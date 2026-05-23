@@ -14,19 +14,19 @@ This workspace is excluded from the monorepo's Turbo `build`/`lint`/`test` pipel
 
 ```bash
 # Development (hot-reload frontend + Rust backend, uses localhost:4000)
-npm run tauri:dev -w @ariso-ai/desktop
+npm run tauri:dev
 
 # Debug mode (enables MCP plugin + disables audio filters for loopback testing)
-npm run tauri:dev:debug -w @ariso-ai/desktop
+npm run tauri:dev:debug
 
 # Build (compile frontend + Rust, produce distributable)
-npm run tauri:build -w @ariso-ai/desktop
+npm run tauri:build
 
 # Build targeting dev API (https://api-dev.ari.ariso.ai)
-npm run tauri:build -w @ariso-ai/desktop -- -- --features dev-api
+npm run tauri:build -- -- --features dev-api
 
 # Build targeting prod API (https://api.ari.ariso.ai)
-npm run tauri:build -w @ariso-ai/desktop -- -- --features prod-api
+npm run tauri:build -- -- --features prod-api
 ```
 
 The API endpoint is controlled by Cargo feature flags and baked into the binary at compile time:
@@ -58,7 +58,7 @@ To test recording without a real microphone, route system audio back as mic inpu
 
 ```bash
 # Start the app in debug mode (disables echo cancellation)
-npm run tauri:dev:debug -w @ariso-ai/desktop
+npm run tauri:dev:debug
 
 # In another terminal, play test audio
 say -v Samantha "Hello everyone, welcome to today's standup."
@@ -76,6 +76,40 @@ Click **Start Recording** in the app before (or while) the `say` command is play
 | `src-tauri/target/` | Rust build artifacts and packaged app bundles |
 
 Both directories are git-ignored.
+
+## Signing & Notarization (CI)
+
+The `Desktop App` workflow can produce a signed + notarized `.app`/`.dmg` for direct distribution. Trigger it from **Actions → Desktop App → Run workflow** (it does not run on PRs or main pushes — those only validate the frontend build).
+
+### Required repo secrets
+
+Add these under **Settings → Secrets and variables → Actions**:
+
+| Secret                       | Value                                                                                          |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `APPLE_CERTIFICATE`          | Base64-encoded `.p12` of your **Developer ID Application** certificate                         |
+| `APPLE_CERTIFICATE_PASSWORD` | Password you set when exporting the `.p12`                                                     |
+| `APPLE_SIGNING_IDENTITY`     | Identity string, e.g. `Developer ID Application: Your Name (TEAMID)`                           |
+| `APPLE_ID`                   | Apple ID email associated with your developer account                                          |
+| `APPLE_PASSWORD`             | App-specific password generated at [appleid.apple.com](https://appleid.apple.com) (not your Apple ID password) |
+| `APPLE_TEAM_ID`              | 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership |
+
+### One-time setup steps
+
+1. **Create a Developer ID Application certificate** in [Apple Developer → Certificates](https://developer.apple.com/account/resources/certificates/list). Download and double-click to install into the login keychain.
+2. **Export it as a `.p12`** from Keychain Access (right-click the cert → Export). Set a password — this becomes `APPLE_CERTIFICATE_PASSWORD`.
+3. **Base64-encode the `.p12`** for `APPLE_CERTIFICATE`:
+   ```bash
+   base64 -i DeveloperID.p12 | pbcopy
+   ```
+4. **Find the signing identity name** for `APPLE_SIGNING_IDENTITY`:
+   ```bash
+   security find-identity -v -p codesigning
+   ```
+   Use the quoted `Developer ID Application: …` string.
+5. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com). This is `APPLE_PASSWORD`.
+
+The workflow's `features` input controls which API endpoint is baked into the binary (`prod-api`, `dev-api`, or `default` for localhost). The signed bundle is uploaded as a workflow artifact and retained for 14 days.
 
 ## Troubleshooting
 

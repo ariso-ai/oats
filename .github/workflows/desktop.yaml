@@ -7,14 +7,24 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      features:
+        description: "Cargo feature for API endpoint"
+        type: choice
+        options:
+          - prod-api
+          - dev-api
+          - default
+        default: prod-api
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   build:
@@ -58,14 +68,33 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
-      - name: Build frontend
-        working-directory: apps/desktop
+      - name: Build frontend (unsigned validation)
+        if: github.event_name != 'workflow_dispatch'
         run: npm run vite:build
 
-  build-skip:
-    name: "build (macos, aarch64-apple-darwin)"
-    needs: gate
-    if: needs.gate.outputs.should_run != 'true'
-    runs-on: [self-hosted, Linux]
-    steps:
-      - run: echo "No desktop changes — skipping build"
+      - name: Build, sign, and notarize
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "${{ inputs.features }}" = "default" ]; then
+            npm run tauri:build
+          else
+            npm run tauri:build -- -- --features ${{ inputs.features }}
+          fi
+
+      - name: Upload signed bundle
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariso-desktop-${{ matrix.target }}-${{ inputs.features }}
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 14
