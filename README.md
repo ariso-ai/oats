@@ -81,33 +81,24 @@ Both directories are git-ignored.
 
 The `Desktop App` workflow can produce a signed + notarized `.app`/`.dmg` for direct distribution. Trigger it from **Actions → Desktop App → Run workflow** (it does not run on PRs or main pushes — those only validate the frontend build).
 
-### Required repo secrets
+Because the runner is a self-hosted Mac, all signing credentials live on the runner itself — **no GitHub secrets required**. The workflow inherits the Apple env vars from the runner's environment, and the Developer ID certificate is read from the runner's login keychain.
 
-Add these under **Settings → Secrets and variables → Actions**:
+### One-time setup on the runner Mac
 
-| Secret                       | Value                                                                                          |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `APPLE_CERTIFICATE`          | Base64-encoded `.p12` of your **Developer ID Application** certificate                         |
-| `APPLE_CERTIFICATE_PASSWORD` | Password you set when exporting the `.p12`                                                     |
-| `APPLE_SIGNING_IDENTITY`     | Identity string, e.g. `Developer ID Application: Your Name (TEAMID)`                           |
-| `APPLE_ID`                   | Apple ID email associated with your developer account                                          |
-| `APPLE_PASSWORD`             | App-specific password generated at [appleid.apple.com](https://appleid.apple.com) (not your Apple ID password) |
-| `APPLE_TEAM_ID`              | 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership |
-
-### One-time setup steps
-
-1. **Create a Developer ID Application certificate** in [Apple Developer → Certificates](https://developer.apple.com/account/resources/certificates/list). Download and double-click to install into the login keychain.
-2. **Export it as a `.p12`** from Keychain Access (right-click the cert → Export). Set a password — this becomes `APPLE_CERTIFICATE_PASSWORD`.
-3. **Base64-encode the `.p12`** for `APPLE_CERTIFICATE`:
+1. **Install the Developer ID Application certificate** into the login keychain:
+   - Go to [Apple Developer → Certificates](https://developer.apple.com/account/resources/certificates/list), create a *Developer ID Application* cert, download the `.cer`, and double-click to add it to **login** keychain.
+   - Verify with `security find-identity -v -p codesigning` — note the quoted identity string (e.g. `Developer ID Application: Your Name (TEAMID)`).
+2. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com).
+3. **Create `~/actions-runner/.env`** on the runner Mac (the GitHub Actions runner auto-loads this file into every job's environment):
    ```bash
-   base64 -i DeveloperID.p12 | pbcopy
+   # ~/actions-runner/.env
+   APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+   APPLE_ID="you@example.com"
+   APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"   # app-specific password, not your Apple ID password
+   APPLE_TEAM_ID="ABCDE12345"             # 10-char Team ID from developer.apple.com → Membership
    ```
-4. **Find the signing identity name** for `APPLE_SIGNING_IDENTITY`:
-   ```bash
-   security find-identity -v -p codesigning
-   ```
-   Use the quoted `Developer ID Application: …` string.
-5. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com). This is `APPLE_PASSWORD`.
+   Restart the runner service (`./svc.sh stop && ./svc.sh start`, or kill `./run.sh` and relaunch) so it picks up the new env file.
+4. **Make sure the login keychain stays unlocked** while builds run. The runner must be started by the logged-in user (default `./run.sh` or `./svc.sh install` under your user account) so it inherits keychain access. If you see `errSecAuthFailed` during signing, the keychain is locked — log back in or run `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
 
 The workflow's `features` input controls which API endpoint is baked into the binary (`prod-api`, `dev-api`, or `default` for localhost). The signed bundle is uploaded as a workflow artifact and retained for 14 days.
 

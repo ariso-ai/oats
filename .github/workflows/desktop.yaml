@@ -74,13 +74,9 @@ jobs:
 
       - name: Build, sign, and notarize
         if: github.event_name == 'workflow_dispatch'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+        # are provided by the runner's ~/actions-runner/.env file.
+        # The Developer ID Application cert lives in the runner Mac's login keychain.
         run: |
           if [ "${{ inputs.features }}" = "default" ]; then
             npm run tauri:build
