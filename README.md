@@ -81,10 +81,10 @@ Both directories are git-ignored.
 
 The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`). It has two jobs:
 
-| Trigger                          | Job        | What it does                                                                  |
-| -------------------------------- | ---------- | ----------------------------------------------------------------------------- |
-| PR to `main`, push to `main`     | `validate` | `vite build` + `cargo check`. No signing secrets exposed.                     |
-| Push of tag matching `v*`        | `release`  | Runs after `validate`. Signs + notarizes with `--features prod-api`, uploads DMG/.app as artifact. Gated by the `release` GitHub Environment (required reviewer + scoped secrets). |
+| Trigger                                | Job        | What it does                                                                  |
+| -------------------------------------- | ---------- | ----------------------------------------------------------------------------- |
+| PR to `main`, push to `main`           | `validate` | `vite build` + `cargo check`. No signing secrets exposed.                     |
+| Publishing a GitHub Release (tag `v*`) | `release`  | Runs after `validate`. Signs + notarizes with `--features prod-api`, attaches the signed DMG to the GitHub Release. Gated by the `release` GitHub Environment (required reviewer + tag-scoped policy + scoped secrets). |
 
 ### One-time setup on the runner Mac
 
@@ -110,12 +110,14 @@ The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macO
 
 ### Cutting a release
 
-```bash
-git tag v0.2.1
-git push origin v0.2.1
-```
+Releases are driven by the **GitHub Release** feature — tag pushes alone do not trigger signing.
 
-The workflow runs `validate` then pauses `release` for your approval (per the environment's required-reviewer rule). After you approve, it builds + signs + notarizes and uploads the signed DMG/.app as a workflow artifact (`ariso-desktop-v0.2.1-aarch64-apple-darwin`, 30-day retention).
+1. **Create a release** on GitHub: **Releases → Draft a new release**, set the tag to `v0.2.1` (target `main`), fill in notes, click **Publish release**. The tag will be created if it doesn't exist.
+2. Alternatively from the CLI: `gh release create v0.2.1 --target main --generate-notes`.
+
+Publishing the release runs `validate`, then pauses `release` for your approval (per the environment's required-reviewer rule). After you approve, it builds + signs + notarizes and attaches the signed DMG to the same GitHub Release.
+
+> **Note:** The `release` environment is restricted to tags matching `v*`. Publishing a release with a non-matching tag will fail the environment gate.
 
 ## Troubleshooting
 
