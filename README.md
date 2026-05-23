@@ -77,6 +77,28 @@ Click **Start Recording** in the app before (or while) the `say` command is play
 
 Both directories are git-ignored.
 
+## Troubleshooting
+
+### `tauri:build` fails with `Cannot find module '.../node_modules/dist/node/cli.js'`
+
+If `npm run tauri:build` (or `vite build`) fails with:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+'.../node_modules/dist/node/cli.js' imported from '.../node_modules/.bin/vite'
+```
+
+the `node_modules/.bin/vite` entry has been installed as a regular file copy instead of a symlink. Vite's launcher does `import('../dist/node/cli.js')`, which only resolves correctly when `.bin/vite` is a symlink into `node_modules/vite/bin/`. When it's a copy, the relative path resolves to the nonexistent `node_modules/dist/node/cli.js`.
+
+Fix by replacing the file with a symlink:
+
+```bash
+rm node_modules/.bin/vite
+ln -s ../vite/bin/vite.js node_modules/.bin/vite
+```
+
+If `npm install` keeps re-copying instead of symlinking, `npm rebuild vite` should restore the symlink as well.
+
 ## **Architecture: WebSocket Streaming**
 
 ### Phase 1 — Direct Deepgram Connection
