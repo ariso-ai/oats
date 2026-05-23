@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for the desktop app",
+  "windows": ["main", "waveform", "settings", "oauth"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-create",
+    "core:window:allow-set-focus",
+    "core:webview:allow-create-webview",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-focus",
+    "core:webview:allow-webview-close",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "store:default",
+    "opener:default"
+  ]
+}

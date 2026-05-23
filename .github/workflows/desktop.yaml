@@ -1,0 +1,71 @@
+name: Desktop App
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: [self-hosted, macOS, ARM64]
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          cache: 'npm'
+          node-version: '24'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ matrix.target }}-
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: npm run vite:build
+
+  build-skip:
+    name: "build (macos, aarch64-apple-darwin)"
+    needs: gate
+    if: needs.gate.outputs.should_run != 'true'
+    runs-on: [self-hosted, Linux]
+    steps:
+      - run: echo "No desktop changes — skipping build"
