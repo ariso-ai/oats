@@ -7,38 +7,24 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      features:
-        description: "Cargo feature for API endpoint"
-        type: choice
-        options:
-          - prod-api
-          - dev-api
-          - default
-        default: prod-api
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Don't cancel in-flight tag builds — they may be signing/notarizing.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - platform: [self-hosted, macOS, ARM64]
-            target: aarch64-apple-darwin
-
-    runs-on: ${{ matrix.platform }}
-
+  validate:
+    name: Validate (frontend + cargo check)
+    runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: read
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -52,7 +38,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Cache Rust dependencies
         uses: actions/cache@v5
@@ -61,36 +47,73 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: rust-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            rust-${{ matrix.target }}-
+            rust-aarch64-apple-darwin-
 
       - name: Install dependencies
         run: npm ci --prefer-offline
 
-      - name: Build frontend (unsigned validation)
-        if: github.event_name != 'workflow_dispatch'
+      - name: Build frontend
         run: npm run vite:build
 
+      - name: Check Rust
+        working-directory: src-tauri
+        run: cargo check --locked
+
+  release:
+    name: Sign, notarize, and bundle
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, macOS, ARM64]
+    # `release` environment holds the Apple signing/notarization secrets and
+    # the required-reviewer protection rule (see README → Signing & Notarization).
+    environment: release
+    permissions:
+      contents: read
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          cache: 'npm'
+          node-version: '24'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-aarch64-apple-darwin-
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
       - name: Build, sign, and notarize
-        if: github.event_name == 'workflow_dispatch'
-        # APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
-        # are provided by the runner's ~/actions-runner/.env file.
-        # The Developer ID Application cert lives in the runner Mac's login keychain.
-        run: |
-          if [ "${{ inputs.features }}" = "default" ]; then
-            npm run tauri:build
-          else
-            npm run tauri:build -- -- --features ${{ inputs.features }}
-          fi
+        run: npm run tauri:build -- -- --features prod-api
 
       - name: Upload signed bundle
-        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: ariso-desktop-${{ matrix.target }}-${{ inputs.features }}
+          name: ariso-desktop-${{ github.ref_name }}-aarch64-apple-darwin
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.app
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30

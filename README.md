@@ -77,30 +77,45 @@ Click **Start Recording** in the app before (or while) the `say` command is play
 
 Both directories are git-ignored.
 
-## Signing & Notarization (CI)
+## CI: Validation and Signed Releases
 
-The `Desktop App` workflow can produce a signed + notarized `.app`/`.dmg` for direct distribution. Trigger it from **Actions → Desktop App → Run workflow** (it does not run on PRs or main pushes — those only validate the frontend build).
+The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`). It has two jobs:
 
-Because the runner is a self-hosted Mac, all signing credentials live on the runner itself — **no GitHub secrets required**. The workflow inherits the Apple env vars from the runner's environment, and the Developer ID certificate is read from the runner's login keychain.
+| Trigger                          | Job        | What it does                                                                  |
+| -------------------------------- | ---------- | ----------------------------------------------------------------------------- |
+| PR to `main`, push to `main`     | `validate` | `vite build` + `cargo check`. No signing secrets exposed.                     |
+| Push of tag matching `v*`        | `release`  | Runs after `validate`. Signs + notarizes with `--features prod-api`, uploads DMG/.app as artifact. Gated by the `release` GitHub Environment (required reviewer + scoped secrets). |
 
 ### One-time setup on the runner Mac
 
 1. **Install the Developer ID Application certificate** into the login keychain:
-   - Go to [Apple Developer → Certificates](https://developer.apple.com/account/resources/certificates/list), create a *Developer ID Application* cert, download the `.cer`, and double-click to add it to **login** keychain.
-   - Verify with `security find-identity -v -p codesigning` — note the quoted identity string (e.g. `Developer ID Application: Your Name (TEAMID)`).
-2. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com).
-3. **Create `~/actions-runner/.env`** on the runner Mac (the GitHub Actions runner auto-loads this file into every job's environment):
-   ```bash
-   # ~/actions-runner/.env
-   APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-   APPLE_ID="you@example.com"
-   APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"   # app-specific password, not your Apple ID password
-   APPLE_TEAM_ID="ABCDE12345"             # 10-char Team ID from developer.apple.com → Membership
-   ```
-   Restart the runner service (`./svc.sh stop && ./svc.sh start`, or kill `./run.sh` and relaunch) so it picks up the new env file.
-4. **Make sure the login keychain stays unlocked** while builds run. The runner must be started by the logged-in user (default `./run.sh` or `./svc.sh install` under your user account) so it inherits keychain access. If you see `errSecAuthFailed` during signing, the keychain is locked — log back in or run `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
+   - From [Apple Developer → Certificates](https://developer.apple.com/account/resources/certificates/list), create a *Developer ID Application* cert, download the `.cer`, and double-click to add it to the **login** keychain.
+   - Verify with `security find-identity -v -p codesigning` — note the quoted identity string (e.g. `Developer ID Application: Your Name (TEAMID)`). This is the value you'll put in `APPLE_SIGNING_IDENTITY` below.
+2. **Keep the login keychain unlocked during builds.** The runner must be started by the logged-in user (default `./run.sh`, or `./svc.sh install` under your user account) so it inherits keychain access. If signing fails with `errSecAuthFailed`, the keychain is locked — log back in or run `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
 
-The workflow's `features` input controls which API endpoint is baked into the binary (`prod-api`, `dev-api`, or `default` for localhost). The signed bundle is uploaded as a workflow artifact and retained for 14 days.
+### One-time setup in the repo
+
+1. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com).
+2. **Create the `release` environment** at **Settings → Environments → New environment** → name `release`.
+   - Add yourself under **Required reviewers** so signed builds pause for approval.
+   - Optionally restrict **Deployment branches and tags** to `Selected branches and tags` → match tags `v*` (prevents accidental use from other refs).
+3. **Add these secrets to the `release` environment** (not repo-level secrets):
+
+   | Secret                   | Value                                                                                                |
+   | ------------------------ | ---------------------------------------------------------------------------------------------------- |
+   | `APPLE_SIGNING_IDENTITY` | The quoted identity string from step 1.1, e.g. `Developer ID Application: Your Name (TEAMID)`        |
+   | `APPLE_ID`               | Apple ID email associated with your developer account                                                |
+   | `APPLE_PASSWORD`         | App-specific password from the previous step (not your Apple ID password)                            |
+   | `APPLE_TEAM_ID`          | 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership |
+
+### Cutting a release
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+The workflow runs `validate` then pauses `release` for your approval (per the environment's required-reviewer rule). After you approve, it builds + signs + notarizes and uploads the signed DMG/.app as a workflow artifact (`ariso-desktop-v0.2.1-aarch64-apple-darwin`, 30-day retention).
 
 ## Troubleshooting
 
