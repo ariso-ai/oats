@@ -66,6 +66,18 @@ fn main() {
                 }
             });
 
+            // Background update scheduler: wake every hour, but only
+            // actually check once per 24h (or on snooze expiry). The
+            // initial 10-second delay lets startup finish first.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                loop {
+                    update_manager::run_check(app_handle.clone(), false).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            });
+
             Ok(())
         });
 
