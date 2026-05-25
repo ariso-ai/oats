@@ -93,6 +93,12 @@ The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macO
    - Verify with `security find-identity -v -p codesigning` — note the quoted identity string (e.g. `Developer ID Application: Your Name (TEAMID)`). This is the value you'll put in `APPLE_SIGNING_IDENTITY` below.
 2. **Keep the login keychain unlocked during builds.** The runner must be started by the logged-in user (default `./run.sh`, or `./svc.sh install` under your user account) so it inherits keychain access. If signing fails with `errSecAuthFailed`, the keychain is locked — log back in or run `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
 
+### signing packages for update
+
+```SHELL
+npx @tauri-apps/cli signer generate
+```
+
 ### One-time setup in the repo
 
 1. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com).
@@ -107,6 +113,8 @@ The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macO
    | `APPLE_ID`               | Apple ID email associated with your developer account                                                |
    | `APPLE_PASSWORD`         | App-specific password from the previous step (not your Apple ID password)                            |
    | `APPLE_TEAM_ID`          | 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership |
+   | `TAURI_SIGNING_PRIVATE_KEY`          | base64 encoded ed25519 private key |
+   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`| private key password |
 
 ### Cutting a release
 

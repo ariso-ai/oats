@@ -97,4 +97,74 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000;
     const DAY: i64 = 24 * 60 * 60;
+
+    #[test]
+    fn should_check_when_never_checked_and_auto_on() {
+        assert!(should_check(&st(), NOW));
+    }
+
+    #[test]
+    fn should_not_check_when_auto_off() {
+        let s = UpdateState {
+            auto_check_enabled: false,
+            ..Default::default()
+        };
+        assert!(!should_check(&s, NOW));
+    }
+
+    #[test]
+    fn should_not_check_when_recently_checked() {
+        let s = UpdateState {
+            last_check_unix: Some(NOW - 10 * 60),
+            ..Default::default()
+        };
+        assert!(!should_check(&s, NOW));
+    }
+
+    #[test]
+    fn should_check_when_check_is_25h_old() {
+        let s = UpdateState {
+            last_check_unix: Some(NOW - 25 * 60 * 60),
+            ..Default::default()
+        };
+        assert!(should_check(&s, NOW));
+    }
+
+    #[test]
+    fn should_not_check_while_snoozed() {
+        let s = UpdateState {
+            snoozed_until_unix: Some(NOW + 60 * 60),
+            ..Default::default()
+        };
+        assert!(!should_check(&s, NOW));
+    }
+
+    #[test]
+    fn should_check_after_snooze_expires() {
+        let s = UpdateState {
+            snoozed_until_unix: Some(NOW - 60),
+            ..Default::default()
+        };
+        assert!(should_check(&s, NOW));
+    }
+
+    #[test]
+    fn skip_cleared_by_higher_version() {
+        let skipped = Some("0.3.0".to_string());
+        assert!(skip_cleared_by(&skipped, "0.3.1"));
+        assert!(skip_cleared_by(&skipped, "0.4.0"));
+        assert!(skip_cleared_by(&skipped, "1.0.0"));
+    }
+
+    #[test]
+    fn skip_not_cleared_by_same_or_lower() {
+        let skipped = Some("0.3.0".to_string());
+        assert!(!skip_cleared_by(&skipped, "0.3.0"));
+        assert!(!skip_cleared_by(&skipped, "0.2.9"));
+    }
+
+    #[test]
+    fn skip_cleared_when_none_returns_false() {
+        assert!(!skip_cleared_by(&None, "1.0.0"));
+    }
 }
