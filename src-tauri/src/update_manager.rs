@@ -342,6 +342,46 @@ pub fn update_get_state<R: Runtime>(app: AppHandle<R>) -> UpdateState {
     app.state::<Manager>().snapshot()
 }
 
+#[tauri::command]
+pub async fn update_install_and_relaunch<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update available".to_string())?;
+
+    let app_for_progress = app.clone();
+    let mut total: Option<u64> = None;
+    let mut downloaded: u64 = 0;
+
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                downloaded += chunk_length as u64;
+                if total.is_none() {
+                    total = content_length;
+                }
+                let _ = app_for_progress.emit(
+                    "update://download-progress",
+                    serde_json::json!({
+                        "downloaded": downloaded,
+                        "total": total,
+                    }),
+                );
+            },
+            || {
+                // download complete; install begins
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    app.restart();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
