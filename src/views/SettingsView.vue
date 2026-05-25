@@ -65,7 +65,7 @@
 
         <div class="update-controls">
           <button
-            v-if="updateAvailable"
+            v-if="updateAvailable || updateSkipped"
             class="primary-btn"
             @click="showUpdateDetails"
           >Show Details</button>
@@ -113,17 +113,23 @@ const updateAvailable = ref(false);
 const updateAvailableVersion = ref('');
 const updateError = ref('');
 const lastCheckUnix = ref<number | null>(null);
+const skippedVersion = ref<string | null>(null);
+
+const updateSkipped = computed(() =>
+  !updateAvailable.value && skippedVersion.value != null
+);
 
 const statusText = computed(() => {
   if (checking.value) return 'Checking…';
   if (updateAvailable.value) return `Update available: ${updateAvailableVersion.value}`;
+  if (updateSkipped.value) return `Update ${skippedVersion.value} available (skipped)`;
   if (lastCheckUnix.value == null) return "You haven't checked yet.";
   const ago = humanizeAgo(Date.now() / 1000 - lastCheckUnix.value);
   return `You're up to date. Last checked: ${ago}`;
 });
 
 const statusClass = computed(() => {
-  if (updateAvailable.value) return 'status-available';
+  if (updateAvailable.value || updateSkipped.value) return 'status-available';
   if (checking.value) return 'status-checking';
   return 'status-ok';
 });
@@ -139,6 +145,7 @@ async function loadUpdateState() {
   const snap = await updater.getState();
   autoCheck.value = snap.auto_check_enabled;
   lastCheckUnix.value = snap.last_check_unix;
+  skippedVersion.value = snap.skipped_version;
   if (snap.latest_known) {
     updateAvailable.value = true;
     updateAvailableVersion.value = snap.latest_known.version;
