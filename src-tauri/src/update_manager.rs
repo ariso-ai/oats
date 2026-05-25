@@ -142,20 +142,21 @@ pub fn save_state<R: Runtime>(app: &AppHandle<R>, state: &UpdateState) {
     let _ = store.save();
 }
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_updater::UpdaterExt;
 
 pub struct Manager {
     state: Mutex<UpdateState>,
-    in_flight: Mutex<bool>,
+    serial: Arc<Semaphore>,
 }
 
 impl Manager {
     pub fn new(initial: UpdateState) -> Self {
         Self {
             state: Mutex::new(initial),
-            in_flight: Mutex::new(false),
+            serial: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -186,17 +187,21 @@ fn extract_mandatory(raw: &serde_json::Value) -> bool {
 /// or `update://none`. Errors emit `update://error` only if `force=true`
 /// (silent for the background path).
 pub async fn run_check<R: Runtime>(app: AppHandle<R>, force: bool) {
+    // Acquire the serial permit. Concurrent callers wait here until the
+    // in-flight check completes, then re-evaluate should_check (which
+    // typically returns false because last_check_unix was just updated).
+    let serial = app.state::<Manager>().serial.clone();
+    let _permit = match serial.acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return, // semaphore closed (shouldn't happen)
+    };
+
     {
         let mgr = app.state::<Manager>();
-        let mut in_flight = mgr.in_flight.lock().unwrap();
-        if *in_flight {
-            return;
-        }
         let state = mgr.state.lock().unwrap();
         if !force && !should_check(&state, now_unix()) {
             return;
         }
-        *in_flight = true;
     }
 
     let _ = app.emit("update://checking", ());
@@ -280,8 +285,6 @@ pub async fn run_check<R: Runtime>(app: AppHandle<R>, force: bool) {
 }
 
 fn finish_check<R: Runtime>(app: &AppHandle<R>, force: bool, result: Result<(), String>) {
-    let mgr = app.state::<Manager>();
-    *mgr.in_flight.lock().unwrap() = false;
     if let Err(msg) = result {
         eprintln!("[update_manager] check failed: {msg}");
         if force {
