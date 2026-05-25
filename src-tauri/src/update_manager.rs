@@ -382,6 +382,45 @@ pub async fn update_install_and_relaunch<R: Runtime>(
     app.restart();
 }
 
+#[tauri::command]
+pub fn update_skip_version<R: Runtime>(
+    app: AppHandle<R>,
+    version: String,
+) -> Result<(), String> {
+    let mgr = app.state::<Manager>();
+    let mut state = mgr.state.lock().unwrap();
+    if let Some(info) = &state.latest_known {
+        if info.mandatory {
+            return Err("Cannot skip a mandatory update".to_string());
+        }
+    }
+    state.skipped_version = Some(version);
+    save_state(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_snooze<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let mgr = app.state::<Manager>();
+    let mut state = mgr.state.lock().unwrap();
+    if let Some(info) = &state.latest_known {
+        if info.mandatory {
+            return Err("Cannot snooze a mandatory update".to_string());
+        }
+    }
+    state.snoozed_until_unix = Some(now_unix() + 24 * 60 * 60);
+    save_state(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_set_auto_check<R: Runtime>(app: AppHandle<R>, enabled: bool) {
+    let mgr = app.state::<Manager>();
+    let mut state = mgr.state.lock().unwrap();
+    state.auto_check_enabled = enabled;
+    save_state(&app, &state);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
