@@ -142,6 +142,206 @@ pub fn save_state<R: Runtime>(app: &AppHandle<R>, state: &UpdateState) {
     let _ = store.save();
 }
 
+use std::sync::Mutex;
+use tauri::{Emitter, Manager as _};
+use tauri_plugin_updater::UpdaterExt;
+
+pub struct Manager {
+    state: Mutex<UpdateState>,
+    in_flight: Mutex<bool>,
+}
+
+impl Manager {
+    pub fn new(initial: UpdateState) -> Self {
+        Self {
+            state: Mutex::new(initial),
+            in_flight: Mutex::new(false),
+        }
+    }
+
+    pub fn snapshot(&self) -> UpdateState {
+        self.state.lock().unwrap().clone()
+    }
+}
+
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Read the `mandatory` flag from the manifest's raw JSON. Missing
+/// or non-boolean values are treated as `false`.
+fn extract_mandatory(raw: &serde_json::Value) -> bool {
+    raw.get("mandatory")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Run a check. If `force` is false and policy says not to (auto-check
+/// off, snoozed, or last check too recent), returns early with no
+/// events. On success, may emit `update://checking`, `update://available`,
+/// or `update://none`. Errors emit `update://error` only if `force=true`
+/// (silent for the background path).
+pub async fn run_check<R: Runtime>(app: AppHandle<R>, force: bool) {
+    {
+        let mgr = app.state::<Manager>();
+        let mut in_flight = mgr.in_flight.lock().unwrap();
+        if *in_flight {
+            return;
+        }
+        let state = mgr.state.lock().unwrap();
+        if !force && !should_check(&state, now_unix()) {
+            return;
+        }
+        *in_flight = true;
+    }
+
+    let _ = app.emit("update://checking", ());
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            finish_check(&app, force, Err(e.to_string()));
+            return;
+        }
+    };
+
+    let result = updater.check().await;
+
+    match result {
+        Ok(Some(update)) => {
+            let mandatory = extract_mandatory(&update.raw_json);
+            let version = update.version.clone();
+            let notes = update.body.clone().unwrap_or_default();
+
+            let info = UpdateInfo {
+                version: version.clone(),
+                notes: notes.clone(),
+                mandatory,
+            };
+
+            // Decide: is this version actually one we should show?
+            let show = {
+                let mgr = app.state::<Manager>();
+                let mut state = mgr.state.lock().unwrap();
+                state.last_check_unix = Some(now_unix());
+                state.latest_known = Some(info.clone());
+
+                // Clear skip if this is a newer version than the skipped one.
+                if skip_cleared_by(&state.skipped_version, &version) {
+                    state.skipped_version = None;
+                }
+
+                // Decide whether to show:
+                // - force=true → always show (manual check overrides skip)
+                // - mandatory → always show
+                // - otherwise → show iff this version is not the skipped one
+                let suppressed = !force
+                    && !mandatory
+                    && state.skipped_version.as_deref() == Some(version.as_str());
+
+                save_state(&app, &state);
+                !suppressed
+            };
+
+            if show {
+                let _ = app.emit(
+                    "update://available",
+                    serde_json::json!({
+                        "version": version,
+                        "notes": notes,
+                        "mandatory": mandatory,
+                    }),
+                );
+                open_update_window(&app);
+            } else {
+                let _ = app.emit("update://none", ());
+            }
+            finish_check(&app, force, Ok(()));
+        }
+        Ok(None) => {
+            {
+                let mgr = app.state::<Manager>();
+                let mut state = mgr.state.lock().unwrap();
+                state.last_check_unix = Some(now_unix());
+                state.latest_known = None;
+                save_state(&app, &state);
+            }
+            let _ = app.emit("update://none", ());
+            finish_check(&app, force, Ok(()));
+        }
+        Err(e) => {
+            finish_check(&app, force, Err(e.to_string()));
+        }
+    }
+}
+
+fn finish_check<R: Runtime>(app: &AppHandle<R>, force: bool, result: Result<(), String>) {
+    let mgr = app.state::<Manager>();
+    *mgr.in_flight.lock().unwrap() = false;
+    if let Err(msg) = result {
+        eprintln!("[update_manager] check failed: {msg}");
+        if force {
+            let _ = app.emit("update://error", serde_json::json!({ "message": msg }));
+        }
+    }
+}
+
+/// Open the update window if it doesn't already exist; focus it if it does.
+/// Mandatory updates intercept the close button.
+fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(win) = app.get_webview_window("update") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    let mandatory = {
+        let mgr = app.state::<Manager>();
+        let s = mgr.state.lock().unwrap();
+        s.latest_known.as_ref().map(|i| i.mandatory).unwrap_or(false)
+    };
+
+    let result = WebviewWindowBuilder::new(
+        app,
+        "update",
+        WebviewUrl::App("/#/update".into()),
+    )
+    .title("")
+    .inner_size(420.0, 360.0)
+    .resizable(false)
+    .center()
+    .skip_taskbar(true)
+    .build();
+
+    if let Ok(win) = result {
+        if mandatory {
+            let win_clone = win.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = win_clone.set_focus();
+                }
+            });
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn update_check<R: Runtime>(app: AppHandle<R>, force: bool) {
+    run_check(app, force).await;
+}
+
+#[tauri::command]
+pub fn update_get_state<R: Runtime>(app: AppHandle<R>) -> UpdateState {
+    app.state::<Manager>().snapshot()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
