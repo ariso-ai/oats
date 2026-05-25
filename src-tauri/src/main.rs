@@ -4,6 +4,7 @@
 mod audio_capture;
 mod commands;
 mod tray;
+mod update_manager;
 
 fn main() {
     #[allow(unused_mut)]
