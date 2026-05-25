@@ -87,6 +87,61 @@ fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
+use serde_json::Value;
+use tauri::{AppHandle, Runtime};
+use tauri_plugin_store::StoreExt;
+
+const STORE_FILE: &str = "settings.json";
+
+const KEY_AUTO_CHECK: &str = "update.auto_check_enabled";
+const KEY_SKIPPED: &str = "update.skipped_version";
+const KEY_SNOOZED_UNTIL: &str = "update.snoozed_until_unix";
+const KEY_LAST_CHECK: &str = "update.last_check_unix";
+
+/// Read persisted state from `settings.json`. Missing keys fall back
+/// to `UpdateState::default()`. `latest_known` is in-memory only — it
+/// is intentionally not persisted (we re-check on startup anyway).
+pub fn load_state<R: Runtime>(app: &AppHandle<R>) -> UpdateState {
+    let mut state = UpdateState::default();
+    let Ok(store) = app.store(STORE_FILE) else {
+        return state;
+    };
+    if let Some(Value::Bool(b)) = store.get(KEY_AUTO_CHECK) {
+        state.auto_check_enabled = b;
+    }
+    if let Some(Value::String(s)) = store.get(KEY_SKIPPED) {
+        state.skipped_version = Some(s);
+    }
+    if let Some(Value::Number(n)) = store.get(KEY_SNOOZED_UNTIL) {
+        state.snoozed_until_unix = n.as_i64();
+    }
+    if let Some(Value::Number(n)) = store.get(KEY_LAST_CHECK) {
+        state.last_check_unix = n.as_i64();
+    }
+    state
+}
+
+/// Persist the four mutable fields. `latest_known` is not written.
+pub fn save_state<R: Runtime>(app: &AppHandle<R>, state: &UpdateState) {
+    let Ok(store) = app.store(STORE_FILE) else {
+        return;
+    };
+    store.set(KEY_AUTO_CHECK, Value::Bool(state.auto_check_enabled));
+    match &state.skipped_version {
+        Some(v) => store.set(KEY_SKIPPED, Value::String(v.clone())),
+        None => { store.delete(KEY_SKIPPED); }
+    }
+    match state.snoozed_until_unix {
+        Some(t) => store.set(KEY_SNOOZED_UNTIL, Value::Number(t.into())),
+        None => { store.delete(KEY_SNOOZED_UNTIL); }
+    }
+    match state.last_check_unix {
+        Some(t) => store.set(KEY_LAST_CHECK, Value::Number(t.into())),
+        None => { store.delete(KEY_LAST_CHECK); }
+    }
+    let _ = store.save();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
