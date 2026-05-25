@@ -5,6 +5,7 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 import App from './App.vue';
 import WaveformView from './views/WaveformView.vue';
 import SettingsView from './views/SettingsView.vue';
+import UpdateView from './views/UpdateView.vue';
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -12,6 +13,7 @@ const router = createRouter({
     { path: '/', name: 'Bootstrap', component: { template: '' } },
     { path: '/waveform', name: 'Waveform', component: WaveformView },
     { path: '/settings', name: 'Settings', component: SettingsView },
+    { path: '/update', name: 'Update', component: UpdateView },
   ],
 });
 
