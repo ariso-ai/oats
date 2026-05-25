@@ -25,11 +25,20 @@ fn main() {
             commands::put_presigned,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
+            update_manager::update_check,
+            update_manager::update_install_and_relaunch,
+            update_manager::update_skip_version,
+            update_manager::update_snooze,
+            update_manager::update_set_auto_check,
+            update_manager::update_get_state,
         ])
         .setup(|app| {
+            use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
+
             tray::create_tray(app.handle())?;
 
-            use tauri::{WebviewWindowBuilder, WebviewUrl};
+            let initial_state = update_manager::load_state(&app.handle());
+            app.manage(update_manager::Manager::new(initial_state));
 
             // Hidden bootstrap window — runs JS event listeners
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/#/".into()))
