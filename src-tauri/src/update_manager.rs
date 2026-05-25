@@ -346,18 +346,36 @@ pub fn update_get_state<R: Runtime>(app: AppHandle<R>) -> UpdateState {
 pub async fn update_install_and_relaunch<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "No update available".to_string())?;
+    // Helper: emit `update://error` then return the same Err so the caller's
+    // .catch in the UpdateView sees it AND any Settings view listening also
+    // surfaces it. Without this emit, install failures silently die in
+    // whichever window initiated them.
+    let emit_err = |app: &AppHandle<R>, msg: String| -> Result<(), String> {
+        let _ = app.emit("update://error", serde_json::json!({ "message": msg }));
+        Err(msg)
+    };
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => return emit_err(&app, e.to_string()),
+    };
+
+    // Re-running check() here (rather than caching the Update handle from the
+    // background check) is intentional: tauri-plugin-updater's Update struct
+    // isn't easily persisted across calls, and the time between dialog-shown
+    // and Install-clicked could be long enough that the manifest has changed
+    // (e.g., rollback). One extra HTTP round-trip is the price.
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        Ok(None) => return emit_err(&app, "No update available".to_string()),
+        Err(e) => return emit_err(&app, e.to_string()),
+    };
 
     let app_for_progress = app.clone();
     let mut total: Option<u64> = None;
     let mut downloaded: u64 = 0;
 
-    update
+    if let Err(e) = update
         .download_and_install(
             move |chunk_length, content_length| {
                 downloaded += chunk_length as u64;
@@ -377,7 +395,9 @@ pub async fn update_install_and_relaunch<R: Runtime>(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        return emit_err(&app, e.to_string());
+    }
 
     app.restart();
 }
