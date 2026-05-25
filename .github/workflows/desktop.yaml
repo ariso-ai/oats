@@ -76,6 +76,8 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -110,9 +112,70 @@ jobs:
       - name: Build, sign, and notarize
         run: npm run tauri:build -- -- --features prod-api
 
-      - name: Attach signed DMG to GitHub Release
+      - name: Generate latest.json updater manifest
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Locate the updater artifacts the bundler produced. Tauri v2
+          # writes these to src-tauri/target/release/bundle/macos/.
+          TARBALL=$(ls src-tauri/target/release/bundle/macos/*.app.tar.gz)
+          SIGFILE="${TARBALL}.sig"
+          BASENAME=$(basename "$TARBALL")
+
+          # The version in tauri.conf.json (strip leading 'v' from tag).
+          VERSION="${RELEASE_TAG#v}"
+
+          # Asset URL is the release-asset download URL on GitHub.
+          ASSET_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BASENAME}"
+
+          # Read the detached signature contents (single line of base64).
+          SIG=$(cat "$SIGFILE")
+
+          # Mandatory flag: derived from the release title containing "[mandatory]".
+          if [[ "$RELEASE_NAME" == *"[mandatory]"* ]]; then
+            MANDATORY="true"
+          else
+            MANDATORY="false"
+          fi
+
+          # Build the manifest using jq to ensure valid JSON escaping
+          # of the (possibly multi-line) release body.
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$RELEASE_BODY" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson mandatory "$MANDATORY" \
+            --arg signature "$SIG" \
+            --arg url "$ASSET_URL" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              mandatory: $mandatory,
+              platforms: {
+                "darwin-aarch64": {
+                  signature: $signature,
+                  url: $url
+                }
+              }
+            }' > latest.json
+
+          # Also copy the tarball and sig to repo root so the upload glob
+          # below picks them up alongside the DMG.
+          cp "$TARBALL" "$SIGFILE" .
+
+      - name: Attach signed DMG + updater manifest to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: src-tauri/target/release/bundle/dmg/*.dmg
+          files: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            *.app.tar.gz
+            *.app.tar.gz.sig
+            latest.json
           fail_on_unmatched_files: true
