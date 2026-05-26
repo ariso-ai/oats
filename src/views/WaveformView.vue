@@ -112,6 +112,7 @@ async function startRecording() {
 async function handleStop() {
   waveform.stop();
   const endAt = new Date().toISOString();
+  const startAt = recorder.startedAt.value;
   isUploading.value = true;
   const mp3Blob = await recorder.stopRecording();
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
@@ -122,7 +123,7 @@ async function handleStop() {
     );
     try {
       await Promise.race([
-        meetingApi.uploadAudio(mp3Blob, { endAt }),
+        meetingApi.uploadAudio(mp3Blob, { startAt, endAt }),
         timeout,
       ]);
       uploadResult.value = 'success';
