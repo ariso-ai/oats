@@ -111,6 +111,7 @@ async function startRecording() {
 
 async function handleStop() {
   waveform.stop();
+  const endAt = new Date().toISOString();
   isUploading.value = true;
   const mp3Blob = await recorder.stopRecording();
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
@@ -120,9 +121,13 @@ async function handleStop() {
       setTimeout(() => reject(new Error('Upload timed out')), 30_000)
     );
     try {
-      await Promise.race([meetingApi.uploadAudio(mp3Blob), timeout]);
+      await Promise.race([
+        meetingApi.uploadAudio(mp3Blob, { endAt }),
+        timeout,
+      ]);
       uploadResult.value = 'success';
-    } catch {
+    } catch (err) {
+      console.error('Upload failed:', err);
       uploadResult.value = 'failed';
     }
   } else {
