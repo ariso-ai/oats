@@ -147,12 +147,18 @@ export function useMeetingApi() {
 
   async function uploadAudio(
     audioBlob: Blob,
-    title?: string
+    options?: { title?: string; startAt?: string | null; endAt?: string }
   ): Promise<{ meetingId: number }> {
     // Presigned flow: get a presigned S3 URL, upload directly, then confirm
+    const metadata: Record<string, string> = {
+      endAt: options?.endAt ?? new Date().toISOString(),
+    };
+    if (options?.startAt) metadata.startAt = options.startAt;
+
     const presignRes = await api.request('POST', '/desktop/meetings/audio/presign', {
       filename: 'recording.mp3',
-      title: title?.trim() || undefined,
+      title: options?.title?.trim() || undefined,
+      metadata,
     });
     assertOk(presignRes, 200, 'get presigned upload URL');
     const { meetingId, presignedUrl } = presignRes.data as {
