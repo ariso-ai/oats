@@ -12,6 +12,16 @@ concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  # Trusted identities the gate evaluates. Only PR comments from these
+  # logins are counted; everything else is ignored. CodeRabbit's GitHub
+  # App login is fixed; the resolver list is the set of humans whose
+  # "resolved"/"addressed" replies can mark a CodeRabbit thread as
+  # addressed for gate purposes.
+  CODERABBIT_BOT_LOGIN: "coderabbitai[bot]"
+  VERDICT_BOT_LOGIN: "github-actions[bot]"
+  AI_REVIEW_RESOLVERS: "shawnzhu"
+
 jobs:
   # Placeholder job that waits for the CodeRabbit GitHub App to post its review.
   # Requires the CodeRabbit app to be installed on the repo. If CodeRabbit does
@@ -37,10 +47,12 @@ jobs:
           elapsed=0
           while [ "$elapsed" -lt "$TIMEOUT" ]; do
             issue_count=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-              --jq '[.[] | select(.user.login | startswith("coderabbit"))] | length' \
+              | jq --arg bot "$CODERABBIT_BOT_LOGIN" \
+                  '[.[] | select(.user.login == $bot and .user.type == "Bot")] | length' \
               | awk '{s+=$1} END{print s+0}')
             review_count=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-              --jq '[.[] | select(.user.login | startswith("coderabbit"))] | length' \
+              | jq --arg bot "$CODERABBIT_BOT_LOGIN" \
+                  '[.[] | select(.user.login == $bot and .user.type == "Bot")] | length' \
               | awk '{s+=$1} END{print s+0}')
             total=$((issue_count + review_count))
             if [ "$total" -gt 0 ]; then
@@ -94,12 +106,18 @@ jobs:
         if: steps.diff_size.outputs.skip != 'true'
         run: |
           set -euo pipefail
+          # Only include comments from the verified CodeRabbit GitHub App
+          # identity. Username-prefix matching is not sufficient — any user
+          # could register an account starting with "coderabbit".
           issue_comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '[.[] | select(.user.login | startswith("coderabbit"))]')
+            | jq --arg bot "$CODERABBIT_BOT_LOGIN" -s \
+                'add // [] | [.[] | select(.user.login == $bot and .user.type == "Bot")]')
           reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-            --jq '[.[] | select(.user.login | startswith("coderabbit"))]')
+            | jq --arg bot "$CODERABBIT_BOT_LOGIN" -s \
+                'add // [] | [.[] | select(.user.login == $bot and .user.type == "Bot")]')
           review_comments=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate \
-            --jq '[.[] | select(.user.login | startswith("coderabbit"))]')
+            | jq --arg bot "$CODERABBIT_BOT_LOGIN" -s \
+                'add // [] | [.[] | select(.user.login == $bot and .user.type == "Bot")]')
           jq -n \
             --argjson ic "${issue_comments:-[]}" \
             --argjson rv "${reviews:-[]}" \
