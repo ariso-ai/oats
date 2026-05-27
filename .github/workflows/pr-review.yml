@@ -1,0 +1,149 @@
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Placeholder job that waits for the CodeRabbit GitHub App to post its review.
+  # Requires the CodeRabbit app to be installed on the repo. If CodeRabbit does
+  # not respond within the timeout, the job logs a warning and exits 0 so the
+  # rest of the pipeline can still run.
+  coderabbit:
+    name: Wait for CodeRabbit
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.draft == false &&
+      !contains(github.event.pull_request.title, '[skip-review]') &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
+    steps:
+      - name: Wait for CodeRabbit to post a review or comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TIMEOUT=600
+          INTERVAL=20
+          elapsed=0
+          while [ "$elapsed" -lt "$TIMEOUT" ]; do
+            issue_count=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq '[.[] | select(.user.login | startswith("coderabbit"))] | length' \
+              | awk '{s+=$1} END{print s+0}')
+            review_count=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+              --jq '[.[] | select(.user.login | startswith("coderabbit"))] | length' \
+              | awk '{s+=$1} END{print s+0}')
+            total=$((issue_count + review_count))
+            if [ "$total" -gt 0 ]; then
+              echo "CodeRabbit has $total comments/reviews. Proceeding."
+              exit 0
+            fi
+            echo "Waiting for CodeRabbit... (${elapsed}s elapsed)"
+            sleep "$INTERVAL"
+            elapsed=$((elapsed + INTERVAL))
+          done
+          echo "::warning::CodeRabbit did not post a review within ${TIMEOUT}s. Proceeding without CodeRabbit input."
+
+  claude-review:
+    name: Claude review
+    needs: coderabbit
+    runs-on: [self-hosted, macOS, ARM64]
+    if: >-
+      github.event.pull_request.draft == false &&
+      !contains(github.event.pull_request.title, '[skip-review]') &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Diff size guard
+        id: diff_size
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          stat_line=$(git diff --shortstat "origin/$BASE_REF...HEAD" || true)
+          # Example: " 12 files changed, 345 insertions(+), 67 deletions(-)"
+          added=$(echo "$stat_line" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
+          deleted=$(echo "$stat_line" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
+          total=$(( ${added:-0} + ${deleted:-0} ))
+          echo "Changed lines: $total"
+          if [ "$total" -gt 2000 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR" --body "Claude review skipped: diff is ${total} lines (limit 2000). Split the PR or add the \`override-ai-review\` label to bypass the gate."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch CodeRabbit findings
+        if: steps.diff_size.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          issue_comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '[.[] | select(.user.login | startswith("coderabbit"))]')
+          reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+            --jq '[.[] | select(.user.login | startswith("coderabbit"))]')
+          review_comments=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate \
+            --jq '[.[] | select(.user.login | startswith("coderabbit"))]')
+          jq -n \
+            --argjson ic "${issue_comments:-[]}" \
+            --argjson rv "${reviews:-[]}" \
+            --argjson rc "${review_comments:-[]}" \
+            '{issue_comments: $ic, reviews: $rv, review_comments: $rc}' \
+            > coderabbit-findings.json
+          echo "CodeRabbit findings written: $(jq '[.issue_comments,.reviews,.review_comments] | map(length) | add' coderabbit-findings.json) items"
+
+      - name: Run Claude review
+        if: steps.diff_size.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          prompt="$(cat .github/review-prompt.md)"
+          claude -p "$prompt" \
+            --output-format json \
+            --allowed-tools "Bash(git diff:*) Bash(git log:*) Bash(grep:*) Read Grep" \
+            --permission-mode acceptEdits \
+            > claude-output.json
+          echo "Claude exit OK. Result length: $(jq -r '.result | length' claude-output.json) chars"
+
+      - name: Post Claude review comment
+        if: steps.diff_size.outputs.skip != 'true'
+        run: bash scripts/post-claude-review.sh
+
+      - name: Cleanup
+        if: always()
+        run: rm -f claude-output.json coderabbit-findings.json
+
+  merge-gate:
+    name: AI review merge gate
+    needs: [coderabbit, claude-review]
+    runs-on: ubuntu-latest
+    if: >-
+      always() &&
+      github.event.pull_request.draft == false &&
+      !contains(github.event.pull_request.title, '[skip-review]') &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Check review status
+        run: bash scripts/check-review-status.sh
