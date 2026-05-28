@@ -2,4 +2,4 @@ dist/
 node_modules/
 src-tauri/target/
 .superpowers/
-docs/superpowers/
+docs/superpowers/plans/
