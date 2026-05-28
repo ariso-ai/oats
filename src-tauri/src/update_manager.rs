@@ -416,6 +416,9 @@ pub fn update_skip_version<R: Runtime>(
         if info.mandatory {
             return Err("Cannot skip a mandatory update".to_string());
         }
+        if info.version != version {
+            return Err("Version mismatch".to_string());
+        }
     }
     state.skipped_version = Some(version);
     save_state(&app, &state);

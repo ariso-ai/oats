@@ -116,7 +116,9 @@ const lastCheckUnix = ref<number | null>(null);
 const skippedVersion = ref<string | null>(null);
 
 const updateSkipped = computed(() =>
-  !updateAvailable.value && skippedVersion.value != null
+  !updateAvailable.value &&
+  skippedVersion.value != null &&
+  skippedVersion.value === updateAvailableVersion.value
 );
 
 const statusText = computed(() => {
@@ -147,8 +149,8 @@ async function loadUpdateState() {
   lastCheckUnix.value = snap.last_check_unix;
   skippedVersion.value = snap.skipped_version;
   if (snap.latest_known) {
-    updateAvailable.value = true;
     updateAvailableVersion.value = snap.latest_known.version;
+    updateAvailable.value = snap.latest_known.version !== snap.skipped_version;
   } else {
     updateAvailable.value = false;
     updateAvailableVersion.value = '';
@@ -172,13 +174,24 @@ async function showUpdateDetails() {
   // Re-run check with force=true; the Rust side opens (or focuses) the
   // update window. This is simpler than calling a separate "open window"
   // command and ensures the data shown is current.
-  await updater.check(true);
+  updateError.value = '';
+  try {
+    await updater.check(true);
+  } catch (e) {
+    updateError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
 async function onToggleAutoCheck(e: Event) {
   const checked = (e.target as HTMLInputElement).checked;
+  const previous = autoCheck.value;
   autoCheck.value = checked;
-  await updater.setAutoCheck(checked);
+  try {
+    await updater.setAutoCheck(checked);
+  } catch (err) {
+    autoCheck.value = previous;
+    updateError.value = err instanceof Error ? err.message : String(err);
+  }
 }
 
 const initials = computed(() => {
@@ -227,10 +240,9 @@ onMounted(async () => {
   const unAvail = await listen('update://available', async () => {
     await loadUpdateState();
   });
-  const unNone = await listen('update://none', () => {
-    updateAvailable.value = false;
-    updateAvailableVersion.value = '';
-    lastCheckUnix.value = Math.floor(Date.now() / 1000);
+  const unNone = await listen('update://none', async () => {
+    await loadUpdateState();
+    checking.value = false;
   });
   const unChecking = await listen('update://checking', () => {
     checking.value = true;

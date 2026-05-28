@@ -102,9 +102,13 @@ let unlistenAvailable: UnlistenFn | null = null;
 onMounted(async () => {
   // Initial state (covers the case where the window is opened from
   // Settings → "Show Details" after the event already fired).
-  const snap = await updater.getState();
-  if (snap.latest_known) {
-    info.value = snap.latest_known;
+  try {
+    const snap = await updater.getState();
+    if (snap.latest_known) {
+      info.value = snap.latest_known;
+    }
+  } catch (e) {
+    downloadError.value = e instanceof Error ? e.message : String(e);
   }
 
   // Stay in sync if a fresh check fires while we're open.
@@ -142,13 +146,23 @@ async function onInstall() {
 }
 
 async function onSkip() {
-  await updater.skipVersion(info.value.version);
-  await getCurrentWindow().close();
+  downloadError.value = '';
+  try {
+    await updater.skipVersion(info.value.version);
+    await getCurrentWindow().close();
+  } catch (e) {
+    downloadError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
 async function onLater() {
-  await updater.snooze();
-  await getCurrentWindow().close();
+  downloadError.value = '';
+  try {
+    await updater.snooze();
+    await getCurrentWindow().close();
+  } catch (e) {
+    downloadError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 </script>
 
