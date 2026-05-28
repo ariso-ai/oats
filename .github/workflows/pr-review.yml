@@ -28,6 +28,7 @@ jobs:
   apply-fixes:
     name: Triage + apply review fixes
     runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 20
     # Only run when the review came from a trusted source AND the PR
     # head is on this repo (we can't push to fork branches). Skip drafts
     # and PRs the author opted out of.
@@ -47,7 +48,7 @@ jobs:
       BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
@@ -65,19 +66,25 @@ jobs:
           # GraphQL Actor.login strips [bot] suffix that REST includes.
           CODERABBIT_GQL="${CODERABBIT_BOT_LOGIN%\[bot\]}"
 
-          threads_json=$(gh api graphql \
+          # `gh api graphql --paginate` auto-follows cursors when the query
+          # exposes $endCursor + pageInfo.endCursor/hasNextPage. Output is
+          # one JSON document per page; merge them with `jq -s`. Comments
+          # per thread bumped to 100 — adequate for CodeRabbit threads;
+          # full per-thread pagination is overkill for the realistic case.
+          threads_json=$(gh api graphql --paginate \
             -F owner="$OWNER" -F name="$NAME" -F number="$PR" \
             -f query='
-              query($owner: String!, $name: String!, $number: Int!) {
+              query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
                 repository(owner: $owner, name: $name) {
                   pullRequest(number: $number) {
-                    reviewThreads(first: 100) {
+                    reviewThreads(first: 100, after: $endCursor) {
+                      pageInfo { hasNextPage endCursor }
                       nodes {
                         id
                         isResolved
                         path
                         line
-                        comments(first: 50) {
+                        comments(first: 100) {
                           nodes {
                             databaseId
                             author { login }
@@ -89,7 +96,8 @@ jobs:
                   }
                 }
               }
-            ')
+            ' \
+            | jq -s '[.[] | .data.repository.pullRequest.reviewThreads.nodes[]]')
 
           # Split into coderabbit majors + shawnzhu (all unresolved inline).
           # Resolved threads are dropped (already handled).
@@ -99,7 +107,7 @@ jobs:
             --arg major "$MAJOR_PATTERN" \
             '
             ($human | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $humans
-            | .data.repository.pullRequest.reviewThreads.nodes as $threads
+            | . as $threads
             | {
                 coderabbit: [
                   $threads[]
@@ -113,7 +121,11 @@ jobs:
                 shawnzhu: [
                   $threads[]
                   | select(.isResolved == false)
-                  | select(($humans | index((.comments.nodes[0].author.login // ""))) != null)
+                  # Bind author.login first; otherwise `$humans | index(…)`
+                  # would re-evaluate the path expression against $humans
+                  # (an array) and error out.
+                  | (.comments.nodes[0].author.login // "") as $login
+                  | select(($humans | index($login)) != null)
                   | {threadId: .id, path, line,
                      rootCommentId: .comments.nodes[0].databaseId,
                      body: .comments.nodes[0].body}

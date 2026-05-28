@@ -32,17 +32,23 @@ bot identity (`coderabbitai[bot]`). Username-prefix matching is unsafe
 — anyone could register `coderabbit-junior`.
 
 ```bash
-gh api graphql -F owner="$OWNER" -F name="$NAME" -F number="$PR" -f query='
-  query($owner: String!, $name: String!, $number: Int!) {
+# Paginate via `gh api graphql --paginate`; it auto-follows cursors when
+# the query exposes $endCursor + pageInfo. `jq -s` merges all page nodes
+# into one flat array. Comments per thread bumped to 100 (rare to exceed).
+gh api graphql --paginate \
+  -F owner="$OWNER" -F name="$NAME" -F number="$PR" \
+  -f query='
+  query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             id
             isResolved
             path
             line
-            comments(first: 50) {
+            comments(first: 100) {
               nodes {
                 id
                 databaseId
@@ -55,8 +61,8 @@ gh api graphql -F owner="$OWNER" -F name="$NAME" -F number="$PR" -f query='
       }
     }
   }
-' | jq '
-  [ .data.repository.pullRequest.reviewThreads.nodes[]
+' | jq -s '
+  [ .[] | .data.repository.pullRequest.reviewThreads.nodes[]
     | select(.isResolved == false)
     # GraphQL Actor.login strips the [bot] suffix that REST includes,
     # so compare against the bare bot login here.
