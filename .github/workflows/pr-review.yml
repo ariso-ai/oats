@@ -1,180 +1,192 @@
-name: Code Review
+name: Apply review fixes
+
+# Triggered when CodeRabbit or shawnzhu submits a PR review. Fetches the
+# major/critical findings, runs Claude with edit tools to apply them,
+# verifies the Tauri + Rust builds, then commits + pushes as
+# github-actions[bot]. CodeRabbit re-reviews the new commit and posts
+# the merge verdict (configured by .coderabbit.yaml). This workflow does
+# not gate merges itself.
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
+  group: apply-review-fixes-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:
-  # Trusted identities the gate evaluates. Only PR comments from these
-  # logins are counted; everything else is ignored. CodeRabbit's GitHub
-  # App login is fixed; the resolver list is the set of humans whose
-  # "resolved"/"addressed" replies can mark a CodeRabbit thread as
-  # addressed for gate purposes.
   CODERABBIT_BOT_LOGIN: "coderabbitai[bot]"
-  VERDICT_BOT_LOGIN: "github-actions[bot]"
-  AI_REVIEW_RESOLVERS: "shawnzhu"
+  HUMAN_REVIEWERS: "shawnzhu"
+  MAJOR_PATTERN: '⚠️ Potential issue|🛑|security|data loss|race condition'
 
 jobs:
-  # Placeholder job that waits for the CodeRabbit GitHub App to post its review.
-  # Requires the CodeRabbit app to be installed on the repo. If CodeRabbit does
-  # not respond within the timeout, the job logs a warning and exits 0 so the
-  # rest of the pipeline can still run.
-  coderabbit:
-    name: Wait for CodeRabbit
-    runs-on: ubuntu-latest
-    if: >-
-      github.event.pull_request.draft == false &&
-      !contains(github.event.pull_request.title, '[skip-review]') &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
-    steps:
-      - name: Wait for CodeRabbit to post a review or comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          TIMEOUT=600
-          INTERVAL=20
-          elapsed=0
-          while [ "$elapsed" -lt "$TIMEOUT" ]; do
-            issue_count=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-              | jq --arg bot "$CODERABBIT_BOT_LOGIN" \
-                  '[.[] | select(.user.login == $bot and .user.type == "Bot")] | length' \
-              | awk '{s+=$1} END{print s+0}')
-            review_count=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-              | jq --arg bot "$CODERABBIT_BOT_LOGIN" \
-                  '[.[] | select(.user.login == $bot and .user.type == "Bot")] | length' \
-              | awk '{s+=$1} END{print s+0}')
-            total=$((issue_count + review_count))
-            if [ "$total" -gt 0 ]; then
-              echo "CodeRabbit has $total comments/reviews. Proceeding."
-              exit 0
-            fi
-            echo "Waiting for CodeRabbit... (${elapsed}s elapsed)"
-            sleep "$INTERVAL"
-            elapsed=$((elapsed + INTERVAL))
-          done
-          echo "::warning::CodeRabbit did not post a review within ${TIMEOUT}s. Proceeding without CodeRabbit input."
-
-  claude-review:
-    name: Claude review
-    needs: coderabbit
+  apply-fixes:
+    name: Triage + apply review fixes
     runs-on: [self-hosted, macOS, ARM64]
+    # Only run when the review came from a trusted source AND the PR
+    # head is on this repo (we can't push to fork branches). Skip drafts
+    # and PRs the author opted out of.
     if: >-
       github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.review.user.login == 'coderabbitai[bot]' ||
+       github.event.review.user.login == 'shawnzhu') &&
       !contains(github.event.pull_request.title, '[skip-review]') &&
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
     env:
       GH_TOKEN: ${{ github.token }}
       PR: ${{ github.event.pull_request.number }}
       REPO: ${{ github.repository }}
-      BASE_REF: ${{ github.base_ref }}
+      OWNER: ${{ github.repository_owner }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
-      - name: Checkout code
+      - name: Checkout PR head
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: Diff size guard
-        id: diff_size
+      - name: Configure git identity
         run: |
-          set -euo pipefail
-          git fetch --no-tags origin "$BASE_REF"
-          stat_line=$(git diff --shortstat "origin/$BASE_REF...HEAD" || true)
-          # Example: " 12 files changed, 345 insertions(+), 67 deletions(-)"
-          added=$(echo "$stat_line" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
-          deleted=$(echo "$stat_line" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
-          total=$(( ${added:-0} + ${deleted:-0} ))
-          echo "Changed lines: $total"
-          if [ "$total" -gt 2000 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            gh pr comment "$PR" --body "Claude review skipped: diff is ${total} lines (limit 2000). Split the PR or add the \`override-ai-review\` label to bypass the gate."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch CodeRabbit findings
-        if: steps.diff_size.outputs.skip != 'true'
+      - name: Fetch actionable findings
+        id: findings
         run: |
           set -euo pipefail
-          # Only include comments from the verified CodeRabbit GitHub App
-          # identity. Username-prefix matching is not sufficient — any user
-          # could register an account starting with "coderabbit".
-          issue_comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            | jq --arg bot "$CODERABBIT_BOT_LOGIN" -s \
-                'add // [] | [.[] | select(.user.login == $bot and .user.type == "Bot")]')
-          reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-            | jq --arg bot "$CODERABBIT_BOT_LOGIN" -s \
-                'add // [] | [.[] | select(.user.login == $bot and .user.type == "Bot")]')
-          review_comments=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate \
-            | jq --arg bot "$CODERABBIT_BOT_LOGIN" -s \
-                'add // [] | [.[] | select(.user.login == $bot and .user.type == "Bot")]')
-          jq -n \
-            --argjson ic "${issue_comments:-[]}" \
-            --argjson rv "${reviews:-[]}" \
-            --argjson rc "${review_comments:-[]}" \
-            '{issue_comments: $ic, reviews: $rv, review_comments: $rc}' \
-            > coderabbit-findings.json
-          echo "CodeRabbit findings written: $(jq '[.issue_comments,.reviews,.review_comments] | map(length) | add' coderabbit-findings.json) items"
+          NAME="${REPO##*/}"
+          # GraphQL Actor.login strips [bot] suffix that REST includes.
+          CODERABBIT_GQL="${CODERABBIT_BOT_LOGIN%\[bot\]}"
 
-      - name: Run Claude review
-        if: steps.diff_size.outputs.skip != 'true'
+          threads_json=$(gh api graphql \
+            -F owner="$OWNER" -F name="$NAME" -F number="$PR" \
+            -f query='
+              query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    reviewThreads(first: 100) {
+                      nodes {
+                        id
+                        isResolved
+                        path
+                        line
+                        comments(first: 50) {
+                          nodes {
+                            databaseId
+                            author { login }
+                            body
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ')
+
+          # Split into coderabbit majors + shawnzhu (all unresolved inline).
+          # Resolved threads are dropped (already handled).
+          jq \
+            --arg cr "$CODERABBIT_GQL" \
+            --arg human "$HUMAN_REVIEWERS" \
+            --arg major "$MAJOR_PATTERN" \
+            '
+            ($human | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $humans
+            | .data.repository.pullRequest.reviewThreads.nodes as $threads
+            | {
+                coderabbit: [
+                  $threads[]
+                  | select(.isResolved == false)
+                  | select((.comments.nodes[0].author.login // "") == $cr)
+                  | select(.comments.nodes[0].body | test($major; "i"))
+                  | {threadId: .id, path, line,
+                     rootCommentId: .comments.nodes[0].databaseId,
+                     body: .comments.nodes[0].body}
+                ],
+                shawnzhu: [
+                  $threads[]
+                  | select(.isResolved == false)
+                  | select(($humans | index((.comments.nodes[0].author.login // ""))) != null)
+                  | {threadId: .id, path, line,
+                     rootCommentId: .comments.nodes[0].databaseId,
+                     body: .comments.nodes[0].body}
+                ]
+              }
+            ' <<< "$threads_json" > actionable-findings.json
+
+          cr_count=$(jq '.coderabbit | length' actionable-findings.json)
+          sz_count=$(jq '.shawnzhu | length' actionable-findings.json)
+          total=$((cr_count + sz_count))
+          echo "CodeRabbit majors: $cr_count"
+          echo "shawnzhu comments: $sz_count"
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+
+      - name: Exit early if nothing actionable
+        if: steps.findings.outputs.total == '0'
+        run: |
+          echo "No unresolved major findings to apply. Done."
+          exit 0
+
+      - name: Run Claude to triage + apply fixes
+        if: steps.findings.outputs.total != '0'
         run: |
           set -euo pipefail
-          prompt="$(cat .github/review-prompt.md)"
+          rm -f /tmp/commit-message.txt /tmp/thread-replies.json
+          prompt="$(cat .github/apply-fixes-prompt.md)"
           claude -p "$prompt" \
             --output-format json \
-            --allowed-tools "Bash(git diff:*) Bash(git log:*) Bash(grep:*) Read Grep" \
+            --allowed-tools "Read Edit Write Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(grep:*) Bash(npm:*) Bash(cargo:*) Bash(cd:*)" \
             --permission-mode acceptEdits \
-            > claude-output.json
-          echo "Claude exit OK. Result length: $(jq -r '.result | length' claude-output.json) chars"
+            > /tmp/claude-output.json
+          echo "Claude finished. Output length: $(jq -r '.result | length' /tmp/claude-output.json) chars"
 
-      - name: Post Claude review comment
-        if: steps.diff_size.outputs.skip != 'true'
-        run: bash scripts/post-claude-review.sh
+      - name: Detect changes
+        if: steps.findings.outputs.total != '0'
+        id: changes
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Claude made no file changes."
+          else
+            echo "no_changes=false" >> "$GITHUB_OUTPUT"
+            echo "Changes:"
+            git status --short
+          fi
+
+      - name: Commit + push fixes
+        if: steps.findings.outputs.total != '0' && steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/commit-message.txt ]; then
+            echo "::error::Claude made changes but no commit message was written to /tmp/commit-message.txt"
+            exit 1
+          fi
+          git add -A
+          git commit -F /tmp/commit-message.txt
+          git push origin "HEAD:$HEAD_REF"
+
+      - name: Post thread replies
+        if: steps.findings.outputs.total != '0' && hashFiles('/tmp/thread-replies.json') != ''
+        run: |
+          set -euo pipefail
+          count=$(jq 'length' /tmp/thread-replies.json)
+          echo "Posting $count thread replies"
+          jq -c '.[]' /tmp/thread-replies.json | while IFS= read -r reply; do
+            id=$(jq -r '.rootCommentId' <<< "$reply")
+            body=$(jq -r '.body' <<< "$reply")
+            gh api "repos/$REPO/pulls/$PR/comments/$id/replies" \
+              -f body="$body" >/dev/null \
+              && echo "  replied to comment $id" \
+              || echo "::warning::failed to reply to comment $id"
+          done
 
       - name: Cleanup
         if: always()
-        run: rm -f claude-output.json coderabbit-findings.json
-
-  merge-gate:
-    name: AI review merge gate
-    needs: [coderabbit, claude-review]
-    runs-on: ubuntu-latest
-    if: >-
-      always() &&
-      github.event.pull_request.draft == false &&
-      !contains(github.event.pull_request.title, '[skip-review]') &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR: ${{ github.event.pull_request.number }}
-      REPO: ${{ github.repository }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Check review status
-        id: gate
-        run: bash scripts/check-review-status.sh
-
-      - name: Approve PR (gate passed)
-        if: success()
-        run: |
-          gh pr review "$PR" --repo "$REPO" --approve \
-            --body "AI review gate passed: no blocking CodeRabbit or Claude findings on $(git rev-parse --short HEAD)."
-
-      - name: Request changes (gate failed)
-        if: failure() && steps.gate.conclusion == 'failure'
-        run: |
-          gh pr review "$PR" --repo "$REPO" --request-changes \
-            --body "AI review gate has blocking findings on $(git rev-parse --short HEAD). See the \`AI review merge gate\` job logs for the count; address findings, resolve CodeRabbit threads, or add the \`override-ai-review\` label."
+        run: rm -f actionable-findings.json /tmp/commit-message.txt /tmp/thread-replies.json /tmp/claude-output.json

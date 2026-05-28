@@ -1,0 +1,19 @@
+# https://docs.coderabbit.ai/getting-started/configure-coderabbit
+# Schema: https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+language: en-US
+early_access: false
+reviews:
+  # Post a "Request changes" review when there are blocking findings, and
+  # "Approve" when the PR is clean. This is what makes CodeRabbit the
+  # merge gate — branch protection set to require an approving review
+  # will block merge until CodeRabbit (or a human) approves.
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: false
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+chat:
+  auto_reply: true
