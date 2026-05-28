@@ -20,7 +20,7 @@
       <li v-for="m in meetings" :key="m.id">
         <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
           <span class="meeting-title">{{ m.title || 'Untitled meeting' }}</span>
-          <span class="meeting-time">{{ formatTime(m.start_time) }}</span>
+          <span class="meeting-time">{{ formatTime(m.start_at) }}</span>
         </button>
       </li>
     </ul>

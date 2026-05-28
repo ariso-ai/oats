@@ -69,22 +69,24 @@ the flow is canceled. The tray menu stays in idle state. No recording starts.
 
 ### List scheduled meetings (new call)
 
-`GET /meetings?start_date=<ISO>&end_date=<ISO>`
+`GET /meetings?startDate=<ISO>&endDate=<ISO>`
 
 - Date range: local-day boundaries for "today" (00:00:00 → 23:59:59), each
   serialized as a full ISO 8601 string with the user's local UTC offset.
 - Auth: existing `Bearer <session>` header is added by `api_request` in
   `src-tauri/src/commands.rs`.
+- Note: the query params are camelCase (`startDate`/`endDate`), not
+  snake_case. The backend returns 500 on snake_case names.
 
-Expected response shape (only the fields we consume are listed; the endpoint
-may return more, which we ignore):
+Response shape (only the fields we consume are listed; the endpoint
+returns many more — meeting URL, participants, etc. — which we ignore):
 
 ```ts
 {
   meetings: Array<{
     id: number;
     title: string | null;
-    start_time: string;   // ISO 8601
+    start_at: string;   // ISO 8601 with offset, e.g. "2026-05-28T09:30:00-04:00"
   }>;
 }
 ```

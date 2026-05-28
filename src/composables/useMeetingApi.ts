@@ -29,7 +29,7 @@ interface PaginatedResponse {
 interface ScheduledMeeting {
   id: number;
   title: string | null;
-  start_time: string;
+  start_at: string;
 }
 
 interface ScheduledMeetingsResponse {
@@ -79,15 +79,15 @@ export function useMeetingApi() {
     endDate: Date
   ): Promise<ScheduledMeeting[]> {
     const params = new URLSearchParams({
-      start_date: startDate.toISOString(),
-      end_date: endDate.toISOString(),
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
     });
     const res = await api.request('GET', `/meetings?${params.toString()}`);
     assertOk(res, 200, 'list scheduled meetings');
     const data = res.data as ScheduledMeetingsResponse;
     return [...(data.meetings ?? [])].sort(
       (a, b) =>
-        new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
+        new Date(a.start_at).getTime() - new Date(b.start_at).getTime()
     );
   }
 
