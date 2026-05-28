@@ -13,8 +13,9 @@ npm run vite:build
 
 ## Inputs
 
-A sibling CI step has written `actionable-findings.json` to the workspace
-root with this shape:
+A sibling CI step has written `actionable-findings.json` to the runner
+temp directory; the absolute path is appended to this prompt. The file
+has this shape:
 
 ```json
 {

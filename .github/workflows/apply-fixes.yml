@@ -131,10 +131,10 @@ jobs:
                      body: .comments.nodes[0].body}
                 ]
               }
-            ' <<< "$threads_json" > actionable-findings.json
+            ' <<< "$threads_json" > "$RUNNER_TEMP/actionable-findings.json"
 
-          cr_count=$(jq '.coderabbit | length' actionable-findings.json)
-          sz_count=$(jq '.shawnzhu | length' actionable-findings.json)
+          cr_count=$(jq '.coderabbit | length' "$RUNNER_TEMP/actionable-findings.json")
+          sz_count=$(jq '.shawnzhu | length' "$RUNNER_TEMP/actionable-findings.json")
           total=$((cr_count + sz_count))
           echo "CodeRabbit majors: $cr_count"
           echo "shawnzhu comments: $sz_count"
@@ -151,7 +151,9 @@ jobs:
         run: |
           set -euo pipefail
           rm -f /tmp/commit-message.txt /tmp/thread-replies.json
-          prompt="$(cat .github/apply-fixes-prompt.md)"
+          prompt="$(cat .github/apply-fixes-prompt.md)
+
+          Findings file (absolute path): $RUNNER_TEMP/actionable-findings.json"
           claude -p "$prompt" \
             --output-format json \
             --allowed-tools "Read Edit Write Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(grep:*) Bash(npm:*) Bash(cargo:*) Bash(cd:*)" \
@@ -201,4 +203,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f actionable-findings.json /tmp/commit-message.txt /tmp/thread-replies.json /tmp/claude-output.json
+        run: rm -f /tmp/commit-message.txt /tmp/thread-replies.json /tmp/claude-output.json
