@@ -18,14 +18,14 @@
 
     <ul v-else class="meeting-list">
       <li v-for="m in meetings" :key="m.id">
-        <button class="meeting-row" @click="choose(m.id)">
+        <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
           <span class="meeting-title">{{ m.title || 'Untitled meeting' }}</span>
           <span class="meeting-time">{{ formatTime(m.start_time) }}</span>
         </button>
       </li>
     </ul>
 
-    <button class="skip-btn" @click="choose(null)">
+    <button class="skip-btn" :disabled="isChoosing" @click="choose(null)">
       Record without meeting
     </button>
   </div>
@@ -41,6 +41,7 @@ type PickerState = 'loading' | 'list' | 'empty' | 'error';
 const meetingApi = useMeetingApi();
 const state = ref<PickerState>('loading');
 const meetings = ref<ScheduledMeeting[]>([]);
+const isChoosing = ref(false);
 
 function todayBoundsLocal(): { startDate: Date; endDate: Date } {
   const start = new Date();
@@ -59,10 +60,13 @@ function formatTime(iso: string): string {
 }
 
 async function choose(meetingId: number | null): Promise<void> {
+  if (isChoosing.value) return;
+  isChoosing.value = true;
   try {
     await invoke('start_recording_window', { meetingId });
   } catch (err) {
     console.error('Failed to start recording window:', err);
+    isChoosing.value = false;
   }
 }
 
@@ -159,6 +163,12 @@ onMounted(async () => {
 
 .meeting-row:hover {
   background: #2a2a3e;
+}
+
+.meeting-row:disabled,
+.skip-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .meeting-title {
