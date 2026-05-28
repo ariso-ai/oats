@@ -434,6 +434,48 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
+/// Open the waveform recording window, optionally attaching to an existing
+/// meeting id. Closes the meeting-picker window if present and flips the
+/// tray menu to the recording state.
+#[tauri::command]
+pub async fn start_recording_window(
+    app: tauri::AppHandle,
+    meeting_id: Option<i64>,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Close the meeting picker window if it exists.
+    if let Some(picker) = app.get_webview_window("meeting-picker") {
+        let _ = picker.close();
+    }
+
+    // If a waveform window already exists, focus it instead of recreating.
+    if let Some(existing) = app.get_webview_window("waveform") {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = match meeting_id {
+        Some(id) => format!("/#/waveform?meetingId={id}"),
+        None => "/#/waveform".to_string(),
+    };
+
+    WebviewWindowBuilder::new(&app, "waveform", WebviewUrl::App(url.into()))
+        .title("")
+        .inner_size(320.0, 56.0)
+        .decorations(false)
+        .always_on_top(true)
+        .resizable(false)
+        .transparent(true)
+        .shadow(false)
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    crate::tray::set_menu(&app, true, false);
+    Ok(())
+}
+
 /// PUT binary data to a presigned URL (bypasses CORS via native HTTP client)
 #[tauri::command]
 pub async fn put_presigned(

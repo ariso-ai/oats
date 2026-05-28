@@ -22,6 +22,7 @@ fn main() {
             commands::create_waveform_window,
             commands::destroy_waveform_window,
             commands::create_settings_window,
+            commands::start_recording_window,
             commands::put_presigned,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
