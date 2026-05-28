@@ -19,8 +19,6 @@ fn main() {
             commands::api_request,
             commands::upload_file,
             commands::set_tray_recording,
-            commands::create_waveform_window,
-            commands::destroy_waveform_window,
             commands::create_settings_window,
             commands::start_recording_window,
             commands::put_presigned,

@@ -383,37 +383,6 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
 }
 
 #[tauri::command]
-pub async fn create_waveform_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
-
-    // Don't create if already exists
-    if app.get_webview_window("waveform").is_some() {
-        return Ok(());
-    }
-
-    WebviewWindowBuilder::new(&app, "waveform", WebviewUrl::App("/#/waveform".into()))
-        .title("")
-        .inner_size(280.0, 56.0)
-        .decorations(false)
-        .always_on_top(true)
-        .resizable(false)
-        .shadow(true)
-        .skip_taskbar(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn destroy_waveform_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("waveform") {
-        win.close().map_err(|e: tauri::Error| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::{WebviewWindowBuilder, WebviewUrl};
 
