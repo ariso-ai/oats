@@ -74,3 +74,38 @@ export const api = {
     return invoke<number>('put_presigned', { url, data, contentType });
   },
 };
+
+export interface UpdateInfo {
+  version: string;
+  notes: string;
+  mandatory: boolean;
+}
+
+export interface UpdateStateSnapshot {
+  last_check_unix: number | null;
+  latest_known: UpdateInfo | null;
+  auto_check_enabled: boolean;
+  skipped_version: string | null;
+  snoozed_until_unix: number | null;
+}
+
+export const updater = {
+  check(force = false): Promise<void> {
+    return invoke('update_check', { force });
+  },
+  installAndRelaunch(): Promise<void> {
+    return invoke('update_install_and_relaunch');
+  },
+  skipVersion(version: string): Promise<void> {
+    return invoke('update_skip_version', { version });
+  },
+  snooze(): Promise<void> {
+    return invoke('update_snooze');
+  },
+  setAutoCheck(enabled: boolean): Promise<void> {
+    return invoke('update_set_auto_check', { enabled });
+  },
+  getState(): Promise<UpdateStateSnapshot> {
+    return invoke('update_get_state');
+  },
+};

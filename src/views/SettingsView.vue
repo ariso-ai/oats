@@ -52,11 +52,41 @@
       </div>
     </section>
 
-    <!-- About Section -->
+    <!-- About / Updates Section -->
     <section class="section">
       <h2 class="section-title">About</h2>
       <div class="card">
-        <span class="about-text">Ariso v{{ appVersion }}</span>
+        <div class="about-header">
+          <span class="version-text">Ariso {{ appVersion }}</span>
+          <span class="status-line" :class="statusClass">
+            {{ statusText }}
+          </span>
+        </div>
+
+        <div class="update-controls">
+          <button
+            v-if="updateAvailable || updateSkipped"
+            class="primary-btn"
+            @click="showUpdateDetails"
+          >Show Details</button>
+          <button
+            v-else
+            class="secondary-btn"
+            :disabled="checking"
+            @click="checkNow"
+          >{{ checking ? 'Checking…' : 'Check for Updates' }}</button>
+        </div>
+
+        <label class="auto-check-row">
+          <input
+            type="checkbox"
+            :checked="autoCheck"
+            @change="onToggleAutoCheck"
+          />
+          <span>Automatically check for updates</span>
+        </label>
+
+        <div v-if="updateError" class="error">{{ updateError }}</div>
       </div>
     </section>
   </div>
@@ -65,7 +95,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { auth, api } from '../tauri';
+import { auth, api, updater } from '../tauri';
 import { load } from '@tauri-apps/plugin-store';
 
 const isSignedIn = ref(false);
@@ -76,6 +106,93 @@ const email = ref('');
 const recordingMode = ref<'mic' | 'mic_and_system'>('mic_and_system');
 const signInPrompt = ref(false);
 const appVersion = __APP_VERSION__;
+
+const checking = ref(false);
+const autoCheck = ref(true);
+const updateAvailable = ref(false);
+const updateAvailableVersion = ref('');
+const updateError = ref('');
+const lastCheckUnix = ref<number | null>(null);
+const skippedVersion = ref<string | null>(null);
+
+const updateSkipped = computed(() =>
+  !updateAvailable.value &&
+  skippedVersion.value != null &&
+  skippedVersion.value === updateAvailableVersion.value
+);
+
+const statusText = computed(() => {
+  if (checking.value) return 'Checking…';
+  if (updateAvailable.value) return `Update available: ${updateAvailableVersion.value}`;
+  if (updateSkipped.value) return `Update ${skippedVersion.value} available (skipped)`;
+  if (lastCheckUnix.value == null) return "You haven't checked yet.";
+  const ago = humanizeAgo(Date.now() / 1000 - lastCheckUnix.value);
+  return `You're up to date. Last checked: ${ago}`;
+});
+
+const statusClass = computed(() => {
+  if (updateAvailable.value || updateSkipped.value) return 'status-available';
+  if (checking.value) return 'status-checking';
+  return 'status-ok';
+});
+
+function humanizeAgo(secs: number): string {
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+async function loadUpdateState() {
+  const snap = await updater.getState();
+  autoCheck.value = snap.auto_check_enabled;
+  lastCheckUnix.value = snap.last_check_unix;
+  skippedVersion.value = snap.skipped_version;
+  if (snap.latest_known) {
+    updateAvailableVersion.value = snap.latest_known.version;
+    updateAvailable.value = snap.latest_known.version !== snap.skipped_version;
+  } else {
+    updateAvailable.value = false;
+    updateAvailableVersion.value = '';
+  }
+}
+
+async function checkNow() {
+  checking.value = true;
+  updateError.value = '';
+  try {
+    await updater.check(true);
+  } catch (e) {
+    updateError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    checking.value = false;
+    await loadUpdateState();
+  }
+}
+
+async function showUpdateDetails() {
+  // Re-run check with force=true; the Rust side opens (or focuses) the
+  // update window. This is simpler than calling a separate "open window"
+  // command and ensures the data shown is current.
+  updateError.value = '';
+  try {
+    await updater.check(true);
+  } catch (e) {
+    updateError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function onToggleAutoCheck(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = autoCheck.value;
+  autoCheck.value = checked;
+  try {
+    await updater.setAutoCheck(checked);
+  } catch (err) {
+    autoCheck.value = previous;
+    updateError.value = err instanceof Error ? err.message : String(err);
+  }
+}
 
 const initials = computed(() => {
   const name = displayName.value || email.value || '?';
@@ -99,6 +216,7 @@ async function fetchUserProfile() {
 }
 
 let unlistenSignInPrompt: UnlistenFn | null = null;
+let unlistenUpdates: UnlistenFn[] = [];
 
 onMounted(async () => {
   const session = await auth.checkSession();
@@ -116,10 +234,31 @@ onMounted(async () => {
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
   });
+
+  await loadUpdateState();
+
+  const unAvail = await listen('update://available', async () => {
+    await loadUpdateState();
+  });
+  const unNone = await listen('update://none', async () => {
+    await loadUpdateState();
+    checking.value = false;
+  });
+  const unChecking = await listen('update://checking', () => {
+    checking.value = true;
+  });
+  const unError = await listen<{ message: string }>('update://error', (e) => {
+    updateError.value = e.payload.message;
+    checking.value = false;
+  });
+
+  // Save unlisteners so onUnmounted can clear them.
+  unlistenUpdates = [unAvail, unNone, unChecking, unError];
 });
 
 onUnmounted(() => {
   unlistenSignInPrompt?.();
+  unlistenUpdates.forEach((un) => un());
 });
 
 async function handleGoogleSignIn() {
@@ -309,8 +448,63 @@ async function handleSignOut() {
   color: #6366f1;
 }
 
-.about-text {
+.about-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.version-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1d1d1f;
+}
+
+.status-line {
+  font-size: 12px;
+}
+
+.status-ok       { color: #16a34a; }
+.status-checking { color: #86868b; }
+.status-available { color: #4f46e5; font-weight: 500; }
+
+.update-controls {
+  margin-bottom: 12px;
+}
+
+.primary-btn {
   font-size: 13px;
-  color: #86868b;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: none;
+  background: linear-gradient(to bottom, #6366f1, #4f46e5);
+  color: white;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.secondary-btn {
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  background: white;
+  color: #1d1d1f;
+  cursor: pointer;
+}
+
+.secondary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.auto-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1d1d1f;
+  cursor: pointer;
 }
 </style>

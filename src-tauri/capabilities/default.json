@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the desktop app",
-  "windows": ["main", "waveform", "settings", "oauth"],
+  "windows": ["main", "waveform", "settings", "oauth", "update"],
   "permissions": [
     "core:default",
     "core:window:allow-create",
@@ -14,6 +14,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "store:default",
-    "opener:default"
+    "opener:default",
+    "updater:default"
   ]
 }

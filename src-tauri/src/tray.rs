@@ -122,6 +122,12 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         });
                     }
                 }
+                "check_updates" => {
+                    let app_async = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::update_manager::run_check(app_async, true).await;
+                    });
+                }
                 "quit" => {
                     app.exit(0);
                 }
@@ -136,12 +142,14 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
 
     MenuBuilder::new(app)
         .item(&start)
         .separator()
         .item(&settings)
+        .item(&check_updates)
         .separator()
         .item(&quit)
         .build()
@@ -155,6 +163,7 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
     };
     let stop = MenuItemBuilder::with_id("stop_recording", "Stop Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
 
     // Quit is intentionally omitted while recording to prevent
     // losing the current recording and skipping the upload flow.
@@ -163,5 +172,6 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
         .item(&stop)
         .separator()
         .item(&settings)
+        .item(&check_updates)
         .build()
 }

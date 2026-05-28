@@ -4,12 +4,14 @@
 mod audio_capture;
 mod commands;
 mod tray;
+mod update_manager;
 
 fn main() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
             commands::check_session,
@@ -23,11 +25,20 @@ fn main() {
             commands::put_presigned,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
+            update_manager::update_check,
+            update_manager::update_install_and_relaunch,
+            update_manager::update_skip_version,
+            update_manager::update_snooze,
+            update_manager::update_set_auto_check,
+            update_manager::update_get_state,
         ])
         .setup(|app| {
+            use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
+
             tray::create_tray(app.handle())?;
 
-            use tauri::{WebviewWindowBuilder, WebviewUrl};
+            let initial_state = update_manager::load_state(&app.handle());
+            app.manage(update_manager::Manager::new(initial_state));
 
             // Hidden bootstrap window — runs JS event listeners
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/#/".into()))
@@ -52,6 +63,18 @@ fn main() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = settings_clone.hide();
+                }
+            });
+
+            // Background update scheduler: wake every hour, but only
+            // actually check once per 24h (or on snooze expiry). The
+            // initial 10-second delay lets startup finish first.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                loop {
+                    update_manager::run_check(app_handle.clone(), false).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             });
 
