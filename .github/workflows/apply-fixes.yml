@@ -1,0 +1,204 @@
+name: Apply review fixes
+
+# Triggered when CodeRabbit or shawnzhu submits a PR review. Fetches the
+# major/critical findings, runs Claude with edit tools to apply them,
+# verifies the Tauri + Rust builds, then commits + pushes as
+# github-actions[bot]. CodeRabbit re-reviews the new commit and posts
+# the merge verdict (configured by .coderabbit.yaml). This workflow does
+# not gate merges itself.
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: apply-review-fixes-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CODERABBIT_BOT_LOGIN: "coderabbitai[bot]"
+  HUMAN_REVIEWERS: "shawnzhu"
+  MAJOR_PATTERN: '⚠️ Potential issue|🛑|security|data loss|race condition'
+
+jobs:
+  apply-fixes:
+    name: Triage + apply review fixes
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 20
+    # Only run when the review came from a trusted source AND the PR
+    # head is on this repo (we can't push to fork branches). Skip drafts
+    # and PRs the author opted out of.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.review.user.login == 'coderabbitai[bot]' ||
+       github.event.review.user.login == 'shawnzhu') &&
+      !contains(github.event.pull_request.title, '[skip-review]') &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      OWNER: ${{ github.repository_owner }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch actionable findings
+        id: findings
+        run: |
+          set -euo pipefail
+          NAME="${REPO##*/}"
+          # GraphQL Actor.login strips [bot] suffix that REST includes.
+          CODERABBIT_GQL="${CODERABBIT_BOT_LOGIN%\[bot\]}"
+
+          # `gh api graphql --paginate` auto-follows cursors when the query
+          # exposes $endCursor + pageInfo.endCursor/hasNextPage. Output is
+          # one JSON document per page; merge them with `jq -s`. Comments
+          # per thread bumped to 100 — adequate for CodeRabbit threads;
+          # full per-thread pagination is overkill for the realistic case.
+          threads_json=$(gh api graphql --paginate \
+            -F owner="$OWNER" -F name="$NAME" -F number="$PR" \
+            -f query='
+              query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    reviewThreads(first: 100, after: $endCursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        isResolved
+                        path
+                        line
+                        comments(first: 100) {
+                          nodes {
+                            databaseId
+                            author { login }
+                            body
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ' \
+            | jq -s '[.[] | .data.repository.pullRequest.reviewThreads.nodes[]]')
+
+          # Split into coderabbit majors + shawnzhu (all unresolved inline).
+          # Resolved threads are dropped (already handled).
+          jq \
+            --arg cr "$CODERABBIT_GQL" \
+            --arg human "$HUMAN_REVIEWERS" \
+            --arg major "$MAJOR_PATTERN" \
+            '
+            ($human | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $humans
+            | . as $threads
+            | {
+                coderabbit: [
+                  $threads[]
+                  | select(.isResolved == false)
+                  | select((.comments.nodes[0].author.login // "") == $cr)
+                  | select(.comments.nodes[0].body | test($major; "i"))
+                  | {threadId: .id, path, line,
+                     rootCommentId: .comments.nodes[0].databaseId,
+                     body: .comments.nodes[0].body}
+                ],
+                shawnzhu: [
+                  $threads[]
+                  | select(.isResolved == false)
+                  # Bind author.login first; otherwise `$humans | index(…)`
+                  # would re-evaluate the path expression against $humans
+                  # (an array) and error out.
+                  | (.comments.nodes[0].author.login // "") as $login
+                  | select(($humans | index($login)) != null)
+                  | {threadId: .id, path, line,
+                     rootCommentId: .comments.nodes[0].databaseId,
+                     body: .comments.nodes[0].body}
+                ]
+              }
+            ' <<< "$threads_json" > actionable-findings.json
+
+          cr_count=$(jq '.coderabbit | length' actionable-findings.json)
+          sz_count=$(jq '.shawnzhu | length' actionable-findings.json)
+          total=$((cr_count + sz_count))
+          echo "CodeRabbit majors: $cr_count"
+          echo "shawnzhu comments: $sz_count"
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+
+      - name: Exit early if nothing actionable
+        if: steps.findings.outputs.total == '0'
+        run: |
+          echo "No unresolved major findings to apply. Done."
+          exit 0
+
+      - name: Run Claude to triage + apply fixes
+        if: steps.findings.outputs.total != '0'
+        run: |
+          set -euo pipefail
+          rm -f /tmp/commit-message.txt /tmp/thread-replies.json
+          prompt="$(cat .github/apply-fixes-prompt.md)"
+          claude -p "$prompt" \
+            --output-format json \
+            --allowed-tools "Read Edit Write Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(grep:*) Bash(npm:*) Bash(cargo:*) Bash(cd:*)" \
+            --permission-mode acceptEdits \
+            > /tmp/claude-output.json
+          echo "Claude finished. Output length: $(jq -r '.result | length' /tmp/claude-output.json) chars"
+
+      - name: Detect changes
+        if: steps.findings.outputs.total != '0'
+        id: changes
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Claude made no file changes."
+          else
+            echo "no_changes=false" >> "$GITHUB_OUTPUT"
+            echo "Changes:"
+            git status --short
+          fi
+
+      - name: Commit + push fixes
+        if: steps.findings.outputs.total != '0' && steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/commit-message.txt ]; then
+            echo "::error::Claude made changes but no commit message was written to /tmp/commit-message.txt"
+            exit 1
+          fi
+          git add -A
+          git commit -F /tmp/commit-message.txt
+          git push origin "HEAD:$HEAD_REF"
+
+      - name: Post thread replies
+        if: steps.findings.outputs.total != '0' && hashFiles('/tmp/thread-replies.json') != ''
+        run: |
+          set -euo pipefail
+          count=$(jq 'length' /tmp/thread-replies.json)
+          echo "Posting $count thread replies"
+          jq -c '.[]' /tmp/thread-replies.json | while IFS= read -r reply; do
+            id=$(jq -r '.rootCommentId' <<< "$reply")
+            body=$(jq -r '.body' <<< "$reply")
+            gh api "repos/$REPO/pulls/$PR/comments/$id/replies" \
+              -f body="$body" >/dev/null \
+              && echo "  replied to comment $id" \
+              || echo "::warning::failed to reply to comment $id"
+          done
+
+      - name: Cleanup
+        if: always()
+        run: rm -f actionable-findings.json /tmp/commit-message.txt /tmp/thread-replies.json /tmp/claude-output.json

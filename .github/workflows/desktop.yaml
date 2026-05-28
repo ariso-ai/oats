@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate (frontend + cargo check)
+    name: Validate (frontend + cargo build)
     runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: read
@@ -57,9 +57,9 @@ jobs:
       - name: Build frontend
         run: npm run vite:build
 
-      - name: Check Rust
+      - name: Build Rust
         working-directory: src-tauri
-        run: cargo check --locked
+        run: cargo build --locked
 
   release:
     name: Sign, notarize, and bundle

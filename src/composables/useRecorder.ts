@@ -14,6 +14,7 @@ export function useRecorder() {
   const isPaused: Ref<boolean> = ref(false);
   const error: Ref<string | null> = ref(null);
   const durationSeconds: Ref<number> = ref(0);
+  const startedAt: Ref<string | null> = ref(null);
   const systemAudioSupported: Ref<boolean> = ref(hasTauri);
 
   let audioContext: AudioContext | null = null;
@@ -80,6 +81,7 @@ export function useRecorder() {
   async function startRecording(mode?: RecordingMode): Promise<void> {
     error.value = null;
     durationSeconds.value = 0;
+    startedAt.value = null;
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
 
@@ -174,6 +176,7 @@ export function useRecorder() {
 
       isRecording.value = true;
       isPaused.value = false;
+      startedAt.value = new Date().toISOString();
 
       timerInterval = setInterval(() => {
         if (!isPaused.value) {
@@ -278,6 +281,7 @@ export function useRecorder() {
     isPaused,
     error,
     durationSeconds,
+    startedAt,
     systemAudioSupported,
     getAnalyser,
     startRecording,
