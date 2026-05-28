@@ -69,13 +69,17 @@ cr_majors=$(printf '%s' "$threads_json" | jq \
   --arg major    "$MAJOR_PATTERN" \
   --arg resolved "$RESOLVED_PATTERN" \
   --argjson resolvers "$resolvers_json" '
+  # GraphQL Actor.login returns the bot login WITHOUT the [bot] suffix
+  # that the REST API includes ("coderabbitai" vs "coderabbitai[bot]"),
+  # so derive the GraphQL form here for comparison.
+  ($bot | sub("\\[bot\\]$"; "")) as $bot_gql |
   [
     .data.repository.pullRequest.reviewThreads.nodes[]
     | select(.isResolved == false)
     | .comments.nodes as $nodes
     | select(($nodes | length) > 0)
     # First (root) comment must be from the trusted CodeRabbit bot.
-    | select(($nodes[0].author.login // "") == $bot)
+    | select(($nodes[0].author.login // "") == $bot_gql)
     | select($nodes[0].body | test($major; "i"))
     # Any reply from an allowed resolver containing the text "resolved" or
     # "addressed" marks the thread as addressed.

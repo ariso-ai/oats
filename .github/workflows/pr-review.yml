@@ -164,4 +164,17 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Check review status
+        id: gate
         run: bash scripts/check-review-status.sh
+
+      - name: Approve PR (gate passed)
+        if: success()
+        run: |
+          gh pr review "$PR" --repo "$REPO" --approve \
+            --body "AI review gate passed: no blocking CodeRabbit or Claude findings on $(git rev-parse --short HEAD)."
+
+      - name: Request changes (gate failed)
+        if: failure() && steps.gate.conclusion == 'failure'
+        run: |
+          gh pr review "$PR" --repo "$REPO" --request-changes \
+            --body "AI review gate has blocking findings on $(git rev-parse --short HEAD). See the \`AI review merge gate\` job logs for the count; address findings, resolve CodeRabbit threads, or add the \`override-ai-review\` label."

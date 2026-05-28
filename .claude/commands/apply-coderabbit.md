@@ -58,7 +58,9 @@ gh api graphql -F owner="$OWNER" -F name="$NAME" -F number="$PR" -f query='
 ' | jq '
   [ .data.repository.pullRequest.reviewThreads.nodes[]
     | select(.isResolved == false)
-    | select((.comments.nodes[0].author.login // "") == "coderabbitai[bot]")
+    # GraphQL Actor.login strips the [bot] suffix that REST includes,
+    # so compare against the bare bot login here.
+    | select((.comments.nodes[0].author.login // "") == "coderabbitai")
     | {threadId: .id, path, line,
        rootCommentId: .comments.nodes[0].databaseId,
        body: .comments.nodes[0].body}
