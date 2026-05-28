@@ -63,6 +63,7 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -76,6 +77,13 @@ const waveform = useWaveform();
 const meetingApi = useMeetingApi();
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
+
+const route = useRoute();
+const meetingIdQuery = route.query.meetingId;
+const meetingId: number | null =
+  typeof meetingIdQuery === 'string' && /^\d+$/.test(meetingIdQuery)
+    ? Number(meetingIdQuery)
+    : null;
 
 const formattedDuration = computed(() => {
   const s = recorder.durationSeconds.value;
@@ -123,7 +131,11 @@ async function handleStop() {
     );
     try {
       await Promise.race([
-        meetingApi.uploadAudio(mp3Blob, { startAt, endAt }),
+        meetingApi.uploadAudio(mp3Blob, {
+          startAt,
+          endAt,
+          meetingId: meetingId ?? undefined,
+        }),
         timeout,
       ]);
       uploadResult.value = 'success';
