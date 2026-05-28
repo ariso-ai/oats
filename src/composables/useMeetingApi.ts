@@ -26,6 +26,16 @@ interface PaginatedResponse {
   };
 }
 
+interface ScheduledMeeting {
+  id: number;
+  title: string | null;
+  start_time: string;
+}
+
+interface ScheduledMeetingsResponse {
+  meetings: ScheduledMeeting[];
+}
+
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
   if (res.status !== expected) {
     const data = res.data as { error?: string } | null;
@@ -62,6 +72,23 @@ export function useMeetingApi() {
     );
     assertOk(res, 200, 'list meetings');
     return res.data as PaginatedResponse;
+  }
+
+  async function listScheduledMeetings(
+    startDate: Date,
+    endDate: Date
+  ): Promise<ScheduledMeeting[]> {
+    const params = new URLSearchParams({
+      start_date: startDate.toISOString(),
+      end_date: endDate.toISOString(),
+    });
+    const res = await api.request('GET', `/meetings?${params.toString()}`);
+    assertOk(res, 200, 'list scheduled meetings');
+    const data = res.data as ScheduledMeetingsResponse;
+    return [...(data.meetings ?? [])].sort(
+      (a, b) =>
+        new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
+    );
   }
 
   async function getMeeting(
@@ -189,6 +216,7 @@ export function useMeetingApi() {
     getDeepgramToken,
     createMeeting,
     listMeetings,
+    listScheduledMeetings,
     getMeeting,
     updateMeeting,
     endMeeting,
@@ -199,4 +227,4 @@ export function useMeetingApi() {
   };
 }
 
-export type { Meeting, PaginatedResponse };
+export type { Meeting, PaginatedResponse, ScheduledMeeting };
