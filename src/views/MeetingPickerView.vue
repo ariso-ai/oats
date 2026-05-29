@@ -16,14 +16,38 @@
       <span>No meetings today.</span>
     </div>
 
-    <ul v-else class="meeting-list">
-      <li v-for="m in meetings" :key="m.id">
-        <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
-          <span class="meeting-title">{{ m.title || 'Untitled meeting' }}</span>
-          <span class="meeting-time">{{ formatTime(m.start_at) }}</span>
+    <template v-else>
+      <!-- Collapsed default: a single featured meeting (or a prompt) -->
+      <template v-if="!showAll">
+        <p v-if="defaultMeeting.kind !== 'none'" class="section-label">
+          {{ defaultMeeting.kind === 'current' ? 'Happening now' : 'Up next' }}
+        </p>
+        <button
+          v-if="defaultMeeting.featured"
+          class="meeting-row"
+          :disabled="isChoosing"
+          @click="choose(defaultMeeting.featured.id)"
+        >
+          <span class="meeting-title">{{ defaultMeeting.featured.title || 'Untitled meeting' }}</span>
+          <span class="meeting-time">{{ formatTime(defaultMeeting.featured.start_at) }}</span>
         </button>
-      </li>
-    </ul>
+        <p v-else class="section-label">No meeting happening now</p>
+      </template>
+
+      <!-- Expanded: full flat list of today's meetings -->
+      <ul v-else class="meeting-list">
+        <li v-for="m in meetings" :key="m.id">
+          <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
+            <span class="meeting-title">{{ m.title || 'Untitled meeting' }}</span>
+            <span class="meeting-time">{{ formatTime(m.start_at) }}</span>
+          </button>
+        </li>
+      </ul>
+
+      <button class="link-btn" type="button" @click="showAll = !showAll">
+        {{ showAll ? 'View less ▴' : 'View all ▾' }}
+      </button>
+    </template>
 
     <button class="skip-btn" :disabled="isChoosing" @click="choose(null)">
       Record without meeting
@@ -32,9 +56,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeetingApi, type ScheduledMeeting } from '../composables/useMeetingApi';
+import { pickDefaultMeeting } from '../composables/pickDefaultMeeting';
 
 type PickerState = 'loading' | 'list' | 'empty' | 'error';
 
@@ -42,6 +67,10 @@ const meetingApi = useMeetingApi();
 const state = ref<PickerState>('loading');
 const meetings = ref<ScheduledMeeting[]>([]);
 const isChoosing = ref(false);
+const showAll = ref(false);
+const now = new Date();
+
+const defaultMeeting = computed(() => pickDefaultMeeting(meetings.value, now));
 
 function todayBoundsLocal(): { startDate: Date; endDate: Date } {
   const start = new Date();
@@ -102,6 +131,31 @@ onMounted(async () => {
   font-size: 16px;
   font-weight: 600;
   margin: 0 0 16px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #9ca3af;
+  margin: 0 0 8px;
+}
+
+.link-btn {
+  align-self: flex-start;
+  margin-top: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #818cf8;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
 }
 
 .state-row {
