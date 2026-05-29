@@ -24,6 +24,7 @@ export const SYNC_EVENT = 'meeting-notifications-sync';
 
 let handle: PusherHandle | null = null;
 let starting = false;
+let cancelled = false;
 let actionListenerReady = false;
 
 // Maps a notification id to the URL its click should open. Best-effort:
@@ -98,6 +99,9 @@ async function onPrepComplete(
       webAppBaseUrl
     );
     const id = nextNotificationId++;
+    // urlById only shrinks on click; cap it so dismissed-but-unclicked
+    // notifications can't grow the map unbounded over a long session.
+    if (urlById.size > 50) urlById.clear();
     urlById.set(id, url);
     sendNotification({ id, title, body });
   } catch (err) {
@@ -109,6 +113,7 @@ async function onPrepComplete(
 export async function startMeetingNotifications(): Promise<void> {
   if (handle || starting) return;
   starting = true;
+  cancelled = false;
   try {
     const session = await auth.checkSession();
     if (!session) return;
@@ -127,6 +132,12 @@ export async function startMeetingNotifications(): Promise<void> {
     h.channel.bind('meeting-prep-complete', (event: PrepCompleteEvent) => {
       void onPrepComplete(event.meetingPrepId, webAppBaseUrl);
     });
+    // If stop() was called while we were connecting, tear down immediately
+    // instead of leaving an orphaned connection.
+    if (cancelled) {
+      h.cleanup();
+      return;
+    }
     handle = h;
   } catch (err) {
     console.error('Failed to start meeting notifications:', err);
@@ -137,6 +148,7 @@ export async function startMeetingNotifications(): Promise<void> {
 
 /** Disconnect from Pusher. */
 export async function stopMeetingNotifications(): Promise<void> {
+  cancelled = true;
   if (handle) {
     handle.cleanup();
     handle = null;
