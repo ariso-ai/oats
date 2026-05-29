@@ -1,210 +1,253 @@
-# Meeting Push Notifications — Design
+# Meeting Push Notifications (Pusher) — Design
 
 **Date:** 2026-05-29
-**App:** `@ariso-ai/desktop` (Tauri v2 + Vue 3)
+**App:** `@ariso-ai/desktop` (`ariso-ai/sage`) — Tauri v2 + Vue 3
 **Status:** Approved for planning
 
 ## Summary
 
 Add native OS push notifications to the desktop app for **meeting-related**
-inbox events only: **meeting prep** and **meeting notes**. The desktop app polls
-the existing backend inbox API, filters for meeting message sources, and fires
-native OS notifications for newly-arrived messages. Clicking a notification
-opens the corresponding page in the user's web app (best-effort).
+events only: **meeting prep ready** and **meeting notes ready**. The desktop
+subscribes in real time to the user's private **Pusher** channel (the same
+mechanism the web app uses), and fires a native OS notification when a
+meeting-prep or meeting-notes event arrives. The notification body is the actual
+inbox message text (fetched by `source_id`). Clicking a notification opens the
+corresponding page in the user's web app (best-effort).
 
-This is scoped strictly to meeting prep + meeting notes. Other inbox sources
-(`workflow`, `reminder`, `coaching_nudge`, `greeting`, etc.) are ignored.
+This **replaces an earlier polling design**. We now push via Pusher rather than
+poll `/user-inbox-messages`.
 
-## Background
+Scope is the **desktop side only** (`ariso-ai/sage`). The meeting-notes event
+does not exist in the backend yet; this spec defines its **contract**, to be
+implemented separately in `ariso-ai/agents`.
 
-The web app (`ariso-ai/agents` → `apps/web-ui`) has a full notifications
-center backed by `/user-inbox-messages`. Relevant facts learned from that code:
+## Background — how the web app pushes
 
-- **Endpoint:** `GET /user-inbox-messages?page&limit` →
-  `{ items, total, pagination: { page, limit, totalPages } }`.
-  There is **no server-side filtering by source** — clients filter themselves.
-- **Message shape** (`InboxMessage`): `{ id: number, source: string,
-  source_id: number | null, message: string | null, created_at, updated_at,
-  unread: boolean }`. `message` is markdown, decrypted server-side per user.
-- **Meeting-related `source` values:** `meeting_prep`, `daily_meeting_prep`,
-  `meeting_notes`.
-- **Web routes** (from `UserNotificationRow.resolveLink`):
-  - `meeting_notes` + `source_id` → `/meeting-notes/{source_id}`
-  - `meeting_prep` + `source_id` → `/my/meeting-prep-v2/{source_id}`
-  - `daily_meeting_prep` → `/my/meetings` (fallback, no id-specific route)
+From `apps/web-ui` in `ariso-ai/agents`:
 
-This desktop app:
+- **`usePusher(channelName)`** (`composables/usePusher.ts`) creates
+  `new Pusher(key, { cluster, channelAuthorization })`, subscribes to the
+  channel, and returns `{ client, channel, cleanup }`.
+- **Channel authorization:** Pusher calls `POST /pusher/auth` with
+  `socketId` + `channelName`; the server (`handlers/pusher_auth.ts`) verifies
+  `req.orgUserMapping` and only authorizes:
+  - `private-{orgId}-{orgUserMappingId}` (general user channel) ← we use this
+  - `private-file-processing-{orgUserMappingId}`
+- **Pusher client config** (public client keys — safe to embed):
+  | Env | Key | Cluster |
+  |---|---|---|
+  | dev / local | `39d990870841a6b478cc` | `us2` |
+  | prod | `ec77b8bc7dc9ff463c13` | `us2` |
+- **Events on the general channel** (verified by reading every Pusher publisher):
+  | Event | Source | Payload |
+  |---|---|---|
+  | `meeting-prep-complete` | `worker/handlers/meetingPrep.ts` | `{ meetingPrepId, eventId }` |
+  | `meeting-export-ready` / `-failed` | export flow | (export only — **not** used here) |
+- **Inbox message ordering for prep:** `meetingPrep.ts` calls
+  `userInboxService.createMessage(..., 'meeting_prep', meetingPrepId)` **before**
+  triggering `meeting-prep-complete`. So when the event arrives, the
+  `meeting_prep` inbox message (with `source_id === meetingPrepId`) already
+  exists and can be fetched.
+- **There is no Pusher event for meeting notes.** `generateMeetingNotes.ts`
+  saves notes silently; only `dailyMeetingNotes.ts` creates a `meeting_notes`
+  inbox message (a daily digest), with no real-time event. ← gap addressed by
+  the contract below.
 
-- Routes all backend calls through a Rust `api_request` command
-  (`src/tauri.ts`), which attaches the session token. The same session resolves
-  to the user's `orgUserMapping` server-side, so `/user-inbox-messages` is
-  reachable with no extra auth work. **(Assumption — verify during build that
-  the desktop session can read the inbox endpoint.)**
-- Already lists `@tauri-apps/plugin-notification` in `package.json`, but it is
-  **completely unwired**: not in `Cargo.toml`, not registered in `main.rs`, not
-  in `capabilities/default.json`.
-- Has a hidden, always-alive **"main" window** (route `/#/`, currently an empty
-  inline component) — the natural home for a background poller, mirroring the
-  existing Rust update-scheduler loop in `main.rs`.
-- Uses `@tauri-apps/plugin-store` (`load('settings.json', { autoSave: true })`)
-  for persistence and `auth.checkSession()` to gate on login.
-- Has **no JS test runner** (no vitest; the workspace is excluded from the
-  monorepo turbo `build`/`lint`/`test` pipeline).
+## This app — relevant facts
+
+- All backend HTTP goes through the Rust `api_request` command (`src/tauri.ts`),
+  which attaches the session token. The session resolves to `orgUserMapping`
+  server-side, so `/pusher/auth`, `/auth/me`, and `/user-inbox-messages` are all
+  reachable.
+- **`/auth/me`** returns `{ org_id, id, user_id, full_name, email, ... }` →
+  channel name is `private-${org_id}-${id}`.
+- `@tauri-apps/plugin-notification` is a dependency but **unwired** (not in
+  `Cargo.toml`, `main.rs`, or `capabilities/default.json`).
+- The hidden, always-alive **"main" window** (route `/#/`, currently an empty
+  inline component) is the home for the persistent Pusher connection — mirroring
+  the existing Rust update-scheduler loop in `main.rs`.
+- `tauri.conf.json` has `csp: null`, so the webview may open the Pusher
+  WebSocket (`wss://ws-us2.pusher.com`) without CSP changes.
+- API base URL is a compile-time Rust const gated by cargo features
+  (`prod-api` / `dev-api` / default-local). Web app URLs and Pusher config will
+  mirror this gating. Web URLs (from `infra/ari-config`): prod
+  `https://web.ari.ariso.ai`, dev `https://web-dev.ari.ariso.ai`, local
+  `http://localhost:5173` *(web-ui Vite default — confirm)*.
+- `@tauri-apps/plugin-store` + `auth.checkSession()` + `SettingsView` checkbox
+  patterns already exist and will be reused.
+- **No JS test runner** (no vitest; workspace excluded from the monorepo turbo
+  pipeline).
 
 ## Goals
 
-- Fire a native OS notification when a new **meeting prep** or **meeting notes**
-  inbox message arrives.
-- Never re-notify for the same message (across polls and across app restarts).
-- Never flood the user with historical messages on first run / fresh install.
-- Let the user disable meeting notifications from Settings.
-- Clicking a notification opens the relevant meeting page in the web app
-  (best-effort).
+- Fire a native OS notification, in real time, when a **meeting-prep-complete**
+  or **meeting-notes-complete** event arrives on the user's private channel.
+- Notification body = the real inbox message text (fetched by `source_id`).
+- Click opens the relevant meeting page in the web app (best-effort).
+- User can disable meeting notifications from Settings.
+- Connection is maintained while signed in; torn down on sign-out.
 
 ## Non-Goals
 
 - No in-app notifications center / list UI (OS toasts only).
-- No marking messages read or deleting them — the desktop is **read-only** to
-  the inbox; the web app owns read/delete state.
-- No support for non-meeting sources.
-- No real server push (SSE/WebSocket/web-push) — polling only.
+- No marking read / deleting inbox messages (desktop stays read-only; web owns
+  read state).
+- No non-meeting sources.
+- No replay of events missed while the app was offline (Pusher does not replay;
+  accepted — see Edge cases).
+- **No backend implementation** — the `meeting-notes-complete` event is defined
+  here as a contract and implemented separately in `ariso-ai/agents`.
 
 ## Architecture
 
-Approach: **JS poller in the always-alive main window** (chosen over a Rust
-poller, which would duplicate session/markdown logic for no gain, and over real
-server push, which needs backend infra we don't own here).
+Approach: **Pusher real-time subscription in the always-alive main window**
+(replaces polling). Chosen because it matches the web app's existing mechanism,
+delivers events instantly, and needs no client-side dedup/watermark.
 
 ### Data flow
 
 ```
 BootstrapView (main window, /#/)
-   └─ starts useMeetingNotifications() singleton
-        └─ every 60s, if signed in & enabled:
-             GET /user-inbox-messages?limit=20   (via api.request)
-               → filter source ∈ {meeting_prep, daily_meeting_prep, meeting_notes}
-               → selectMessagesToNotify(meetingMsgs, watermark)   [pure fn]
-               → for each selected: fire OS notification
-               → persist watermark = max(id) to notifications.json store
+  └─ useMeetingNotifications.start()
+       1. if signed in & enabled & OS permission granted:
+       2. config  = getDesktopConfig()      // pusher key/cluster, web base URL (Rust, feature-baked)
+       3. me      = GET /auth/me             // org_id, id
+       4. channel = usePusher(`private-${org_id}-${id}`)   // auth via POST /pusher/auth (Rust)
+       5. channel.bind('meeting-prep-complete',  e => onMeetingEvent('prep',  e.meetingPrepId))
+          channel.bind('meeting-notes-complete', e => onMeetingEvent('notes', e.meetingId))
+       └─ onMeetingEvent(kind, sourceId):
+            items = GET /user-inbox-messages?limit=20
+            msg   = findInboxMessage(items, sourceMap[kind], sourceId)
+            notify(title[kind], body=msg?.message ?? genericBody[kind],
+                   url = deepLink[kind](sourceId))         // OS toast
+            on click → openUrl(url)                        // opener plugin, best-effort
 ```
 
-### Components / files
+### Components / files (sage repo)
 
 | File | Change |
 |---|---|
+| `package.json` | Add `pusher-js` dependency. |
 | `src-tauri/Cargo.toml` | Add `tauri-plugin-notification = "2"`. |
-| `src-tauri/src/main.rs` | Register `.plugin(tauri_plugin_notification::init())`. Add `WEB_APP_BASE_URL` const (feature-gated, mirrors `API_BASE_URL`) + a `get_web_app_base_url` command. |
-| `src-tauri/src/commands.rs` | Add `WEB_APP_BASE_URL` const + `get_web_app_base_url` command (returns the baked web base URL to JS). |
-| `src-tauri/capabilities/default.json` | Add `"notification:default"` permission. |
-| `src/composables/useInbox.ts` | `InboxMessage` type; `MEETING_SOURCES` const; `listInboxMessages(limit)`; pure `selectMessagesToNotify(messages, watermark)`; `notificationFor(msg)` (title + body + deep-link URL). |
-| `src/composables/useMeetingNotifications.ts` | Singleton poller: start/stop, permission request, store watermark, fire toasts, gate on auth + enabled setting. |
-| `src/views/BootstrapView.vue` | New view replacing the empty inline `/#/` component; starts the poller `onMounted`, stops `onUnmounted`. |
-| `src/main.ts` | Wire `BootstrapView` into the `/` (Bootstrap) route. |
-| `src/views/SettingsView.vue` | New "Notifications" section with a "Meeting notifications" checkbox (persisted in `settings.json`, default ON), toggling the poller. |
-| `src/tauri.ts` | Add `getWebAppBaseUrl()` wrapper for the new command. |
-| `vitest` setup | Add `vitest` devDependency, a `test` script, minimal config; one spec for `selectMessagesToNotify` + `notificationFor`. |
+| `src-tauri/src/main.rs` | Register `.plugin(tauri_plugin_notification::init())`; add `get_desktop_config` to the invoke handler. |
+| `src-tauri/src/commands.rs` | Add feature-gated consts `PUSHER_KEY`, `PUSHER_CLUSTER`, `WEB_APP_BASE_URL` + `get_desktop_config` command returning `{ pusherKey, pusherCluster, webAppBaseUrl }`. |
+| `src-tauri/capabilities/default.json` | Add `"notification:default"`. |
+| `src/tauri.ts` | Add `getDesktopConfig()` wrapper; `pusherAuth(socketId, channelName)` wrapper over `api.request('POST','/pusher/auth', …)`. |
+| `src/composables/usePusher.ts` | Create authenticated Pusher client/channel (channelAuthorization customHandler → `pusherAuth`); return `{ client, channel, cleanup }`. Mirrors the web composable. |
+| `src/composables/useInbox.ts` | `InboxMessage` type; `listInboxMessages(limit)`; pure `findInboxMessage(items, source, sourceId)`; source/title/deep-link maps. |
+| `src/composables/useMeetingNotifications.ts` | Singleton orchestrator: fetch config + `/auth/me`, build channel, subscribe, bind both events, fetch inbox text, fire OS toast, wire click→openUrl. Gated on auth + setting + permission. `start()` / `stop()`. |
+| `src/views/BootstrapView.vue` | New view at `/#/`; `start()` on mount, `stop()` on unmount. Replaces the empty inline component. |
+| `src/main.ts` | Wire `BootstrapView` into the `/` route. |
+| `src/views/SettingsView.vue` | "Notifications" section with a "Meeting notifications" checkbox (persisted in `settings.json`, default ON) controlling the subscription. |
+| vitest setup | Add `vitest` devDep + `"test"` script + minimal config; spec for the pure mappers. |
 
-### Notification selection (the only non-trivial logic)
+### Event → notification mapping
 
-`selectMessagesToNotify(messages, watermark)` is a **pure function**:
+| kind | event | id field | inbox `source` | title | deep link |
+|---|---|---|---|---|---|
+| prep | `meeting-prep-complete` | `meetingPrepId` | `meeting_prep` | "Meeting prep ready" | `{web}/my/meeting-prep-v2/{meetingPrepId}` |
+| notes | `meeting-notes-complete` | `meetingId` | `meeting_notes` | "Meeting notes ready" | `{web}/meeting-notes/{meetingId}` |
 
-- Input: the meeting-filtered messages from the current poll, and the persisted
-  `watermark` (highest `id` already handled, or `null` if never run).
-- **First run (`watermark === null`):** return `[]` and signal the caller to
-  set the watermark to the current max meeting id — i.e. baseline silently, do
-  not notify for pre-existing messages.
-- **Subsequent runs:** return messages with `id > watermark`, sorted ascending
-  by `id`.
-- Caller updates `watermark = max(existing watermark, max id of meeting msgs
-  seen this poll)` after firing, so deletions/read-state changes never cause
-  re-notification.
+- **Body:** the fetched inbox message text, markdown-stripped to plain text and
+  truncated (~120 chars). If the message isn't found (race / not yet created),
+  fall back to a generic body ("Your meeting prep is ready." /
+  "Your meeting notes are ready.").
+- `findInboxMessage(items, source, sourceId)` is **pure**: returns the item with
+  matching `source` and `source_id` (number-compared), else `null`.
 
-Using `id` (monotonic auto-increment) as the watermark is robust against
-interleaving of other sources and against `created_at` ties.
+### Pusher client config delivery
 
-### Notification content (`notificationFor`)
+`get_desktop_config` (Rust) returns the feature-baked `pusherKey`,
+`pusherCluster`, and `webAppBaseUrl`, keeping client config consistent with the
+build target (same pattern as the existing `API_BASE_URL` const):
 
-| Source | Title | Body | Deep link |
+| Feature | Pusher key | Cluster | Web app base |
 |---|---|---|---|
-| `meeting_prep` | "Meeting prep ready" | markdown→plain, truncated ~120 chars | `{web}/my/meeting-prep-v2/{source_id}` or `{web}/my/meetings` |
-| `daily_meeting_prep` | "Meeting prep ready" | same | `{web}/my/meetings` |
-| `meeting_notes` | "Meeting notes ready" | same | `{web}/meeting-notes/{source_id}` or `{web}/my/meetings` |
+| `prod-api` | `ec77b8bc7dc9ff463c13` | `us2` | `https://web.ari.ariso.ai` |
+| `dev-api` | `39d990870841a6b478cc` | `us2` | `https://web-dev.ari.ariso.ai` |
+| *(default/local)* | `39d990870841a6b478cc` | `us2` | `http://localhost:5173` *(confirm)* |
 
-Markdown is stripped to plain text with a lightweight inline helper (strip
-`#`, `*`, `_`, `` ` ``, link syntax → text; collapse whitespace; truncate).
-No new markdown dependency.
+### Channel authorization
 
-### Web app base URL
-
-The desktop bakes its `API_BASE_URL` at compile time via cargo features. The web
-base URL mirrors it (from `infra/ari-config` in the agents repo):
-
-| Feature | API | Web app |
-|---|---|---|
-| `prod-api` | `https://api.ari.ariso.ai` | `https://web.ari.ariso.ai` |
-| `dev-api` | `https://api-dev.ari.ariso.ai` | `https://web-dev.ari.ariso.ai` |
-| *(default)* | `http://localhost:4000` | `http://localhost:5173` *(web-ui Vite default — confirm)* |
-
-Exposed to JS via a `get_web_app_base_url` Tauri command so the URL stays
-consistent with the build target.
+`usePusher` uses a `channelAuthorization.customHandler` that calls
+`pusherAuth(socketId, channelName)` → `api.request('POST', '/pusher/auth',
+{ socketId, channelName })` (Rust attaches the session). The handler reads
+`req.body.{socketId,channelName}`, so a JSON body works (Express has both
+json + urlencoded parsers). Returns `{ auth: … }` to the Pusher callback. The
+WebSocket itself connects directly from the webview to Pusher.
 
 ### Click handling
 
-Use the notification plugin's action/click hook to open the deep-link URL via
-the already-registered `opener` plugin (`openUrl`). **Best-effort:** Tauri v2
-desktop notification click-callbacks are unreliable across platforms; if the
-hook does not fire, the toast remains purely informational. This limitation is
-accepted and will be noted in code comments.
+On the notification, open the deep-link URL via the already-registered `opener`
+plugin (`openUrl`). **Best-effort:** Tauri v2 desktop notification
+click-callbacks are unreliable across platforms; if the hook doesn't fire, the
+toast stays informational. Noted in code comments.
 
 ## Settings toggle
 
-A new "Notifications" section in `SettingsView.vue` with a single checkbox,
-"Meeting notifications", matching the existing `auto-check-row` checkbox
-pattern. Persisted as `meetingNotificationsEnabled` in `settings.json`
-(default `true`). Toggling off stops the poller; toggling on starts it (and
-requests OS permission if needed).
+A new "Notifications" section in `SettingsView.vue` with a "Meeting
+notifications" checkbox (matching the existing `auto-check-row` pattern),
+persisted as `meetingNotificationsEnabled` in `settings.json` (default `true`).
+Off → `stop()` (disconnect Pusher). On → `start()` (request OS permission if
+needed, connect).
 
-## Polling details
+## Lifecycle
 
-- **Interval:** 60s (meeting prep/notes are produced server-side; sub-minute
-  latency is unnecessary). A 10s initial delay lets startup finish, mirroring
-  the update scheduler.
-- **Gating:** poll only when `auth.checkSession()` returns a session AND the
-  setting is enabled AND OS permission is granted.
-- **Lifecycle:** started by `BootstrapView` (always-alive main window); the
-  composable is a module-level singleton so navigation never spawns duplicates.
+- Started by `BootstrapView` in the always-alive main window; the composable is
+  a module-level singleton so navigation never creates duplicate connections.
+- On sign-in → `start()`; on sign-out → `stop()` + `cleanup()` (unbind,
+  unsubscribe, disconnect).
+- `pusher-js` handles reconnection/backoff automatically.
 
 ## Error handling & edge cases
 
-- **API failure:** log and skip the cycle; do not advance the watermark; retry
-  next interval. Never surface a UI error (background task).
-- **Not signed in:** skip the cycle silently; resume once signed in.
-- **Permission denied:** poller no-ops; re-checks permission when the setting is
-  re-enabled.
-- **First run / fresh install:** baseline the watermark to current max; no
-  flood.
-- **App restart:** watermark persisted in `notifications.json`; no duplicate
-  toasts.
-- **Message with `source_id === null`:** use the fallback web route.
-- **Empty / null `message`:** notify with title only (empty body).
-- **Inbox endpoint not reachable by desktop session:** fail closed (logged, no
-  notifications). Verify reachability early during build.
+- **`/auth/me` or `/pusher/auth` fails:** log, do not crash; retry on next
+  `start()` / reconnect. No UI error (background task).
+- **Not signed in / permission denied / setting off:** no connection; toast is
+  a no-op.
+- **Inbox message not found for the event id:** use the generic body; still
+  notify (the event itself is the source of truth that something is ready).
+- **`csp: null`:** WS allowed; no config change. If CSP is ever tightened, add
+  `connect-src wss://ws-us2.pusher.com https://sockjs-us2.pusher.com` + the API.
+- **Events missed while offline:** Pusher does not replay missed events; those
+  notifications are lost (no historical flood, no catch-up). Accepted.
+- **Duplicate delivery on reconnect:** not expected from Pusher; if observed,
+  add a small in-memory set of recently-notified `${kind}:${id}` keys.
 
 ## Testing
 
-- **Automated (vitest):** unit-test the pure logic — `selectMessagesToNotify`
-  (first-run baseline returns empty; only `id > watermark` selected; ascending
-  order; mixed sources already filtered out) and `notificationFor` (correct
-  title/body/URL per source, source_id present vs fallback, markdown stripping,
-  truncation). Add `vitest` devDep + `"test": "vitest run"` script + minimal
-  config.
-- **Manual (`npm run tauri:dev`):** sign in, trigger/seed a meeting_prep and a
-  meeting_notes inbox message, confirm exactly one OS toast each, no repeats on
-  next poll, no flood on first launch, toggle off suppresses, click opens the
-  web URL (where the platform fires the callback).
+- **Automated (vitest):** unit-test the pure logic —
+  - `findInboxMessage(items, source, sourceId)`: matches on source + numeric
+    `source_id`; returns `null` when absent; ignores other sources.
+  - notification mapping: correct title / deep-link URL per `kind`; markdown
+    stripping + truncation of the body; generic-body fallback when message null.
+  - channel-name builder: `private-${org_id}-${id}`.
+  Add `vitest` devDep + `"test": "vitest run"` + minimal config.
+- **Manual (`npm run tauri:dev`):** sign in; trigger a real
+  `meeting-prep-complete` (and, once the backend ships it,
+  `meeting-notes-complete`); confirm one OS toast each with the inbox text as
+  body; toggle off suppresses; click opens the web URL (where the platform
+  fires the callback); sign-out disconnects.
+
+## Backend contract (separate task — `ariso-ai/agents`, NOT in this spec's build)
+
+To make **meeting notes** push, the backend must, when per-meeting notes finish
+(`apps/worker/src/handlers/generateMeetingNotes.ts`), for the meeting **host**
+(and optionally each internal participant):
+
+1. **Create the inbox message first** (so the desktop's fetch-by-`source_id`
+   succeeds), mirroring `meetingPrep.ts`:
+   `userInboxService.createMessage(host, <notes summary text>, 'meeting_notes', meeting.id)`.
+2. **Then trigger Pusher** on `private-${host.org_id}-${host.id}`:
+   - **Event:** `meeting-notes-complete`
+   - **Payload:** `{ meetingId: number }`
+
+This matches the prep pattern exactly (inbox-then-trigger, same channel shape),
+so the desktop client treats both events identically.
 
 ## Open items to confirm during build
 
-1. Desktop session can read `/user-inbox-messages` (auth/orgUserMapping).
-2. Local web app base URL (`http://localhost:5173` assumed).
-3. Reliability of the notification click callback on the target OS (macOS).
+1. Local web app base URL (`http://localhost:5173` assumed).
+2. Notification click-callback reliability on the target OS (macOS).
+3. `POST /pusher/auth` accepts a JSON body via the Rust `api_request` path
+   (verify the Express route parses JSON, not only urlencoded).
