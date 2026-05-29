@@ -52,6 +52,21 @@
       </div>
     </section>
 
+    <!-- Notifications Section -->
+    <section class="section">
+      <h2 class="section-title">Notifications</h2>
+      <div class="card">
+        <label class="auto-check-row">
+          <input
+            type="checkbox"
+            :checked="meetingNotifications"
+            @change="onToggleMeetingNotifications"
+          />
+          <span>Meeting prep notifications</span>
+        </label>
+      </div>
+    </section>
+
     <!-- About / Updates Section -->
     <section class="section">
       <h2 class="section-title">About</h2>
@@ -97,6 +112,11 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater } from '../tauri';
 import { load } from '@tauri-apps/plugin-store';
+import {
+  isMeetingNotificationsEnabled,
+  setMeetingNotificationsEnabled,
+  emitNotificationsSync,
+} from '../composables/useMeetingNotifications';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
@@ -104,6 +124,7 @@ const errorMessage = ref('');
 const displayName = ref('');
 const email = ref('');
 const recordingMode = ref<'mic' | 'mic_and_system'>('mic_and_system');
+const meetingNotifications = ref(true);
 const signInPrompt = ref(false);
 const appVersion = __APP_VERSION__;
 
@@ -194,6 +215,12 @@ async function onToggleAutoCheck(e: Event) {
   }
 }
 
+async function onToggleMeetingNotifications(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  meetingNotifications.value = checked;
+  await setMeetingNotificationsEnabled(checked);
+}
+
 const initials = computed(() => {
   const name = displayName.value || email.value || '?';
   return name.slice(0, 2).toUpperCase();
@@ -230,6 +257,8 @@ onMounted(async () => {
   if (savedMode === 'mic' || savedMode === 'mic_and_system') {
     recordingMode.value = savedMode;
   }
+
+  meetingNotifications.value = await isMeetingNotificationsEnabled();
 
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
@@ -275,6 +304,7 @@ async function handleGoogleSignIn() {
     isSignedIn.value = true;
     signInPrompt.value = false;
     await fetchUserProfile();
+    await emitNotificationsSync();
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {
@@ -287,6 +317,7 @@ async function handleSignOut() {
   isSignedIn.value = false;
   displayName.value = '';
   email.value = '';
+  await emitNotificationsSync();
 }
 </script>
 
