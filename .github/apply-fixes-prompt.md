@@ -60,6 +60,9 @@ edits together. Use the `Edit` tool — no shell-based file rewriting.
 
 ### Do NOT apply suggestions that
 
+- Touch documentation-only files — anything under `docs/` or any `*.md`
+  file. Code is the source of truth; doc drift is out of scope for this
+  job and is never worth a commit here.
 - Remove error handling (Rust `?` / `match` over `Result`, JS `try`/
   `catch`, Tauri command error returns).
 - Change public API signatures without confirming callers via `grep`:
