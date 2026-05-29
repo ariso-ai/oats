@@ -24,6 +24,7 @@ fn main() {
             commands::destroy_waveform_window,
             commands::create_settings_window,
             commands::put_presigned,
+            commands::get_desktop_config,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
             update_manager::update_check,

@@ -24,6 +24,21 @@ const API_BASE_URL: &str = "https://api.ari.ariso.ai";
 const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
 const API_BASE_URL: &str = "http://localhost:4000";
+
+#[cfg(feature = "prod-api")]
+const PUSHER_KEY: &str = "ec77b8bc7dc9ff463c13";
+#[cfg(not(feature = "prod-api"))]
+const PUSHER_KEY: &str = "39d990870841a6b478cc";
+
+const PUSHER_CLUSTER: &str = "us2";
+
+#[cfg(feature = "prod-api")]
+const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
+#[cfg(feature = "dev-api")]
+const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
+#[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
+const WEB_APP_BASE_URL: &str = "http://localhost:5173";
+
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
 
@@ -451,4 +466,24 @@ pub async fn put_presigned(
         .map_err(|e| e.to_string())?;
 
     Ok(response.status().as_u16())
+}
+
+#[derive(Serialize)]
+pub struct DesktopConfig {
+    #[serde(rename = "pusherKey")]
+    pub pusher_key: String,
+    #[serde(rename = "pusherCluster")]
+    pub pusher_cluster: String,
+    #[serde(rename = "webAppBaseUrl")]
+    pub web_app_base_url: String,
+}
+
+/// Returns build-baked client config (Pusher key/cluster, web app base URL).
+#[tauri::command]
+pub fn get_desktop_config() -> DesktopConfig {
+    DesktopConfig {
+        pusher_key: PUSHER_KEY.to_string(),
+        pusher_cluster: PUSHER_CLUSTER.to_string(),
+        web_app_base_url: WEB_APP_BASE_URL.to_string(),
+    }
 }
