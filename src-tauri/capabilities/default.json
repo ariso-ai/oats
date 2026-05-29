@@ -15,6 +15,7 @@
     "core:window:allow-start-dragging",
     "store:default",
     "opener:default",
+    "notification:default",
     "updater:default"
   ]
 }
