@@ -25,6 +25,8 @@ const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
 const API_BASE_URL: &str = "http://localhost:4000";
 
+// Public Pusher client key. dev-api and local both use the dev key, so this
+// gates on prod-api only (unlike WEB_APP_BASE_URL's three-way split).
 #[cfg(feature = "prod-api")]
 const PUSHER_KEY: &str = "ec77b8bc7dc9ff463c13";
 #[cfg(not(feature = "prod-api"))]

@@ -74,6 +74,8 @@ async function ensurePermission(): Promise<boolean> {
 async function ensureActionListener(): Promise<void> {
   if (actionListenerReady) return;
   actionListenerReady = true;
+  // Registered once per session and intentionally never unregistered — it is a
+  // single process-wide listener guarded by `actionListenerReady`.
   // Best-effort: open the deep link if the platform delivers a click action.
   await onAction((notification: Options) => {
     const id = notification.id;
@@ -111,7 +113,15 @@ async function onPrepComplete(
 
 /** Connect to Pusher and start surfacing meeting-prep notifications. */
 export async function startMeetingNotifications(): Promise<void> {
-  if (handle || starting) return;
+  if (handle) return;
+  // If a previous start() is still in-flight (e.g. a rapid stop()+start()
+  // sync cycle), wait for it to finish or abort before deciding whether we
+  // still need to connect. The in-flight start() always clears `starting` in
+  // its finally block, so this loop is bounded.
+  while (starting) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (handle) return;
   starting = true;
   cancelled = false;
   try {
