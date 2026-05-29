@@ -24,7 +24,10 @@ export function findInboxMessage(
 ): InboxMessage | null {
   return (
     items.find(
-      (m) => m.source === source && Number(m.source_id) === Number(sourceId)
+      (m) =>
+        m.source === source &&
+        m.source_id != null &&
+        Number(m.source_id) === Number(sourceId)
     ) ?? null
   );
 }

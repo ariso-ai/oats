@@ -217,8 +217,13 @@ async function onToggleAutoCheck(e: Event) {
 
 async function onToggleMeetingNotifications(e: Event) {
   const checked = (e.target as HTMLInputElement).checked;
+  const previous = meetingNotifications.value;
   meetingNotifications.value = checked;
-  await setMeetingNotificationsEnabled(checked);
+  try {
+    await setMeetingNotificationsEnabled(checked);
+  } catch {
+    meetingNotifications.value = previous;
+  }
 }
 
 const initials = computed(() => {
@@ -304,7 +309,9 @@ async function handleGoogleSignIn() {
     isSignedIn.value = true;
     signInPrompt.value = false;
     await fetchUserProfile();
-    await emitNotificationsSync();
+    void emitNotificationsSync().catch((err) => {
+      console.warn('Failed to sync notifications after sign-in', err);
+    });
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {
@@ -317,7 +324,9 @@ async function handleSignOut() {
   isSignedIn.value = false;
   displayName.value = '';
   email.value = '';
-  await emitNotificationsSync();
+  void emitNotificationsSync().catch((err) => {
+    console.warn('Failed to sync notifications after sign-out', err);
+  });
 }
 </script>
 

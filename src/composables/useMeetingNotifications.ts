@@ -73,7 +73,6 @@ async function ensurePermission(): Promise<boolean> {
 
 async function ensureActionListener(): Promise<void> {
   if (actionListenerReady) return;
-  actionListenerReady = true;
   // Registered once per session and intentionally never unregistered — it is a
   // single process-wide listener guarded by `actionListenerReady`.
   // Best-effort: open the deep link if the platform delivers a click action.
@@ -86,6 +85,7 @@ async function ensureActionListener(): Promise<void> {
       void openUrl(url);
     }
   });
+  actionListenerReady = true;
 }
 
 async function onPrepComplete(
