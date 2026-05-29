@@ -9,7 +9,8 @@
     "tauri:dev": "tauri dev",
     "tauri:dev:debug": "VITE_DEBUG_AUDIO=true tauri dev --features mcp",
     "tauri:build": "tauri build",
-    "tauri:clean": "cd src-tauri && cargo clean"
+    "tauri:clean": "cd src-tauri && cargo clean",
+    "test": "vitest run"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
@@ -28,6 +29,7 @@
     "tailwindcss": "^4.1.8",
     "tauri-plugin-mcp": "^0.1.0",
     "tauri-plugin-mcp-server": "^0.1.0",
-    "vite": "^7.3.2"
+    "vite": "^7.3.2",
+    "vitest": "^4.1.7"
   }
 }
