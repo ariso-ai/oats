@@ -83,8 +83,10 @@ fn main() {
 
     #[cfg(all(debug_assertions, feature = "mcp"))]
     {
-        let socket_path = std::path::PathBuf::from(std::env::var("HOME").expect("HOME not set"))
-            .join(".ariso/run/sage-mcp.sock");
+        let home_dir = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("Neither HOME nor USERPROFILE is set");
+        let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/sage-mcp.sock");
         if let Some(dir) = socket_path.parent() {
             std::fs::create_dir_all(dir).expect("failed to create MCP socket dir");
         }
