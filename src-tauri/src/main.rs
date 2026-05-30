@@ -84,17 +84,35 @@ fn main() {
     #[cfg(all(debug_assertions, feature = "mcp"))]
     {
         let home_dir = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .expect("Neither HOME nor USERPROFILE is set");
-        let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/sage-mcp.sock");
-        if let Some(dir) = socket_path.parent() {
-            std::fs::create_dir_all(dir).expect("failed to create MCP socket dir");
+            .or_else(|| std::env::var_os("USERPROFILE"));
+        if let Some(home_dir) = home_dir {
+            let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/sage-mcp.sock");
+            let dir_ready = match socket_path.parent() {
+                Some(dir) => match std::fs::create_dir_all(dir) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: failed to create MCP socket directory {}: {}. MCP plugin will not be initialized.",
+                            dir.display(),
+                            e
+                        );
+                        false
+                    }
+                },
+                None => true,
+            };
+            if dir_ready {
+                builder = builder.plugin(tauri_plugin_mcp::init_with_config(
+                    tauri_plugin_mcp::PluginConfig::new("Ariso".to_string())
+                        .start_socket_server(true)
+                        .socket_path(socket_path),
+                ));
+            }
+        } else {
+            eprintln!(
+                "Warning: neither HOME nor USERPROFILE is set; MCP plugin will not be initialized."
+            );
         }
-        builder = builder.plugin(tauri_plugin_mcp::init_with_config(
-            tauri_plugin_mcp::PluginConfig::new("Ariso".to_string())
-                .start_socket_server(true)
-                .socket_path(socket_path),
-        ));
     }
 
     builder
