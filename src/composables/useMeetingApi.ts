@@ -84,8 +84,8 @@ export function useMeetingApi() {
     });
     const res = await api.request('GET', `/meetings?${params.toString()}`);
     assertOk(res, 200, 'list scheduled meetings');
-    const data = res.data as ScheduledMeetingsResponse;
-    return [...(data.meetings ?? [])].sort(
+    const data = res.data as ScheduledMeetingsResponse | null;
+    return [...(data?.meetings ?? [])].sort(
       (a, b) =>
         new Date(a.start_at).getTime() - new Date(b.start_at).getTime()
     );
