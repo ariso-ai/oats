@@ -112,7 +112,7 @@ fn set_session_token(app: &tauri::AppHandle, token: &str) -> Result<(), String> 
     store.save().map_err(|e| e.to_string())
 }
 
-fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     store.delete(SESSION_KEY);
     store.save().map_err(|e| e.to_string())

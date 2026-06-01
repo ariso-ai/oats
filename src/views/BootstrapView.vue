@@ -10,10 +10,12 @@ import { SYNC_EVENT } from '../composables/useMeetingNotifications';
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
-  await invoke('sync_meeting_notifications');
+  // Register the listener first so a failing initial sync doesn't prevent
+  // future sign-in/out and settings-toggle broadcasts from being seen.
   unlisten = await listen(SYNC_EVENT, () => {
     void invoke('sync_meeting_notifications');
   });
+  void invoke('sync_meeting_notifications');
 });
 
 onUnmounted(() => {

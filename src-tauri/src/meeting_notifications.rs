@@ -22,12 +22,40 @@ use tauri_plugin_store::StoreExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
-    get_session_token, http_client, API_BASE_URL, PUSHER_CLUSTER, PUSHER_KEY, WEB_APP_BASE_URL,
+    clear_session_token, get_session_token, http_client, API_BASE_URL, PUSHER_CLUSTER, PUSHER_KEY,
+    WEB_APP_BASE_URL,
 };
 
 const SETTINGS_PATH: &str = "settings.json";
 const ENABLED_KEY: &str = "meetingNotificationsEnabled";
 const MEETING_PREP_SOURCE: &str = "meeting_prep";
+
+/// Hard cap on a single websocket handshake. Without this a hung TCP/TLS
+/// connect can stall the orchestrator past the point where run_loop's
+/// reconnect/backoff could otherwise recover.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Per-HTTP-request cap covering both `.send()` and body decode. Same reason as
+/// the WS timeout; reqwest's builder isn't configured with a request timeout
+/// (see `commands::http_client`).
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Errors raised by the session-bound HTTP/WS calls. `Auth` means the server
+/// rejected the stored session (401/403) — distinct because it requires
+/// tearing down the orchestrator instead of retrying.
+enum SessionError {
+    Auth,
+    Other(String),
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auth => f.write_str("session invalid (auth rejected)"),
+            Self::Other(e) => f.write_str(e),
+        }
+    }
+}
 
 /// Holds the handle to the running orchestrator task (if any).
 #[derive(Default)]
@@ -79,9 +107,15 @@ pub fn stop(app: &AppHandle) {
     }
 }
 
-/// Supervisor loop: (re)connect forever with exponential backoff. A `seen` set
-/// (shared across reconnects) dedupes notifications between the realtime path
-/// and the catch-up fetch.
+/// Supervisor loop: (re)connect with exponential backoff until the session is
+/// invalidated. A `seen` set (shared across reconnects) dedupes notifications
+/// between the realtime path and the catch-up fetch.
+///
+/// On `SessionError::Auth` the loop exits: the stored token is cleared, the
+/// orchestrator handle is reset, and we wait for the next sign-in (a
+/// `SYNC_EVENT` broadcast) to call `sync()` and re-spawn us. Without this
+/// the loop would reauth every 1–30s forever against a server that has
+/// already invalidated the session.
 async fn run_loop(app: AppHandle) {
     let mut backoff = 1u64;
     let mut seen: HashSet<i64> = HashSet::new();
@@ -89,14 +123,28 @@ async fn run_loop(app: AppHandle) {
     // notifying, so launch doesn't replay every old prep as a banner.
     let mut first = true;
     loop {
-        if let Err(e) = run_session(&app, &mut seen, &mut first).await {
-            eprintln!("meeting-notifications: session error: {e}");
-        } else {
-            backoff = 1;
+        match run_session(&app, &mut seen, &mut first).await {
+            Ok(()) => backoff = 1,
+            Err(SessionError::Auth) => {
+                eprintln!(
+                    "meeting-notifications: session invalid; clearing token and stopping orchestrator"
+                );
+                let _ = clear_session_token(&app);
+                break;
+            }
+            Err(SessionError::Other(e)) => {
+                eprintln!("meeting-notifications: session error: {e}");
+            }
         }
         tokio::time::sleep(Duration::from_secs(backoff)).await;
         backoff = (backoff * 2).min(30);
     }
+    // Reset the manager handle so a future `sync()` (e.g. after sign-in) can
+    // spawn us again. Without this the `guard.is_some()` early-return in
+    // `sync()` would keep the orchestrator off until app restart.
+    let mgr = app.state::<NotificationManager>();
+    let mut guard = mgr.handle.lock().unwrap();
+    *guard = None;
 }
 
 /// One connection lifecycle: connect → auth → subscribe → read until close.
@@ -104,16 +152,17 @@ async fn run_session(
     app: &AppHandle,
     seen: &mut HashSet<i64>,
     first: &mut bool,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let (org_id, user_id) = fetch_me(app).await?;
     let channel = format!("private-{org_id}-{user_id}");
 
     let url = format!(
         "wss://ws-{PUSHER_CLUSTER}.pusher.com/app/{PUSHER_KEY}?protocol=7&client=ariso-desktop&version=0.2.1"
     );
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
+    let (ws, _) = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
         .await
-        .map_err(|e| format!("connect: {e}"))?;
+        .map_err(|_| SessionError::Other("connect: timed out".into()))?
+        .map_err(|e| SessionError::Other(format!("connect: {e}")))?;
     let (mut write, mut read) = ws.split();
 
     // Application-level keepalive so a dead connection is detected promptly.
@@ -124,7 +173,7 @@ async fn run_session(
             maybe_msg = read.next() => {
                 let msg = match maybe_msg {
                     Some(Ok(m)) => m,
-                    Some(Err(e)) => return Err(format!("read: {e}")),
+                    Some(Err(e)) => return Err(SessionError::Other(format!("read: {e}"))),
                     None => return Ok(()),
                 };
                 let text = match msg {
@@ -158,7 +207,7 @@ async fn handle_message(
     text: &str,
     seen: &mut HashSet<i64>,
     first: &mut bool,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     let event = v.get("event").and_then(Value::as_str).unwrap_or("");
 
@@ -177,7 +226,7 @@ async fn handle_message(
             write
                 .send(Message::Text(sub.to_string()))
                 .await
-                .map_err(|e| format!("subscribe send: {e}"))?;
+                .map_err(|e| SessionError::Other(format!("subscribe send: {e}")))?;
         }
         "pusher:ping" => {
             let _ = write
@@ -186,12 +235,12 @@ async fn handle_message(
         }
         "pusher:error" => eprintln!("meeting-notifications: pusher error: {text}"),
         "pusher_internal:subscription_succeeded" => {
-            catch_up(app, seen, *first).await;
+            catch_up(app, seen, *first).await?;
             *first = false;
         }
         "meeting-prep-complete" => {
             if let Some(prep_id) = inner_json(&v).get("meetingPrepId").and_then(Value::as_i64) {
-                handle_prep(app, prep_id, seen).await;
+                handle_prep(app, prep_id, seen).await?;
             }
         }
         _ => {}
@@ -211,21 +260,37 @@ fn inner_json(v: &Value) -> Value {
 
 /// GET /auth/me → (org_id, user_id) for the channel name. Both fields may come
 /// back as either a JSON string or number, so coerce to string either way.
-async fn fetch_me(app: &AppHandle) -> Result<(String, String), String> {
-    let token = get_session_token(app).ok_or("no session token")?;
-    let resp = http_client()
-        .get(format!("{API_BASE_URL}/auth/me"))
-        .header(AUTHORIZATION, format!("Bearer {token}"))
-        .header(CONTENT_TYPE, "application/json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("/auth/me returned {}", resp.status().as_u16()));
-    }
-    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-    let org_id = value_to_string(v.get("org_id")).ok_or("missing org_id")?;
-    let user_id = value_to_string(v.get("id")).ok_or("missing id")?;
+async fn fetch_me(app: &AppHandle) -> Result<(String, String), SessionError> {
+    let token = get_session_token(app).ok_or(SessionError::Auth)?;
+    let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .get(format!("{API_BASE_URL}/auth/me"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(SessionError::Auth);
+        }
+        if !status.is_success() {
+            return Err(SessionError::Other(format!(
+                "/auth/me returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| SessionError::Other("/auth/me timed out".into()))??;
+    let org_id =
+        value_to_string(v.get("org_id")).ok_or_else(|| SessionError::Other("missing org_id".into()))?;
+    let user_id =
+        value_to_string(v.get("id")).ok_or_else(|| SessionError::Other("missing id".into()))?;
     Ok((org_id, user_id))
 }
 
@@ -239,25 +304,43 @@ fn value_to_string(v: Option<&Value>) -> Option<String> {
 }
 
 /// POST /pusher/auth { socketId, channelName } → auth signature.
-async fn pusher_auth(app: &AppHandle, socket_id: &str, channel: &str) -> Result<String, String> {
-    let token = get_session_token(app).ok_or("no session token")?;
+async fn pusher_auth(
+    app: &AppHandle,
+    socket_id: &str,
+    channel: &str,
+) -> Result<String, SessionError> {
+    let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let body = json!({ "socketId": socket_id, "channelName": channel });
-    let resp = http_client()
-        .post(format!("{API_BASE_URL}/pusher/auth"))
-        .header(AUTHORIZATION, format!("Bearer {token}"))
-        .header(CONTENT_TYPE, "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("/pusher/auth returned {}", resp.status().as_u16()));
-    }
-    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .post(format!("{API_BASE_URL}/pusher/auth"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(SessionError::Auth);
+        }
+        if !status.is_success() {
+            return Err(SessionError::Other(format!(
+                "/pusher/auth returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| SessionError::Other("/pusher/auth timed out".into()))??;
     v.get("auth")
         .and_then(Value::as_str)
         .map(String::from)
-        .ok_or_else(|| "missing auth in /pusher/auth response".to_string())
+        .ok_or_else(|| SessionError::Other("missing auth in /pusher/auth response".into()))
 }
 
 struct InboxItem {
@@ -268,19 +351,33 @@ struct InboxItem {
 }
 
 /// GET /user-inbox-messages?limit=20 → parsed items (newest first).
-async fn fetch_inbox(app: &AppHandle) -> Result<Vec<InboxItem>, String> {
-    let token = get_session_token(app).ok_or("no session token")?;
-    let resp = http_client()
-        .get(format!("{API_BASE_URL}/user-inbox-messages?limit=20"))
-        .header(AUTHORIZATION, format!("Bearer {token}"))
-        .header(CONTENT_TYPE, "application/json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("/user-inbox-messages returned {}", resp.status().as_u16()));
-    }
-    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+async fn fetch_inbox(app: &AppHandle) -> Result<Vec<InboxItem>, SessionError> {
+    let token = get_session_token(app).ok_or(SessionError::Auth)?;
+    let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .get(format!("{API_BASE_URL}/user-inbox-messages?limit=20"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(SessionError::Auth);
+        }
+        if !status.is_success() {
+            return Err(SessionError::Other(format!(
+                "/user-inbox-messages returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| SessionError::Other("/user-inbox-messages timed out".into()))??;
     let items = v
         .get("items")
         .and_then(Value::as_array)
@@ -309,31 +406,42 @@ fn parse_id(v: Option<&Value>) -> Option<i64> {
 /// Realtime handler: a live event is an explicit "this just happened" signal,
 /// so always notify. Recording it in `seen` keeps the catch-up backstop from
 /// re-notifying the same prep on the next (re)subscribe.
-async fn handle_prep(app: &AppHandle, prep_id: i64, seen: &mut HashSet<i64>) {
+async fn handle_prep(
+    app: &AppHandle,
+    prep_id: i64,
+    seen: &mut HashSet<i64>,
+) -> Result<(), SessionError> {
     seen.insert(prep_id);
     let message = match fetch_inbox(app).await {
         Ok(items) => items
             .into_iter()
             .find(|m| m.source == MEETING_PREP_SOURCE && m.source_id == Some(prep_id))
             .and_then(|m| m.message),
-        Err(e) => {
+        Err(SessionError::Auth) => return Err(SessionError::Auth),
+        Err(SessionError::Other(e)) => {
             eprintln!("meeting-notifications: inbox fetch failed (using fallback body): {e}");
             None
         }
     };
     let (title, body) = build_notification(message.as_deref());
     show(app, &title, &body, &prep_url(prep_id));
+    Ok(())
 }
 
 /// Catch-up backstop run on each (re)subscribe. On the first subscribe it only
 /// seeds `seen` (no notifications); afterwards it surfaces unread meeting-preps
 /// that arrived while we were disconnected/suspended.
-async fn catch_up(app: &AppHandle, seen: &mut HashSet<i64>, seed_only: bool) {
+async fn catch_up(
+    app: &AppHandle,
+    seen: &mut HashSet<i64>,
+    seed_only: bool,
+) -> Result<(), SessionError> {
     let items = match fetch_inbox(app).await {
         Ok(items) => items,
-        Err(e) => {
+        Err(SessionError::Auth) => return Err(SessionError::Auth),
+        Err(SessionError::Other(e)) => {
             eprintln!("meeting-notifications: catch-up inbox fetch failed: {e}");
-            return;
+            return Ok(());
         }
     };
     for item in items {
@@ -348,6 +456,7 @@ async fn catch_up(app: &AppHandle, seen: &mut HashSet<i64>, seed_only: bool) {
             show(app, &title, &body, &prep_url(id));
         }
     }
+    Ok(())
 }
 
 fn build_notification(message: Option<&str>) -> (String, String) {
