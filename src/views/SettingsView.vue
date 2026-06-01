@@ -62,8 +62,20 @@
             :checked="meetingNotifications"
             @change="onToggleMeetingNotifications"
           />
-          <span>Meeting prep notifications</span>
+          <span>Meeting preps</span>
         </label>
+        <p
+          v-if="notifStatus === 'granted'"
+          class="notif-status notif-status--ok"
+        >
+          Permission granted
+        </p>
+        <p
+          v-else-if="notifStatus === 'denied'"
+          class="notif-status notif-status--err"
+        >
+          Permission not granted
+        </p>
       </div>
     </section>
 
@@ -115,6 +127,8 @@ import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
   setMeetingNotificationsEnabled,
+  ensureNotificationPermission,
+  openNotificationSettings,
   emitNotificationsSync,
 } from '../composables/useMeetingNotifications';
 
@@ -125,6 +139,7 @@ const displayName = ref('');
 const email = ref('');
 const recordingMode = ref<'mic' | 'mic_and_system'>('mic_and_system');
 const meetingNotifications = ref(true);
+const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
 const appVersion = __APP_VERSION__;
 
@@ -219,6 +234,21 @@ async function onToggleMeetingNotifications(e: Event) {
   const checked = (e.target as HTMLInputElement).checked;
   const previous = meetingNotifications.value;
   meetingNotifications.value = checked;
+  // When switching notifications on, request OS permission. If it isn't
+  // granted (denied, or macOS already recorded a decision so no prompt
+  // appears), open System Settings → Notifications so the user can enable
+  // it manually.
+  if (checked) {
+    const granted = await ensureNotificationPermission();
+    notifStatus.value = granted ? 'granted' : 'denied';
+    if (!granted) {
+      // Previously denied / no prompt possible — let the user enable it.
+      await openNotificationSettings();
+    }
+  } else {
+    notifStatus.value = '';
+  }
+  // Revert the optimistic toggle if persisting the setting fails.
   try {
     await setMeetingNotificationsEnabled(checked);
   } catch {
@@ -354,6 +384,26 @@ async function handleSignOut() {
   padding: 10px 14px;
   border-radius: 10px;
   margin-bottom: 16px;
+}
+
+.notif-status {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 12px;
+  border-radius: 8px;
+}
+
+.notif-status--ok {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  color: #166534;
+}
+
+.notif-status--err {
+  background: #fee2e2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
 }
 
 .section {

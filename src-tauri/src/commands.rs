@@ -6,9 +6,9 @@ use tauri_plugin_store::StoreExt;
 use tokio::sync::oneshot;
 use url::Url;
 
-const APP_USER_AGENT: &str = "ArisoDesktop/0.2.0";
+const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 
-fn http_client() -> reqwest::Client {
+pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(APP_USER_AGENT)
         .build()
@@ -19,27 +19,27 @@ fn http_client() -> reqwest::Client {
 compile_error!("Features `prod-api` and `dev-api` are mutually exclusive");
 
 #[cfg(feature = "prod-api")]
-const API_BASE_URL: &str = "https://api.ari.ariso.ai";
+pub(crate) const API_BASE_URL: &str = "https://api.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
+pub(crate) const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-const API_BASE_URL: &str = "http://localhost:4000";
+pub(crate) const API_BASE_URL: &str = "http://localhost:4000";
 
 // Public Pusher client key. dev-api and local both use the dev key, so this
 // gates on prod-api only (unlike WEB_APP_BASE_URL's three-way split).
 #[cfg(feature = "prod-api")]
-const PUSHER_KEY: &str = "ec77b8bc7dc9ff463c13";
+pub(crate) const PUSHER_KEY: &str = "ec77b8bc7dc9ff463c13";
 #[cfg(not(feature = "prod-api"))]
-const PUSHER_KEY: &str = "39d990870841a6b478cc";
+pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 
-const PUSHER_CLUSTER: &str = "us2";
+pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
 #[cfg(feature = "prod-api")]
-const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
+pub(crate) const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
+pub(crate) const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-const WEB_APP_BASE_URL: &str = "http://localhost:5173";
+pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
 
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
@@ -70,7 +70,7 @@ struct PrepareStateResponse {
     redirect_url: String,
 }
 
-fn get_session_token(app: &tauri::AppHandle) -> Option<String> {
+pub(crate) fn get_session_token(app: &tauri::AppHandle) -> Option<String> {
     let store = app.store(STORE_PATH).ok()?;
     store
         .get(SESSION_KEY)
