@@ -59,6 +59,12 @@ describe('truncate', () => {
     expect(out.length).toBe(10);
     expect(out.endsWith('…')).toBe(true);
   });
+
+  it('never exceeds max for non-positive or tiny limits', () => {
+    expect(truncate('hello', 0)).toBe('');
+    expect(truncate('hello', -5)).toBe('');
+    expect(truncate('hello', 1)).toBe('…');
+  });
 });
 
 describe('buildPrepNotification', () => {

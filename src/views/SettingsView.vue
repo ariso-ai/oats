@@ -239,11 +239,19 @@ async function onToggleMeetingNotifications(e: Event) {
   // appears), open System Settings → Notifications so the user can enable
   // it manually.
   if (checked) {
-    const granted = await ensureNotificationPermission();
-    notifStatus.value = granted ? 'granted' : 'denied';
-    if (!granted) {
-      // Previously denied / no prompt possible — let the user enable it.
-      await openNotificationSettings();
+    // Permission prompt + settings deep-link are best-effort: a rejection here
+    // must not abort the handler, or the optimistic toggle would stay on screen
+    // with nothing persisted below.
+    try {
+      const granted = await ensureNotificationPermission();
+      notifStatus.value = granted ? 'granted' : 'denied';
+      if (!granted) {
+        // Previously denied / no prompt possible — let the user enable it.
+        await openNotificationSettings();
+      }
+    } catch (err) {
+      notifStatus.value = 'denied';
+      console.warn('Notification permission flow failed', err);
     }
   } else {
     notifStatus.value = '';

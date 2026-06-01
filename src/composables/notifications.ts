@@ -44,6 +44,8 @@ export function stripMarkdown(md: string): string {
 
 /** Truncate to `max` characters, replacing the overflow with an ellipsis. */
 export function truncate(text: string, max = 120): string {
+  if (max <= 0) return '';
+  if (max === 1) return '…';
   if (text.length <= max) return text;
   return text.slice(0, max - 1).trimEnd() + '…';
 }

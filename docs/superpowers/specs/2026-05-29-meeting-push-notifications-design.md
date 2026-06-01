@@ -58,11 +58,12 @@ From `apps/web-ui` in `ariso-ai/agents`:
   channel name is `private-${org_id}-${id}`.
 - `@tauri-apps/plugin-notification` is a dependency but **unwired** (not in
   `Cargo.toml`, `main.rs`, or `capabilities/default.json`).
-- The hidden, always-alive **"main" window** (route `/#/`, currently an empty
-  inline component) is the home for the persistent Pusher connection — mirroring
-  the existing Rust update-scheduler loop in `main.rs`.
-- `tauri.conf.json` has `csp: null`, so the webview may open the Pusher
-  WebSocket (`wss://ws-us2.pusher.com`) without CSP changes.
+- The persistent Pusher connection lives in the **native Rust runtime** (a
+  spawned tokio task, mirroring the existing update-scheduler loop in `main.rs`),
+  not in a webview — macOS suspends hidden/occluded webviews, which froze the
+  JS listener and dropped events. The Rust process is never suspended.
+- Because the WebSocket opens from Rust (`tokio-tungstenite`), webview CSP
+  (`csp: null`) doesn't apply to it.
 - API base URL is a compile-time Rust const gated by cargo features
   (`prod-api` / `dev-api` / default-local). Web app URLs and Pusher config mirror
   this gating. Web URLs (from `infra/ari-config`): prod `https://web.ari.ariso.ai`,
@@ -90,51 +91,74 @@ From `apps/web-ui` in `ariso-ai/agents`:
 - No marking read / deleting inbox messages (desktop stays read-only; web owns
   read state).
 - No non-meeting sources.
-- No replay of events missed while the app was offline (Pusher does not replay;
-  accepted — see Edge cases).
+- No general event replay: Pusher does not redeliver to disconnected clients.
+  A bounded `catch_up` inbox fetch on each (re)subscribe recovers *unread
+  meeting preps* specifically; arbitrary missed events are not replayed.
 
 ## Architecture
 
-Approach: **Pusher real-time subscription in the always-alive main window**
-(replaces polling). Matches the web app's mechanism, delivers events instantly,
-and needs no client-side dedup/watermark.
+Approach: **Pusher real-time subscription in the native Rust process**
+(replaces polling). The connection runs in the always-alive Rust runtime — not
+in a webview — because macOS suspends hidden/occluded webviews, which froze the
+JS listener and dropped events. The native process is never suspended, so the
+WebSocket stays alive in the background. Realtime delivery is best-effort
+(Pusher does not redeliver to disconnected clients), so each (re)subscribe also
+runs a catch-up inbox fetch and a process-lifetime `seen` set dedupes the
+realtime and catch-up paths.
+
+> **Note (build outcome):** an earlier draft of this spec put the subscription
+> in the webview via a `pusher-js` + `usePusher.ts` client. That approach was
+> abandoned during the build for the macOS-suspension reason above; the
+> orchestrator was reimplemented natively in Rust (no `pusher-js` dependency,
+> no frontend channel code). The sections below reflect the shipped design.
 
 ### Data flow
 
 ```
-BootstrapView (main window, /#/)
-  └─ useMeetingNotifications.start()
-       1. if signed in & enabled & OS permission granted:
-       2. config  = getDesktopConfig()      // pusher key/cluster, web base URL (Rust, feature-baked)
-       3. me      = GET /auth/me             // org_id, id
-       4. channel = usePusher(`private-${org_id}-${id}`)   // auth via POST /pusher/auth (Rust)
-       5. channel.bind('meeting-prep-complete', e => onPrepComplete(e.meetingPrepId))
-       └─ onPrepComplete(meetingPrepId):
-            items = GET /user-inbox-messages?limit=20
-            msg   = findInboxMessage(items, 'meeting_prep', meetingPrepId)
-            notify('Meeting prep ready',
-                   body = msg?.message ?? 'Your meeting prep is ready.',
-                   url  = `${webBase}/my/meeting-prep-v2/${meetingPrepId}`)   // OS toast
-            on click → openUrl(url)                                           // opener plugin, best-effort
+Rust runtime (src-tauri/src/meeting_notifications.rs)
+  └─ sync(app)  // triggered on sign-in, sign-out, and the settings toggle
+       1. desired = notifications enabled && session token present
+       2. if !desired → stop(); else spawn run_loop (if not already running)
+       └─ run_loop → run_session (reconnect w/ exponential backoff to 30s):
+            me      = GET /auth/me                         // org_id, id (Bearer session token)
+            channel = `private-${org_id}-${id}`
+            ws      = wss://ws-${PUSHER_CLUSTER}.pusher.com/app/${PUSHER_KEY}
+            on pusher:connection_established:
+              auth = POST /pusher/auth { socketId, channelName }   // Rust, session token
+              send pusher:subscribe { channel, auth }
+            on subscription_succeeded → catch_up()          // seed-only on first subscribe
+            on 'meeting-prep-complete' { meetingPrepId } → handle_prep(meetingPrepId):
+              items = GET /user-inbox-messages?limit=20
+              msg   = items.find(source == 'meeting_prep' && source_id == meetingPrepId)
+              show('Meeting prep ready',
+                   body = msg?.message (markdown-stripped, truncated) ?? 'Your meeting prep is ready.',
+                   url  = `${WEB_APP_BASE_URL}/my/meeting-prep-v2/${meetingPrepId}`)
+              // macOS bundle: UNUserNotificationCenter; click opens url via delegate.
+              // dev / other OS: tauri-plugin-notification (no click handling).
 ```
+
+The frontend (`src/composables/useMeetingNotifications.ts`) owns only the
+settings toggle + OS-permission UI; it persists `meetingNotificationsEnabled`
+and broadcasts a `meeting-notifications-sync` event so the native orchestrator
+re-evaluates via `sync()`.
 
 ### Components / files (sage repo)
 
+The Pusher subscription, channel auth, inbox fetch, and OS-notification dispatch
+all live natively in Rust. The frontend keeps only the settings UI; there is no
+`pusher-js` dependency and no frontend channel/auth code.
+
 | File | Change |
 |---|---|
-| `package.json` | Add `pusher-js` dependency. |
-| `src-tauri/Cargo.toml` | Add `tauri-plugin-notification = "2"`. |
-| `src-tauri/src/main.rs` | Register `.plugin(tauri_plugin_notification::init())`; add `get_desktop_config` to the invoke handler. |
-| `src-tauri/src/commands.rs` | Add feature-gated consts `PUSHER_KEY`, `PUSHER_CLUSTER`, `WEB_APP_BASE_URL` + `get_desktop_config` command returning `{ pusherKey, pusherCluster, webAppBaseUrl }`. |
+| `src-tauri/Cargo.toml` | Add `tauri-plugin-notification`, `tokio-tungstenite`, `futures-util` (WS client); macOS: `objc2*` crates for UNUserNotificationCenter click handling. |
+| `src-tauri/src/main.rs` | Register the notification plugin + `NotificationManager` state; call `meeting_notifications::init_native` (installs the macOS UNC delegate, main thread); expose `sync_meeting_notifications` / `stop_meeting_notifications` commands. |
+| `src-tauri/src/commands.rs` | Add feature-gated consts `PUSHER_KEY`, `PUSHER_CLUSTER`, `WEB_APP_BASE_URL` (baked per `prod-api`/`dev-api`/local, mirroring `API_BASE_URL`); session-token helpers consumed by the orchestrator. |
+| `src-tauri/src/meeting_notifications.rs` | **Native orchestrator** (new): `sync`/`stop`, `run_loop` (reconnect + backoff), `run_session` (WS connect → `/pusher/auth` → subscribe → read), realtime `handle_prep` + `catch_up` backstop with a shared `seen` dedup set, inbox fetch + markdown-strip/truncate, and notification `show` (macOS UNC with click→open, else plugin). |
 | `src-tauri/capabilities/default.json` | Add `"notification:default"`. |
-| `src/tauri.ts` | Add `getDesktopConfig()` wrapper; `pusherAuth(socketId, channelName)` wrapper over `api.request('POST','/pusher/auth', …)`. |
-| `src/composables/usePusher.ts` | Create authenticated Pusher client/channel (channelAuthorization customHandler → `pusherAuth`); return `{ client, channel, cleanup }`. Mirrors the web composable. |
-| `src/composables/useInbox.ts` | `InboxMessage` type; `listInboxMessages(limit)`; pure `findInboxMessage(items, source, sourceId)`; markdown-strip/truncate helper. |
-| `src/composables/useMeetingNotifications.ts` | Singleton orchestrator: fetch config + `/auth/me`, build channel, subscribe, bind `meeting-prep-complete`, fetch inbox text, fire OS toast, wire click→openUrl. Gated on auth + setting + permission. `start()` / `stop()`. |
-| `src/views/BootstrapView.vue` | New view at `/#/`; `start()` on mount, `stop()` on unmount. Replaces the empty inline component. |
-| `src/main.ts` | Wire `BootstrapView` into the `/` route. |
-| `src/views/SettingsView.vue` | "Notifications" section with a "Meeting notifications" checkbox (persisted in `settings.json`, default ON) controlling the subscription. |
-| vitest setup | Add `vitest` devDep + `"test"` script + minimal config; spec for the pure helpers. |
+| `src/composables/notifications.ts` | Pure TS helpers (`findInboxMessage`, `stripMarkdown`, `truncate`, `buildPrepNotification`, `prepChannelName`) retained for unit tests; the Rust orchestrator owns the runtime path. |
+| `src/composables/useMeetingNotifications.ts` | Settings/permission shim only: read/write `meetingNotificationsEnabled`, request OS permission, open macOS notification settings, and `emit` `meeting-notifications-sync` so the native `sync()` re-evaluates. No subscription logic. |
+| `src/views/SettingsView.vue` | "Notifications" section with a "Meeting notifications" checkbox (persisted in `settings.json`, default ON) that drives the permission flow + sync broadcast. |
+| `package.json` | Add `vitest` devDep + `"test"` script for the pure helpers. |
 
 ### Notification mapping
 
@@ -150,9 +174,10 @@ BootstrapView (main window, /#/)
 
 ### Pusher client config delivery
 
-`get_desktop_config` (Rust) returns the feature-baked `pusherKey`,
-`pusherCluster`, and `webAppBaseUrl`, keeping client config consistent with the
-build target (same pattern as the existing `API_BASE_URL` const):
+The Pusher key/cluster and web base URL are feature-baked Rust consts
+(`PUSHER_KEY`, `PUSHER_CLUSTER`, `WEB_APP_BASE_URL` in `commands.rs`) consumed
+directly by the native orchestrator — no invoke command crosses to the
+frontend. They follow the same per-feature gating as `API_BASE_URL`:
 
 | Feature | Pusher key | Cluster | Web app base |
 |---|---|---|---|
@@ -162,50 +187,64 @@ build target (same pattern as the existing `API_BASE_URL` const):
 
 ### Channel authorization
 
-`usePusher` uses a `channelAuthorization.customHandler` that calls
-`pusherAuth(socketId, channelName)` → `api.request('POST', '/pusher/auth',
-{ socketId, channelName })` (Rust attaches the session). The handler reads
-`req.body.{socketId,channelName}`, so a JSON body works (Express has both
-json + urlencoded parsers). Returns `{ auth: … }` to the Pusher callback. The
-WebSocket itself connects directly from the webview to Pusher.
+The orchestrator opens the Pusher WebSocket directly from the Rust process. On
+`pusher:connection_established` it calls `POST /pusher/auth` with a JSON body
+`{ socketId, channelName }` and a `Bearer` session token (the server reads
+`req.body.{socketId,channelName}`), then sends `pusher:subscribe` with the
+returned `{ auth }` signature. A 401/403 on this (or `/auth/me`) is treated as
+an invalid session: the token is cleared and the loop exits until the next
+sign-in broadcast.
 
 ### Click handling
 
-On the notification, open the deep-link URL via the already-registered `opener`
-plugin (`openUrl`). **Best-effort:** Tauri v2 desktop notification
-click-callbacks are unreliable across platforms; if the hook doesn't fire, the
-toast stays informational. Noted in code comments.
+The deep-link URL rides along as the notification's request identifier. On the
+**macOS bundle**, a `UNUserNotificationCenter` delegate receives the click on
+the main thread and runs `open <url>`. On unsigned/ad-hoc builds UNC errors, and
+in dev / on other platforms the orchestrator falls back to
+`tauri-plugin-notification`, which has **no click handling** (the toast stays
+informational). Noted in code comments.
 
 ## Settings toggle
 
 A new "Notifications" section in `SettingsView.vue` with a "Meeting
 notifications" checkbox (matching the existing `auto-check-row` pattern),
 persisted as `meetingNotificationsEnabled` in `settings.json` (default `true`).
-Off → `stop()` (disconnect Pusher). On → `start()` (request OS permission if
-needed, connect).
+Toggling it requests OS permission (when turning on) and emits
+`meeting-notifications-sync`; the native `sync()` then starts or stops the
+orchestrator accordingly.
 
 ## Lifecycle
 
-- Started by `BootstrapView` in the always-alive main window; the composable is
-  a module-level singleton so navigation never creates duplicate connections.
-- On sign-in → `start()`; on sign-out → `stop()` + `cleanup()` (unbind,
-  unsubscribe, disconnect).
-- `pusher-js` handles reconnection/backoff automatically.
+- The native orchestrator runs in the always-alive Rust runtime (never spawned
+  per-webview), so navigation can't create duplicate connections.
+- `sync()` is (re)invoked on sign-in, sign-out, and the settings toggle. It
+  starts the task when `enabled && signed in`, and `stop()`s (aborts the task)
+  otherwise.
+- `run_loop` handles reconnection itself: exponential backoff (1s → 30s cap) on
+  transient errors; on an auth rejection it clears the token, resets the handle,
+  and waits for the next sign-in sync to re-spawn.
 
 ## Error handling & edge cases
 
-- **`/auth/me` or `/pusher/auth` fails:** log, do not crash; retry on next
-  `start()` / reconnect. No UI error (background task).
-- **Not signed in / permission denied / setting off:** no connection; toast is
-  a no-op.
+- **Transient `/auth/me`, `/pusher/auth`, `/user-inbox-messages`, or WS failure:**
+  log, do not crash; `run_loop` reconnects with backoff. No UI error
+  (background task). All session-bound calls have a 15s timeout so a hung
+  connect can't stall the loop.
+- **Auth rejected (401/403):** clear the stored token, exit the loop, and wait
+  for the next sign-in sync — avoids hammering an already-invalidated session.
+- **Not signed in / setting off:** `sync()` keeps the orchestrator stopped; no
+  connection. (OS permission is a frontend concern; a denied permission still
+  lets the orchestrator run — the OS just suppresses the banner.)
 - **Inbox message not found for `meetingPrepId`:** use the generic body; still
   notify (the event itself signals prep is ready).
-- **`csp: null`:** WS allowed; no config change. If CSP is ever tightened, add
-  `connect-src wss://ws-us2.pusher.com https://sockjs-us2.pusher.com` + the API.
-- **Events missed while offline:** Pusher does not replay; those notifications
-  are lost (no historical flood, no catch-up). Accepted.
-- **Duplicate delivery on reconnect:** not expected from Pusher; if observed,
-  add a small in-memory set of recently-notified `meetingPrepId`s.
+- **WebSocket transport:** the connection opens from the Rust process, not the
+  webview, so webview CSP (`csp: null`) is irrelevant to it.
+- **Events missed while offline:** Pusher does not replay, but the `catch_up`
+  inbox fetch on each (re)subscribe surfaces any unread `meeting_prep` not yet
+  notified. The first subscribe is seed-only (no replay of pre-existing preps
+  on launch).
+- **Duplicate delivery (reconnect / realtime+catch-up overlap):** a
+  process-lifetime `seen` set of notified `meetingPrepId`s dedupes both paths.
 
 ## Testing
 
