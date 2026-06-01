@@ -3,6 +3,7 @@
 
 mod audio_capture;
 mod commands;
+mod meeting_notifications;
 mod tray;
 mod update_manager;
 
@@ -11,6 +12,7 @@ fn main() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
@@ -22,6 +24,9 @@ fn main() {
             commands::create_settings_window,
             commands::start_recording_window,
             commands::put_presigned,
+            commands::get_desktop_config,
+            meeting_notifications::sync_meeting_notifications,
+            meeting_notifications::stop_meeting_notifications,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
             update_manager::update_check,
@@ -38,6 +43,17 @@ fn main() {
 
             let initial_state = update_manager::load_state(&app.handle());
             app.manage(update_manager::Manager::new(initial_state));
+
+            // Native meeting-prep notification orchestrator. Owns the Pusher
+            // connection in the Rust process (webviews get suspended when
+            // hidden). Self-gates on session + the enabled toggle.
+            app.manage(meeting_notifications::NotificationManager::new());
+            // Install the macOS notification-click delegate on the main thread.
+            meeting_notifications::init_native(app.handle());
+            let notif_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                meeting_notifications::sync(&notif_handle).await;
+            });
 
             // Hidden bootstrap window — runs JS event listeners
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/#/".into()))

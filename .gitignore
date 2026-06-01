@@ -3,3 +3,4 @@ node_modules/
 src-tauri/target/
 .superpowers/
 docs/superpowers/plans/
+.DS_Store

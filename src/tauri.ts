@@ -75,6 +75,35 @@ export const api = {
   },
 };
 
+export interface DesktopConfig {
+  pusherKey: string;
+  pusherCluster: string;
+  webAppBaseUrl: string;
+}
+
+export async function getDesktopConfig(): Promise<DesktopConfig> {
+  return invoke<DesktopConfig>('get_desktop_config');
+}
+
+export interface PusherAuthResponse {
+  auth: string;
+  channel_data?: string;
+}
+
+export async function pusherAuth(
+  socketId: string,
+  channelName: string
+): Promise<PusherAuthResponse> {
+  const res = await api.request('POST', '/pusher/auth', {
+    socketId,
+    channelName,
+  });
+  if (res.status !== 200) {
+    throw new Error(`Pusher auth failed (${res.status})`);
+  }
+  return res.data as PusherAuthResponse;
+}
+
 export interface UpdateInfo {
   version: string;
   notes: string;
