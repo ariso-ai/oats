@@ -56,14 +56,20 @@
     <section class="section">
       <h2 class="section-title">Notifications</h2>
       <div class="card">
-        <label class="auto-check-row">
-          <input
-            type="checkbox"
-            :checked="meetingNotifications"
-            @change="onToggleMeetingNotifications"
-          />
-          <span>Meeting preps</span>
-        </label>
+        <div class="setting-row">
+          <span class="setting-label">Meeting preps</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="meetingNotifications"
+              @change="onToggleMeetingNotifications"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
         <p
           v-if="notifStatus === 'granted'"
           class="notif-status notif-status--ok"
@@ -604,5 +610,54 @@ async function handleSignOut() {
   font-size: 13px;
   color: #1d1d1f;
   cursor: pointer;
+}
+
+/* iOS-style toggle switch */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.toggle-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  display: inline-flex;
+  align-items: center;
+  width: 40px;
+  height: 24px;
+  padding: 2px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: #d1d5db;
+  transition: background 0.2s ease;
+}
+
+.toggle-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s ease;
+}
+
+.toggle-input:checked + .toggle-track {
+  background: #4f46e5;
+}
+
+.toggle-input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(16px);
+}
+
+.toggle-input:focus-visible + .toggle-track {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
 }
 </style>
