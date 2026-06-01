@@ -32,7 +32,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
             match event.id().as_ref() {
                 "start_recording" => {
                     // Validate session against the API before opening the
-                    // recording UI. A locally-stored token may be stale.
+                    // meeting picker. A locally-stored token may be stale.
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let valid =
@@ -50,29 +50,29 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                     .emit("tray://show-sign-in-prompt", ());
                                 return;
                             }
-                            if app_main.get_webview_window("waveform").is_none()
+
+                            // If the picker is already open, focus it.
+                            if let Some(picker) =
+                                app_main.get_webview_window("meeting-picker")
                             {
-                                if WebviewWindowBuilder::new(
-                                    &app_main,
-                                    "waveform",
-                                    tauri::WebviewUrl::App("/#/waveform".into()),
-                                )
-                                .title("")
-                                .inner_size(320.0, 56.0)
-                                .decorations(false)
-                                .always_on_top(true)
-                                .resizable(false)
-                                .transparent(true)
-                                .shadow(false)
-                                .skip_taskbar(true)
-                                .build()
-                                .is_err()
-                                {
-                                    return;
-                                }
+                                let _ = picker.show();
+                                let _ = picker.set_focus();
+                                return;
                             }
-                            set_menu(&app_main, true, false);
-                            let _ = app_main.emit("tray://start-recording", ());
+
+                            let _ = WebviewWindowBuilder::new(
+                                &app_main,
+                                "meeting-picker",
+                                tauri::WebviewUrl::App(
+                                    "/#/meeting-picker".into(),
+                                ),
+                            )
+                            .title("Select a meeting")
+                            .inner_size(400.0, 500.0)
+                            .resizable(false)
+                            .center()
+                            .skip_taskbar(true)
+                            .build();
                         });
                     });
                 }
