@@ -8,18 +8,28 @@ import { SYNC_EVENT } from '../composables/useMeetingNotifications';
 // it to re-evaluate (session + enabled toggle) on launch and whenever a sync
 // is broadcast (sign-in/out, settings toggle).
 let unlisten: UnlistenFn | null = null;
+let disposed = false;
 
 onMounted(async () => {
   // Register the listener first so a failing initial sync doesn't prevent
   // future sign-in/out and settings-toggle broadcasts from being seen.
-  unlisten = await listen(SYNC_EVENT, () => {
+  const off = await listen(SYNC_EVENT, () => {
     void invoke('sync_meeting_notifications');
   });
+  // onUnmounted can fire before this await resolves; if it did, detach now
+  // so the listener doesn't outlive the component.
+  if (disposed) {
+    off();
+    return;
+  }
+  unlisten = off;
   void invoke('sync_meeting_notifications');
 });
 
 onUnmounted(() => {
+  disposed = true;
   unlisten?.();
+  unlisten = null;
 });
 </script>
 
