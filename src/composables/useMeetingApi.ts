@@ -26,6 +26,16 @@ interface PaginatedResponse {
   };
 }
 
+interface ScheduledMeeting {
+  id: number;
+  title: string | null;
+  start_at: string;
+}
+
+interface ScheduledMeetingsResponse {
+  meetings: ScheduledMeeting[];
+}
+
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
   if (res.status !== expected) {
     const data = res.data as { error?: string } | null;
@@ -62,6 +72,23 @@ export function useMeetingApi() {
     );
     assertOk(res, 200, 'list meetings');
     return res.data as PaginatedResponse;
+  }
+
+  async function listScheduledMeetings(
+    startDate: Date,
+    endDate: Date
+  ): Promise<ScheduledMeeting[]> {
+    const params = new URLSearchParams({
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
+    });
+    const res = await api.request('GET', `/meetings?${params.toString()}`);
+    assertOk(res, 200, 'list scheduled meetings');
+    const data = res.data as ScheduledMeetingsResponse | null;
+    return [...(data?.meetings ?? [])].sort(
+      (a, b) =>
+        new Date(a.start_at).getTime() - new Date(b.start_at).getTime()
+    );
   }
 
   async function getMeeting(
@@ -147,15 +174,24 @@ export function useMeetingApi() {
 
   async function uploadAudio(
     audioBlob: Blob,
-    options?: { title?: string; startAt?: string | null; endAt?: string }
+    options?: {
+      title?: string;
+      startAt?: string | null;
+      endAt?: string;
+      meetingId?: number;
+    }
   ): Promise<{ meetingId: number }> {
-    // Presigned flow: get a presigned S3 URL, upload directly, then confirm
     const metadata: Record<string, string> = {
       endAt: options?.endAt ?? new Date().toISOString(),
     };
     if (options?.startAt) metadata.startAt = options.startAt;
 
-    const presignRes = await api.request('POST', '/desktop/meetings/audio/presign', {
+    const presignPath =
+      options?.meetingId != null
+        ? `/desktop/meetings/${options.meetingId}/audio/presign`
+        : '/desktop/meetings/audio/presign';
+
+    const presignRes = await api.request('POST', presignPath, {
       filename: 'recording.mp3',
       title: options?.title?.trim() || undefined,
       metadata,
@@ -166,7 +202,6 @@ export function useMeetingApi() {
       presignedUrl: string;
     };
 
-    // PUT directly to S3 via native HTTP client (avoids CORS in built app)
     const putStatus = await api.putPresigned(
       presignedUrl,
       [...new Uint8Array(await new Response(audioBlob).arrayBuffer())],
@@ -176,7 +211,6 @@ export function useMeetingApi() {
       throw new Error(`S3 upload failed (${putStatus})`);
     }
 
-    // Confirm upload and trigger transcription
     const confirmRes = await api.request(
       'POST',
       `/desktop/meetings/${meetingId}/audio/confirm`
@@ -189,6 +223,7 @@ export function useMeetingApi() {
     getDeepgramToken,
     createMeeting,
     listMeetings,
+    listScheduledMeetings,
     getMeeting,
     updateMeeting,
     endMeeting,
@@ -199,4 +234,4 @@ export function useMeetingApi() {
   };
 }
 
-export type { Meeting, PaginatedResponse };
+export type { Meeting, PaginatedResponse, ScheduledMeeting };

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ariso-desktop": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["node_modules/tauri-plugin-mcp-server/build/index.js"],
+      "env": {
+        "TAURI_MCP_IPC_PATH": "${HOME}/.ariso/run/sage-mcp.sock"
+      }
+    }
+  }
+}

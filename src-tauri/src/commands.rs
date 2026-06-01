@@ -400,37 +400,6 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
 }
 
 #[tauri::command]
-pub async fn create_waveform_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
-
-    // Don't create if already exists
-    if app.get_webview_window("waveform").is_some() {
-        return Ok(());
-    }
-
-    WebviewWindowBuilder::new(&app, "waveform", WebviewUrl::App("/#/waveform".into()))
-        .title("")
-        .inner_size(280.0, 56.0)
-        .decorations(false)
-        .always_on_top(true)
-        .resizable(false)
-        .shadow(true)
-        .skip_taskbar(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn destroy_waveform_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("waveform") {
-        win.close().map_err(|e: tauri::Error| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::{WebviewWindowBuilder, WebviewUrl};
 
@@ -448,6 +417,48 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
         .build()
         .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+/// Open the waveform recording window, optionally attaching to an existing
+/// meeting id. Closes the meeting-picker window if present and flips the
+/// tray menu to the recording state.
+#[tauri::command]
+pub async fn start_recording_window(
+    app: tauri::AppHandle,
+    meeting_id: Option<i64>,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Close the meeting picker window if it exists.
+    if let Some(picker) = app.get_webview_window("meeting-picker") {
+        let _ = picker.close();
+    }
+
+    // If a waveform window already exists, focus it instead of recreating.
+    if let Some(existing) = app.get_webview_window("waveform") {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = match meeting_id {
+        Some(id) => format!("/#/waveform?meetingId={id}"),
+        None => "/#/waveform".to_string(),
+    };
+
+    WebviewWindowBuilder::new(&app, "waveform", WebviewUrl::App(url.into()))
+        .title("")
+        .inner_size(320.0, 56.0)
+        .decorations(false)
+        .always_on_top(true)
+        .resizable(false)
+        .transparent(true)
+        .shadow(false)
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    crate::tray::set_menu(&app, true, false);
     Ok(())
 }
 

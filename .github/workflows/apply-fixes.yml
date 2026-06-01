@@ -22,7 +22,12 @@ concurrency:
 env:
   CODERABBIT_BOT_LOGIN: "coderabbitai[bot]"
   HUMAN_REVIEWERS: "shawnzhu"
-  MAJOR_PATTERN: '⚠️ Potential issue|🛑|security|data loss|race condition'
+  # Match CodeRabbit's severity badge (🔴 Critical / 🟠 Major) and hard
+  # blockers — NOT '⚠️ Potential issue', which prefixes every finding
+  # header (including 🟡 Minor nits) and so let doc-only minors through
+  # as "majors". The keyword alternatives still catch severe issues by
+  # content even if the badge wording shifts.
+  MAJOR_PATTERN: '🛑|🔴 Critical|🟠 Major|security|data loss|race condition'
 
 jobs:
   apply-fixes:
@@ -159,7 +164,13 @@ jobs:
             --allowed-tools "Read Edit Write Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(grep:*) Bash(npm:*) Bash(cargo:*) Bash(cd:*)" \
             --permission-mode acceptEdits \
             > /tmp/claude-output.json
-          echo "Claude finished. Output length: $(jq -r '.result | length' /tmp/claude-output.json) chars"
+          # Surface Claude's full triage summary in the log. Without this
+          # a no-change run is a black box — you can't tell "correctly
+          # decided to skip" from "silently misfired".
+          echo "Claude finished. Result:"
+          echo "----------------------------------------"
+          jq -r '.result // "(no result field)"' /tmp/claude-output.json
+          echo "----------------------------------------"
 
       - name: Detect changes
         if: steps.findings.outputs.total != '0'
@@ -200,6 +211,20 @@ jobs:
               && echo "  replied to comment $id" \
               || echo "::warning::failed to reply to comment $id"
           done
+
+      # Step 5 of the prompt requires Claude to write thread-replies.json
+      # even when it applies nothing, so every finding gets a recorded
+      # triage decision. If it applied no fix AND left no replies, the run
+      # produced no commit and no audit trail — fail loudly rather than
+      # passing as a silent no-op.
+      - name: Require triage record when no fixes applied
+        if: steps.findings.outputs.total != '0' && steps.changes.outputs.no_changes == 'true'
+        run: |
+          if [ ! -s /tmp/thread-replies.json ]; then
+            echo "::error::Claude applied no fixes and wrote no /tmp/thread-replies.json. Per Step 5 it must record a triage reply for every finding — treating this as a failed run, not a clean no-op."
+            exit 1
+          fi
+          echo "No fixes applied; triage replies were recorded and posted."
 
       - name: Cleanup
         if: always()

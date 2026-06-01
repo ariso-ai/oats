@@ -7,6 +7,7 @@ import WaveformView from './views/WaveformView.vue';
 import SettingsView from './views/SettingsView.vue';
 import UpdateView from './views/UpdateView.vue';
 import BootstrapView from './views/BootstrapView.vue';
+import MeetingPickerView from './views/MeetingPickerView.vue';
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -15,6 +16,7 @@ const router = createRouter({
     { path: '/waveform', name: 'Waveform', component: WaveformView },
     { path: '/settings', name: 'Settings', component: SettingsView },
     { path: '/update', name: 'Update', component: UpdateView },
+    { path: '/meeting-picker', name: 'MeetingPicker', component: MeetingPickerView },
   ],
 });
 
