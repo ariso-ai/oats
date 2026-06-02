@@ -210,10 +210,13 @@ async function onDownloadModel() {
   modelProgress.value = null;
   try {
     await local.downloadModel();
-  } catch (e) {
-    console.error('Model download failed', e);
-  } finally {
+    // Reflect the freshly-installed model on success.
     await refreshModelStatus();
+  } catch (e) {
+    // Keep the failure visible; do NOT refresh here or the on-disk status
+    // (still "not_downloaded") would clobber the error indication.
+    console.error('Model download failed', e);
+    modelStatus.value = { state: 'error' };
   }
 }
 
@@ -418,8 +421,10 @@ onMounted(async () => {
   if (backend.value === 'local') await refreshModelStatus();
 
   const unModelProgress = await listen<number>('model://progress', (e) => {
-    modelProgress.value = e.payload >= 0 ? e.payload : null;
+    // Set the downloading state first so the computed always reads a coherent
+    // pair. A negative payload means indeterminate (show "Downloading…").
     modelStatus.value = { state: 'downloading' };
+    modelProgress.value = e.payload >= 0 ? e.payload : null;
   });
   const unModelDone = await listen('model://done', async () => {
     modelProgress.value = null;
