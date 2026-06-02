@@ -6,6 +6,7 @@ mod commands;
 mod meeting_notifications;
 mod storage;
 mod transcribe;
+mod model_manager;
 mod tray;
 mod update_manager;
 
