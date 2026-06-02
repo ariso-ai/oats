@@ -520,8 +520,10 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    // The library window has no hide-on-close handler, so it is destroyed on
+    // close and recreated (with fresh data) on the next open. This branch only
+    // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
-        win.show().map_err(|e| e.to_string())?;
         win.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
