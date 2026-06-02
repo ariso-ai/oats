@@ -50,6 +50,95 @@ pub fn status(root: &Path) -> ModelStatus {
     }
 }
 
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::Emitter;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+
+/// Prevents concurrent model downloads (which would race on manifest.tmp).
+static DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub fn local_model_status() -> Result<ModelStatus, String> {
+    let root = crate::storage::ariso_root()?;
+    Ok(status(&root))
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgressLine {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    fraction: Option<f64>,
+}
+
+#[tauri::command]
+pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
+    // Reject re-entry; clear the flag on every exit path via the Drop guard.
+    if DOWNLOAD_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("a model download is already in progress".to_string());
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard;
+
+    let root = crate::storage::ariso_root()?;
+    let models = crate::storage::models_dir(&root);
+    std::fs::create_dir_all(&models).map_err(|e| format!("create models dir: {e}"))?;
+
+    let bin = crate::transcribe::sidecar_path()?;
+    let mut child = Command::new(&bin)
+        .arg("download")
+        .arg("--models")
+        .arg(&models)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+
+    let stdout = child.stdout.take().ok_or("no stdout from sidecar")?;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(p) = serde_json::from_str::<ProgressLine>(&line) {
+            if p.kind == "progress" {
+                let _ = app.emit("model://progress", p.fraction.unwrap_or(-1.0));
+            }
+        }
+    }
+
+    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let _ = app.emit("model://error", stderr.clone());
+        return Err(format!("model download failed: {stderr}"));
+    }
+
+    write_manifest(&root, &now_iso())?;
+    let _ = app.emit("model://done", ());
+    Ok(())
+}
+
+/// Opaque UTC marker timestamp. Only stored in manifest.json; never parsed for
+/// logic (readiness is presence-based), so a `unix:<secs>` string suffices and
+/// avoids pulling in a date crate.
+fn now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
