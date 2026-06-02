@@ -115,6 +115,54 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))
 }
 
+/// Render a speaker-attributed markdown transcript with YAML front-matter.
+pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
+    let label_for = |speaker: u32| -> String {
+        meta.participants
+            .iter()
+            .find(|p| p.id == speaker)
+            .map(|p| p.label.clone())
+            .unwrap_or_else(|| format!("Speaker {}", speaker + 1))
+    };
+
+    let participant_labels: Vec<String> = if meta.participants.is_empty() {
+        let mut ids: Vec<u32> = segments.iter().map(|s| s.speaker).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().map(label_for).collect()
+    } else {
+        meta.participants.iter().map(|p| p.label.clone()).collect()
+    };
+    let participants_yaml = participant_labels
+        .iter()
+        .map(|l| format!("\"{l}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("title: {}\n", meta.title));
+    out.push_str(&format!("date: {}\n", meta.created_at));
+    out.push_str(&format!("duration: \"{}\"\n", format_hms(meta.duration_seconds as f64)));
+    out.push_str(&format!("participants: [{participants_yaml}]\n"));
+    out.push_str("---\n\n");
+
+    for seg in segments {
+        out.push_str(&format!(
+            "**{}** [{}]\n{}\n\n",
+            label_for(seg.speaker),
+            format_hms(seg.start),
+            seg.text.trim()
+        ));
+    }
+    out
+}
+
+/// Write the rendered transcript atomically.
+pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
+    write_atomic(&dir.join("transcript.md"), markdown.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +189,47 @@ mod tests {
         assert_eq!(format_hms(0.0), "00:00:00");
         assert_eq!(format_hms(3.4), "00:00:03");
         assert_eq!(format_hms(2533.0), "00:42:13");
+    }
+
+    #[test]
+    fn renders_markdown_with_speaker_blocks() {
+        let meta = RecordingMeta {
+            id: "x".into(),
+            title: "Recording 2026-06-02 14:30".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 2533,
+            status: RecordingStatus::Done,
+            language: Some("en".into()),
+            participants: vec![
+                Participant { id: 0, label: "Speaker 1".into() },
+                Participant { id: 1, label: "Speaker 2".into() },
+            ],
+            model_version: Some("parakeet-tdt-0.6b-v3".into()),
+            error: None,
+        };
+        let segments = vec![
+            Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
+            Segment { speaker: 1, text: "Hi back".into(), start: 9.0, end: 12.0 },
+        ];
+        let md = render_markdown(&meta, &segments);
+
+        assert!(md.starts_with("---\n"));
+        assert!(md.contains("title: Recording 2026-06-02 14:30"));
+        assert!(md.contains("duration: \"00:42:13\""));
+        assert!(md.contains("**Speaker 1** [00:00:03]\nHello there"));
+        assert!(md.contains("**Speaker 2** [00:00:09]\nHi back"));
+    }
+
+    #[test]
+    fn unknown_speaker_falls_back_to_label() {
+        let meta = RecordingMeta {
+            id: "x".into(), title: "t".into(), created_at: "c".into(),
+            duration_seconds: 0, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None,
+        };
+        let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
+        let md = render_markdown(&meta, &segments);
+        assert!(md.contains("**Speaker 6** [00:00:00]\nhi"));
     }
 
     #[test]
