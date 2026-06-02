@@ -3,9 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
-/// Model identifier recorded in each recording's metadata. Single source of
-/// truth until the sidecar reports its own model version in `TranscriptResult`.
-const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +98,7 @@ pub async fn finalize_core(
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
-            meta.model_version = Some(MODEL_VERSION.to_string());
+            meta.model_version = Some(storage::MODEL_VERSION.to_string());
             let md = storage::render_markdown(&meta, &result.segments);
             storage::write_transcript(&dir, &md)?;
             meta.status = RecordingStatus::Done;

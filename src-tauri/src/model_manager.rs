@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
+use crate::storage::MODEL_VERSION;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,14 @@ fn manifest_path(root: &Path) -> std::path::PathBuf {
 }
 
 /// Ready = a manifest ready-marker exists and parses.
+///
+/// This is presence-based by design: FluidAudio owns the on-disk model layout
+/// (it lays out its own repo-named subdirs under the models dir and resolves
+/// them internally), so Rust does not enumerate individual model files. The
+/// marker is written only after the sidecar download exits successfully. A
+/// user who manually deletes model files while leaving the marker would hit a
+/// late failure at transcribe time (recording is retained as `failed`) rather
+/// than being gated up front — an accepted v1 simplification.
 pub fn is_ready(root: &Path) -> bool {
     read_manifest(root).is_some()
 }

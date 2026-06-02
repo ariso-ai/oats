@@ -146,13 +146,18 @@ let diarizerDir = modelsURL.appendingPathComponent("diarizer")
 if isDownload {
     runToCompletion {
         do {
-            let onProgress: DownloadUtils.ProgressHandler = { p in
-                emitProgress(p.fractionCompleted)
+            // Two download phases share the 0..1 bar: ASR maps to 0..0.5,
+            // diarizer to 0.5..1.0, so the bar advances monotonically.
+            let onAsr: DownloadUtils.ProgressHandler = { p in
+                emitProgress(p.fractionCompleted * 0.5)
+            }
+            let onDiarizer: DownloadUtils.ProgressHandler = { p in
+                emitProgress(0.5 + p.fractionCompleted * 0.5)
             }
             _ = try await AsrModels.downloadAndLoad(
-                to: asrDir, version: .v3, progressHandler: onProgress)
+                to: asrDir, version: .v3, progressHandler: onAsr)
             _ = try await DiarizerModels.downloadIfNeeded(
-                to: diarizerDir, progressHandler: onProgress)
+                to: diarizerDir, progressHandler: onDiarizer)
             emitProgress(1.0)
             stdoutLine("{\"type\":\"done\"}")
         } catch {

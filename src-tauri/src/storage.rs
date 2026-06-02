@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Identifier of the on-device STT model, recorded in each recording's
+/// `meta.json` and the models `manifest.json`. Single source of truth so the
+/// per-recording `modelVersion` and the ready-marker can never drift apart.
+pub const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RecordingStatus {

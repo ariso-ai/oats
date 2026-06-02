@@ -131,6 +131,10 @@ async function handleStop() {
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
 
   if (mp3Blob.size > 0 && backend.value) {
+    // This only bounds the UI wait. A timed-out local transcription keeps
+    // running natively and still writes its final status to meta.json, so the
+    // Library (source of truth) may show 'done'/'failed' even if the window
+    // showed a timeout. Audio is persisted before transcription, so nothing is lost.
     const timeout = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Operation timed out')), 120_000)
     );
