@@ -106,6 +106,16 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
 
     let stdout = child.stdout.take().ok_or("no stdout from sidecar")?;
+    let stderr = child.stderr.take().ok_or("no stderr from sidecar")?;
+
+    // Drain stderr concurrently so a large stderr burst can't fill the OS pipe
+    // buffer and deadlock against our stdout read loop.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut BufReader::new(stderr), &mut buf).await;
+        buf
+    });
+
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if let Ok(p) = serde_json::from_str::<ProgressLine>(&line) {
@@ -115,22 +125,23 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
 
-    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let exit = child.wait().await.map_err(|e| e.to_string())?;
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+    if !exit.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
         let _ = app.emit("model://error", stderr.clone());
         return Err(format!("model download failed: {stderr}"));
     }
 
-    write_manifest(&root, &now_iso())?;
+    write_manifest(&root, &now_marker())?;
     let _ = app.emit("model://done", ());
     Ok(())
 }
 
-/// Opaque UTC marker timestamp. Only stored in manifest.json; never parsed for
+/// Opaque download marker. Only stored in manifest.json; never parsed for
 /// logic (readiness is presence-based), so a `unix:<secs>` string suffices and
 /// avoids pulling in a date crate.
-fn now_iso() -> String {
+fn now_marker() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
