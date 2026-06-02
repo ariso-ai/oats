@@ -73,9 +73,14 @@ pub fn recordings_dir(root: &Path) -> PathBuf {
     root.join("recordings")
 }
 
-/// Turn an ISO-8601 instant into a filesystem-safe, sortable folder id.
+/// Turn a UTC ISO-8601 instant into a filesystem-safe, sortable folder id.
 /// "2026-06-02T14:30:05.123Z" -> "2026-06-02T14-30-05Z"
+///
+/// Assumes a UTC (`Z`) timestamp such as `Date.toISOString()` produces. Any
+/// `+HH:MM` offset is dropped before sanitizing so it cannot leak `:` into the
+/// id (which would corrupt the folder name and the `list_recordings` ordering).
 pub fn sanitize_iso_to_id(iso: &str) -> String {
+    let iso = iso.split('+').next().unwrap_or(iso);
     let head = match iso.split_once('.') {
         Some((h, _)) => h,
         None => iso.trim_end_matches('Z'),
@@ -109,6 +114,11 @@ pub fn read_meta(dir: &Path) -> Result<RecordingMeta, String> {
 }
 
 /// Write to a sibling temp file then rename, so readers never see a partial file.
+///
+/// The rename is atomic, but the temp path is fixed, so this assumes a single
+/// writer per `path` at a time. Concurrent writers to the same path must be
+/// serialized by the caller (e.g. the model download command guards against
+/// re-entry).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes).map_err(|e| format!("write tmp: {e}"))?;
@@ -187,6 +197,8 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
             Err(_) => continue,
         }
     }
+    // Lexical descending == chronological newest-first, because `created_at`
+    // is a consistently-formatted UTC ISO-8601 timestamp.
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(out)
 }
@@ -210,6 +222,11 @@ mod tests {
     #[test]
     fn sanitizes_iso_without_millis() {
         assert_eq!(sanitize_iso_to_id("2026-06-02T14:30:05Z"), "2026-06-02T14-30-05Z");
+    }
+
+    #[test]
+    fn sanitizes_iso_drops_offset() {
+        assert_eq!(sanitize_iso_to_id("2026-06-02T14:30:05+00:00"), "2026-06-02T14-30-05Z");
     }
 
     #[test]
