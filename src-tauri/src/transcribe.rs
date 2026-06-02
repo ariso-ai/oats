@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
+/// Model identifier recorded in each recording's metadata. Single source of
+/// truth until the sidecar reports its own model version in `TranscriptResult`.
+const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptResult {
@@ -52,16 +56,21 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ariso-stt failed: {}", stderr.trim()));
     }
-    serde_json::from_slice::<TranscriptResult>(&output.stdout)
-        .map_err(|e| format!("parse transcript json: {e}"))
+    serde_json::from_slice::<TranscriptResult>(&output.stdout).map_err(|e| {
+        // Include a bounded, char-safe preview of stdout for diagnosis.
+        let preview: String = String::from_utf8_lossy(&output.stdout)
+            .chars()
+            .take(200)
+            .collect();
+        format!("parse transcript json: {e} (stdout: {preview})")
+    })
 }
 
 use crate::storage::{self, RecordingMeta, RecordingStatus};
-use std::path::Path as StdPath;
 
 /// Pure-ish orchestration over an explicit root, so tests use a tempdir.
 pub async fn finalize_core(
-    root: &StdPath,
+    root: &Path,
     audio: Vec<u8>,
     title: String,
     created_at: String,
@@ -92,7 +101,7 @@ pub async fn finalize_core(
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
-            meta.model_version = Some("parakeet-tdt-0.6b-v3".to_string());
+            meta.model_version = Some(MODEL_VERSION.to_string());
             let md = storage::render_markdown(&meta, &result.segments);
             storage::write_transcript(&dir, &md)?;
             meta.status = RecordingStatus::Done;
@@ -124,11 +133,14 @@ pub async fn local_finalize_recording(
     finalize_core(&root, audio, title, created_at, duration_seconds).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY (all set_var/remove_var below): tests run with `--test-threads=1`,
+    // so there is no concurrent env mutation while these calls execute.
 
     /// Write an executable stub script and point ARISO_STT_BIN at it.
     fn write_stub(dir: &Path, body: &str) -> PathBuf {
