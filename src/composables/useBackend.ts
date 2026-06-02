@@ -1,0 +1,91 @@
+import { local, auth, getBackendSetting } from '../tauri';
+import { useMeetingApi } from './useMeetingApi';
+
+export type BackendId = 'ariso' | 'local';
+
+export interface Readiness {
+  ready: boolean;
+  reason?: 'signed-out' | 'model-missing' | 'unsupported-platform';
+}
+
+export interface RecordingMeta {
+  startAt: string | null;
+  endAt: string;
+  durationSeconds: number;
+  meetingId?: number;
+}
+
+export interface FinalizeResult {
+  backend: BackendId;
+  [k: string]: unknown;
+}
+
+export interface Backend {
+  id: BackendId;
+  needsAuth: boolean;
+  usesMeetingPicker: boolean;
+  isReady(): Promise<Readiness>;
+  finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
+}
+
+async function blobToBytes(blob: Blob): Promise<number[]> {
+  return [...new Uint8Array(await blob.arrayBuffer())];
+}
+
+function timestampTitle(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
+  const date = d.toISOString().slice(0, 10);
+  const time = d.toTimeString().slice(0, 5);
+  return `Recording ${date} ${time}`;
+}
+
+export class ArisoBackend implements Backend {
+  id: BackendId = 'ariso';
+  needsAuth = true;
+  usesMeetingPicker = true;
+
+  async isReady(): Promise<Readiness> {
+    const session = await auth.checkSession();
+    return session ? { ready: true } : { ready: false, reason: 'signed-out' };
+  }
+
+  async finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult> {
+    const { uploadAudio } = useMeetingApi();
+    const { meetingId } = await uploadAudio(blob, {
+      startAt: meta.startAt,
+      endAt: meta.endAt,
+      meetingId: meta.meetingId,
+    });
+    return { backend: 'ariso', meetingId };
+  }
+}
+
+export class LocalBackend implements Backend {
+  id: BackendId = 'local';
+  needsAuth = false;
+  usesMeetingPicker = false;
+
+  async isReady(): Promise<Readiness> {
+    const status = await local.modelStatus();
+    if (status.state === 'unsupported') return { ready: false, reason: 'unsupported-platform' };
+    return status.state === 'ready' ? { ready: true } : { ready: false, reason: 'model-missing' };
+  }
+
+  async finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult> {
+    const createdAt = meta.startAt ?? meta.endAt;
+    const bytes = await blobToBytes(blob);
+    const res = await local.finalizeRecording(
+      bytes,
+      timestampTitle(createdAt),
+      createdAt,
+      meta.durationSeconds
+    );
+    return { backend: 'local', ...res };
+  }
+}
+
+export async function getActiveBackend(): Promise<Backend> {
+  const id = await getBackendSetting();
+  return id === 'local' ? new LocalBackend() : new ArisoBackend();
+}
