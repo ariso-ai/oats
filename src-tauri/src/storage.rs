@@ -163,6 +163,34 @@ pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("transcript.md"), markdown.as_bytes())
 }
 
+/// List all recordings, newest-first by `created_at`. Folders without a
+/// readable `meta.json` are skipped. Missing recordings dir => empty list.
+pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
+    let dir = recordings_dir(root);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read recordings dir: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        match read_meta(&entry.path()) {
+            Ok(m) => out.push(RecordingSummary {
+                id: m.id,
+                title: m.title,
+                created_at: m.created_at,
+                duration_seconds: m.duration_seconds,
+                status: m.status,
+            }),
+            Err(_) => continue,
+        }
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +217,40 @@ mod tests {
         assert_eq!(format_hms(0.0), "00:00:00");
         assert_eq!(format_hms(3.4), "00:00:03");
         assert_eq!(format_hms(2533.0), "00:42:13");
+    }
+
+    fn meta_with(id: &str, created: &str) -> RecordingMeta {
+        RecordingMeta {
+            id: id.into(), title: format!("T {id}"), created_at: created.into(),
+            duration_seconds: 1, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None,
+        }
+    }
+
+    #[test]
+    fn lists_recordings_newest_first_and_skips_junk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (id, created) in [
+            ("2026-06-01T10-00-00Z", "2026-06-01T10:00:00Z"),
+            ("2026-06-02T10-00-00Z", "2026-06-02T10:00:00Z"),
+        ] {
+            let dir = create_recording_dir(root, id).unwrap();
+            write_meta(&dir, &meta_with(id, created)).unwrap();
+        }
+        std::fs::create_dir_all(recordings_dir(root).join("garbage")).unwrap();
+
+        let list = list_recordings(root).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "2026-06-02T10-00-00Z");
+        assert_eq!(list[1].id, "2026-06-01T10-00-00Z");
+    }
+
+    #[test]
+    fn lists_empty_when_no_recordings_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let list = list_recordings(tmp.path()).unwrap();
+        assert!(list.is_empty());
     }
 
     #[test]
