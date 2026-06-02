@@ -1,6 +1,7 @@
 dist/
 node_modules/
 src-tauri/target/
+src-tauri/binaries/
 .superpowers/
 docs/superpowers/plans/
 .DS_Store
