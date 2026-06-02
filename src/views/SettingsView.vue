@@ -6,8 +6,44 @@
       Please sign in to start recording.
     </div>
 
-    <!-- Account Section -->
+    <!-- Transcription Backend Section -->
     <section class="section">
+      <h2 class="section-title">Transcription Backend</h2>
+      <div class="card">
+        <div class="setting-row">
+          <span class="setting-label">Backend</span>
+          <select :value="backend" class="setting-select" @change="onSelectBackend">
+            <option value="ariso">Ariso (cloud)</option>
+            <option value="local">Local (on-device)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Local Transcription card -->
+    <section v-if="backend === 'local'" class="section">
+      <h2 class="section-title">Local Transcription</h2>
+      <div class="card">
+        <div v-if="modelPrompt && modelStatus.state !== 'ready'" class="signin-banner">
+          Download the transcription model to record locally.
+        </div>
+        <div class="setting-row">
+          <span class="setting-label">Model status</span>
+          <span class="setting-label">{{ modelStatusText }}</span>
+        </div>
+        <button
+          class="secondary-btn"
+          style="margin-top: 12px"
+          :disabled="modelStatus.state === 'downloading' || modelStatus.state === 'ready' || modelStatus.state === 'unsupported'"
+          @click="onDownloadModel"
+        >
+          {{ modelStatus.state === 'ready' ? 'Model installed' : 'Download model' }}
+        </button>
+      </div>
+    </section>
+
+    <!-- Account Section -->
+    <section v-if="backend === 'ariso'" class="section">
       <h2 class="section-title">Account</h2>
       <div class="card">
         <div v-if="isSignedIn" class="account-info">
@@ -128,7 +164,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { auth, api, updater } from '../tauri';
+import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
@@ -148,6 +184,51 @@ const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
 const appVersion = __APP_VERSION__;
+
+const backend = ref<'ariso' | 'local'>('ariso');
+const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
+const modelProgress = ref<number | null>(null);
+const modelPrompt = ref(false);
+
+async function refreshModelStatus() {
+  try {
+    modelStatus.value = await local.modelStatus();
+  } catch {
+    modelStatus.value = { state: 'error' };
+  }
+}
+
+async function onSelectBackend(e: Event) {
+  const next = (e.target as HTMLSelectElement).value === 'local' ? 'local' : 'ariso';
+  backend.value = next;
+  await setBackendSetting(next);
+  if (next === 'local') await refreshModelStatus();
+}
+
+async function onDownloadModel() {
+  modelStatus.value = { state: 'downloading' };
+  modelProgress.value = null;
+  try {
+    await local.downloadModel();
+  } catch (e) {
+    console.error('Model download failed', e);
+  } finally {
+    await refreshModelStatus();
+  }
+}
+
+const modelStatusText = computed(() => {
+  switch (modelStatus.value.state) {
+    case 'ready': return `Ready${modelStatus.value.version ? ` (${modelStatus.value.version})` : ''}`;
+    case 'downloading':
+      return modelProgress.value == null
+        ? 'Downloading…'
+        : `Downloading ${Math.round(modelProgress.value * 100)}%`;
+    case 'error': return 'Download failed';
+    case 'unsupported': return 'Requires Apple Silicon, macOS 14+';
+    default: return 'Not downloaded';
+  }
+});
 
 const checking = ref(false);
 const autoCheck = ref(true);
@@ -332,6 +413,26 @@ onMounted(async () => {
 
   // Save unlisteners so onUnmounted can clear them.
   unlistenUpdates = [unAvail, unNone, unChecking, unError];
+
+  backend.value = await getBackendSetting();
+  if (backend.value === 'local') await refreshModelStatus();
+
+  const unModelProgress = await listen<number>('model://progress', (e) => {
+    modelProgress.value = e.payload >= 0 ? e.payload : null;
+    modelStatus.value = { state: 'downloading' };
+  });
+  const unModelDone = await listen('model://done', async () => {
+    modelProgress.value = null;
+    await refreshModelStatus();
+  });
+  const unModelError = await listen('model://error', async () => {
+    modelProgress.value = null;
+    modelStatus.value = { state: 'error' };
+  });
+  const unModelPrompt = await listen('tray://show-model-prompt', () => {
+    modelPrompt.value = true;
+  });
+  unlistenUpdates.push(unModelProgress, unModelDone, unModelError, unModelPrompt);
 });
 
 onUnmounted(() => {
