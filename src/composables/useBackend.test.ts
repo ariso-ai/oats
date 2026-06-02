@@ -108,4 +108,9 @@ describe('getActiveBackend', () => {
     getBackendSetting.mockResolvedValue('ariso');
     expect((await getActiveBackend()).id).toBe('ariso');
   });
+
+  it('defaults to Ariso when the setting read throws', async () => {
+    getBackendSetting.mockRejectedValue(new Error('store unavailable'));
+    expect((await getActiveBackend()).id).toBe('ariso');
+  });
 });

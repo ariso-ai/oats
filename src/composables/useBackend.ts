@@ -92,6 +92,13 @@ export class LocalBackend implements Backend {
 }
 
 export async function getActiveBackend(): Promise<Backend> {
-  const id = await getBackendSetting();
+  // Never reject: a failed settings read must not break the recording window.
+  // Fall back to the default (Ariso) backend.
+  let id: BackendId = 'ariso';
+  try {
+    id = await getBackendSetting();
+  } catch (e) {
+    console.error('Failed to read backend setting; defaulting to Ariso', e);
+  }
   return id === 'local' ? new LocalBackend() : new ArisoBackend();
 }

@@ -150,6 +150,9 @@ async function handleStop() {
       uploadResult.value = 'failed';
     }
   } else {
+    if (mp3Blob.size > 0 && !backend.value) {
+      console.error('handleStop: backend not initialized; discarding recording');
+    }
     await closeWindow();
   }
 
