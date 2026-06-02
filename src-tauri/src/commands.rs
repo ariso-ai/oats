@@ -43,6 +43,16 @@ pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
 
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
+const SETTINGS_PATH: &str = "settings.json";
+
+/// Read the active runtime backend ("ariso" | "local"); defaults to "ariso".
+pub(crate) fn active_backend(app: &tauri::AppHandle) -> String {
+    app.store(SETTINGS_PATH)
+        .ok()
+        .and_then(|s| s.get("backend"))
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "ariso".to_string())
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SignInResult {
@@ -420,33 +430,23 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
-/// Open the waveform recording window, optionally attaching to an existing
-/// meeting id. Closes the meeting-picker window if present and flips the
-/// tray menu to the recording state.
-#[tauri::command]
-pub async fn start_recording_window(
-    app: tauri::AppHandle,
-    meeting_id: Option<i64>,
-) -> Result<(), String> {
+/// Shared helper to open the waveform recording window. Used by the
+/// `start_recording_window` command and by the tray (Local backend path).
+pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i64>) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    // Close the meeting picker window if it exists.
     if let Some(picker) = app.get_webview_window("meeting-picker") {
         let _ = picker.close();
     }
-
-    // If a waveform window already exists, focus it instead of recreating.
     if let Some(existing) = app.get_webview_window("waveform") {
         let _ = existing.set_focus();
         return Ok(());
     }
-
     let url = match meeting_id {
         Some(id) => format!("/#/waveform?meetingId={id}"),
         None => "/#/waveform".to_string(),
     };
-
-    WebviewWindowBuilder::new(&app, "waveform", WebviewUrl::App(url.into()))
+    WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         .inner_size(320.0, 56.0)
         .decorations(false)
@@ -457,9 +457,19 @@ pub async fn start_recording_window(
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
-
-    crate::tray::set_menu(&app, true, false);
+    crate::tray::set_menu(app, true, false);
     Ok(())
+}
+
+/// Open the waveform recording window, optionally attaching to an existing
+/// meeting id. Closes the meeting-picker window if present and flips the
+/// tray menu to the recording state.
+#[tauri::command]
+pub async fn start_recording_window(
+    app: tauri::AppHandle,
+    meeting_id: Option<i64>,
+) -> Result<(), String> {
+    open_waveform_window(&app, meeting_id)
 }
 
 /// PUT binary data to a presigned URL (bypasses CORS via native HTTP client)
@@ -499,4 +509,29 @@ pub fn get_desktop_config() -> DesktopConfig {
         pusher_cluster: PUSHER_CLUSTER.to_string(),
         web_app_base_url: WEB_APP_BASE_URL.to_string(),
     }
+}
+
+#[tauri::command]
+pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::list_recordings(&root)
+}
+
+#[tauri::command]
+pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    if let Some(win) = app.get_webview_window("library") {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
+        .title("Library")
+        .inner_size(460.0, 560.0)
+        .resizable(true)
+        .center()
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
