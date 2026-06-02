@@ -17,9 +17,10 @@ describe('LibraryView', () => {
     const wrapper = mount(LibraryView);
     await flushPromises();
     expect(wrapper.text()).toContain('No recordings yet');
+    expect(wrapper.findAll('.recording-row')).toHaveLength(0);
   });
 
-  it('renders a row per recording, newest first as returned', async () => {
+  it('renders a row per recording in the order returned', async () => {
     listRecordings.mockResolvedValue([
       { id: 'b', title: 'Second', createdAt: '2026-06-02T10:00:00Z', durationSeconds: 75, status: 'done' },
       { id: 'a', title: 'First', createdAt: '2026-06-01T10:00:00Z', durationSeconds: 3661, status: 'failed' },
