@@ -4,6 +4,7 @@
 mod audio_capture;
 mod commands;
 mod meeting_notifications;
+mod storage;
 mod tray;
 mod update_manager;
 
