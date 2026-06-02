@@ -35,8 +35,12 @@ async function blobToBytes(blob: Blob): Promise<number[]> {
 function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
-  const date = d.toISOString().slice(0, 10);
-  const time = d.toTimeString().slice(0, 5);
+  // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same
+  // timezone (mixing toISOString's UTC date with toTimeString's local time can
+  // disagree near midnight).
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   return `Recording ${date} ${time}`;
 }
 
@@ -68,6 +72,8 @@ export class LocalBackend implements Backend {
 
   async isReady(): Promise<Readiness> {
     const status = await local.modelStatus();
+    // 'unsupported' is reserved for a future Rust-side platform check
+    // (Apple Silicon / macOS 14+); local_model_status does not emit it yet.
     if (status.state === 'unsupported') return { ready: false, reason: 'unsupported-platform' };
     return status.state === 'ready' ? { ready: true } : { ready: false, reason: 'model-missing' };
   }

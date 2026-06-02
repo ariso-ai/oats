@@ -6,6 +6,7 @@ const putPresigned = vi.fn();
 const checkSession = vi.fn();
 const modelStatus = vi.fn();
 const getBackendSetting = vi.fn();
+const uploadAudio = vi.fn();
 
 vi.mock('../tauri', () => ({
   local: {
@@ -18,6 +19,10 @@ vi.mock('../tauri', () => ({
     putPresigned: (...a: unknown[]) => putPresigned(...a),
   },
   getBackendSetting: () => getBackendSetting(),
+}));
+
+vi.mock('./useMeetingApi', () => ({
+  useMeetingApi: () => ({ uploadAudio: (...a: unknown[]) => uploadAudio(...a) }),
 }));
 
 import { ArisoBackend, LocalBackend, getActiveBackend } from './useBackend';
@@ -56,8 +61,9 @@ describe('LocalBackend', () => {
     expect(audioArg).toEqual([1, 2, 3]);
     expect(createdAtArg).toBe('2026-06-02T14:30:05.000Z');
     expect(durationArg).toBe(2400);
-    expect(typeof titleArg).toBe('string');
-    expect(titleArg.length).toBeGreaterThan(0);
+    // Title is a consistent local "YYYY-MM-DD HH:MM" (assert format, not a
+    // timezone-specific value).
+    expect(titleArg).toMatch(/^Recording \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 });
 
@@ -75,6 +81,23 @@ describe('ArisoBackend', () => {
     expect(await b.isReady()).toEqual({ ready: true });
     checkSession.mockResolvedValue(null);
     expect(await b.isReady()).toEqual({ ready: false, reason: 'signed-out' });
+  });
+
+  it('finalizeRecording uploads via useMeetingApi and returns the meetingId', async () => {
+    uploadAudio.mockResolvedValue({ meetingId: 7 });
+    const blob = new Blob([new Uint8Array([9])], { type: 'audio/mpeg' });
+    const res = await new ArisoBackend().finalizeRecording(blob, {
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 2400,
+      meetingId: 7,
+    });
+    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+    expect(uploadAudio).toHaveBeenCalledWith(blob, {
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      meetingId: 7,
+    });
   });
 });
 
