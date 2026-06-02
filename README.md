@@ -39,6 +39,35 @@ The API endpoint is controlled by Cargo feature flags and baked into the binary 
 
 Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and noise suppression. This allows testing transcription with virtual audio devices (e.g., BlackHole) and the `say` command.
 
+> **Note:** the Cargo feature flags above (`dev-api` / `prod-api`) select the **Ariso server build target** and are independent of the runtime **transcription backend** (Ariso vs Local), which the user chooses in Settings.
+
+## Local backend (on-device transcription)
+
+The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. It uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). **Requires Apple Silicon, macOS 14+.**
+
+Build the sidecar before `tauri:build` / `tauri:dev` (it is not committed — it's a build artifact):
+
+```bash
+cd src-tauri/ariso-stt
+swift build -c release
+mkdir -p ../binaries
+cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+```
+
+Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (declared in `tauri.conf.json > bundle.externalBin`). At runtime the app resolves the sidecar next to its own executable, or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require this binary to be present — build the sidecar first on a fresh checkout.
+
+The sidecar contract (stdout is JSON only; logs go to stderr):
+
+- `ariso-stt --audio <path> --models <dir> --format json` → one `{language, durationSeconds, participants[], segments[]}` object.
+- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`.
+
+Storage layout under `~/.ariso/`:
+
+- `models/` — downloaded CoreML model bundles (`asr/`, `diarizer/`) + a `manifest.json` ready-marker
+- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `meta.json`
+
+In Settings → **Transcription Backend**, switch to **Local** and click **Download model** (one-time, ~1 GB). Past local recordings appear in the tray **Library…** window.
+
 ## Testing Transcription with a Virtual Audio Device
 
 To test recording without a real microphone, route system audio back as mic input using an aggregate device.
