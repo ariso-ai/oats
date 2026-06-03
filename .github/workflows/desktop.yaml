@@ -57,6 +57,16 @@ jobs:
       - name: Build frontend
         run: npm run vite:build
 
+      # The ariso-stt Swift sidecar is a build artifact (not committed) that
+      # tauri's `externalBin` requires to exist before `cargo build`. Build it
+      # on every run — it lives under the gitignored, uncached binaries/ dir.
+      - name: Build ariso-stt sidecar
+        working-directory: src-tauri/ariso-stt
+        run: |
+          swift build -c release
+          mkdir -p ../binaries
+          cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+
       - name: Build Rust
         working-directory: src-tauri
         run: cargo build --locked
@@ -106,6 +116,15 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline
+
+      # Same as the validate job: the sidecar is a gitignored build artifact
+      # that `tauri:build` (via externalBin) needs present before bundling.
+      - name: Build ariso-stt sidecar
+        working-directory: src-tauri/ariso-stt
+        run: |
+          swift build -c release
+          mkdir -p ../binaries
+          cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
 
       - name: Build, sign, and notarize
         env:
