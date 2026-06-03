@@ -62,6 +62,28 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
     })
 }
 
+/// Run the sidecar in notes mode and return the generated markdown (stdout).
+pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, String> {
+    let bin = sidecar_path()?;
+    let output = Command::new(&bin)
+        .arg("notes")
+        .arg("--transcript")
+        .arg(transcript)
+        .arg("--models")
+        .arg(models)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ariso-stt notes failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 use crate::storage::{self, RecordingMeta, RecordingStatus};
 
 /// Pure-ish orchestration over an explicit root, so tests use a tempdir.
@@ -103,6 +125,25 @@ pub async fn finalize_core(
             storage::write_transcript(&dir, &md)?;
             meta.status = RecordingStatus::Done;
             storage::write_meta(&dir, &meta)?;
+
+            // Best-effort meeting notes. A failure here must NOT fail the
+            // recording: the transcript is already saved and marked Done.
+            let transcript_path = dir.join("transcript.md");
+            match run_notes(&transcript_path, &models).await {
+                Ok(notes) => {
+                    if let Err(e) = storage::write_notes(&dir, &notes) {
+                        eprintln!("write notes: {e}");
+                        meta.notes_error = Some(e);
+                        let _ = storage::write_meta(&dir, &meta);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("notes generation: {e}");
+                    meta.notes_error = Some(e);
+                    let _ = storage::write_meta(&dir, &meta);
+                }
+            }
+
             Ok(FinalizeResult {
                 backend: "local".to_string(),
                 id,
@@ -220,5 +261,55 @@ mod tests {
         let meta = read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Failed);
         assert!(meta.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_note_md_when_notes_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        // Stub: `notes` subcommand prints markdown; otherwise print transcript JSON.
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo '# Notes'; echo '- did a thing'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let res = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05Z".into(), 12,
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.status, RecordingStatus::Done);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        let notes = std::fs::read_to_string(dir.join("note.md")).unwrap();
+        assert!(notes.contains("# Notes"), "got: {notes}");
+        assert!(crate::storage::read_meta(&dir).unwrap().notes_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalize_stays_done_when_notes_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        // Stub: `notes` subcommand fails; transcribe still succeeds.
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo 'notes boom' >&2; exit 1; fi\ncat <<'EOF'\n{json}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let res = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05Z".into(), 12,
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.status, RecordingStatus::Done);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        assert!(dir.join("transcript.md").exists());
+        assert!(!dir.join("note.md").exists());
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Done);
+        assert!(meta.notes_error.is_some());
     }
 }
