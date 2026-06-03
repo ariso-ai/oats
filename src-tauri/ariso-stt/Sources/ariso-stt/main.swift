@@ -56,14 +56,19 @@ func emitProgress(_ fraction: Double) {
 }
 
 /// Run an async body to completion, then exit. `fail()` handles error exits.
+///
+/// Uses `dispatchMain()` rather than blocking the main thread on a semaphore:
+/// swift-huggingface drives model-download progress through a `@MainActor`
+/// handler, so a parked main thread would starve the MainActor and the download
+/// would deadlock (TCP connected, zero bytes, forever). `dispatchMain()` parks
+/// the main thread while still servicing the main queue; the async `Task` exits
+/// the process when `body` completes.
 func runToCompletion(_ body: @escaping @Sendable () async -> Void) -> Never {
-    let sem = DispatchSemaphore(value: 0)
     Task {
         await body()
-        sem.signal()
+        exit(0)
     }
-    sem.wait()
-    exit(0)
+    dispatchMain()
 }
 
 // MARK: - Token -> text reconstruction
@@ -152,10 +157,12 @@ func loadNotesModel(modelsURL: URL, onProgress: ((Double) -> Void)? = nil) async
     // alongside the ASR/diarizer models (the `llm/hub` subdir).
     let cacheDir = modelsURL.appendingPathComponent("llm").appendingPathComponent("hub")
     let hub = HubClient(cache: HubCache(cacheDirectory: cacheDir))
+    // Gemma 3 1B (QAT, 4-bit): small, fast, and — unlike gemma-4-e2b — NOT
+    // stored with HuggingFace Xet, so it downloads over plain LFS.
     return try await LLMModelFactory.shared.loadContainer(
         from: #hubDownloader(hub),
         using: #huggingFaceTokenizerLoader(),
-        configuration: LLMRegistry.gemma4_e2b_it_4bit
+        configuration: LLMRegistry.gemma3_1B_qat_4bit
     ) { progress in
         onProgress?(progress.fractionCompleted)
     }
