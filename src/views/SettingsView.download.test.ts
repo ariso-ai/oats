@@ -17,9 +17,10 @@ describe('shouldAutoDownload', () => {
 });
 
 describe('rowStatusText', () => {
-  it('shows a download percentage while downloading', () => {
-    expect(rowStatusText('downloading', 0.42)).toBe('Downloading 42%');
-    expect(rowStatusText('downloading', null)).toBe('Downloading…');
+  it('shows a bare percentage while downloading', () => {
+    expect(rowStatusText('downloading', 0.42)).toBe('42%');
+    expect(rowStatusText('downloading', 0.9)).toBe('90%');
+    expect(rowStatusText('downloading', null)).toBe('Starting…');
   });
   it('shows failure on error', () => {
     expect(rowStatusText('error', null)).toBe('Download failed');

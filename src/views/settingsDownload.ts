@@ -13,13 +13,14 @@ export function shouldAutoDownload(
 }
 
 /**
- * Status text shown for a model that is NOT yet installed. (An installed model
- * is shown with a green tick in the template instead of any text.) A live
- * download/error takes precedence; otherwise the model is simply not downloaded.
+ * Status text shown beside a model that is NOT yet installed. (An installed
+ * model is shown with a green tick in the template instead of any text.) While
+ * downloading, this is the bare progress percentage (e.g. "90%") — the button
+ * itself carries the "Downloading" label.
  */
 export function rowStatusText(busy: Busy, progress: number | null): string {
   if (busy === 'downloading') {
-    return progress == null ? 'Downloading…' : `Downloading ${Math.round(progress * 100)}%`;
+    return progress == null ? 'Starting…' : `${Math.round(progress * 100)}%`;
   }
   if (busy === 'error') return 'Download failed';
   return 'Not downloaded';

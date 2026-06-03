@@ -30,35 +30,29 @@
         <div class="setting-row">
           <span class="setting-label">Speech voice model</span>
           <div class="model-controls">
-            <span
-              v-if="sttInstalled && sttBusy === 'idle'"
-              class="model-ready"
-              title="Installed"
-              aria-label="Installed"
-            >✓</span>
-            <template v-else>
-              <span class="model-status">{{ sttStatusText }}</span>
-              <button class="secondary-btn" :disabled="anyDownloading" @click="onInstallStt">
-                Install
-              </button>
-            </template>
+            <span v-if="sttInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
+            <span v-else class="model-status">{{ sttStatusText }}</span>
+            <button
+              class="secondary-btn"
+              :disabled="sttInstalled || anyDownloading"
+              @click="onInstallStt"
+            >
+              {{ sttInstalled ? 'Installed' : sttBusy === 'downloading' ? 'Downloading' : 'Install' }}
+            </button>
           </div>
         </div>
         <div class="setting-row" style="margin-top: 16px">
           <span class="setting-label">Language model</span>
           <div class="model-controls">
-            <span
-              v-if="llmInstalled && llmBusy === 'idle'"
-              class="model-ready"
-              title="Installed"
-              aria-label="Installed"
-            >✓</span>
-            <template v-else>
-              <span class="model-status">{{ llmStatusText }}</span>
-              <button class="secondary-btn" :disabled="anyDownloading" @click="onInstallLlm">
-                Install
-              </button>
-            </template>
+            <span v-if="llmInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
+            <span v-else class="model-status">{{ llmStatusText }}</span>
+            <button
+              class="secondary-btn"
+              :disabled="llmInstalled || anyDownloading"
+              @click="onInstallLlm"
+            >
+              {{ llmInstalled ? 'Installed' : llmBusy === 'downloading' ? 'Downloading' : 'Install' }}
+            </button>
           </div>
         </div>
       </div>
