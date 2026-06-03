@@ -46,6 +46,8 @@ pub struct RecordingMeta {
     pub model_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -179,6 +181,11 @@ pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("transcript.md"), markdown.as_bytes())
 }
 
+/// Write the generated meeting notes atomically.
+pub fn write_notes(dir: &Path, markdown: &str) -> Result<(), String> {
+    write_atomic(&dir.join("note.md"), markdown.as_bytes())
+}
+
 /// List all recordings, newest-first by `created_at`. Folders without a
 /// readable `meta.json` are skipped. Missing recordings dir => empty list.
 pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
@@ -246,7 +253,7 @@ mod tests {
         RecordingMeta {
             id: id.into(), title: format!("T {id}"), created_at: created.into(),
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
-            participants: vec![], model_version: None, error: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
         }
     }
 
@@ -291,6 +298,7 @@ mod tests {
             ],
             model_version: Some("parakeet-tdt-0.6b-v3".into()),
             error: None,
+            notes_error: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -310,11 +318,20 @@ mod tests {
         let meta = RecordingMeta {
             id: "x".into(), title: "t".into(), created_at: "c".into(),
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
-            participants: vec![], model_version: None, error: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
         assert!(md.contains("**Speaker 6** [00:00:00]\nhi"));
+    }
+
+    #[test]
+    fn write_notes_creates_note_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write_notes(dir, "# Notes\n- point").unwrap();
+        let body = std::fs::read_to_string(dir.join("note.md")).unwrap();
+        assert_eq!(body, "# Notes\n- point");
     }
 
     #[test]
@@ -336,6 +353,7 @@ mod tests {
             participants: vec![],
             model_version: None,
             error: None,
+            notes_error: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();

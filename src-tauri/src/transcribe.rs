@@ -88,6 +88,7 @@ pub async fn finalize_core(
         participants: vec![],
         model_version: None,
         error: None,
+        notes_error: None,
     };
     storage::write_meta(&dir, &meta)?;
 
