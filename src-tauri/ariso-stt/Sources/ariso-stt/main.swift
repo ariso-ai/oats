@@ -201,23 +201,47 @@ let asrDir = modelsURL.appendingPathComponent("asr")
 let diarizerDir = modelsURL.appendingPathComponent("diarizer")
 
 if isDownload {
+    // `--target` selects which models to download. "all" (default) keeps the
+    // original three-phase behavior; "stt" downloads only ASR + diarizer and
+    // "llm" downloads only the gemma notes model, each over a full 0..1 bar.
+    let target = argValue("--target") ?? "all"
     runToCompletion {
         do {
-            // Three download phases share the 0..1 bar: ASR maps to 0..0.33,
-            // diarizer to 0.33..0.5, and the gemma notes model to 0.5..1.0,
-            // so the bar advances monotonically.
-            let onAsr: DownloadUtils.ProgressHandler = { p in
-                emitProgress(p.fractionCompleted * 0.33)
-            }
-            let onDiarizer: DownloadUtils.ProgressHandler = { p in
-                emitProgress(0.33 + p.fractionCompleted * 0.17)
-            }
-            _ = try await AsrModels.downloadAndLoad(
-                to: asrDir, version: .v3, progressHandler: onAsr)
-            _ = try await DiarizerModels.downloadIfNeeded(
-                to: diarizerDir, progressHandler: onDiarizer)
-            _ = try await loadNotesModel(modelsURL: modelsURL) { f in
-                emitProgress(0.5 + f * 0.5)
+            switch target {
+            case "stt":
+                // STT only: ASR maps to 0..0.66, diarizer to 0.66..1.0.
+                let onAsr: DownloadUtils.ProgressHandler = { p in
+                    emitProgress(p.fractionCompleted * 0.66)
+                }
+                let onDiarizer: DownloadUtils.ProgressHandler = { p in
+                    emitProgress(0.66 + p.fractionCompleted * 0.34)
+                }
+                _ = try await AsrModels.downloadAndLoad(
+                    to: asrDir, version: .v3, progressHandler: onAsr)
+                _ = try await DiarizerModels.downloadIfNeeded(
+                    to: diarizerDir, progressHandler: onDiarizer)
+            case "llm":
+                // LLM only: the gemma notes model maps to the full 0..1 bar.
+                _ = try await loadNotesModel(modelsURL: modelsURL) { f in
+                    emitProgress(f)
+                }
+            default:
+                // "all" (and any unrecognized value): three phases share the
+                // 0..1 bar — ASR 0..0.33, diarizer 0.33..0.5, gemma 0.5..1.0 —
+                // so the bar advances monotonically.
+                let onAsr: DownloadUtils.ProgressHandler = { p in
+                    emitProgress(p.fractionCompleted * 0.33)
+                }
+                let onDiarizer: DownloadUtils.ProgressHandler = { p in
+                    emitProgress(0.33 + p.fractionCompleted * 0.17)
+                }
+                _ = try await AsrModels.downloadAndLoad(
+                    to: asrDir, version: .v3, progressHandler: onAsr)
+                _ = try await DiarizerModels.downloadIfNeeded(
+                    to: diarizerDir, progressHandler: onDiarizer)
+                _ = try await loadNotesModel(modelsURL: modelsURL) { f in
+                    emitProgress(0.5 + f * 0.5)
+                }
             }
             emitProgress(1.0)
             stdoutLine("{\"type\":\"done\"}")
