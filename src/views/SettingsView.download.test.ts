@@ -18,19 +18,13 @@ describe('shouldAutoDownload', () => {
 
 describe('rowStatusText', () => {
   it('shows a download percentage while downloading', () => {
-    expect(rowStatusText(false, 'downloading', 0.42)).toBe('Downloading 42%');
-    expect(rowStatusText(false, 'downloading', null)).toBe('Downloading…');
+    expect(rowStatusText('downloading', 0.42)).toBe('Downloading 42%');
+    expect(rowStatusText('downloading', null)).toBe('Downloading…');
   });
   it('shows failure on error', () => {
-    expect(rowStatusText(false, 'error', null)).toBe('Download failed');
+    expect(rowStatusText('error', null)).toBe('Download failed');
   });
-  it('reflects installed state when idle', () => {
-    expect(rowStatusText(true, 'idle', null)).toBe('Ready');
-    expect(rowStatusText(false, 'idle', null)).toBe('Not downloaded');
-  });
-  it('uses the provided ready label when installed', () => {
-    expect(rowStatusText(true, 'idle', null, 'Ready (parakeet-tdt-0.6b-v3)')).toBe(
-      'Ready (parakeet-tdt-0.6b-v3)',
-    );
+  it('shows "Not downloaded" when idle and not installed', () => {
+    expect(rowStatusText('idle', null)).toBe('Not downloaded');
   });
 });

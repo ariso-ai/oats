@@ -13,19 +13,14 @@ export function shouldAutoDownload(
 }
 
 /**
- * Status text for a single model row. A live download/error (`busy`) takes
- * precedence; otherwise the row reflects whether the model is installed.
- * `readyLabel` lets the STT row show its version (e.g. "Ready (parakeet…)").
+ * Status text shown for a model that is NOT yet installed. (An installed model
+ * is shown with a green tick in the template instead of any text.) A live
+ * download/error takes precedence; otherwise the model is simply not downloaded.
  */
-export function rowStatusText(
-  installed: boolean,
-  busy: Busy,
-  progress: number | null,
-  readyLabel = 'Ready',
-): string {
+export function rowStatusText(busy: Busy, progress: number | null): string {
   if (busy === 'downloading') {
     return progress == null ? 'Downloading…' : `Downloading ${Math.round(progress * 100)}%`;
   }
   if (busy === 'error') return 'Download failed';
-  return installed ? readyLabel : 'Not downloaded';
+  return 'Not downloaded';
 }

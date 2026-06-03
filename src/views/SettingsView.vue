@@ -20,37 +20,47 @@
       </div>
     </section>
 
-    <!-- Local Transcription card -->
+    <!-- On-device models card -->
     <section v-if="backend === 'local'" class="section">
-      <h2 class="section-title">Local Transcription</h2>
+      <h2 class="section-title">On-device models</h2>
       <div class="card">
         <div v-if="modelPrompt && !sttInstalled" class="signin-banner">
-          Download the transcription model to record locally.
+          Download the models to record on your device.
         </div>
         <div class="setting-row">
-          <span class="setting-label">Speech-to-text (STT)</span>
-          <span class="setting-label">{{ sttStatusText }}</span>
+          <span class="setting-label">Speech voice model</span>
+          <div class="model-controls">
+            <span
+              v-if="sttInstalled && sttBusy === 'idle'"
+              class="model-ready"
+              title="Installed"
+              aria-label="Installed"
+            >✓</span>
+            <template v-else>
+              <span class="model-status">{{ sttStatusText }}</span>
+              <button class="secondary-btn" :disabled="anyDownloading" @click="onInstallStt">
+                Install
+              </button>
+            </template>
+          </div>
         </div>
-        <button
-          class="secondary-btn"
-          style="margin-top: 8px"
-          :disabled="sttInstalled || anyDownloading"
-          @click="onInstallStt"
-        >
-          {{ sttInstalled ? 'Installed' : 'Install' }}
-        </button>
         <div class="setting-row" style="margin-top: 16px">
-          <span class="setting-label">Notes model (LLM)</span>
-          <span class="setting-label">{{ llmStatusText }}</span>
+          <span class="setting-label">Language model</span>
+          <div class="model-controls">
+            <span
+              v-if="llmInstalled && llmBusy === 'idle'"
+              class="model-ready"
+              title="Installed"
+              aria-label="Installed"
+            >✓</span>
+            <template v-else>
+              <span class="model-status">{{ llmStatusText }}</span>
+              <button class="secondary-btn" :disabled="anyDownloading" @click="onInstallLlm">
+                Install
+              </button>
+            </template>
+          </div>
         </div>
-        <button
-          class="secondary-btn"
-          style="margin-top: 8px"
-          :disabled="llmInstalled || anyDownloading"
-          @click="onInstallLlm"
-        >
-          {{ llmInstalled ? 'Installed' : 'Install' }}
-        </button>
       </div>
     </section>
 
@@ -261,17 +271,8 @@ const anyDownloading = computed(
   () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
 );
 
-const sttStatusText = computed(() =>
-  rowStatusText(
-    sttInstalled.value,
-    sttBusy.value,
-    sttProgress.value,
-    modelStatus.value.version ? `Ready (${modelStatus.value.version})` : 'Ready',
-  ),
-);
-const llmStatusText = computed(() =>
-  rowStatusText(llmInstalled.value, llmBusy.value, llmProgress.value),
-);
+const sttStatusText = computed(() => rowStatusText(sttBusy.value, sttProgress.value));
+const llmStatusText = computed(() => rowStatusText(llmBusy.value, llmProgress.value));
 
 const checking = ref(false);
 const autoCheck = ref(true);
@@ -685,6 +686,24 @@ async function handleSignOut() {
 .setting-label {
   font-size: 14px;
   color: #1d1d1f;
+}
+
+.model-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-status {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.model-ready {
+  color: #16a34a;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .setting-select {
