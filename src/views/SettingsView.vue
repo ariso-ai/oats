@@ -31,6 +31,10 @@
           <span class="setting-label">Model status</span>
           <span class="setting-label">{{ modelStatusText }}</span>
         </div>
+        <div class="setting-row">
+          <span class="setting-label">Notes model (LLM)</span>
+          <span class="setting-label">{{ llmStatusText }}</span>
+        </div>
         <button
           class="secondary-btn"
           style="margin-top: 12px"
@@ -165,7 +169,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
-import { shouldAutoDownload } from './settingsDownload';
+import { shouldAutoDownload, llmRowState } from './settingsDownload';
 import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
@@ -229,6 +233,19 @@ async function onDownloadModel() {
 const modelStatusText = computed(() => {
   switch (modelStatus.value.state) {
     case 'ready': return `Ready${modelStatus.value.version ? ` (${modelStatus.value.version})` : ''}`;
+    case 'downloading':
+      return modelProgress.value == null
+        ? 'Downloading…'
+        : `Downloading ${Math.round(modelProgress.value * 100)}%`;
+    case 'error': return 'Download failed';
+    case 'unsupported': return 'Requires Apple Silicon, macOS 14+';
+    default: return 'Not downloaded';
+  }
+});
+
+const llmStatusText = computed(() => {
+  switch (llmRowState(modelStatus.value.state, modelStatus.value.llmReady)) {
+    case 'ready': return 'Ready';
     case 'downloading':
       return modelProgress.value == null
         ? 'Downloading…'

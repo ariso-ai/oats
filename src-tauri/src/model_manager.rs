@@ -9,6 +9,11 @@ pub struct ModelStatus {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Whether the on-device notes LLM (gemma) has been downloaded. Reported
+    /// separately from `state` so the Settings window can show the LLM's own
+    /// download status alongside the overall model status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -51,10 +56,21 @@ pub fn write_manifest(root: &Path, downloaded_at: &str) -> Result<(), String> {
     crate::storage::write_atomic(&manifest_path(root), json.as_bytes())
 }
 
+/// Presence-based readiness for the notes LLM (gemma), mirroring `is_ready`.
+/// The bootstrap download writes the model under `<models>/llm/hub` (the
+/// HuggingFace cache layout); a non-empty dir means it was fetched.
+pub fn llm_is_ready(root: &Path) -> bool {
+    let dir = crate::storage::models_dir(root).join("llm").join("hub");
+    std::fs::read_dir(&dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 pub fn status(root: &Path) -> ModelStatus {
+    let llm_ready = Some(llm_is_ready(root));
     match read_manifest(root) {
-        Some(m) => ModelStatus { state: "ready".into(), version: Some(m.version) },
-        None => ModelStatus { state: "not_downloaded".into(), version: None },
+        Some(m) => ModelStatus { state: "ready".into(), version: Some(m.version), llm_ready },
+        None => ModelStatus { state: "not_downloaded".into(), version: None, llm_ready },
     }
 }
 
@@ -174,5 +190,24 @@ mod tests {
         let s = status(root);
         assert_eq!(s.state, "ready");
         assert_eq!(s.version.as_deref(), Some(MODEL_VERSION));
+    }
+
+    #[test]
+    fn llm_ready_reflects_gemma_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Absent until the gemma model dir exists.
+        assert!(!llm_is_ready(root));
+        assert_eq!(status(root).llm_ready, Some(false));
+
+        let snap = crate::storage::models_dir(root)
+            .join("llm")
+            .join("hub")
+            .join("models--mlx-community--gemma-4-e2b-it-4bit");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("config.json"), b"{}").unwrap();
+
+        assert!(llm_is_ready(root));
+        assert_eq!(status(root).llm_ready, Some(true));
     }
 }

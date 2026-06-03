@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldAutoDownload } from './settingsDownload';
+import { shouldAutoDownload, llmRowState } from './settingsDownload';
 
 describe('shouldAutoDownload', () => {
   it('starts for local when not yet downloaded', () => {
@@ -13,5 +13,18 @@ describe('shouldAutoDownload', () => {
   });
   it('never starts for the ariso backend', () => {
     expect(shouldAutoDownload('ariso', 'not_downloaded')).toBe(false);
+  });
+});
+
+describe('llmRowState', () => {
+  it('reflects gemma presence when not actively downloading', () => {
+    expect(llmRowState('ready', true)).toBe('ready');
+    expect(llmRowState('ready', false)).toBe('not_downloaded');
+    expect(llmRowState('not_downloaded', undefined)).toBe('not_downloaded');
+  });
+  it('shares the overall state while downloading or errored', () => {
+    expect(llmRowState('downloading', false)).toBe('downloading');
+    expect(llmRowState('error', false)).toBe('error');
+    expect(llmRowState('unsupported', undefined)).toBe('unsupported');
   });
 });

@@ -158,6 +158,8 @@ export interface LocalFinalizeResult {
 export interface ModelStatus {
   state: 'not_downloaded' | 'downloading' | 'ready' | 'error' | 'unsupported';
   version?: string;
+  /** Whether the on-device notes LLM (gemma) has been downloaded. */
+  llmReady?: boolean;
 }
 
 export const local = {
