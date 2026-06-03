@@ -1,8 +1,10 @@
 import Foundation
 import FluidAudio
-import Hub
 import MLXLLM
 import MLXLMCommon
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
 // MARK: - Output contract (must match the Rust `TranscriptResult` deserializer)
 
@@ -143,11 +145,18 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
 /// subdir) so model files live alongside the ASR/diarizer models. Download
 /// progress is reported to STDERR only — stdout stays clean for the result.
 func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
-    let hub = HubApi(downloadBase: modelsURL.appendingPathComponent("llm"))
+    // mlx-swift-lm 3.x is provider-agnostic: it takes an injected `Downloader`
+    // and `TokenizerLoader`. The MLXHuggingFace macros bridge HuggingFace's
+    // `HubClient` / swift-transformers `AutoTokenizer` into those protocols.
+    // Pinning the `HubClient` cache under the `--models` dir keeps LLM weights
+    // alongside the ASR/diarizer models (the `llm/hub` subdir).
+    let cacheDir = modelsURL.appendingPathComponent("llm").appendingPathComponent("hub")
+    let hub = HubClient(cache: HubCache(cacheDirectory: cacheDir))
     var lastReported = -1
     return try await LLMModelFactory.shared.loadContainer(
-        hub: hub,
-        configuration: LLMRegistry.gemma3n_E2B_it_lm_4bit
+        from: #hubDownloader(hub),
+        using: #huggingFaceTokenizerLoader(),
+        configuration: LLMRegistry.gemma4_e2b_it_4bit
     ) { progress in
         let pct = Int(progress.fractionCompleted * 100)
         if pct != lastReported {
