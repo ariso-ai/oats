@@ -307,7 +307,7 @@ mod tests {
         let md = render_markdown(&meta, &segments);
 
         assert!(md.starts_with("---\n"));
-        assert!(md.contains("title: Recording 2026-06-02 14:30"));
+        assert!(md.contains("title: \"Recording 2026-06-02 14:30\""));
         assert!(md.contains("duration: \"00:42:13\""));
         assert!(md.contains("**Speaker 1** [00:00:03]\nHello there"));
         assert!(md.contains("**Speaker 2** [00:00:09]\nHi back"));
