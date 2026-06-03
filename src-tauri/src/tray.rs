@@ -31,41 +31,52 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 "start_recording" => {
-                    // Validate session against the API before opening the
-                    // meeting picker. A locally-stored token may be stale.
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let valid =
-                            crate::commands::is_session_valid(&app_async).await;
+                        let backend = crate::commands::active_backend(&app_async);
+
+                        if backend == "local" {
+                            let root = match crate::storage::ariso_root() {
+                                Ok(r) => r,
+                                Err(_) => return,
+                            };
+                            let ready = crate::model_manager::is_ready(&root);
+                            let app_main = app_async.clone();
+                            let _ = app_async.run_on_main_thread(move || {
+                                if !ready {
+                                    if let Some(win) = app_main.get_webview_window("settings") {
+                                        let _ = win.show();
+                                        let _ = win.set_focus();
+                                    }
+                                    let _ = app_main.emit("tray://show-model-prompt", ());
+                                    return;
+                                }
+                                let _ = crate::commands::open_waveform_window(&app_main, None);
+                            });
+                            return;
+                        }
+
+                        // Ariso (default): existing session gate + meeting-picker.
+                        let valid = crate::commands::is_session_valid(&app_async).await;
                         let app_main = app_async.clone();
                         let _ = app_async.run_on_main_thread(move || {
                             if !valid {
-                                if let Some(win) =
-                                    app_main.get_webview_window("settings")
-                                {
+                                if let Some(win) = app_main.get_webview_window("settings") {
                                     let _ = win.show();
                                     let _ = win.set_focus();
                                 }
-                                let _ = app_main
-                                    .emit("tray://show-sign-in-prompt", ());
+                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
                                 return;
                             }
-
-                            // If the picker is already open, focus it.
-                            if let Some(picker) =
-                                app_main.get_webview_window("meeting-picker")
-                            {
+                            if let Some(picker) = app_main.get_webview_window("meeting-picker") {
                                 let _ = picker.show();
                                 let _ = picker.set_focus();
                                 return;
                             }
-
                             let _ = WebviewWindowBuilder::new(
                                 &app_main,
                                 "meeting-picker",
-                                tauri::WebviewUrl::App(
-                                    "/#/meeting-picker".into(),
-                                ),
+                                tauri::WebviewUrl::App("/#/meeting-picker".into()),
                             )
                             .title("Select a meeting")
                             .inner_size(400.0, 500.0)
@@ -122,6 +133,12 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         });
                     }
                 }
+                "library" => {
+                    let app_async = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::commands::create_library_window(app_async).await;
+                    });
+                }
                 "check_updates" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -142,6 +159,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let library = MenuItemBuilder::with_id("library", "Library...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
 
@@ -149,6 +167,7 @@ pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
         .item(&start)
         .separator()
         .item(&settings)
+        .item(&library)
         .item(&check_updates)
         .separator()
         .item(&quit)

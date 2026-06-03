@@ -4,6 +4,9 @@
 mod audio_capture;
 mod commands;
 mod meeting_notifications;
+mod storage;
+mod transcribe;
+mod model_manager;
 mod tray;
 mod update_manager;
 
@@ -25,6 +28,11 @@ fn main() {
             commands::start_recording_window,
             commands::put_presigned,
             commands::get_desktop_config,
+            commands::list_local_recordings,
+            commands::create_library_window,
+            transcribe::local_finalize_recording,
+            model_manager::local_model_status,
+            model_manager::download_local_model,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
             audio_capture::start_system_audio_capture,

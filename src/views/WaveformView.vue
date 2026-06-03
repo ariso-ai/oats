@@ -5,14 +5,16 @@
         <span :class="uploadResult === 'success' ? 'upload-check' : 'upload-error-icon'">
           {{ uploadResult === 'success' ? '✓' : '✗' }}
         </span>
-        <span class="upload-label">{{ uploadResult === 'success' ? 'Upload successful' : 'Upload failed' }}</span>
+        <span class="upload-label">
+          {{ uploadResult === 'success' ? successLabel : failLabel }}
+        </span>
         <button class="close-btn" @click.stop.prevent="closeWindow">Close</button>
       </div>
     </template>
     <template v-else-if="isUploading">
       <div class="upload-info" data-tauri-drag-region>
         <span class="upload-spinner" />
-        <span class="upload-label">Uploading…</span>
+        <span class="upload-label">{{ progressLabel }}</span>
       </div>
     </template>
     <template v-else>
@@ -70,11 +72,15 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { useRecorder, type RecordingMode } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
-import { useMeetingApi } from '../composables/useMeetingApi';
+import { getActiveBackend, type Backend } from '../composables/useBackend';
 
 const recorder = useRecorder();
 const waveform = useWaveform();
-const meetingApi = useMeetingApi();
+const backend = ref<Backend | null>(null);
+const isLocal = computed(() => backend.value?.id === 'local');
+const successLabel = computed(() => (isLocal.value ? 'Transcription complete' : 'Upload successful'));
+const failLabel = computed(() => (isLocal.value ? 'Transcription failed' : 'Upload failed'));
+const progressLabel = computed(() => (isLocal.value ? 'Transcribing…' : 'Uploading…'));
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
 
@@ -125,25 +131,33 @@ async function handleStop() {
   const mp3Blob = await recorder.stopRecording();
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
 
-  if (mp3Blob.size > 0) {
+  if (mp3Blob.size > 0 && backend.value) {
+    // This only bounds the UI wait. A timed-out local transcription keeps
+    // running natively and still writes its final status to meta.json, so the
+    // Library (source of truth) may show 'done'/'failed' even if the window
+    // showed a timeout. Audio is persisted before transcription, so nothing is lost.
     const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Upload timed out')), 30_000)
+      setTimeout(() => reject(new Error('Operation timed out')), 120_000)
     );
     try {
       await Promise.race([
-        meetingApi.uploadAudio(mp3Blob, {
+        backend.value.finalizeRecording(mp3Blob, {
           startAt,
           endAt,
+          durationSeconds: recorder.durationSeconds.value,
           meetingId: meetingId ?? undefined,
         }),
         timeout,
       ]);
       uploadResult.value = 'success';
     } catch (err) {
-      console.error('Upload failed:', err);
+      console.error('Finalize failed:', err);
       uploadResult.value = 'failed';
     }
   } else {
+    if (mp3Blob.size > 0 && !backend.value) {
+      console.error('handleStop: backend not initialized; discarding recording');
+    }
     await closeWindow();
   }
 
@@ -171,6 +185,8 @@ async function handleResume() {
 onMounted(async () => {
   document.documentElement.style.background = 'transparent';
   document.body.style.background = 'transparent';
+
+  backend.value = await getActiveBackend();
 
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);

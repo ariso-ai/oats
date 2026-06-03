@@ -22,7 +22,8 @@ concurrency:
 jobs:
   validate:
     name: Validate (frontend + cargo build)
-    runs-on: [self-hosted, macOS, ARM64]
+    #runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-26
     permissions:
       contents: read
     steps:
@@ -46,7 +47,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
           key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             rust-aarch64-apple-darwin-
@@ -56,6 +56,16 @@ jobs:
 
       - name: Build frontend
         run: npm run vite:build
+
+      # The ariso-stt Swift sidecar is a build artifact (not committed) that
+      # tauri's `externalBin` requires to exist before `cargo build`. Build it
+      # on every run — it lives under the gitignored, uncached binaries/ dir.
+      - name: Build ariso-stt sidecar
+        working-directory: src-tauri/ariso-stt
+        run: |
+          swift build -c release
+          mkdir -p ../binaries
+          cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
 
       - name: Build Rust
         working-directory: src-tauri
@@ -106,6 +116,15 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline
+
+      # Same as the validate job: the sidecar is a gitignored build artifact
+      # that `tauri:build` (via externalBin) needs present before bundling.
+      - name: Build ariso-stt sidecar
+        working-directory: src-tauri/ariso-stt
+        run: |
+          swift build -c release
+          mkdir -p ../binaries
+          cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
 
       - name: Build, sign, and notarize
         env:

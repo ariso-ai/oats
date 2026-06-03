@@ -26,6 +26,8 @@
     "@tailwindcss/vite": "^4.1.8",
     "@tauri-apps/cli": "^2.5.0",
     "@vitejs/plugin-vue": "^6.0.5",
+    "@vue/test-utils": "^2.4.10",
+    "jsdom": "^29.1.1",
     "tailwindcss": "^4.1.8",
     "tauri-plugin-mcp": "^0.1.0",
     "tauri-plugin-mcp-server": "^0.1.0",

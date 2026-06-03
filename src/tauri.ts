@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { load } from '@tauri-apps/plugin-store';
 
 interface SignInResult {
   success?: boolean;
@@ -138,3 +139,62 @@ export const updater = {
     return invoke('update_get_state');
   },
 };
+
+export interface RecordingSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  durationSeconds: number;
+  status: 'recording' | 'transcribing' | 'done' | 'failed';
+}
+
+export interface LocalFinalizeResult {
+  backend: 'local';
+  id: string;
+  title: string;
+  status: 'recording' | 'transcribing' | 'done' | 'failed';
+}
+
+export interface ModelStatus {
+  state: 'not_downloaded' | 'downloading' | 'ready' | 'error' | 'unsupported';
+  version?: string;
+}
+
+export const local = {
+  finalizeRecording(
+    audio: number[],
+    title: string,
+    createdAt: string,
+    durationSeconds: number
+  ): Promise<LocalFinalizeResult> {
+    return invoke<LocalFinalizeResult>('local_finalize_recording', {
+      audio,
+      title,
+      createdAt,
+      durationSeconds,
+    });
+  },
+  listRecordings(): Promise<RecordingSummary[]> {
+    return invoke<RecordingSummary[]>('list_local_recordings');
+  },
+  modelStatus(): Promise<ModelStatus> {
+    return invoke<ModelStatus>('local_model_status');
+  },
+  downloadModel(): Promise<void> {
+    return invoke('download_local_model');
+  },
+  openLibraryWindow(): Promise<void> {
+    return invoke('create_library_window');
+  },
+};
+
+export async function getBackendSetting(): Promise<'ariso' | 'local'> {
+  const store = await load('settings.json', { autoSave: true });
+  const v = await store.get<string>('backend');
+  return v === 'local' ? 'local' : 'ariso';
+}
+
+export async function setBackendSetting(backend: 'ariso' | 'local'): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('backend', backend);
+}
