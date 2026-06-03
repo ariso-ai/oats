@@ -226,7 +226,11 @@ mod tests {
     async fn finalize_writes_transcript_and_marks_done() {
         let tmp = tempfile::tempdir().unwrap();
         let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let stub = write_stub(tmp.path(), &format!("cat <<'EOF'\n{json}\nEOF"));
+        // Branch on the `notes` subcommand so the stub's transcript JSON isn't
+        // dumped into note.md; this test exercises only the transcribe path.
+        let body =
+            format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         let res = finalize_core(
