@@ -144,7 +144,7 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
 /// needed. The download is pinned under the `--models` dir (in an `llm`
 /// subdir) so model files live alongside the ASR/diarizer models. Download
 /// progress is reported to STDERR only — stdout stays clean for the result.
-func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
+func loadNotesModel(modelsURL: URL, onProgress: ((Double) -> Void)? = nil) async throws -> ModelContainer {
     // mlx-swift-lm 3.x is provider-agnostic: it takes an injected `Downloader`
     // and `TokenizerLoader`. The MLXHuggingFace macros bridge HuggingFace's
     // `HubClient` / swift-transformers `AutoTokenizer` into those protocols.
@@ -152,23 +152,20 @@ func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
     // alongside the ASR/diarizer models (the `llm/hub` subdir).
     let cacheDir = modelsURL.appendingPathComponent("llm").appendingPathComponent("hub")
     let hub = HubClient(cache: HubCache(cacheDirectory: cacheDir))
-    var lastReported = -1
     return try await LLMModelFactory.shared.loadContainer(
         from: #hubDownloader(hub),
         using: #huggingFaceTokenizerLoader(),
         configuration: LLMRegistry.gemma4_e2b_it_4bit
     ) { progress in
-        let pct = Int(progress.fractionCompleted * 100)
-        if pct != lastReported {
-            lastReported = pct
-            stderrLine("notes: downloading model \(pct)%")
-        }
+        onProgress?(progress.fractionCompleted)
     }
 }
 
 /// Run the notes model on `transcript` and return the full Markdown notes.
 func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
-    let container = try await loadNotesModel(modelsURL: modelsURL)
+    let container = try await loadNotesModel(modelsURL: modelsURL) { f in
+        stderrLine("notes: downloading model \(Int(f * 100))%")
+    }
     let prompt = """
         You are a meeting-notes assistant. Read the transcript below and write concise meeting notes in Markdown with these sections, omitting any that have no content:
 
@@ -189,7 +186,7 @@ func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
         """
     let session = ChatSession(
         container,
-        generateParameters: GenerateParameters(temperature: 0.3))
+        generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0.3))
     return try await session.respond(to: prompt)
 }
 
@@ -206,18 +203,22 @@ let diarizerDir = modelsURL.appendingPathComponent("diarizer")
 if isDownload {
     runToCompletion {
         do {
-            // Two download phases share the 0..1 bar: ASR maps to 0..0.5,
-            // diarizer to 0.5..1.0, so the bar advances monotonically.
+            // Three download phases share the 0..1 bar: ASR maps to 0..0.33,
+            // diarizer to 0.33..0.5, and the gemma notes model to 0.5..1.0,
+            // so the bar advances monotonically.
             let onAsr: DownloadUtils.ProgressHandler = { p in
-                emitProgress(p.fractionCompleted * 0.5)
+                emitProgress(p.fractionCompleted * 0.33)
             }
             let onDiarizer: DownloadUtils.ProgressHandler = { p in
-                emitProgress(0.5 + p.fractionCompleted * 0.5)
+                emitProgress(0.33 + p.fractionCompleted * 0.17)
             }
             _ = try await AsrModels.downloadAndLoad(
                 to: asrDir, version: .v3, progressHandler: onAsr)
             _ = try await DiarizerModels.downloadIfNeeded(
                 to: diarizerDir, progressHandler: onDiarizer)
+            _ = try await loadNotesModel(modelsURL: modelsURL) { f in
+                emitProgress(0.5 + f * 0.5)
+            }
             emitProgress(1.0)
             stdoutLine("{\"type\":\"done\"}")
         } catch {
