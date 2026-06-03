@@ -165,6 +165,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
+import { shouldAutoDownload } from './settingsDownload';
 import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
@@ -202,7 +203,12 @@ async function onSelectBackend(e: Event) {
   const next = (e.target as HTMLSelectElement).value === 'local' ? 'local' : 'ariso';
   backend.value = next;
   await setBackendSetting(next);
-  if (next === 'local') await refreshModelStatus();
+  if (next === 'local') {
+    await refreshModelStatus();
+    if (shouldAutoDownload(next, modelStatus.value.state)) {
+      void onDownloadModel();
+    }
+  }
 }
 
 async function onDownloadModel() {
