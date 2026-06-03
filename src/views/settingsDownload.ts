@@ -23,3 +23,16 @@ export function llmRowState(
   }
   return llmReady ? 'ready' : 'not_downloaded';
 }
+
+/**
+ * Whether every local model is fully installed — the ASR/diarizer manifest is
+ * ready AND the notes LLM (gemma) is present. Drives the Install button: it is
+ * disabled/labelled "Installed" only when this is true; otherwise the button
+ * reads "Install" and downloads whatever is still missing.
+ */
+export function isModelInstalled(
+  state: ModelStatus['state'],
+  llmReady: boolean | undefined,
+): boolean {
+  return state === 'ready' && llmReady === true;
+}

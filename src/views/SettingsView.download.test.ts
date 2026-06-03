@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldAutoDownload, llmRowState } from './settingsDownload';
+import { shouldAutoDownload, llmRowState, isModelInstalled } from './settingsDownload';
 
 describe('shouldAutoDownload', () => {
   it('starts for local when not yet downloaded', () => {
@@ -26,5 +26,21 @@ describe('llmRowState', () => {
     expect(llmRowState('downloading', false)).toBe('downloading');
     expect(llmRowState('error', false)).toBe('error');
     expect(llmRowState('unsupported', undefined)).toBe('unsupported');
+  });
+});
+
+describe('isModelInstalled', () => {
+  it('is true only when manifest ready AND the LLM is present', () => {
+    expect(isModelInstalled('ready', true)).toBe(true);
+  });
+  it('is false when the LLM is missing even if the manifest is ready', () => {
+    expect(isModelInstalled('ready', false)).toBe(false);
+    expect(isModelInstalled('ready', undefined)).toBe(false);
+  });
+  it('is false for non-ready states', () => {
+    expect(isModelInstalled('not_downloaded', false)).toBe(false);
+    expect(isModelInstalled('downloading', false)).toBe(false);
+    expect(isModelInstalled('error', false)).toBe(false);
+    expect(isModelInstalled('unsupported', false)).toBe(false);
   });
 });

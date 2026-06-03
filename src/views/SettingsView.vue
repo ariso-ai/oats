@@ -38,10 +38,10 @@
         <button
           class="secondary-btn"
           style="margin-top: 12px"
-          :disabled="modelStatus.state === 'downloading' || modelStatus.state === 'ready' || modelStatus.state === 'unsupported'"
+          :disabled="modelStatus.state === 'downloading' || modelStatus.state === 'unsupported' || isModelInstalled(modelStatus.state, modelStatus.llmReady)"
           @click="onDownloadModel"
         >
-          {{ modelStatus.state === 'ready' ? 'Model installed' : 'Download model' }}
+          {{ isModelInstalled(modelStatus.state, modelStatus.llmReady) ? 'Installed' : 'Install' }}
         </button>
       </div>
     </section>
@@ -169,7 +169,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
-import { shouldAutoDownload, llmRowState } from './settingsDownload';
+import { shouldAutoDownload, llmRowState, isModelInstalled } from './settingsDownload';
 import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
