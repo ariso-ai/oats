@@ -43,7 +43,7 @@ Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and no
 
 ## Local backend (on-device transcription)
 
-The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. It uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). **Requires Apple Silicon, macOS 14+.**
+The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. It uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-4-e2b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-e2b-it-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording). **Requires Apple Silicon, macOS 14+.**
 
 Build the sidecar before `tauri:build` / `tauri:dev` (it is not committed — it's a build artifact):
 
@@ -56,17 +56,18 @@ cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
 
 Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (declared in `tauri.conf.json > bundle.externalBin`). At runtime the app resolves the sidecar next to its own executable, or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require this binary to be present — build the sidecar first on a fresh checkout.
 
-The sidecar contract (stdout is JSON only; logs go to stderr):
+The sidecar contract (stdout carries only the result — transcript JSON, progress JSON-lines, or notes Markdown; all logs go to stderr):
 
 - `ariso-stt --audio <path> --models <dir> --format json` → one `{language, durationSeconds, participants[], segments[]}` object.
-- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`.
+- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`. Downloads ASR (`0–0.33`), diarizer (`0.33–0.5`), and the gemma notes model (`0.5–1.0`) into `<dir>` — the gemma weights land under `<dir>/llm/hub`.
+- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Uses `mlx-community/gemma-4-e2b-it-4bit`; the model must already be present (fetched via `download`).
 
 Storage layout under `~/.ariso/`:
 
-- `models/` — downloaded CoreML model bundles (`asr/`, `diarizer/`) + a `manifest.json` ready-marker
-- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `meta.json`
+- `models/` — downloaded CoreML model bundles (`asr/`, `diarizer/`), the gemma notes model (`llm/hub/`) + a `manifest.json` ready-marker
+- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `note.md` (meeting notes), `meta.json`
 
-In Settings → **Transcription Backend**, switch to **Local** and click **Download model** (one-time, ~1 GB). Past local recordings appear in the tray **Library…** window.
+In Settings → **Transcription Backend**, switch to **Local**; the model download (ASR + diarizer + gemma notes model, ~2 GB total, one-time) starts automatically. If it fails, click **Download model** to retry. Past local recordings appear in the tray **Library…** window.
 
 ## Testing Transcription with a Virtual Audio Device
 
