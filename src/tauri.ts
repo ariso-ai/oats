@@ -182,8 +182,11 @@ export const local = {
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
   },
-  downloadModel(): Promise<void> {
-    return invoke('download_local_model');
+  downloadStt(): Promise<void> {
+    return invoke('download_local_stt');
+  },
+  downloadLlm(): Promise<void> {
+    return invoke('download_local_llm');
   },
   openLibraryWindow(): Promise<void> {
     return invoke('create_library_window');

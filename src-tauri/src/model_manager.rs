@@ -98,8 +98,18 @@ struct ProgressLine {
     fraction: Option<f64>,
 }
 
-#[tauri::command]
-pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
+/// Run the sidecar `download --target <target>`, streaming progress as the
+/// given events. `write_manifest_after` controls whether the STT readiness
+/// manifest is written on success (true for STT; the LLM uses disk-presence
+/// readiness instead). A single global guard serializes downloads.
+async fn run_download(
+    app: tauri::AppHandle,
+    target: &str,
+    write_manifest_after: bool,
+    ev_progress: &str,
+    ev_done: &str,
+    ev_error: &str,
+) -> Result<(), String> {
     // Reject re-entry; clear the flag on every exit path via the Drop guard.
     if DOWNLOAD_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -124,6 +134,8 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
         .arg("download")
         .arg("--models")
         .arg(&models)
+        .arg("--target")
+        .arg(target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -144,7 +156,7 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
     while let Ok(Some(line)) = lines.next_line().await {
         if let Ok(p) = serde_json::from_str::<ProgressLine>(&line) {
             if p.kind == "progress" {
-                let _ = app.emit("model://progress", p.fraction.unwrap_or(-1.0));
+                let _ = app.emit(ev_progress, p.fraction.unwrap_or(-1.0));
             }
         }
     }
@@ -153,13 +165,44 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
     let stderr_bytes = stderr_task.await.unwrap_or_default();
     if !exit.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        let _ = app.emit("model://error", stderr.clone());
+        let _ = app.emit(ev_error, stderr.clone());
         return Err(format!("model download failed: {stderr}"));
     }
 
-    write_manifest(&root, &now_marker())?;
-    let _ = app.emit("model://done", ());
+    if write_manifest_after {
+        write_manifest(&root, &now_marker())?;
+    }
+    let _ = app.emit(ev_done, ());
     Ok(())
+}
+
+/// Download the STT models (ASR + diarizer) and write the readiness manifest.
+#[tauri::command]
+pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
+    run_download(
+        app,
+        "stt",
+        true,
+        "model://stt/progress",
+        "model://stt/done",
+        "model://stt/error",
+    )
+    .await
+}
+
+/// Download the notes LLM (gemma). Readiness is disk-presence based
+/// (`llm_is_ready`), so no manifest is written.
+#[tauri::command]
+pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
+    run_download(
+        app,
+        "llm",
+        false,
+        "model://llm/progress",
+        "model://llm/done",
+        "model://llm/error",
+    )
+    .await
 }
 
 /// Opaque download marker. Only stored in manifest.json; never parsed for

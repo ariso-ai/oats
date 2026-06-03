@@ -1,6 +1,9 @@
 import type { ModelStatus } from '../tauri';
 
-/** Whether switching to `backend` with the given model state should auto-start a download. */
+/** Per-model install/download UI state, independent of the backend status. */
+export type Busy = 'idle' | 'downloading' | 'error';
+
+/** Whether switching to `backend` with the given STT state should auto-start the STT download. */
 export function shouldAutoDownload(
   backend: 'ariso' | 'local',
   state: ModelStatus['state'],
@@ -10,29 +13,19 @@ export function shouldAutoDownload(
 }
 
 /**
- * Display state for the notes-LLM (gemma) status row. While the overall model
- * download is in progress (or errored/unsupported), the LLM shares that state;
- * otherwise it reflects whether the gemma model is actually present on disk.
+ * Status text for a single model row. A live download/error (`busy`) takes
+ * precedence; otherwise the row reflects whether the model is installed.
+ * `readyLabel` lets the STT row show its version (e.g. "Ready (parakeet…)").
  */
-export function llmRowState(
-  overall: ModelStatus['state'],
-  llmReady: boolean | undefined,
-): ModelStatus['state'] {
-  if (overall === 'downloading' || overall === 'error' || overall === 'unsupported') {
-    return overall;
+export function rowStatusText(
+  installed: boolean,
+  busy: Busy,
+  progress: number | null,
+  readyLabel = 'Ready',
+): string {
+  if (busy === 'downloading') {
+    return progress == null ? 'Downloading…' : `Downloading ${Math.round(progress * 100)}%`;
   }
-  return llmReady ? 'ready' : 'not_downloaded';
-}
-
-/**
- * Whether every local model is fully installed — the ASR/diarizer manifest is
- * ready AND the notes LLM (gemma) is present. Drives the Install button: it is
- * disabled/labelled "Installed" only when this is true; otherwise the button
- * reads "Install" and downloads whatever is still missing.
- */
-export function isModelInstalled(
-  state: ModelStatus['state'],
-  llmReady: boolean | undefined,
-): boolean {
-  return state === 'ready' && llmReady === true;
+  if (busy === 'error') return 'Download failed';
+  return installed ? readyLabel : 'Not downloaded';
 }

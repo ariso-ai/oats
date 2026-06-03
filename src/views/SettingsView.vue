@@ -24,24 +24,32 @@
     <section v-if="backend === 'local'" class="section">
       <h2 class="section-title">Local Transcription</h2>
       <div class="card">
-        <div v-if="modelPrompt && modelStatus.state !== 'ready'" class="signin-banner">
+        <div v-if="modelPrompt && !sttInstalled" class="signin-banner">
           Download the transcription model to record locally.
         </div>
         <div class="setting-row">
-          <span class="setting-label">Model status</span>
-          <span class="setting-label">{{ modelStatusText }}</span>
+          <span class="setting-label">Speech-to-text (STT)</span>
+          <span class="setting-label">{{ sttStatusText }}</span>
         </div>
-        <div class="setting-row">
+        <button
+          class="secondary-btn"
+          style="margin-top: 8px"
+          :disabled="sttInstalled || anyDownloading"
+          @click="onInstallStt"
+        >
+          {{ sttInstalled ? 'Installed' : 'Install' }}
+        </button>
+        <div class="setting-row" style="margin-top: 16px">
           <span class="setting-label">Notes model (LLM)</span>
           <span class="setting-label">{{ llmStatusText }}</span>
         </div>
         <button
           class="secondary-btn"
-          style="margin-top: 12px"
-          :disabled="modelStatus.state === 'downloading' || modelStatus.state === 'unsupported' || isModelInstalled(modelStatus.state, modelStatus.llmReady)"
-          @click="onDownloadModel"
+          style="margin-top: 8px"
+          :disabled="llmInstalled || anyDownloading"
+          @click="onInstallLlm"
         >
-          {{ isModelInstalled(modelStatus.state, modelStatus.llmReady) ? 'Installed' : 'Install' }}
+          {{ llmInstalled ? 'Installed' : 'Install' }}
         </button>
       </div>
     </section>
@@ -169,7 +177,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
-import { shouldAutoDownload, llmRowState, isModelInstalled } from './settingsDownload';
+import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
@@ -192,14 +200,19 @@ const appVersion = __APP_VERSION__;
 
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
-const modelProgress = ref<number | null>(null);
 const modelPrompt = ref(false);
+
+// Per-model download UI state — the STT and LLM Install buttons are independent.
+const sttBusy = ref<Busy>('idle');
+const llmBusy = ref<Busy>('idle');
+const sttProgress = ref<number | null>(null);
+const llmProgress = ref<number | null>(null);
 
 async function refreshModelStatus() {
   try {
     modelStatus.value = await local.modelStatus();
   } catch {
-    modelStatus.value = { state: 'error' };
+    modelStatus.value = { state: 'not_downloaded' };
   }
 }
 
@@ -209,52 +222,56 @@ async function onSelectBackend(e: Event) {
   await setBackendSetting(next);
   if (next === 'local') {
     await refreshModelStatus();
+    // Auto-start the STT download (needed to record). The LLM is opt-in via its button.
     if (shouldAutoDownload(next, modelStatus.value.state)) {
-      void onDownloadModel();
+      void onInstallStt();
     }
   }
 }
 
-async function onDownloadModel() {
-  modelStatus.value = { state: 'downloading' };
-  modelProgress.value = null;
+async function onInstallStt() {
+  sttBusy.value = 'downloading';
+  sttProgress.value = null;
   try {
-    await local.downloadModel();
-    // Reflect the freshly-installed model on success.
+    await local.downloadStt();
     await refreshModelStatus();
+    sttBusy.value = 'idle';
   } catch (e) {
-    // Keep the failure visible; do NOT refresh here or the on-disk status
-    // (still "not_downloaded") would clobber the error indication.
-    console.error('Model download failed', e);
-    modelStatus.value = { state: 'error' };
+    console.error('STT model download failed', e);
+    sttBusy.value = 'error';
   }
 }
 
-const modelStatusText = computed(() => {
-  switch (modelStatus.value.state) {
-    case 'ready': return `Ready${modelStatus.value.version ? ` (${modelStatus.value.version})` : ''}`;
-    case 'downloading':
-      return modelProgress.value == null
-        ? 'Downloading…'
-        : `Downloading ${Math.round(modelProgress.value * 100)}%`;
-    case 'error': return 'Download failed';
-    case 'unsupported': return 'Requires Apple Silicon, macOS 14+';
-    default: return 'Not downloaded';
+async function onInstallLlm() {
+  llmBusy.value = 'downloading';
+  llmProgress.value = null;
+  try {
+    await local.downloadLlm();
+    await refreshModelStatus();
+    llmBusy.value = 'idle';
+  } catch (e) {
+    console.error('LLM model download failed', e);
+    llmBusy.value = 'error';
   }
-});
+}
 
-const llmStatusText = computed(() => {
-  switch (llmRowState(modelStatus.value.state, modelStatus.value.llmReady)) {
-    case 'ready': return 'Ready';
-    case 'downloading':
-      return modelProgress.value == null
-        ? 'Downloading…'
-        : `Downloading ${Math.round(modelProgress.value * 100)}%`;
-    case 'error': return 'Download failed';
-    case 'unsupported': return 'Requires Apple Silicon, macOS 14+';
-    default: return 'Not downloaded';
-  }
-});
+const sttInstalled = computed(() => modelStatus.value.state === 'ready');
+const llmInstalled = computed(() => modelStatus.value.llmReady === true);
+const anyDownloading = computed(
+  () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
+);
+
+const sttStatusText = computed(() =>
+  rowStatusText(
+    sttInstalled.value,
+    sttBusy.value,
+    sttProgress.value,
+    modelStatus.value.version ? `Ready (${modelStatus.value.version})` : 'Ready',
+  ),
+);
+const llmStatusText = computed(() =>
+  rowStatusText(llmInstalled.value, llmBusy.value, llmProgress.value),
+);
 
 const checking = ref(false);
 const autoCheck = ref(true);
@@ -447,24 +464,18 @@ onMounted(async () => {
   }
   if (backend.value === 'local') await refreshModelStatus();
 
-  const unModelProgress = await listen<number>('model://progress', (e) => {
-    // Set the downloading state first so the computed always reads a coherent
-    // pair. A negative payload means indeterminate (show "Downloading…").
-    modelStatus.value = { state: 'downloading' };
-    modelProgress.value = e.payload >= 0 ? e.payload : null;
+  // Per-model download progress. Completion/failure is handled by the awaited
+  // install calls (onInstallStt / onInstallLlm); these events only feed the bar.
+  const unSttProgress = await listen<number>('model://stt/progress', (e) => {
+    sttProgress.value = e.payload >= 0 ? e.payload : null;
   });
-  const unModelDone = await listen('model://done', async () => {
-    modelProgress.value = null;
-    await refreshModelStatus();
-  });
-  const unModelError = await listen('model://error', async () => {
-    modelProgress.value = null;
-    modelStatus.value = { state: 'error' };
+  const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
+    llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
   const unModelPrompt = await listen('tray://show-model-prompt', () => {
     modelPrompt.value = true;
   });
-  unlistenUpdates.push(unModelProgress, unModelDone, unModelError, unModelPrompt);
+  unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
 });
 
 onUnmounted(() => {

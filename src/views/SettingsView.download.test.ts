@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldAutoDownload, llmRowState, isModelInstalled } from './settingsDownload';
+import { shouldAutoDownload, rowStatusText } from './settingsDownload';
 
 describe('shouldAutoDownload', () => {
   it('starts for local when not yet downloaded', () => {
@@ -16,31 +16,21 @@ describe('shouldAutoDownload', () => {
   });
 });
 
-describe('llmRowState', () => {
-  it('reflects gemma presence when not actively downloading', () => {
-    expect(llmRowState('ready', true)).toBe('ready');
-    expect(llmRowState('ready', false)).toBe('not_downloaded');
-    expect(llmRowState('not_downloaded', undefined)).toBe('not_downloaded');
+describe('rowStatusText', () => {
+  it('shows a download percentage while downloading', () => {
+    expect(rowStatusText(false, 'downloading', 0.42)).toBe('Downloading 42%');
+    expect(rowStatusText(false, 'downloading', null)).toBe('Downloading…');
   });
-  it('shares the overall state while downloading or errored', () => {
-    expect(llmRowState('downloading', false)).toBe('downloading');
-    expect(llmRowState('error', false)).toBe('error');
-    expect(llmRowState('unsupported', undefined)).toBe('unsupported');
+  it('shows failure on error', () => {
+    expect(rowStatusText(false, 'error', null)).toBe('Download failed');
   });
-});
-
-describe('isModelInstalled', () => {
-  it('is true only when manifest ready AND the LLM is present', () => {
-    expect(isModelInstalled('ready', true)).toBe(true);
+  it('reflects installed state when idle', () => {
+    expect(rowStatusText(true, 'idle', null)).toBe('Ready');
+    expect(rowStatusText(false, 'idle', null)).toBe('Not downloaded');
   });
-  it('is false when the LLM is missing even if the manifest is ready', () => {
-    expect(isModelInstalled('ready', false)).toBe(false);
-    expect(isModelInstalled('ready', undefined)).toBe(false);
-  });
-  it('is false for non-ready states', () => {
-    expect(isModelInstalled('not_downloaded', false)).toBe(false);
-    expect(isModelInstalled('downloading', false)).toBe(false);
-    expect(isModelInstalled('error', false)).toBe(false);
-    expect(isModelInstalled('unsupported', false)).toBe(false);
+  it('uses the provided ready label when installed', () => {
+    expect(rowStatusText(true, 'idle', null, 'Ready (parakeet-tdt-0.6b-v3)')).toBe(
+      'Ready (parakeet-tdt-0.6b-v3)',
+    );
   });
 });
