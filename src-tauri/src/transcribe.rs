@@ -8,7 +8,6 @@ use tokio::process::Command;
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptResult {
     pub language: String,
-    pub duration_seconds: f64,
     pub participants: Vec<crate::storage::Participant>,
     pub segments: Vec<crate::storage::Segment>,
 }
