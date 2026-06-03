@@ -1,5 +1,8 @@
 import Foundation
 import FluidAudio
+import Hub
+import MLXLLM
+import MLXLMCommon
 
 // MARK: - Output contract (must match the Rust `TranscriptResult` deserializer)
 
@@ -133,6 +136,54 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
         segments: segments)
 }
 
+// MARK: - Notes (LLM meeting-notes generation)
+
+/// Load the gemma instruct model used for meeting notes, downloading it if
+/// needed. The download is pinned under the `--models` dir (in an `llm`
+/// subdir) so model files live alongside the ASR/diarizer models. Download
+/// progress is reported to STDERR only — stdout stays clean for the result.
+func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
+    let hub = HubApi(downloadBase: modelsURL.appendingPathComponent("llm"))
+    var lastReported = -1
+    return try await LLMModelFactory.shared.loadContainer(
+        hub: hub,
+        configuration: LLMRegistry.gemma3n_E2B_it_lm_4bit
+    ) { progress in
+        let pct = Int(progress.fractionCompleted * 100)
+        if pct != lastReported {
+            lastReported = pct
+            stderrLine("notes: downloading model \(pct)%")
+        }
+    }
+}
+
+/// Run the notes model on `transcript` and return the full Markdown notes.
+func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
+    let container = try await loadNotesModel(modelsURL: modelsURL)
+    let prompt = """
+        You are a meeting-notes assistant. Read the transcript below and write concise meeting notes in Markdown with these sections, omitting any that have no content:
+
+        ## Summary
+        A 2-3 sentence overview.
+
+        ## Key Points
+        - bullet points of the main discussion
+
+        ## Decisions
+        - decisions that were made
+
+        ## Action Items
+        - owner: task
+
+        Transcript:
+        \(transcript)
+        """
+    let session = ChatSession(
+        container,
+        generateParameters: GenerateParameters(temperature: 0.3))
+    return try await session.respond(to: prompt)
+}
+
 // MARK: - Entry
 
 let arguments = CommandLine.arguments
@@ -162,6 +213,26 @@ if isDownload {
             stdoutLine("{\"type\":\"done\"}")
         } catch {
             fail("download error: \(error)")
+        }
+    }
+}
+
+let isNotes = arguments.count > 1 && arguments[1] == "notes"
+
+if isNotes {
+    guard let transcriptPath = argValue("--transcript") else { fail("missing --transcript") }
+    let transcript: String
+    do {
+        transcript = try String(contentsOf: URL(fileURLWithPath: transcriptPath), encoding: .utf8)
+    } catch {
+        fail("notes read error: \(error)")
+    }
+    runToCompletion {
+        do {
+            let notes = try await generateNotes(transcript: transcript, modelsURL: modelsURL)
+            FileHandle.standardOutput.write(Data(notes.utf8))
+        } catch {
+            fail("notes error: \(error)")
         }
     }
 }
