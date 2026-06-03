@@ -47,7 +47,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
           key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             rust-aarch64-apple-darwin-
