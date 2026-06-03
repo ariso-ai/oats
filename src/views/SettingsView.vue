@@ -417,7 +417,11 @@ onMounted(async () => {
   // Save unlisteners so onUnmounted can clear them.
   unlistenUpdates = [unAvail, unNone, unChecking, unError];
 
-  backend.value = await getBackendSetting();
+  try {
+    backend.value = await getBackendSetting();
+  } catch (e) {
+    console.error('Failed to read backend setting; defaulting to Ariso', e);
+  }
   if (backend.value === 'local') await refreshModelStatus();
 
   const unModelProgress = await listen<number>('model://progress', (e) => {

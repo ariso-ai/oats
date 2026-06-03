@@ -88,7 +88,7 @@ swappable "transcriber" boundary instead of FFI-ing a Swift package into the Rus
 
 **Sidecar contract:**
 
-```
+```bash
 ariso-stt --audio <path> --models <dir> --format json
 ```
 
@@ -116,7 +116,7 @@ macOS 14+" and the download/record actions are disabled.
 
 ## 4. Storage layer (`storage.rs`, `~/.ariso/`)
 
-```
+```text
 ~/.ariso/
   run/                              # existing (MCP socket) — untouched
   models/

@@ -6,7 +6,7 @@
           {{ uploadResult === 'success' ? '✓' : '✗' }}
         </span>
         <span class="upload-label">
-          {{ uploadResult === 'success' ? `${finalizeVerb}e successful` : `${finalizeVerb}e failed` }}
+          {{ uploadResult === 'success' ? successLabel : failLabel }}
         </span>
         <button class="close-btn" @click.stop.prevent="closeWindow">Close</button>
       </div>
@@ -14,7 +14,7 @@
     <template v-else-if="isUploading">
       <div class="upload-info" data-tauri-drag-region>
         <span class="upload-spinner" />
-        <span class="upload-label">{{ finalizeVerb }}ing…</span>
+        <span class="upload-label">{{ progressLabel }}</span>
       </div>
     </template>
     <template v-else>
@@ -77,9 +77,10 @@ import { getActiveBackend, type Backend } from '../composables/useBackend';
 const recorder = useRecorder();
 const waveform = useWaveform();
 const backend = ref<Backend | null>(null);
-const finalizeVerb = computed(() =>
-  backend.value?.id === 'local' ? 'Transcrib' : 'Upload'
-);
+const isLocal = computed(() => backend.value?.id === 'local');
+const successLabel = computed(() => (isLocal.value ? 'Transcription complete' : 'Upload successful'));
+const failLabel = computed(() => (isLocal.value ? 'Transcription failed' : 'Upload failed'));
+const progressLabel = computed(() => (isLocal.value ? 'Transcribing…' : 'Uploading…'));
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
 

@@ -154,10 +154,11 @@ pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut out = String::new();
     out.push_str("---\n");
-    out.push_str(&format!("title: {}\n", meta.title));
-    out.push_str(&format!("date: {}\n", meta.created_at));
+    out.push_str(&format!("title: \"{}\"\n", esc(&meta.title)));
+    out.push_str(&format!("date: \"{}\"\n", esc(&meta.created_at)));
     out.push_str(&format!("duration: \"{}\"\n", format_hms(meta.duration_seconds as f64)));
     out.push_str(&format!("participants: [{participants_yaml}]\n"));
     out.push_str("---\n\n");
