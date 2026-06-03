@@ -45,16 +45,24 @@ Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and no
 
 The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. It uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording). **Requires Apple Silicon, macOS 14+.**
 
-Build the sidecar before `tauri:build` / `tauri:dev` (it is not committed — it's a build artifact):
+Build the sidecar before `tauri:build` / `tauri:dev` (these are build artifacts, not committed):
 
 ```bash
 cd src-tauri/ariso-stt
 swift build -c release
 mkdir -p ../binaries
 cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+
+# The notes backend uses MLX (Metal). `swift build` CANNOT compile MLX's Metal
+# shaders — only xcodebuild can — so build the metallib bundle separately and
+# ship it next to the sidecar. Without it, notes fail at runtime with
+# "Failed to load the default metallib".
+xcodebuild build -scheme ariso-stt -configuration Release \
+  -destination 'generic/platform=macOS' -derivedDataPath .xcode -skipMacroValidation
+cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 ```
 
-Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (declared in `tauri.conf.json > bundle.externalBin`). At runtime the app resolves the sidecar next to its own executable, or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require this binary to be present — build the sidecar first on a fresh checkout.
+Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources; the sidecar itself resolves next to the app executable or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../target/debug/`.
 
 The sidecar contract (stdout carries only the result — transcript JSON, progress JSON-lines, or notes Markdown; all logs go to stderr):
 

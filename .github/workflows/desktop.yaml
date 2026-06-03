@@ -119,12 +119,20 @@ jobs:
 
       # Same as the validate job: the sidecar is a gitignored build artifact
       # that `tauri:build` (via externalBin) needs present before bundling.
+      # Additionally build the MLX metallib bundle: `swift build` cannot compile
+      # MLX's Metal shaders, so the notes (LLM) backend fails at runtime with
+      # "Failed to load the default metallib". xcodebuild produces
+      # mlx-swift_Cmlx.bundle, which bundle.resources ships into the .app.
       - name: Build ariso-stt sidecar
         working-directory: src-tauri/ariso-stt
         run: |
           swift build -c release
           mkdir -p ../binaries
           cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+          xcodebuild build -scheme ariso-stt -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 
       - name: Build, sign, and notarize
         env:
