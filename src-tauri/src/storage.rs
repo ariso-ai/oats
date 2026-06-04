@@ -58,6 +58,12 @@ pub struct RecordingSummary {
     pub created_at: String,
     pub duration_seconds: u64,
     pub status: RecordingStatus,
+    /// Whether `recording.mp3` exists in the recording's directory.
+    pub has_audio: bool,
+    /// Whether `note.md` exists in the recording's directory.
+    pub has_note: bool,
+    /// Whether `transcript.md` exists in the recording's directory.
+    pub has_transcript: bool,
 }
 
 /// Resolve the `~/.ariso` root. `ARISO_ROOT` overrides (used by tests/dev);
@@ -200,13 +206,19 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
             continue;
         }
         match read_meta(&entry.path()) {
-            Ok(m) => out.push(RecordingSummary {
-                id: m.id,
-                title: m.title,
-                created_at: m.created_at,
-                duration_seconds: m.duration_seconds,
-                status: m.status,
-            }),
+            Ok(m) => {
+                let dir = entry.path();
+                out.push(RecordingSummary {
+                    id: m.id,
+                    title: m.title,
+                    created_at: m.created_at,
+                    duration_seconds: m.duration_seconds,
+                    status: m.status,
+                    has_audio: dir.join("recording.mp3").exists(),
+                    has_note: dir.join("note.md").exists(),
+                    has_transcript: dir.join("transcript.md").exists(),
+                });
+            }
             Err(_) => continue,
         }
     }
@@ -274,6 +286,45 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "2026-06-02T10-00-00Z");
         assert_eq!(list[1].id, "2026-06-01T10-00-00Z");
+        // Artifact files absent — all flags should be false.
+        assert!(!list[0].has_audio);
+        assert!(!list[0].has_note);
+        assert!(!list[0].has_transcript);
+        assert!(!list[1].has_audio);
+        assert!(!list[1].has_note);
+        assert!(!list[1].has_transcript);
+    }
+
+    #[test]
+    fn lists_recordings_artifact_flags_reflect_file_existence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Recording with all three artifact files present.
+        let id_full = "2026-06-03T10-00-00Z";
+        let dir_full = create_recording_dir(root, id_full).unwrap();
+        write_meta(&dir_full, &meta_with(id_full, "2026-06-03T10:00:00Z")).unwrap();
+        std::fs::write(dir_full.join("recording.mp3"), b"audio").unwrap();
+        std::fs::write(dir_full.join("note.md"), b"notes").unwrap();
+        std::fs::write(dir_full.join("transcript.md"), b"transcript").unwrap();
+
+        // Recording with no artifact files.
+        let id_empty = "2026-06-02T10-00-00Z";
+        let dir_empty = create_recording_dir(root, id_empty).unwrap();
+        write_meta(&dir_empty, &meta_with(id_empty, "2026-06-02T10:00:00Z")).unwrap();
+
+        let list = list_recordings(root).unwrap();
+        assert_eq!(list.len(), 2);
+        // Newest first: id_full at index 0.
+        assert_eq!(list[0].id, id_full);
+        assert!(list[0].has_audio);
+        assert!(list[0].has_note);
+        assert!(list[0].has_transcript);
+
+        assert_eq!(list[1].id, id_empty);
+        assert!(!list[1].has_audio);
+        assert!(!list[1].has_note);
+        assert!(!list[1].has_transcript);
     }
 
     #[test]
