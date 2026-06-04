@@ -74,11 +74,16 @@ onMounted(async () => {
   padding: 24px;
   font-family: -apple-system, system-ui, sans-serif;
   background: #f5f5f7;
-  min-height: 100vh;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
 }
-.title { font-size: 20px; font-weight: 700; margin-bottom: 16px; color: #1d1d1f; }
+.title { font-size: 20px; font-weight: 700; margin-bottom: 16px; color: #1d1d1f; flex-shrink: 0; }
 .hint { font-size: 14px; color: #86868b; }
-.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* Scrolls vertically when the recordings overflow the window. min-height: 0 lets
+   this flex child shrink below its content height so overflow-y can engage. */
+.list { list-style: none; margin: 0; padding: 0 4px 0 0; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; overflow-y: auto; }
 .recording-row { background: #fff; border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
 .row-main { display: flex; justify-content: space-between; align-items: center; }
 .row-title { font-size: 14px; font-weight: 500; color: #1d1d1f; }
@@ -88,7 +93,10 @@ onMounted(async () => {
 .status-transcribing { color: #4f46e5; }
 .status-recording { color: #86868b; }
 .row-sub { display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: #86868b; }
-.row-controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+/* nowrap keeps the player + both buttons on one line; the player flexes to fill
+   the remaining width (see RecordingAudioPlayer .audio-el) while the buttons
+   keep their size. */
+.row-controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: nowrap; }
 .btn-note, .btn-transcript {
   font-size: 13px;
   padding: 5px 14px;
@@ -97,6 +105,8 @@ onMounted(async () => {
   background: white;
   color: #1d1d1f;
   cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .btn-note:disabled, .btn-transcript:disabled {
   opacity: 0.5;
