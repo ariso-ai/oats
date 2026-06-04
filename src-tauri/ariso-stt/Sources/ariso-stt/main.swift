@@ -172,16 +172,36 @@ func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
         - Use only facts stated in the transcript. Never invent details, names, or speakers.
         - The transcript labels speakers generically (e.g. "Speaker 1", "Speaker 2"). Do not invent any speaker or person who does not appear in the transcript.
         - Output the notes only — no preamble, no closing remarks, and never repeat or restate these instructions.
+        - Output raw Markdown directly. Never wrap the notes in a code fence (do not emit ``` or ```markdown).
         - Use these level-2 (##) sections, in this order: Summary, Key Points, Decisions, Action Items.
         - "Summary" is 2-3 sentences describing what the meeting was about. The other sections are bullet lists.
         - For each action item, state the task. Only attribute it to a speaker if that exact speaker explicitly committed to it in the transcript; otherwise give the task with no owner.
         - Omit any section that has no real content in the transcript (for example, if no decisions were made, leave out the Decisions section entirely). Never write placeholder text under a heading.
         """
+    // A repetition penalty is essential here: the small notes model otherwise
+    // falls into a degeneration loop, repeating a sentence until maxTokens and
+    // emitting the transcript back instead of a summary.
     let session = ChatSession(
         container,
         instructions: instructions,
-        generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0.3))
-    return try await session.respond(to: "Transcript:\n\(transcript)")
+        generateParameters: GenerateParameters(
+            maxTokens: 2048, temperature: 0.3,
+            repetitionPenalty: 1.15, repetitionContextSize: 64))
+    let raw = try await session.respond(to: "Transcript:\n\(transcript)")
+    return stripCodeFence(raw)
+}
+
+/// The small notes model often wraps its whole answer in a ```markdown … ```
+/// fence despite the prompt. Strip fence markers so `note.md` is raw Markdown:
+/// if the content is fully wrapped, unwrap it; otherwise drop any stray fence
+/// lines. Meeting notes never contain a legitimate code block, so removing all
+/// ``` lines is safe here.
+func stripCodeFence(_ raw: String) -> String {
+    let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+    let kept = normalized
+        .components(separatedBy: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+    return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 // MARK: - Entry
