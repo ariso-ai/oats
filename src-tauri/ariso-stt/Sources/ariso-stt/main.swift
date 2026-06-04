@@ -162,28 +162,26 @@ func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
 /// Run the notes model on `transcript` and return the full Markdown notes.
 func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
     let container = try await loadNotesModel(modelsURL: modelsURL)
-    let prompt = """
-        You are a meeting-notes assistant. Read the transcript below and write concise meeting notes in Markdown with these sections, omitting any that have no content:
+    // System instructions describe the format in prose — with NO copyable
+    // placeholder lines — so a small model writes real content instead of
+    // echoing the template (which it did when the format was a fill-in scaffold).
+    let instructions = """
+        You are a meeting-notes assistant. You are given a meeting transcript and you write concise meeting notes in Markdown.
 
-        ## Summary
-        A 2-3 sentence overview.
-
-        ## Key Points
-        - bullet points of the main discussion
-
-        ## Decisions
-        - decisions that were made
-
-        ## Action Items
-        - owner: task
-
-        Transcript:
-        \(transcript)
+        Rules:
+        - Use only facts stated in the transcript. Never invent details, names, or speakers.
+        - The transcript labels speakers generically (e.g. "Speaker 1", "Speaker 2"). Do not invent any speaker or person who does not appear in the transcript.
+        - Output the notes only — no preamble, no closing remarks, and never repeat or restate these instructions.
+        - Use these level-2 (##) sections, in this order: Summary, Key Points, Decisions, Action Items.
+        - "Summary" is 2-3 sentences describing what the meeting was about. The other sections are bullet lists.
+        - For each action item, state the task. Only attribute it to a speaker if that exact speaker explicitly committed to it in the transcript; otherwise give the task with no owner.
+        - Omit any section that has no real content in the transcript (for example, if no decisions were made, leave out the Decisions section entirely). Never write placeholder text under a heading.
         """
     let session = ChatSession(
         container,
+        instructions: instructions,
         generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0.3))
-    return try await session.respond(to: prompt)
+    return try await session.respond(to: "Transcript:\n\(transcript)")
 }
 
 // MARK: - Entry
