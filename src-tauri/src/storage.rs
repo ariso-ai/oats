@@ -207,16 +207,16 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
         }
         match read_meta(&entry.path()) {
             Ok(m) => {
-                let dir = entry.path();
+                let recording_dir = entry.path();
                 out.push(RecordingSummary {
                     id: m.id,
                     title: m.title,
                     created_at: m.created_at,
                     duration_seconds: m.duration_seconds,
                     status: m.status,
-                    has_audio: dir.join("recording.mp3").exists(),
-                    has_note: dir.join("note.md").exists(),
-                    has_transcript: dir.join("transcript.md").exists(),
+                    has_audio: recording_dir.join("recording.mp3").exists(),
+                    has_note: recording_dir.join("note.md").exists(),
+                    has_transcript: recording_dir.join("transcript.md").exists(),
                 });
             }
             Err(_) => continue,
