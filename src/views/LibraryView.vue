@@ -13,6 +13,11 @@
           <span>{{ formatDate(r.createdAt) }}</span>
           <span>{{ formatDuration(r.durationSeconds) }}</span>
         </div>
+        <div class="row-controls">
+          <RecordingAudioPlayer :id="r.id" :has-audio="r.hasAudio" />
+          <button class="btn-note" :disabled="!r.hasNote" @click="openNote(r.id)">Note</button>
+          <button class="btn-transcript" :disabled="!r.hasTranscript" @click="openTranscript(r.id)">Transcript</button>
+        </div>
       </li>
     </ul>
   </div>
@@ -21,6 +26,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { local, type RecordingSummary } from '../tauri';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
 const recordings = ref<RecordingSummary[]>([]);
 const loading = ref(true);
@@ -34,6 +40,22 @@ function formatDuration(secs: number): string {
 function formatDate(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+async function openNote(id: string) {
+  try {
+    await local.openRecordingFile(id, 'note');
+  } catch (e) {
+    console.error('Failed to open note', e);
+  }
+}
+
+async function openTranscript(id: string) {
+  try {
+    await local.openRecordingFile(id, 'transcript');
+  } catch (e) {
+    console.error('Failed to open transcript', e);
+  }
 }
 
 onMounted(async () => {
@@ -66,4 +88,18 @@ onMounted(async () => {
 .status-transcribing { color: #4f46e5; }
 .status-recording { color: #86868b; }
 .row-sub { display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: #86868b; }
+.row-controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.btn-note, .btn-transcript {
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  background: white;
+  color: #1d1d1f;
+  cursor: pointer;
+}
+.btn-note:disabled, .btn-transcript:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 </style>

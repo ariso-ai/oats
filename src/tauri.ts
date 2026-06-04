@@ -146,6 +146,9 @@ export interface RecordingSummary {
   createdAt: string;
   durationSeconds: number;
   status: 'recording' | 'transcribing' | 'done' | 'failed';
+  hasAudio: boolean;
+  hasNote: boolean;
+  hasTranscript: boolean;
 }
 
 export interface LocalFinalizeResult {
@@ -178,6 +181,12 @@ export const local = {
   },
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
+  },
+  readRecordingAudio(id: string): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('read_recording_audio', { id });
+  },
+  openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
+    return invoke('open_recording_file', { id, kind });
   },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
