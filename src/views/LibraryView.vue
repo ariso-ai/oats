@@ -1,6 +1,6 @@
 <template>
   <div class="library">
-    <h1 class="title">Library</h1>
+    <h1 class="title">Meetings</h1>
     <p v-if="loading" class="hint">Loading…</p>
     <p v-else-if="recordings.length === 0" class="hint">No recordings yet.</p>
     <ul v-else class="list">
