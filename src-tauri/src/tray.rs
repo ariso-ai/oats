@@ -136,7 +136,19 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 "library" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let _ = crate::commands::create_library_window(app_async).await;
+                        if crate::commands::active_backend(&app_async) == "local" {
+                            // Local backend: reuse the in-app Library window
+                            // (titled "Meetings").
+                            let _ = crate::commands::create_library_window(app_async).await;
+                        } else {
+                            // Ariso backend: meetings live in the web app.
+                            use tauri_plugin_opener::OpenerExt;
+                            let url = format!(
+                                "{}/my/meetings",
+                                crate::commands::WEB_APP_BASE_URL
+                            );
+                            let _ = app_async.opener().open_url(url, None::<&str>);
+                        }
                     });
                 }
                 "check_updates" => {
@@ -159,7 +171,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
-    let library = MenuItemBuilder::with_id("library", "Library...").build(app)?;
+    let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
 
