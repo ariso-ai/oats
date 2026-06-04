@@ -42,8 +42,8 @@ describe('LibraryView', () => {
 
   it('renders a row per recording in the order returned', async () => {
     listRecordings.mockResolvedValue([
-      { id: 'b', title: 'Second', createdAt: '2026-06-02T10:00:00Z', durationSeconds: 75, status: 'done' },
-      { id: 'a', title: 'First', createdAt: '2026-06-01T10:00:00Z', durationSeconds: 3661, status: 'failed' },
+      rec({ id: 'b', title: 'Second', createdAt: '2026-06-02T10:00:00Z', durationSeconds: 75, status: 'done' }),
+      rec({ id: 'a', title: 'First', createdAt: '2026-06-01T10:00:00Z', durationSeconds: 3661, status: 'failed' }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
@@ -104,6 +104,9 @@ describe('LibraryView', () => {
       createObjectURL: vi.fn(() => 'blob:x'),
       revokeObjectURL: vi.fn(),
     });
+    // jsdom does not implement HTMLMediaElement.play(); stub it so the
+    // best-effort programmatic play does not log a noisy "Not implemented".
+    vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
     readRecordingAudio.mockResolvedValue(new ArrayBuffer(8));
     listRecordings.mockResolvedValue([rec({ id: 'a', hasAudio: true })]);
     const wrapper = mount(LibraryView);
@@ -116,6 +119,28 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(readRecordingAudio).toHaveBeenCalledWith('a');
     expect(wrapper.find('audio.audio-el').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the error state and creates no blob URL when audio fails to load', async () => {
+    const createObjectURL = vi.fn(() => 'blob:x');
+    vi.stubGlobal('URL', {
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    readRecordingAudio.mockRejectedValue(new Error('boom'));
+    listRecordings.mockResolvedValue([rec({ id: 'a', hasAudio: true })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    const play = wrapper.find('.play-btn');
+    await play.trigger('click');
+    await flushPromises();
+    expect(readRecordingAudio).toHaveBeenCalledWith('a');
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(wrapper.find('audio.audio-el').exists()).toBe(false);
+    const playAfter = wrapper.find('.play-btn');
+    expect(playAfter.classes()).toContain('play-btn--error');
+    expect(playAfter.text()).toContain('Failed');
     vi.unstubAllGlobals();
   });
 });
