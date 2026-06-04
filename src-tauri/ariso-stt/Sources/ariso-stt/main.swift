@@ -145,34 +145,23 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
 
 // MARK: - Notes (LLM meeting-notes generation)
 
-/// Load the gemma instruct model used for meeting notes, downloading it if
-/// needed. The download is pinned under the `--models` dir (in an `llm`
-/// subdir) so model files live alongside the ASR/diarizer models. Download
-/// progress is reported to STDERR only — stdout stays clean for the result.
-func loadNotesModel(modelsURL: URL, onProgress: ((Double) -> Void)? = nil) async throws -> ModelContainer {
-    // mlx-swift-lm 3.x is provider-agnostic: it takes an injected `Downloader`
-    // and `TokenizerLoader`. The MLXHuggingFace macros bridge HuggingFace's
-    // `HubClient` / swift-transformers `AutoTokenizer` into those protocols.
-    // Pinning the `HubClient` cache under the `--models` dir keeps LLM weights
-    // alongside the ASR/diarizer models (the `llm/hub` subdir).
-    let cacheDir = modelsURL.appendingPathComponent("llm").appendingPathComponent("hub")
-    let hub = HubClient(cache: HubCache(cacheDirectory: cacheDir))
-    // Gemma 3 1B (QAT, 4-bit): small, fast, and — unlike gemma-4-e2b — NOT
-    // stored with HuggingFace Xet, so it downloads over plain LFS.
+/// Load the notes LLM from its local directory. The model is downloaded
+/// out-of-band by the Rust app from the project CDN (the published weights are
+/// HuggingFace Xet-backed, which the Swift HF client can't fetch), so here we
+/// only LOAD from disk — no network. Model + tokenizer are read from
+/// `<models>/llm/gemma-3-1b-it-qat-4bit/`.
+func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
+    let dir = modelsURL
+        .appendingPathComponent("llm")
+        .appendingPathComponent("gemma-3-1b-it-qat-4bit")
     return try await LLMModelFactory.shared.loadContainer(
-        from: #hubDownloader(hub),
-        using: #huggingFaceTokenizerLoader(),
-        configuration: LLMRegistry.gemma3_1B_qat_4bit
-    ) { progress in
-        onProgress?(progress.fractionCompleted)
-    }
+        from: dir,
+        using: #huggingFaceTokenizerLoader())
 }
 
 /// Run the notes model on `transcript` and return the full Markdown notes.
 func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
-    let container = try await loadNotesModel(modelsURL: modelsURL) { f in
-        stderrLine("notes: downloading model \(Int(f * 100))%")
-    }
+    let container = try await loadNotesModel(modelsURL: modelsURL)
     let prompt = """
         You are a meeting-notes assistant. Read the transcript below and write concise meeting notes in Markdown with these sections, omitting any that have no content:
 
@@ -208,48 +197,21 @@ let asrDir = modelsURL.appendingPathComponent("asr")
 let diarizerDir = modelsURL.appendingPathComponent("diarizer")
 
 if isDownload {
-    // `--target` selects which models to download. "all" (default) keeps the
-    // original three-phase behavior; "stt" downloads only ASR + diarizer and
-    // "llm" downloads only the gemma notes model, each over a full 0..1 bar.
-    let target = argValue("--target") ?? "all"
+    // Downloads the speech models (ASR + diarizer, CoreML) over a 0..1 bar:
+    // ASR 0..0.66, diarizer 0.66..1.0. The notes LLM is NOT downloaded here —
+    // the Rust app fetches it directly from the project CDN (see download_local_llm).
     runToCompletion {
         do {
-            switch target {
-            case "stt":
-                // STT only: ASR maps to 0..0.66, diarizer to 0.66..1.0.
-                let onAsr: DownloadUtils.ProgressHandler = { p in
-                    emitProgress(p.fractionCompleted * 0.66)
-                }
-                let onDiarizer: DownloadUtils.ProgressHandler = { p in
-                    emitProgress(0.66 + p.fractionCompleted * 0.34)
-                }
-                _ = try await AsrModels.downloadAndLoad(
-                    to: asrDir, version: .v3, progressHandler: onAsr)
-                _ = try await DiarizerModels.downloadIfNeeded(
-                    to: diarizerDir, progressHandler: onDiarizer)
-            case "llm":
-                // LLM only: the gemma notes model maps to the full 0..1 bar.
-                _ = try await loadNotesModel(modelsURL: modelsURL) { f in
-                    emitProgress(f)
-                }
-            default:
-                // "all" (and any unrecognized value): three phases share the
-                // 0..1 bar — ASR 0..0.33, diarizer 0.33..0.5, gemma 0.5..1.0 —
-                // so the bar advances monotonically.
-                let onAsr: DownloadUtils.ProgressHandler = { p in
-                    emitProgress(p.fractionCompleted * 0.33)
-                }
-                let onDiarizer: DownloadUtils.ProgressHandler = { p in
-                    emitProgress(0.33 + p.fractionCompleted * 0.17)
-                }
-                _ = try await AsrModels.downloadAndLoad(
-                    to: asrDir, version: .v3, progressHandler: onAsr)
-                _ = try await DiarizerModels.downloadIfNeeded(
-                    to: diarizerDir, progressHandler: onDiarizer)
-                _ = try await loadNotesModel(modelsURL: modelsURL) { f in
-                    emitProgress(0.5 + f * 0.5)
-                }
+            let onAsr: DownloadUtils.ProgressHandler = { p in
+                emitProgress(p.fractionCompleted * 0.66)
             }
+            let onDiarizer: DownloadUtils.ProgressHandler = { p in
+                emitProgress(0.66 + p.fractionCompleted * 0.34)
+            }
+            _ = try await AsrModels.downloadAndLoad(
+                to: asrDir, version: .v3, progressHandler: onAsr)
+            _ = try await DiarizerModels.downloadIfNeeded(
+                to: diarizerDir, progressHandler: onDiarizer)
             emitProgress(1.0)
             stdoutLine("{\"type\":\"done\"}")
         } catch {

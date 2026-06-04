@@ -67,15 +67,15 @@ Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-
 The sidecar contract (stdout carries only the result — transcript JSON, progress JSON-lines, or notes Markdown; all logs go to stderr):
 
 - `ariso-stt --audio <path> --models <dir> --format json` → one `{language, durationSeconds, participants[], segments[]}` object.
-- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`. Downloads ASR (`0–0.33`), diarizer (`0.33–0.5`), and the gemma notes model (`0.5–1.0`) into `<dir>` — the gemma weights land under `<dir>/llm/hub`.
-- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Uses `mlx-community/gemma-3-1b-it-qat-4bit`; the model must already be present (fetched via `download`).
+- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`. Downloads the speech models — ASR (`0–0.66`) and diarizer (`0.66–1.0`) — into `<dir>`. The notes LLM is NOT downloaded here.
+- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Loads the LLM from `<dir>/llm/gemma-3-1b-it-qat-4bit/` (a local directory; no network). The Rust app downloads that model directly from the project CDN (Cloudflare R2) — the published weights are HuggingFace Xet-backed, which the Swift HF client can't fetch.
 
 Storage layout under `~/.ariso/`:
 
-- `models/` — downloaded CoreML model bundles (`asr/`, `diarizer/`), the gemma notes model (`llm/hub/`) + a `manifest.json` ready-marker
+- `models/` — CoreML speech bundles (`asr/`, `diarizer/`) + `manifest.json` ready-marker; the notes LLM in `llm/gemma-3-1b-it-qat-4bit/` (with a `.complete` marker written only after a full download)
 - `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `note.md` (meeting notes), `meta.json`
 
-In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs each model independently: the speech voice model (ASR + diarizer) downloads automatically, and the language model (for notes) installs from its own **Install** button. Each shows a green tick when ready. Past local recordings appear in the tray **Library…** window.
+In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs each model independently: the speech voice model (ASR + diarizer, from the sidecar) downloads automatically, and the language model (for notes, from the project CDN) installs from its own **Install** button. Each shows a green tick when ready. Past local recordings appear in the tray **Library…** window.
 
 ## Testing Transcription with a Virtual Audio Device
 
