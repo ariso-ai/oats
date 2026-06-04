@@ -1,5 +1,10 @@
 import Foundation
 import FluidAudio
+import MLXLLM
+import MLXLMCommon
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
 // MARK: - Output contract (must match the Rust `TranscriptResult` deserializer)
 
@@ -51,14 +56,19 @@ func emitProgress(_ fraction: Double) {
 }
 
 /// Run an async body to completion, then exit. `fail()` handles error exits.
+///
+/// Uses `dispatchMain()` rather than blocking the main thread on a semaphore:
+/// swift-huggingface drives model-download progress through a `@MainActor`
+/// handler, so a parked main thread would starve the MainActor and the download
+/// would deadlock (TCP connected, zero bytes, forever). `dispatchMain()` parks
+/// the main thread while still servicing the main queue; the async `Task` exits
+/// the process when `body` completes.
 func runToCompletion(_ body: @escaping @Sendable () async -> Void) -> Never {
-    let sem = DispatchSemaphore(value: 0)
     Task {
         await body()
-        sem.signal()
+        exit(0)
     }
-    sem.wait()
-    exit(0)
+    dispatchMain()
 }
 
 // MARK: - Token -> text reconstruction
@@ -133,6 +143,67 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
         segments: segments)
 }
 
+// MARK: - Notes (LLM meeting-notes generation)
+
+/// Load the notes LLM from its local directory. The model is downloaded
+/// out-of-band by the Rust app from the project CDN (the published weights are
+/// HuggingFace Xet-backed, which the Swift HF client can't fetch), so here we
+/// only LOAD from disk — no network. Model + tokenizer are read from
+/// `<models>/llm/gemma-3-1b-it-qat-4bit/`.
+func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
+    let dir = modelsURL
+        .appendingPathComponent("llm")
+        .appendingPathComponent("gemma-3-1b-it-qat-4bit")
+    return try await LLMModelFactory.shared.loadContainer(
+        from: dir,
+        using: #huggingFaceTokenizerLoader())
+}
+
+/// Run the notes model on `transcript` and return the full Markdown notes.
+func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
+    let container = try await loadNotesModel(modelsURL: modelsURL)
+    // System instructions describe the format in prose — with NO copyable
+    // placeholder lines — so a small model writes real content instead of
+    // echoing the template (which it did when the format was a fill-in scaffold).
+    let instructions = """
+        You are a meeting-notes assistant. You are given a meeting transcript and you write concise meeting notes in Markdown.
+
+        Rules:
+        - Use only facts stated in the transcript. Never invent details, names, or speakers.
+        - The transcript labels speakers generically (e.g. "Speaker 1", "Speaker 2"). Do not invent any speaker or person who does not appear in the transcript.
+        - Output the notes only — no preamble, no closing remarks, and never repeat or restate these instructions.
+        - Output raw Markdown directly. Never wrap the notes in a code fence (do not emit ``` or ```markdown).
+        - Use these level-2 (##) sections, in this order: Summary, Key Points, Decisions, Action Items.
+        - "Summary" is 2-3 sentences describing what the meeting was about. The other sections are bullet lists.
+        - For each action item, state the task. Only attribute it to a speaker if that exact speaker explicitly committed to it in the transcript; otherwise give the task with no owner.
+        - Omit any section that has no real content in the transcript (for example, if no decisions were made, leave out the Decisions section entirely). Never write placeholder text under a heading.
+        """
+    // A repetition penalty is essential here: the small notes model otherwise
+    // falls into a degeneration loop, repeating a sentence until maxTokens and
+    // emitting the transcript back instead of a summary.
+    let session = ChatSession(
+        container,
+        instructions: instructions,
+        generateParameters: GenerateParameters(
+            maxTokens: 2048, temperature: 0.3,
+            repetitionPenalty: 1.15, repetitionContextSize: 64))
+    let raw = try await session.respond(to: "Transcript:\n\(transcript)")
+    return stripCodeFence(raw)
+}
+
+/// The small notes model often wraps its whole answer in a ```markdown … ```
+/// fence despite the prompt. Strip fence markers so `note.md` is raw Markdown:
+/// if the content is fully wrapped, unwrap it; otherwise drop any stray fence
+/// lines. Meeting notes never contain a legitimate code block, so removing all
+/// ``` lines is safe here.
+func stripCodeFence(_ raw: String) -> String {
+    let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+    let kept = normalized
+        .components(separatedBy: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+    return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 // MARK: - Entry
 
 let arguments = CommandLine.arguments
@@ -144,15 +215,16 @@ let asrDir = modelsURL.appendingPathComponent("asr")
 let diarizerDir = modelsURL.appendingPathComponent("diarizer")
 
 if isDownload {
+    // Downloads the speech models (ASR + diarizer, CoreML) over a 0..1 bar:
+    // ASR 0..0.66, diarizer 0.66..1.0. The notes LLM is NOT downloaded here —
+    // the Rust app fetches it directly from the project CDN (see download_local_llm).
     runToCompletion {
         do {
-            // Two download phases share the 0..1 bar: ASR maps to 0..0.5,
-            // diarizer to 0.5..1.0, so the bar advances monotonically.
             let onAsr: DownloadUtils.ProgressHandler = { p in
-                emitProgress(p.fractionCompleted * 0.5)
+                emitProgress(p.fractionCompleted * 0.66)
             }
             let onDiarizer: DownloadUtils.ProgressHandler = { p in
-                emitProgress(0.5 + p.fractionCompleted * 0.5)
+                emitProgress(0.66 + p.fractionCompleted * 0.34)
             }
             _ = try await AsrModels.downloadAndLoad(
                 to: asrDir, version: .v3, progressHandler: onAsr)
@@ -162,6 +234,26 @@ if isDownload {
             stdoutLine("{\"type\":\"done\"}")
         } catch {
             fail("download error: \(error)")
+        }
+    }
+}
+
+let isNotes = arguments.count > 1 && arguments[1] == "notes"
+
+if isNotes {
+    guard let transcriptPath = argValue("--transcript") else { fail("missing --transcript") }
+    let transcript: String
+    do {
+        transcript = try String(contentsOf: URL(fileURLWithPath: transcriptPath), encoding: .utf8)
+    } catch {
+        fail("notes read error: \(error)")
+    }
+    runToCompletion {
+        do {
+            let notes = try await generateNotes(transcript: transcript, modelsURL: modelsURL)
+            FileHandle.standardOutput.write(Data(notes.utf8))
+        } catch {
+            fail("notes error: \(error)")
         }
     }
 }

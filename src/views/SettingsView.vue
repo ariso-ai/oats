@@ -20,25 +20,41 @@
       </div>
     </section>
 
-    <!-- Local Transcription card -->
+    <!-- On-device models card -->
     <section v-if="backend === 'local'" class="section">
-      <h2 class="section-title">Local Transcription</h2>
+      <h2 class="section-title">On-device models</h2>
       <div class="card">
-        <div v-if="modelPrompt && modelStatus.state !== 'ready'" class="signin-banner">
-          Download the transcription model to record locally.
+        <div v-if="modelPrompt && !sttInstalled" class="signin-banner">
+          Download the models to record on your device.
         </div>
         <div class="setting-row">
-          <span class="setting-label">Model status</span>
-          <span class="setting-label">{{ modelStatusText }}</span>
+          <span class="setting-label">Speech voice model</span>
+          <div class="model-controls">
+            <span v-if="sttInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
+            <span v-else class="model-status">{{ sttStatusText }}</span>
+            <button
+              class="secondary-btn"
+              :disabled="unsupported || sttInstalled || anyDownloading"
+              @click="onInstallStt"
+            >
+              {{ sttInstalled ? 'Installed' : sttBusy === 'downloading' ? 'Downloading' : 'Install' }}
+            </button>
+          </div>
         </div>
-        <button
-          class="secondary-btn"
-          style="margin-top: 12px"
-          :disabled="modelStatus.state === 'downloading' || modelStatus.state === 'ready' || modelStatus.state === 'unsupported'"
-          @click="onDownloadModel"
-        >
-          {{ modelStatus.state === 'ready' ? 'Model installed' : 'Download model' }}
-        </button>
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="setting-label">Language model</span>
+          <div class="model-controls">
+            <span v-if="llmInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
+            <span v-else class="model-status">{{ llmStatusText }}</span>
+            <button
+              class="secondary-btn"
+              :disabled="unsupported || llmInstalled || anyDownloading"
+              @click="onInstallLlm"
+            >
+              {{ llmInstalled ? 'Installed' : llmBusy === 'downloading' ? 'Downloading' : 'Install' }}
+            </button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -165,6 +181,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
+import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { load } from '@tauri-apps/plugin-store';
 import {
   isMeetingNotificationsEnabled,
@@ -187,14 +204,19 @@ const appVersion = __APP_VERSION__;
 
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
-const modelProgress = ref<number | null>(null);
 const modelPrompt = ref(false);
+
+// Per-model download UI state — the STT and LLM Install buttons are independent.
+const sttBusy = ref<Busy>('idle');
+const llmBusy = ref<Busy>('idle');
+const sttProgress = ref<number | null>(null);
+const llmProgress = ref<number | null>(null);
 
 async function refreshModelStatus() {
   try {
     modelStatus.value = await local.modelStatus();
   } catch {
-    modelStatus.value = { state: 'error' };
+    modelStatus.value = { state: 'not_downloaded' };
   }
 }
 
@@ -202,36 +224,54 @@ async function onSelectBackend(e: Event) {
   const next = (e.target as HTMLSelectElement).value === 'local' ? 'local' : 'ariso';
   backend.value = next;
   await setBackendSetting(next);
-  if (next === 'local') await refreshModelStatus();
-}
-
-async function onDownloadModel() {
-  modelStatus.value = { state: 'downloading' };
-  modelProgress.value = null;
-  try {
-    await local.downloadModel();
-    // Reflect the freshly-installed model on success.
+  if (next === 'local') {
     await refreshModelStatus();
-  } catch (e) {
-    // Keep the failure visible; do NOT refresh here or the on-disk status
-    // (still "not_downloaded") would clobber the error indication.
-    console.error('Model download failed', e);
-    modelStatus.value = { state: 'error' };
+    // Auto-start the STT download (needed to record). The LLM is opt-in via its button.
+    if (shouldAutoDownload(next, modelStatus.value.state)) {
+      void onInstallStt();
+    }
   }
 }
 
-const modelStatusText = computed(() => {
-  switch (modelStatus.value.state) {
-    case 'ready': return `Ready${modelStatus.value.version ? ` (${modelStatus.value.version})` : ''}`;
-    case 'downloading':
-      return modelProgress.value == null
-        ? 'Downloading…'
-        : `Downloading ${Math.round(modelProgress.value * 100)}%`;
-    case 'error': return 'Download failed';
-    case 'unsupported': return 'Requires Apple Silicon, macOS 14+';
-    default: return 'Not downloaded';
+async function onInstallStt() {
+  sttBusy.value = 'downloading';
+  sttProgress.value = null;
+  try {
+    await local.downloadStt();
+    await refreshModelStatus();
+    sttBusy.value = 'idle';
+  } catch (e) {
+    console.error('STT model download failed', e);
+    sttBusy.value = 'error';
   }
-});
+}
+
+async function onInstallLlm() {
+  llmBusy.value = 'downloading';
+  llmProgress.value = null;
+  try {
+    await local.downloadLlm();
+    await refreshModelStatus();
+    llmBusy.value = 'idle';
+  } catch (e) {
+    console.error('LLM model download failed', e);
+    llmBusy.value = 'error';
+  }
+}
+
+const unsupported = computed(() => modelStatus.value.state === 'unsupported');
+const sttInstalled = computed(() => modelStatus.value.state === 'ready');
+const llmInstalled = computed(() => modelStatus.value.llmReady === true);
+const anyDownloading = computed(
+  () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
+);
+
+const sttStatusText = computed(() =>
+  unsupported.value ? 'Unsupported on this device' : rowStatusText(sttBusy.value, sttProgress.value),
+);
+const llmStatusText = computed(() =>
+  unsupported.value ? 'Unsupported on this device' : rowStatusText(llmBusy.value, llmProgress.value),
+);
 
 const checking = ref(false);
 const autoCheck = ref(true);
@@ -424,24 +464,18 @@ onMounted(async () => {
   }
   if (backend.value === 'local') await refreshModelStatus();
 
-  const unModelProgress = await listen<number>('model://progress', (e) => {
-    // Set the downloading state first so the computed always reads a coherent
-    // pair. A negative payload means indeterminate (show "Downloading…").
-    modelStatus.value = { state: 'downloading' };
-    modelProgress.value = e.payload >= 0 ? e.payload : null;
+  // Per-model download progress. Completion/failure is handled by the awaited
+  // install calls (onInstallStt / onInstallLlm); these events only feed the bar.
+  const unSttProgress = await listen<number>('model://stt/progress', (e) => {
+    sttProgress.value = e.payload >= 0 ? e.payload : null;
   });
-  const unModelDone = await listen('model://done', async () => {
-    modelProgress.value = null;
-    await refreshModelStatus();
-  });
-  const unModelError = await listen('model://error', async () => {
-    modelProgress.value = null;
-    modelStatus.value = { state: 'error' };
+  const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
+    llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
   const unModelPrompt = await listen('tray://show-model-prompt', () => {
     modelPrompt.value = true;
   });
-  unlistenUpdates.push(unModelProgress, unModelDone, unModelError, unModelPrompt);
+  unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
 });
 
 onUnmounted(() => {
@@ -651,6 +685,24 @@ async function handleSignOut() {
 .setting-label {
   font-size: 14px;
   color: #1d1d1f;
+}
+
+.model-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-status {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.model-ready {
+  color: #16a34a;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .setting-select {

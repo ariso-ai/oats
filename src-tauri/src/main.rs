@@ -32,7 +32,8 @@ fn main() {
             commands::create_library_window,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
-            model_manager::download_local_model,
+            model_manager::download_local_stt,
+            model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
             audio_capture::start_system_audio_capture,
@@ -74,7 +75,7 @@ fn main() {
             // destroyed; otherwise re-opening from the tray would do nothing.
             let settings = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/#/settings".into()))
                 .title("Ariso Settings")
-                .inner_size(450.0, 520.0)
+                .inner_size(450.0, 800.0)
                 .resizable(false)
                 .center()
                 .visible(false)

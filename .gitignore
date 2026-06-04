@@ -3,6 +3,9 @@ node_modules/
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/ariso-stt/.build/
+src-tauri/ariso-stt/.xcode/
+src-tauri/ariso-stt/.xcode-metallib/
+src-tauri/ariso-stt/.swiftpm/
 .superpowers/
 docs/superpowers/plans/
 .DS_Store

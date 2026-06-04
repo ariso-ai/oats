@@ -9,6 +9,11 @@ pub struct ModelStatus {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Whether the on-device notes LLM (gemma) has been downloaded. Reported
+    /// separately from `state` so the Settings window can show the LLM's own
+    /// download status alongside the overall model status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -51,10 +56,28 @@ pub fn write_manifest(root: &Path, downloaded_at: &str) -> Result<(), String> {
     crate::storage::write_atomic(&manifest_path(root), json.as_bytes())
 }
 
+/// The notes LLM is downloaded (from the app CDN) into this directory and
+/// loaded by the sidecar `notes` command via a directory-based config.
+const LLM_MODEL_NAME: &str = "gemma-3-1b-it-qat-4bit";
+
+fn llm_dir(root: &Path) -> std::path::PathBuf {
+    crate::storage::models_dir(root)
+        .join("llm")
+        .join(LLM_MODEL_NAME)
+}
+
+/// Readiness for the notes LLM. Marker-based (not mere presence): the marker is
+/// written only after every file finishes downloading, so an interrupted
+/// download is not mistaken for a ready model.
+pub fn llm_is_ready(root: &Path) -> bool {
+    llm_dir(root).join(".complete").exists()
+}
+
 pub fn status(root: &Path) -> ModelStatus {
+    let llm_ready = Some(llm_is_ready(root));
     match read_manifest(root) {
-        Some(m) => ModelStatus { state: "ready".into(), version: Some(m.version) },
-        None => ModelStatus { state: "not_downloaded".into(), version: None },
+        Some(m) => ModelStatus { state: "ready".into(), version: Some(m.version), llm_ready },
+        None => ModelStatus { state: "not_downloaded".into(), version: None, llm_ready },
     }
 }
 
@@ -82,8 +105,18 @@ struct ProgressLine {
     fraction: Option<f64>,
 }
 
-#[tauri::command]
-pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
+/// Run the sidecar `download --target <target>`, streaming progress as the
+/// given events. `write_manifest_after` controls whether the STT readiness
+/// manifest is written on success (true for STT; the LLM uses disk-presence
+/// readiness instead). A single global guard serializes downloads.
+async fn run_download(
+    app: tauri::AppHandle,
+    target: &str,
+    write_manifest_after: bool,
+    ev_progress: &str,
+    ev_done: &str,
+    ev_error: &str,
+) -> Result<(), String> {
     // Reject re-entry; clear the flag on every exit path via the Drop guard.
     if DOWNLOAD_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -108,6 +141,8 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
         .arg("download")
         .arg("--models")
         .arg(&models)
+        .arg("--target")
+        .arg(target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -128,7 +163,7 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
     while let Ok(Some(line)) = lines.next_line().await {
         if let Ok(p) = serde_json::from_str::<ProgressLine>(&line) {
             if p.kind == "progress" {
-                let _ = app.emit("model://progress", p.fraction.unwrap_or(-1.0));
+                let _ = app.emit(ev_progress, p.fraction.unwrap_or(-1.0));
             }
         }
     }
@@ -137,12 +172,183 @@ pub async fn download_local_model(app: tauri::AppHandle) -> Result<(), String> {
     let stderr_bytes = stderr_task.await.unwrap_or_default();
     if !exit.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        let _ = app.emit("model://error", stderr.clone());
+        let _ = app.emit(ev_error, stderr.clone());
         return Err(format!("model download failed: {stderr}"));
     }
 
-    write_manifest(&root, &now_marker())?;
-    let _ = app.emit("model://done", ());
+    if write_manifest_after {
+        write_manifest(&root, &now_marker())?;
+    }
+    let _ = app.emit(ev_done, ());
+    Ok(())
+}
+
+/// Download the STT models (ASR + diarizer) and write the readiness manifest.
+#[tauri::command]
+pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
+    run_download(
+        app,
+        "stt",
+        true,
+        "model://stt/progress",
+        "model://stt/done",
+        "model://stt/error",
+    )
+    .await
+}
+
+/// Public CDN base for the notes LLM files (Cloudflare R2). The model is NOT
+/// fetched via HuggingFace: the published `model.safetensors` is Xet-backed and
+/// the Swift HF client can't download Xet, so we mirror plain files on R2 and
+/// pull them directly.
+const LLM_CDN_BASE: &str =
+    "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/models/gemma-3-1b-it-qat-4bit";
+
+/// The exact files the model loader needs. Doc/git files are omitted, and so is
+/// `tokenizer.model` — Gemma ships a `tokenizer.json` fast tokenizer that the
+/// loader uses, so the SentencePiece model is redundant (verified: the model
+/// loads and generates without it).
+const LLM_FILES: &[&str] = &[
+    "config.json",
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+];
+
+fn llm_fraction(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        -1.0
+    } else {
+        (done as f64 / total as f64).clamp(0.0, 1.0)
+    }
+}
+
+/// Download the notes LLM directly from the app CDN into `<models>/llm/<name>/`,
+/// emitting `model://llm/{progress,done,error}`. A `.complete` marker is written
+/// only after every file finishes, so an interrupted download is never mistaken
+/// for a ready model. Files already fully present are skipped (idempotent retry).
+#[tauri::command]
+pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
+    if DOWNLOAD_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("a model download is already in progress".to_string());
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard;
+
+    let root = crate::storage::ariso_root()?;
+    let dir = llm_dir(&root);
+    let app2 = app.clone();
+    match download_llm_files(&dir, &move |f| {
+        let _ = app2.emit("model://llm/progress", f);
+    })
+    .await
+    {
+        Ok(()) => {
+            let _ = app.emit("model://llm/done", ());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("model://llm/error", e.clone());
+            Err(e)
+        }
+    }
+}
+
+/// Download every `LLM_FILES` entry from the CDN into `dir`, reporting byte
+/// progress (0.0–1.0) via `on_progress`. Decoupled from `AppHandle` so it can be
+/// exercised by an integration test. Writes the `.complete` marker on success.
+async fn download_llm_files(
+    dir: &Path,
+    on_progress: &(dyn Fn(f64) + Sync),
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| format!("create llm dir: {e}"))?;
+    // Clear any stale readiness marker before rewriting files: if a repair or
+    // reinstall is interrupted, an old `.complete` must not keep `llm_is_ready`
+    // true while a model file is partial. Re-written only after a full success.
+    let marker = dir.join(".complete");
+    let _ = tokio::fs::remove_file(&marker).await;
+    let client = reqwest::Client::new();
+
+    // 1) Size every file (HEAD) so progress is a true byte fraction.
+    let mut sizes = Vec::with_capacity(LLM_FILES.len());
+    for f in LLM_FILES {
+        let url = format!("{LLM_CDN_BASE}/{f}");
+        let resp = client
+            .head(&url)
+            .send()
+            .await
+            .map_err(|e| format!("head {f}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("head {f}: HTTP {}", resp.status()));
+        }
+        sizes.push(resp.content_length().unwrap_or(0));
+    }
+    let total: u64 = sizes.iter().sum();
+
+    // 2) Download each file (skip already-complete), streaming with progress.
+    let mut done: u64 = 0;
+    for (i, f) in LLM_FILES.iter().enumerate() {
+        let dest = dir.join(f);
+        let expected = sizes[i];
+        if let Ok(meta) = tokio::fs::metadata(&dest).await {
+            if expected != 0 && meta.len() == expected {
+                done += expected;
+                on_progress(llm_fraction(done, total));
+                continue;
+            }
+        }
+
+        let url = format!("{LLM_CDN_BASE}/{f}");
+        let mut resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("get {f}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("get {f}: HTTP {}", resp.status()));
+        }
+
+        let part = dir.join(format!("{f}.part"));
+        let mut file = tokio::fs::File::create(&part)
+            .await
+            .map_err(|e| format!("create {f}.part: {e}"))?;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("read {f}: {e}"))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("write {f}: {e}"))?;
+            done += chunk.len() as u64;
+            on_progress(llm_fraction(done, total));
+        }
+        file.flush().await.map_err(|e| format!("flush {f}: {e}"))?;
+        drop(file);
+        tokio::fs::rename(&part, &dest)
+            .await
+            .map_err(|e| format!("finalize {f}: {e}"))?;
+    }
+
+    // 3) Mark complete (readiness gate).
+    tokio::fs::write(&marker, b"1")
+        .await
+        .map_err(|e| format!("write marker: {e}"))?;
     Ok(())
 }
 
@@ -174,5 +380,40 @@ mod tests {
         let s = status(root);
         assert_eq!(s.state, "ready");
         assert_eq!(s.version.as_deref(), Some(MODEL_VERSION));
+    }
+
+    #[test]
+    fn llm_ready_requires_complete_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert!(!llm_is_ready(root));
+        assert_eq!(status(root).llm_ready, Some(false));
+
+        // Files present but no marker → a partial download is NOT ready.
+        let dir = llm_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        assert!(!llm_is_ready(root));
+
+        // Marker written only after a full download → ready.
+        std::fs::write(dir.join(".complete"), b"1").unwrap();
+        assert!(llm_is_ready(root));
+        assert_eq!(status(root).llm_ready, Some(true));
+    }
+
+    // Hits the network (downloads the full model from R2). Excluded from the
+    // default run; invoke with `cargo test r2_download_smoke -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: downloads ~736MB from the R2 CDN"]
+    async fn r2_download_smoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        download_llm_files(tmp.path(), &|_| {}).await.unwrap();
+        assert!(tmp.path().join(".complete").exists());
+        for f in LLM_FILES {
+            assert!(tmp.path().join(f).exists(), "missing {f}");
+        }
+        // The big weights file should be its full size.
+        let st = std::fs::metadata(tmp.path().join("model.safetensors")).unwrap();
+        assert!(st.len() > 700_000_000, "safetensors too small: {}", st.len());
     }
 }
