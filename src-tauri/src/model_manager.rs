@@ -204,13 +204,15 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
 const LLM_CDN_BASE: &str =
     "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/models/gemma-3-1b-it-qat-4bit";
 
-/// The exact files the model loader needs (doc/git files are intentionally omitted).
+/// The exact files the model loader needs. Doc/git files are omitted, and so is
+/// `tokenizer.model` — Gemma ships a `tokenizer.json` fast tokenizer that the
+/// loader uses, so the SentencePiece model is redundant (verified: the model
+/// loads and generates without it).
 const LLM_FILES: &[&str] = &[
     "config.json",
     "model.safetensors",
     "model.safetensors.index.json",
     "tokenizer.json",
-    "tokenizer.model",
     "tokenizer_config.json",
     "special_tokens_map.json",
     "added_tokens.json",
@@ -230,8 +232,6 @@ fn llm_fraction(done: u64, total: u64) -> f64 {
 /// for a ready model. Files already fully present are skipped (idempotent retry).
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
     if DOWNLOAD_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -246,17 +246,37 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     }
     let _guard = Guard;
 
-    let emit_err = |app: &tauri::AppHandle, e: String| -> String {
-        let _ = app.emit("model://llm/error", e.clone());
-        e
-    };
-
     let root = crate::storage::ariso_root()?;
     let dir = llm_dir(&root);
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| emit_err(&app, format!("create llm dir: {e}")))?;
+    let app2 = app.clone();
+    match download_llm_files(&dir, &move |f| {
+        let _ = app2.emit("model://llm/progress", f);
+    })
+    .await
+    {
+        Ok(()) => {
+            let _ = app.emit("model://llm/done", ());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("model://llm/error", e.clone());
+            Err(e)
+        }
+    }
+}
 
+/// Download every `LLM_FILES` entry from the CDN into `dir`, reporting byte
+/// progress (0.0–1.0) via `on_progress`. Decoupled from `AppHandle` so it can be
+/// exercised by an integration test. Writes the `.complete` marker on success.
+async fn download_llm_files(
+    dir: &Path,
+    on_progress: &(dyn Fn(f64) + Sync),
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| format!("create llm dir: {e}"))?;
     let client = reqwest::Client::new();
 
     // 1) Size every file (HEAD) so progress is a true byte fraction.
@@ -267,9 +287,9 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
             .head(&url)
             .send()
             .await
-            .map_err(|e| emit_err(&app, format!("head {f}: {e}")))?;
+            .map_err(|e| format!("head {f}: {e}"))?;
         if !resp.status().is_success() {
-            return Err(emit_err(&app, format!("head {f}: HTTP {}", resp.status())));
+            return Err(format!("head {f}: HTTP {}", resp.status()));
         }
         sizes.push(resp.content_length().unwrap_or(0));
     }
@@ -283,7 +303,7 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
         if let Ok(meta) = tokio::fs::metadata(&dest).await {
             if expected != 0 && meta.len() == expected {
                 done += expected;
-                let _ = app.emit("model://llm/progress", llm_fraction(done, total));
+                on_progress(llm_fraction(done, total));
                 continue;
             }
         }
@@ -293,40 +313,37 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
             .get(&url)
             .send()
             .await
-            .map_err(|e| emit_err(&app, format!("get {f}: {e}")))?;
+            .map_err(|e| format!("get {f}: {e}"))?;
         if !resp.status().is_success() {
-            return Err(emit_err(&app, format!("get {f}: HTTP {}", resp.status())));
+            return Err(format!("get {f}: HTTP {}", resp.status()));
         }
 
         let part = dir.join(format!("{f}.part"));
         let mut file = tokio::fs::File::create(&part)
             .await
-            .map_err(|e| emit_err(&app, format!("create {f}.part: {e}")))?;
+            .map_err(|e| format!("create {f}.part: {e}"))?;
         while let Some(chunk) = resp
             .chunk()
             .await
-            .map_err(|e| emit_err(&app, format!("read {f}: {e}")))?
+            .map_err(|e| format!("read {f}: {e}"))?
         {
             file.write_all(&chunk)
                 .await
-                .map_err(|e| emit_err(&app, format!("write {f}: {e}")))?;
+                .map_err(|e| format!("write {f}: {e}"))?;
             done += chunk.len() as u64;
-            let _ = app.emit("model://llm/progress", llm_fraction(done, total));
+            on_progress(llm_fraction(done, total));
         }
-        file.flush()
-            .await
-            .map_err(|e| emit_err(&app, format!("flush {f}: {e}")))?;
+        file.flush().await.map_err(|e| format!("flush {f}: {e}"))?;
         drop(file);
         tokio::fs::rename(&part, &dest)
             .await
-            .map_err(|e| emit_err(&app, format!("finalize {f}: {e}")))?;
+            .map_err(|e| format!("finalize {f}: {e}"))?;
     }
 
     // 3) Mark complete (readiness gate).
     tokio::fs::write(dir.join(".complete"), b"1")
         .await
-        .map_err(|e| emit_err(&app, format!("write marker: {e}")))?;
-    let _ = app.emit("model://llm/done", ());
+        .map_err(|e| format!("write marker: {e}"))?;
     Ok(())
 }
 
@@ -377,5 +394,21 @@ mod tests {
         std::fs::write(dir.join(".complete"), b"1").unwrap();
         assert!(llm_is_ready(root));
         assert_eq!(status(root).llm_ready, Some(true));
+    }
+
+    // Hits the network (downloads the full model from R2). Excluded from the
+    // default run; invoke with `cargo test r2_download_smoke -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: downloads ~736MB from the R2 CDN"]
+    async fn r2_download_smoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        download_llm_files(tmp.path(), &|_| {}).await.unwrap();
+        assert!(tmp.path().join(".complete").exists());
+        for f in LLM_FILES {
+            assert!(tmp.path().join(f).exists(), "missing {f}");
+        }
+        // The big weights file should be its full size.
+        let st = std::fs::metadata(tmp.path().join("model.safetensors")).unwrap();
+        assert!(st.len() > 700_000_000, "safetensors too small: {}", st.len());
     }
 }
