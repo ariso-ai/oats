@@ -60,12 +60,20 @@ jobs:
       # The ariso-stt Swift sidecar is a build artifact (not committed) that
       # tauri's `externalBin` requires to exist before `cargo build`. Build it
       # on every run — it lives under the gitignored, uncached binaries/ dir.
+      # The MLX metallib bundle (mlx-swift_Cmlx.bundle) is referenced by
+      # tauri.conf.json's bundle.resources, so cargo build validates its path
+      # too; `swift build` can't compile MLX's Metal shaders, so build it with
+      # xcodebuild like the release job does.
       - name: Build ariso-stt sidecar
         working-directory: src-tauri/ariso-stt
         run: |
           swift build -c release
           mkdir -p ../binaries
           cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+          xcodebuild build -scheme ariso-stt -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 
       - name: Build Rust
         working-directory: src-tauri
