@@ -30,6 +30,8 @@ fn main() {
             commands::get_desktop_config,
             commands::list_local_recordings,
             commands::create_library_window,
+            commands::read_recording_audio,
+            commands::open_recording_file,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
             model_manager::download_local_stt,

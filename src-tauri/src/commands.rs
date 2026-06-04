@@ -517,6 +517,54 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     crate::storage::list_recordings(&root)
 }
 
+/// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
+/// guarding against path traversal. Ids are normally sanitized timestamps
+/// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
+fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
+    // Reject ids that could escape the recordings dir.
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(format!("invalid recording id: {id}"));
+    }
+    let root = crate::storage::ariso_root()?;
+    Ok(crate::storage::recordings_dir(&root).join(id))
+}
+
+/// Map an openable file `kind` to its on-disk filename. Only `note` and
+/// `transcript` are valid; anything else is an error.
+fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "note" => Ok("note.md"),
+        "transcript" => Ok("transcript.md"),
+        other => Err(format!("invalid recording file kind: {other}")),
+    }
+}
+
+/// Read the raw bytes of a recording's `recording.mp3`, returned as a raw
+/// binary IPC response so the frontend can build a Blob URL for an `<audio>`
+/// element (avoids JSON-array bloat from a `Vec<u8>` return).
+#[tauri::command]
+pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> {
+    let path = recording_dir(&id)?.join("recording.mp3");
+    let bytes = std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Open a recording's `note.md` or `transcript.md` in the OS default app.
+/// `kind` must be `"note"` or `"transcript"`.
+#[tauri::command]
+pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let filename = note_or_transcript_filename(&kind)?;
+    let path = recording_dir(&id)?.join(filename);
+    if !path.exists() {
+        return Err(format!("recording file not found: {}", path.display()));
+    }
+    app.opener()
+        .open_path(path.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
@@ -536,4 +584,51 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_or_transcript_filename_maps_known_kinds() {
+        assert_eq!(note_or_transcript_filename("note").unwrap(), "note.md");
+        assert_eq!(
+            note_or_transcript_filename("transcript").unwrap(),
+            "transcript.md"
+        );
+    }
+
+    #[test]
+    fn note_or_transcript_filename_rejects_unknown_kind() {
+        assert!(note_or_transcript_filename("").is_err());
+        assert!(note_or_transcript_filename("audio").is_err());
+        assert!(note_or_transcript_filename("note.md").is_err());
+    }
+
+    #[test]
+    fn recording_dir_rejects_traversal_ids() {
+        // These guards are pure (no env read), so no ARISO_ROOT needed.
+        assert!(recording_dir("").is_err());
+        assert!(recording_dir("..").is_err());
+        assert!(recording_dir("../foo").is_err());
+        assert!(recording_dir("a/b").is_err());
+        assert!(recording_dir("a\\b").is_err());
+        assert!(recording_dir("foo/../bar").is_err());
+    }
+
+    #[test]
+    fn recording_dir_accepts_normal_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `recording_dir` reads ARISO_ROOT; set it for this test. The other
+        // `recording_dir` tests only exercise the pre-env guard branch, so
+        // they don't depend on this value.
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = recording_dir(id).unwrap();
+        assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
 }
