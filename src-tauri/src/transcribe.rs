@@ -130,6 +130,13 @@ pub async fn finalize_core(
             // recording: the transcript is already saved and marked Done.
             let transcript_path = dir.join("transcript.md");
             match run_notes(&transcript_path, &models).await {
+                // Empty output is a silent failure: it would write a blank
+                // note.md with notes_error unset, reading as success. Record it.
+                Ok(notes) if notes.trim().is_empty() => {
+                    eprintln!("notes generation: empty output");
+                    meta.notes_error = Some("notes generation produced empty output".to_string());
+                    let _ = storage::write_meta(&dir, &meta);
+                }
                 Ok(notes) => {
                     if let Err(e) = storage::write_notes(&dir, &notes) {
                         eprintln!("write notes: {e}");

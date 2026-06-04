@@ -7,25 +7,29 @@
 
 Add on-device meeting-notes generation to the **Local** transcription backend. After
 the `ariso-stt` sidecar transcribes a recording and Rust writes `transcript.md`, the
-backend runs the gemma4 LLM over the transcript to produce structured meeting notes,
+backend runs the Gemma 3 LLM over the transcript to produce structured meeting notes,
 saved as `note.md` alongside `transcript.md` in the recording directory.
 
-The notes model is bundled into the existing bootstrap **download** flow: switching to
-the Local backend now downloads the STT models (ASR + diarizer) **and then** the gemma4
-notes model, gated behind a single readiness manifest and retryable from the existing
-Settings button.
+Switching to the Local backend installs two model sets as **separate flows**: the STT
+models (ASR + diarizer), auto-started and gated by `manifest.json`, and the Gemma 3 notes
+model, installed opt-in from the project CDN and gated by its own `.complete` marker. Both
+are retryable from their Install buttons in Settings.
 
 ## Model
 
-- **Repo:** `mlx-community/gemma-4-e2b-it-4bit` (Gemma 4 E2B, 4-bit, `model_type: gemma4`)
-- **Size:** ~1.13 GB (single `model.safetensors`)
+- **Repo:** `mlx-community/gemma-3-1b-it-qat-4bit` (Gemma 3 1B, QAT 4-bit, `model_type: gemma3`)
+- **Size:** ~1.0 GB (4-bit QAT weights)
 - **Runtime:** [`mlx-swift-lm`](https://github.com/ml-explore/mlx-swift-lm) `MLXLLM`.
-  Confirmed support: `Gemma4.swift` / `Gemma4Text.swift` exist and `LLMModelFactory`
-  registers `"gemma4" -> Gemma4Model`. The repo is in the registry as
-  `LLMRegistry.gemma4_e2b_it_4bit` (id `mlx-community/gemma-4-e2b-it-4bit`, type `.llm`).
-- The E2B variant was chosen over E4B (~1.67 GB) for smaller download / lower RAM /
-  faster generation. Switching to E4B later is a one-line change to the loaded
-  configuration — the code path is identical.
+  Confirmed support: `Gemma3Text.swift` exists and `LLMModelFactory` registers
+  `"gemma3" -> Gemma3TextModel`. The repo is in the registry as
+  `LLMRegistry.gemma3_1B_qat_4bit` (id `mlx-community/gemma-3-1b-it-qat-4bit`, type `.llm`).
+- **Why Gemma 3 1B over a larger model:** model size is the dominant on-device cost —
+  download footprint, RAM, and generation latency all scale with it. The 1B QAT-4bit
+  variant keeps the bootstrap download and memory budget small enough to ship to every
+  Apple-Silicon user. A larger model (e.g. Gemma 3 4B, or Gemma 4 E2B ~1.13 GB) is a
+  one-line change to the loaded configuration if note quality proves insufficient — the
+  code path is identical. To keep the small model from degenerating (echoing the
+  transcript / looping), notes generation sets a repetition penalty (see Components).
 
 ## Architecture & Data Flow
 
@@ -37,7 +41,8 @@ record → write recording.mp3 → ariso-stt (transcribe) → write transcript.m
 
 Two phases, decoupled:
 
-1. **Download/bootstrap** (one-time, gated): STT models + gemma4 model.
+1. **Download/bootstrap** (one-time, gated): STT models (sidecar) + Gemma 3 model (Rust/R2),
+   as two separate flows.
 2. **Per-recording**: transcribe → write `transcript.md` → mark `Done` → generate notes →
    write `note.md`.
 
@@ -53,24 +58,28 @@ returns data on stdout and Rust persists it.
 `mlx-swift`. Trade-off: larger sidecar binary and longer CI sidecar build — acceptable,
 called out for visibility.
 
-All Hub access (download and load) uses a single download base under the `--models` dir
-(e.g. `<models>/hub`) so the model downloaded during bootstrap is the same one loaded at
-notes time, and notes generation works fully offline.
+STT (ASR + diarizer) and the notes LLM are **split download flows**: the sidecar
+downloads the speech models, while the Rust app downloads the LLM directly from the
+project CDN (Cloudflare R2). The published Gemma weights are HuggingFace Xet-backed,
+which the Swift HF client cannot fetch, so the LLM is mirrored as plain files on R2 and
+pulled by Rust rather than through the sidecar / HF Hub. The LLM lands in
+`<models>/llm/gemma-3-1b-it-qat-4bit/`, so notes generation works fully offline.
 
-**Extend the `download` subcommand** (`ariso-stt download --models <dir>`):
-- Phase 1 — ASR download → progress `0.0–0.33`
-- Phase 2 — diarizer download → progress `0.33–0.5`
-- Phase 3 — gemma4 model download → progress `0.5–1.0`
+**The `download` subcommand** (`ariso-stt download --models <dir>`) handles **STT only**:
+- Phase 1 — ASR download → progress `0.0–0.66`
+- Phase 2 — diarizer download → progress `0.66–1.0`
 - Emits the existing JSON-lines progress contract: `{"type":"progress","fraction":F}` …
-  then `{"type":"done"}`. The single 0→1 bar advances monotonically across all three.
-- Gemma download triggers via the `MLXLLM` model-load/snapshot path against the shared
-  Hub base, mapping its fractional progress into the `0.5–1.0` band.
+  then `{"type":"done"}`. The single 0→1 bar advances monotonically across both.
+- The notes LLM is **not** downloaded here — see the Rust R2 download below.
 
 **New `notes` subcommand** (`ariso-stt notes --transcript <path> --models <dir>`):
 - Reads the transcript markdown at `--transcript`.
-- Loads `mlx-community/gemma-4-e2b-it-4bit` via `MLXLLM` from the shared Hub base
-  (already present after bootstrap; no network needed).
+- Loads `mlx-community/gemma-3-1b-it-qat-4bit` via `MLXLLM` from the local
+  `<models>/llm/gemma-3-1b-it-qat-4bit/` directory (already present after the Rust R2
+  download; no network needed).
 - Runs a fixed meeting-notes prompt and **writes the generated markdown to stdout**.
+  Generation sets a repetition penalty (`repetitionPenalty ≈ 1.15`) — the small model
+  otherwise degenerates into a loop and echoes the transcript instead of summarizing.
 - Logs / progress / errors go to **stderr**; exit `0` on success, `1` on failure
   (same contract discipline as `transcribe`).
 
@@ -96,28 +105,31 @@ action items. Embedded in the `notes` command; tunable later.
 - Add optional field to `RecordingMeta`:
   `#[serde(default, skip_serializing_if = "Option::is_none")] pub notes_error: Option<String>`.
 
-**`model_manager.rs`:** no structural change. The extended `download` subcommand simply
-emits more progress on the existing `model://progress` stream; `manifest.json` is still
-written only after the sidecar exits `0` — which now means **all three** models
-downloaded. `is_ready` (the recording gate) therefore implies STT *and* gemma are present.
+**`model_manager.rs`:** two separate download commands with two readiness signals.
+`download_local_stt` runs the sidecar `download` and writes `manifest.json` on exit `0`
+(STT readiness). `download_local_llm` fetches the LLM files from the R2 CDN into
+`<models>/llm/<name>/` and writes a `.complete` marker on success (LLM readiness, checked
+by `llm_is_ready`). STT readiness gates recording; LLM readiness gates notes.
 
 ### Frontend (`src/views/SettingsView.vue`)
 
-- **Auto-start download on switch:** `onSelectBackend('local')` triggers `onDownloadModel()`
-  when `modelStatus` is not `ready`/`downloading`/`unsupported` (today the user must click
-  the button manually).
-- **Retry:** the existing **Download model** button stays. Because it re-enables on the
-  `error` state (error is not in the disabled set), it already serves as the retry control
-  — clicking re-runs `download_local_model`. Hub caching means already-fetched files are
-  not re-downloaded, so retry resumes rather than restarts.
-- The combined download is shown as a **single progress bar** for all three models (no
-  separate "STT" vs "notes model" phases in the UI).
+- **Two model rows**, each with its own Install button and status: Speech (STT) and
+  Language (LLM). STT is required to record; the LLM is opt-in for notes.
+- **Auto-start STT on switch:** `onSelectBackend('local')` auto-triggers the **STT**
+  download when STT is not ready/downloading/unsupported (`shouldAutoDownload`). The LLM
+  is **not** auto-downloaded — the user installs it via its own button.
+- **Retry:** each Install button re-enables on its `error` state and re-runs its download
+  (`download_local_stt` / `download_local_llm`). Already-complete files are skipped, so
+  retry resumes rather than restarts.
+- **Unsupported devices:** when `state === 'unsupported'`, both rows show "Unsupported on
+  this device" and both Install buttons are disabled.
 
 ## Error Handling
 
 | Failure | Behavior |
 |---|---|
-| Download fails (any phase, incl. gemma) | No manifest written → status `error`/`not_downloaded`. Button re-enabled → user clicks to retry; Hub resumes from cache. |
+| STT download fails | No `manifest.json` written → STT status `error`/`not_downloaded`. Button re-enabled → user retries; completed files skipped. |
+| LLM download fails | No `.complete` marker written → `llmReady` stays false. LLM Install button re-enabled → user retries; completed files skipped. |
 | Notes generation fails at record time (e.g. OOM) | Logged + `meta.notes_error` set; recording stays `Done`, `note.md` absent. Transcript unaffected. |
 | Transcription fails | Unchanged from today: recording `Failed`, audio retained, notes never attempted. |
 
@@ -127,10 +139,12 @@ Rust stub-script tests (the existing `ARISO_STT_BIN` stub pattern, no real model
 - `run_notes` success → stdout captured, `note.md` written with expected content.
 - `run_notes` failure (stub exits 1) → `finalize_core` keeps status `Done`, sets
   `notes_error`, and `transcript.md` still present.
-- Extended download: covered by existing manifest/readiness tests; a stub emitting the
-  three-phase progress then `done` writes the manifest.
+- STT download: covered by existing manifest/readiness tests; a stub emitting the
+  two-phase (ASR + diarizer) progress then `done` writes the manifest.
+- LLM download: `download_llm_files` is exercised against a stub CDN; the `.complete`
+  marker is written only after all files finish.
 
-The Swift-side gemma load/generation is validated manually (requires the real ~1.13 GB
+The Swift-side Gemma 3 load/generation is validated manually (requires the real ~1.0 GB
 model and Apple Silicon); it is not unit-tested in CI.
 
 ## Docs

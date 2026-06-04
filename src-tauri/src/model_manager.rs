@@ -277,6 +277,11 @@ async fn download_llm_files(
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("create llm dir: {e}"))?;
+    // Clear any stale readiness marker before rewriting files: if a repair or
+    // reinstall is interrupted, an old `.complete` must not keep `llm_is_ready`
+    // true while a model file is partial. Re-written only after a full success.
+    let marker = dir.join(".complete");
+    let _ = tokio::fs::remove_file(&marker).await;
     let client = reqwest::Client::new();
 
     // 1) Size every file (HEAD) so progress is a true byte fraction.
@@ -341,7 +346,7 @@ async fn download_llm_files(
     }
 
     // 3) Mark complete (readiness gate).
-    tokio::fs::write(dir.join(".complete"), b"1")
+    tokio::fs::write(&marker, b"1")
         .await
         .map_err(|e| format!("write marker: {e}"))?;
     Ok(())

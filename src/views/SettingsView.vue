@@ -34,7 +34,7 @@
             <span v-else class="model-status">{{ sttStatusText }}</span>
             <button
               class="secondary-btn"
-              :disabled="sttInstalled || anyDownloading"
+              :disabled="unsupported || sttInstalled || anyDownloading"
               @click="onInstallStt"
             >
               {{ sttInstalled ? 'Installed' : sttBusy === 'downloading' ? 'Downloading' : 'Install' }}
@@ -48,7 +48,7 @@
             <span v-else class="model-status">{{ llmStatusText }}</span>
             <button
               class="secondary-btn"
-              :disabled="llmInstalled || anyDownloading"
+              :disabled="unsupported || llmInstalled || anyDownloading"
               @click="onInstallLlm"
             >
               {{ llmInstalled ? 'Installed' : llmBusy === 'downloading' ? 'Downloading' : 'Install' }}
@@ -259,14 +259,19 @@ async function onInstallLlm() {
   }
 }
 
+const unsupported = computed(() => modelStatus.value.state === 'unsupported');
 const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
 const anyDownloading = computed(
   () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
 );
 
-const sttStatusText = computed(() => rowStatusText(sttBusy.value, sttProgress.value));
-const llmStatusText = computed(() => rowStatusText(llmBusy.value, llmProgress.value));
+const sttStatusText = computed(() =>
+  unsupported.value ? 'Unsupported on this device' : rowStatusText(sttBusy.value, sttProgress.value),
+);
+const llmStatusText = computed(() =>
+  unsupported.value ? 'Unsupported on this device' : rowStatusText(llmBusy.value, llmProgress.value),
+);
 
 const checking = ref(false);
 const autoCheck = ref(true);
