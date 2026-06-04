@@ -75,7 +75,7 @@ fn main() {
             // destroyed; otherwise re-opening from the tray would do nothing.
             let settings = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/#/settings".into()))
                 .title("Ariso Settings")
-                .inner_size(450.0, 520.0)
+                .inner_size(450.0, 800.0)
                 .resizable(false)
                 .center()
                 .visible(false)

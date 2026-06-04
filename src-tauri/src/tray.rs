@@ -116,7 +116,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         tauri::WebviewUrl::App("/#/settings".into()),
                     )
                     .title("Ariso Settings")
-                    .inner_size(450.0, 520.0)
+                    .inner_size(450.0, 800.0)
                     .resizable(false)
                     .center()
                     .skip_taskbar(true)
