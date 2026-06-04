@@ -58,21 +58,37 @@ jobs:
         run: npm run vite:build
 
       # The ariso-stt Swift sidecar is a build artifact (not committed) that
-      # tauri's `externalBin` requires to exist before `cargo build`. Build it
-      # on every run — it lives under the gitignored, uncached binaries/ dir.
-      # The MLX metallib bundle (mlx-swift_Cmlx.bundle) is referenced by
-      # tauri.conf.json's bundle.resources, so cargo build validates its path
-      # too; `swift build` can't compile MLX's Metal shaders, so build it with
-      # xcodebuild like the release job does.
+      # tauri's `externalBin` requires to exist before `cargo build`. It lives
+      # under the gitignored binaries/ dir. Building it compiles the heavy MLX
+      # dependency tree from scratch (~25 min), but its inputs — Package.resolved
+      # and Sources/ — rarely change, so cache the produced artifacts keyed on
+      # their hash and skip the build entirely on a hit. Exact-match key only
+      # (no restore-keys): a partial restore would yield artifacts that don't
+      # match the current source.
+      - name: Cache ariso-stt sidecar artifacts
+        id: sidecar-cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
+            src-tauri/binaries/mlx-swift_Cmlx.bundle
+          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+
+      # On a cache miss, build once with xcodebuild. It emits both the
+      # executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle, referenced
+      # by tauri.conf.json's bundle.resources) into Build/Products/Release. A
+      # separate `swift build` is redundant — `swift build` can't compile MLX's
+      # Metal shaders anyway, and xcodebuild's executable already expects the
+      # metallib bundle beside it — so build once and copy both products out.
       - name: Build ariso-stt sidecar
+        if: steps.sidecar-cache.outputs.cache-hit != 'true'
         working-directory: src-tauri/ariso-stt
         run: |
-          swift build -c release
           mkdir -p ../binaries
-          cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
           xcodebuild build -scheme ariso-stt -configuration Release \
             -destination 'generic/platform=macOS' \
             -derivedDataPath .xcode -skipMacroValidation
+          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
           cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 
       - name: Build Rust
@@ -127,19 +143,31 @@ jobs:
 
       # Same as the validate job: the sidecar is a gitignored build artifact
       # that `tauri:build` (via externalBin) needs present before bundling.
-      # Additionally build the MLX metallib bundle: `swift build` cannot compile
-      # MLX's Metal shaders, so the notes (LLM) backend fails at runtime with
-      # "Failed to load the default metallib". xcodebuild produces
-      # mlx-swift_Cmlx.bundle, which bundle.resources ships into the .app.
+      # The artifact cache (keyed on Package.resolved + Sources/) is shared with
+      # the validate job, so this usually restores instantly. On a miss, a single
+      # xcodebuild emits both the executable and the MLX metallib bundle
+      # (mlx-swift_Cmlx.bundle): without the bundle the notes (LLM) backend fails
+      # at runtime with "Failed to load the default metallib", and bundle.resources
+      # ships it into the .app. `swift build` is redundant (it can't compile MLX's
+      # Metal shaders), so build once with xcodebuild and copy both products out.
+      - name: Cache ariso-stt sidecar artifacts
+        id: sidecar-cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
+            src-tauri/binaries/mlx-swift_Cmlx.bundle
+          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+
       - name: Build ariso-stt sidecar
+        if: steps.sidecar-cache.outputs.cache-hit != 'true'
         working-directory: src-tauri/ariso-stt
         run: |
-          swift build -c release
           mkdir -p ../binaries
-          cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
           xcodebuild build -scheme ariso-stt -configuration Release \
             -destination 'generic/platform=macOS' \
             -derivedDataPath .xcode -skipMacroValidation
+          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
           cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 
       - name: Build, sign, and notarize
