@@ -521,8 +521,14 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
 fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
-    // Reject ids that could escape the recordings dir.
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+    // Reject ids that could escape the recordings dir. `:` is blocked too so a
+    // Windows drive-relative form (e.g. `C:foo`) can never slip past the guard.
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || id.contains("..")
+    {
         return Err(format!("invalid recording id: {id}"));
     }
     let root = crate::storage::ariso_root()?;
@@ -561,7 +567,7 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         return Err(format!("recording file not found: {}", path.display()));
     }
     app.opener()
-        .open_path(path.to_string_lossy().to_string(), None::<&str>)
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
 }
 
@@ -614,6 +620,7 @@ mod tests {
         assert!(recording_dir("../foo").is_err());
         assert!(recording_dir("a/b").is_err());
         assert!(recording_dir("a\\b").is_err());
+        assert!(recording_dir("C:foo").is_err());
         assert!(recording_dir("foo/../bar").is_err());
     }
 
