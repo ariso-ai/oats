@@ -1,7 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::task::JoinHandle;
+
+/// Upper bound on how long the notes sidecar may run before we kill it.
+/// Notes generation is best-effort and runs detached from `finalize_core`,
+/// so this only bounds the background task's lifetime.
+const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
 
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,18 +70,28 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
 }
 
 /// Run the sidecar in notes mode and return the generated markdown (stdout).
+/// Bounded by [`NOTES_TIMEOUT`]; on timeout the child process is killed
+/// (via `kill_on_drop`) so a hung sidecar can't keep a caller pending.
 pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, String> {
     let bin = sidecar_path()?;
-    let output = Command::new(&bin)
-        .arg("notes")
+    let mut cmd = Command::new(&bin);
+    cmd.arg("notes")
         .arg("--transcript")
         .arg(transcript)
         .arg("--models")
         .arg(models)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(NOTES_TIMEOUT, cmd.output())
         .await
+        .map_err(|_| {
+            format!(
+                "ariso-stt notes timed out after {}s",
+                NOTES_TIMEOUT.as_secs()
+            )
+        })?
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
 
     if !output.status.success() {
@@ -84,16 +101,49 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, Strin
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Best-effort notes generation: runs the sidecar and writes either
+/// `note.md` or `meta.notes_error`. Failures here never affect the
+/// recording's `Done` status.
+async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
+    let transcript_path = dir.join("transcript.md");
+    match run_notes(&transcript_path, &models).await {
+        // Empty output is a silent failure: it would write a blank
+        // note.md with notes_error unset, reading as success. Record it.
+        Ok(notes) if notes.trim().is_empty() => {
+            eprintln!("notes generation: empty output");
+            meta.notes_error = Some("notes generation produced empty output".to_string());
+            let _ = storage::write_meta(&dir, &meta);
+        }
+        Ok(notes) => {
+            if let Err(e) = storage::write_notes(&dir, &notes) {
+                eprintln!("write notes: {e}");
+                meta.notes_error = Some(e);
+                let _ = storage::write_meta(&dir, &meta);
+            }
+        }
+        Err(e) => {
+            eprintln!("notes generation: {e}");
+            meta.notes_error = Some(e);
+            let _ = storage::write_meta(&dir, &meta);
+        }
+    }
+}
+
 use crate::storage::{self, RecordingMeta, RecordingStatus};
 
 /// Pure-ish orchestration over an explicit root, so tests use a tempdir.
+///
+/// Returns as soon as the transcript is persisted and marked `Done`. Notes
+/// generation runs in a detached background task whose `JoinHandle` is
+/// returned alongside the result — production callers drop it; tests
+/// `.await` it to observe `note.md` / `meta.notes_error`.
 pub async fn finalize_core(
     root: &Path,
     audio: Vec<u8>,
     title: String,
     created_at: String,
     duration_seconds: u64,
-) -> Result<FinalizeResult, String> {
+) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     let id = storage::sanitize_iso_to_id(&created_at);
     let dir = storage::create_recording_dir(root, &id)?;
 
@@ -126,37 +176,20 @@ pub async fn finalize_core(
             meta.status = RecordingStatus::Done;
             storage::write_meta(&dir, &meta)?;
 
-            // Best-effort meeting notes. A failure here must NOT fail the
-            // recording: the transcript is already saved and marked Done.
-            let transcript_path = dir.join("transcript.md");
-            match run_notes(&transcript_path, &models).await {
-                // Empty output is a silent failure: it would write a blank
-                // note.md with notes_error unset, reading as success. Record it.
-                Ok(notes) if notes.trim().is_empty() => {
-                    eprintln!("notes generation: empty output");
-                    meta.notes_error = Some("notes generation produced empty output".to_string());
-                    let _ = storage::write_meta(&dir, &meta);
-                }
-                Ok(notes) => {
-                    if let Err(e) = storage::write_notes(&dir, &notes) {
-                        eprintln!("write notes: {e}");
-                        meta.notes_error = Some(e);
-                        let _ = storage::write_meta(&dir, &meta);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("notes generation: {e}");
-                    meta.notes_error = Some(e);
-                    let _ = storage::write_meta(&dir, &meta);
-                }
-            }
+            // Spawn notes generation detached: it's best-effort and writes
+            // its outcome (note.md or meta.notes_error) directly to disk,
+            // so the UI/library state never has to wait on it.
+            let notes_handle = tokio::spawn(process_notes(dir.clone(), models, meta.clone()));
 
-            Ok(FinalizeResult {
-                backend: "local".to_string(),
-                id,
-                title,
-                status: RecordingStatus::Done,
-            })
+            Ok((
+                FinalizeResult {
+                    backend: "local".to_string(),
+                    id,
+                    title,
+                    status: RecordingStatus::Done,
+                },
+                notes_handle,
+            ))
         }
         Err(e) => {
             meta.status = RecordingStatus::Failed;
@@ -175,7 +208,11 @@ pub async fn local_finalize_recording(
     duration_seconds: u64,
 ) -> Result<FinalizeResult, String> {
     let root = storage::ariso_root()?;
-    finalize_core(&root, audio, title, created_at, duration_seconds).await
+    // Drop the notes JoinHandle: notes are best-effort and continue running
+    // in the background, writing their outcome to meta.json directly.
+    finalize_core(&root, audio, title, created_at, duration_seconds)
+        .await
+        .map(|(res, _notes)| res)
 }
 
 #[cfg(all(test, unix))]
@@ -240,10 +277,13 @@ mod tests {
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
-        let res = finalize_core(
+        let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
             "My Title".into(), "2026-06-02T14:30:05.000Z".into(), 12,
         ).await.unwrap();
+        // Drain the notes task before clearing ARISO_STT_BIN, otherwise the
+        // detached task would race the env-var teardown.
+        notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         assert_eq!(res.status, RecordingStatus::Done);
@@ -285,10 +325,11 @@ mod tests {
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
-        let res = finalize_core(
+        let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
             "T".into(), "2026-06-02T14:30:05Z".into(), 12,
         ).await.unwrap();
+        notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         assert_eq!(res.status, RecordingStatus::Done);
@@ -309,10 +350,11 @@ mod tests {
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
-        let res = finalize_core(
+        let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
             "T".into(), "2026-06-02T14:30:05Z".into(), 12,
         ).await.unwrap();
+        notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         assert_eq!(res.status, RecordingStatus::Done);
