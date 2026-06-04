@@ -83,6 +83,8 @@ onBeforeUnmount(() => {
   background: white;
   color: #1d1d1f;
   cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .play-btn:disabled {
   opacity: 0.5;
@@ -92,8 +94,11 @@ onBeforeUnmount(() => {
   color: #dc2626;
   border-color: #fca5a5;
 }
+/* Flex to fill the remaining row width beside the Note/Transcript buttons;
+   min-width: 0 lets it shrink instead of pushing the buttons off the line. */
 .audio-el {
   height: 32px;
-  max-width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 </style>
