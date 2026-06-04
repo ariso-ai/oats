@@ -545,12 +545,24 @@ fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Upper bound on the audio we'll load into memory for playback. The whole file
+/// is read into RAM and copied across IPC into a JS Blob, so this guards against
+/// OOM on a corrupt or pathologically large file. ~1 GB is far above any real
+/// meeting recording (mp3 at this app's bitrate is well under 1 MB/min).
+const MAX_AUDIO_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Read the raw bytes of a recording's `recording.mp3`, returned as a raw
 /// binary IPC response so the frontend can build a Blob URL for an `<audio>`
 /// element (avoids JSON-array bloat from a `Vec<u8>` return).
 #[tauri::command]
 pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> {
     let path = recording_dir(&id)?.join("recording.mp3");
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("read recording audio: {e}"))?
+        .len();
+    if size > MAX_AUDIO_BYTES {
+        return Err(format!("recording audio too large to play: {size} bytes"));
+    }
     let bytes = std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))?;
     Ok(tauri::ipc::Response::new(bytes))
 }
