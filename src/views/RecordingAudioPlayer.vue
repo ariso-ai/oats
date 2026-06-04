@@ -1,10 +1,10 @@
 <template>
   <audio
     v-if="blobUrl"
+    ref="audioEl"
     class="audio-el"
     :src="blobUrl"
     controls
-    autoplay
   ></audio>
   <button
     v-else
@@ -21,7 +21,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onBeforeUnmount } from 'vue';
+import { ref, onBeforeUnmount, nextTick } from 'vue';
 import { local } from '../tauri';
 
 const props = defineProps<{ id: string; hasAudio: boolean }>();
@@ -29,6 +29,11 @@ const props = defineProps<{ id: string; hasAudio: boolean }>();
 const blobUrl = ref<string | null>(null);
 const loading = ref(false);
 const errored = ref(false);
+const audioEl = ref<HTMLAudioElement | null>(null);
+
+// Tracks whether the component unmounted while a load was in flight, so a URL
+// created after onBeforeUnmount ran gets revoked instead of leaking.
+let destroyed = false;
 
 async function onPlay() {
   if (!props.hasAudio || loading.value || blobUrl.value) return;
@@ -36,17 +41,33 @@ async function onPlay() {
   errored.value = false;
   try {
     const buf = await local.readRecordingAudio(props.id);
+    // Backend writes recording.mp3 (see src-tauri/src/commands.rs); keep MIME in sync.
     const blob = new Blob([buf], { type: 'audio/mpeg' });
-    blobUrl.value = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
+    if (destroyed) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    blobUrl.value = url;
+    // autoplay is unreliable in WKWebView (the user-gesture token is lost across
+    // the await), so play programmatically as a best effort; the native
+    // <audio controls> remains usable if the webview blocks it.
+    await nextTick();
+    audioEl.value?.play().catch(() => {});
   } catch (e) {
-    console.error('Failed to load recording audio', e);
-    errored.value = true;
+    if (!destroyed) {
+      console.error('Failed to load recording audio', e);
+      errored.value = true;
+    }
   } finally {
-    loading.value = false;
+    if (!destroyed) {
+      loading.value = false;
+    }
   }
 }
 
 onBeforeUnmount(() => {
+  destroyed = true;
   if (blobUrl.value) {
     URL.revokeObjectURL(blobUrl.value);
   }
