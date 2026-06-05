@@ -22,8 +22,7 @@ concurrency:
 jobs:
   validate:
     name: Validate (frontend + cargo build)
-    #runs-on: [self-hosted, macOS, ARM64]
-    runs-on: macos-26
+    runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: read
     steps:
