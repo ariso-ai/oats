@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 
 const listRecordings = vi.fn();
@@ -30,6 +30,12 @@ function rec(over: Record<string, unknown>) {
 }
 
 beforeEach(() => vi.clearAllMocks());
+// Always restore URL stubs and the HTMLMediaElement.play spy, even if a test
+// throws before reaching its inline teardown, so they can't leak across specs.
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('LibraryView', () => {
   it('shows an empty state when there are no recordings', async () => {
@@ -119,7 +125,6 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(readRecordingAudio).toHaveBeenCalledWith('a');
     expect(wrapper.find('audio.audio-el').exists()).toBe(true);
-    vi.unstubAllGlobals();
   });
 
   it('shows the error state and creates no blob URL when audio fails to load', async () => {
@@ -141,6 +146,5 @@ describe('LibraryView', () => {
     const playAfter = wrapper.find('.play-btn');
     expect(playAfter.classes()).toContain('play-btn--error');
     expect(playAfter.text()).toContain('Failed');
-    vi.unstubAllGlobals();
   });
 });

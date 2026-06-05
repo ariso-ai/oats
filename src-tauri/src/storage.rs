@@ -214,9 +214,9 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     created_at: m.created_at,
                     duration_seconds: m.duration_seconds,
                     status: m.status,
-                    has_audio: recording_dir.join("recording.mp3").exists(),
-                    has_note: recording_dir.join("note.md").exists(),
-                    has_transcript: recording_dir.join("transcript.md").exists(),
+                    has_audio: recording_dir.join("recording.mp3").is_file(),
+                    has_note: recording_dir.join("note.md").is_file(),
+                    has_transcript: recording_dir.join("transcript.md").is_file(),
                 });
             }
             Err(_) => continue,
