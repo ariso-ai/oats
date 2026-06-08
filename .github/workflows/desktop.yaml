@@ -109,6 +109,11 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -180,7 +185,6 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_BODY: ${{ github.event.release.body }}
           RELEASE_NAME: ${{ github.event.release.name }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -196,13 +200,13 @@ jobs:
           fi
           TARBALL="${TARBALLS[0]}"
           SIGFILE="${TARBALL}.sig"
-          BASENAME=$(basename "$TARBALL")
 
           # The version in tauri.conf.json (strip leading 'v' from tag).
           VERSION="${RELEASE_TAG#v}"
 
-          # Asset URL is the release-asset download URL on GitHub.
-          ASSET_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BASENAME}"
+          # Asset URL is the stable R2 path the updater downloads the payload
+          # from. The object at this key is overwritten by the Publish to R2 step.
+          ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.app.tar.gz"
 
           # Read the detached signature contents (single line of base64).
           SIG=$(cat "$SIGFILE")
@@ -236,17 +240,56 @@ jobs:
               }
             }' > latest.json
 
-          # Also copy the tarball and sig to repo root so the upload glob
-          # below picks them up alongside the DMG.
-          cp "$TARBALL" "$SIGFILE" .
+      - name: Publish artifacts to R2
+        run: |
+          set -euo pipefail
 
-      - name: Attach signed DMG + updater manifest to GitHub Release
+          # Ensure the AWS CLI is available on the self-hosted runner.
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "AWS CLI not found on runner; install with 'brew install awscli'." >&2
+            exit 1
+          fi
+
+          # Re-locate the bundler outputs (same logic as the manifest step).
+          mapfile -t TARBALLS < <(find src-tauri/target/release/bundle/macos -maxdepth 1 -type f -name '*.app.tar.gz' | sort)
+          if [[ "${#TARBALLS[@]}" -ne 1 ]]; then
+            echo "Expected exactly 1 updater tarball, found ${#TARBALLS[@]}." >&2
+            exit 1
+          fi
+          TARBALL="${TARBALLS[0]}"
+
+          mapfile -t DMGS < <(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | sort)
+          if [[ "${#DMGS[@]}" -ne 1 ]]; then
+            echo "Expected exactly 1 DMG, found ${#DMGS[@]}." >&2
+            exit 1
+          fi
+          DMG="${DMGS[0]}"
+
+          NOCACHE="no-cache, max-age=0, must-revalidate"
+
+          # Upload payloads BEFORE the manifest that references them, so a client
+          # reading the new latest.json never points at a missing object.
+          aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/desktop/Ariso.app.tar.gz" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/gzip \
+            --cache-control "$NOCACHE"
+
+          aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/Ariso.dmg" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/x-apple-diskimage \
+            --cache-control "$NOCACHE"
+
+          aws s3 cp latest.json "s3://${R2_BUCKET}/desktop/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/json \
+            --cache-control "$NOCACHE"
+
+      - name: Add R2 download link to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            *.app.tar.gz
-            *.app.tar.gz.sig
-            latest.json
-          fail_on_unmatched_files: true
+          append_body: true
+          body: |
+
+            ---
+            **Download:** https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.dmg
