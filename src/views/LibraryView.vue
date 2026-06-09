@@ -1,35 +1,58 @@
 <template>
   <div class="library">
-    <h1 class="title">Meetings</h1>
-    <p v-if="loading" class="hint">Loading…</p>
-    <p v-else-if="recordings.length === 0" class="hint">No recordings yet.</p>
-    <ul v-else class="list">
-      <li v-for="r in recordings" :key="r.id" class="recording-row">
-        <div class="row-main">
-          <span class="row-title">{{ r.title }}</span>
-          <span class="row-status" :class="`status-${r.status}`">{{ r.status }}</span>
-        </div>
-        <div class="row-sub">
-          <span>{{ formatDate(r.createdAt) }}</span>
-          <span>{{ formatDuration(r.durationSeconds) }}</span>
-        </div>
-        <div class="row-controls">
-          <RecordingAudioPlayer :id="r.id" :has-audio="r.hasAudio" />
-          <button class="btn-note" :disabled="!r.hasNote" @click="openNote(r.id)">Note</button>
-          <button class="btn-transcript" :disabled="!r.hasTranscript" @click="openTranscript(r.id)">Transcript</button>
-        </div>
-      </li>
-    </ul>
+    <aside class="left-panel">
+      <h1 class="title">Meetings</h1>
+      <p v-if="loading" class="hint">Loading…</p>
+      <p v-else-if="error" class="hint">{{ error }}</p>
+      <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
+      <ul v-else class="list">
+          <!-- key is backend-scoped: the list always comes from a single backend at a time -->
+        <li v-for="m in meetings" :key="m.id" class="recording-row">
+          <div class="row-main">
+            <span class="row-title">{{ m.title }}</span>
+            <span v-if="m.status" class="row-status" :class="`status-${m.status}`">{{ m.status }}</span>
+          </div>
+          <div class="row-sub">
+            <span>{{ formatDate(m.timestamp) }}</span>
+            <span v-if="m.durationSeconds != null">{{ formatDuration(m.durationSeconds) }}</span>
+          </div>
+          <div v-if="m.files" class="row-controls">
+            <RecordingAudioPlayer :id="m.id" :has-audio="m.files.hasAudio" />
+            <button class="btn-note" :disabled="!m.files.hasNote" @click="openNote(m.id)">Note</button>
+            <button class="btn-transcript" :disabled="!m.files.hasTranscript" @click="openTranscript(m.id)">Transcript</button>
+          </div>
+        </li>
+      </ul>
+    </aside>
+
+    <section class="right-panel">
+      <header class="right-header">
+        <button
+          class="record-btn"
+          :disabled="recording"
+          aria-label="Start recording"
+          @click="startRecording"
+        >
+          <span class="record-dot" />
+        </button>
+      </header>
+      <div class="right-body" />
+      <RecorderPanel v-if="recording" class="recorder-dock" @done="onRecorderDone" />
+    </section>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { local, type RecordingSummary } from '../tauri';
+import { local } from '../tauri';
+import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
+import RecorderPanel from './RecorderPanel.vue';
 
-const recordings = ref<RecordingSummary[]>([]);
+const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
+const error = ref<string | null>(null);
+const recording = ref(false);
 
 function formatDuration(secs: number): string {
   const m = Math.floor(secs / 60).toString().padStart(2, '0');
@@ -42,7 +65,20 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-async function openNote(id: string) {
+async function loadMeetings(): Promise<void> {
+  loading.value = true;
+  error.value = null;
+  try {
+    meetings.value = await (await getActiveBackend()).listMeetings();
+  } catch (e) {
+    console.error('Failed to list meetings', e);
+    error.value = 'Could not load meetings.';
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function openNote(id: string): Promise<void> {
   try {
     await local.openRecordingFile(id, 'note');
   } catch (e) {
@@ -50,7 +86,7 @@ async function openNote(id: string) {
   }
 }
 
-async function openTranscript(id: string) {
+async function openTranscript(id: string): Promise<void> {
   try {
     await local.openRecordingFile(id, 'transcript');
   } catch (e) {
@@ -58,31 +94,39 @@ async function openTranscript(id: string) {
   }
 }
 
-onMounted(async () => {
-  try {
-    recordings.value = await local.listRecordings();
-  } catch (e) {
-    console.error('Failed to list recordings', e);
-  } finally {
-    loading.value = false;
-  }
-});
+function startRecording(): void {
+  recording.value = true;
+}
+
+async function onRecorderDone(): Promise<void> {
+  recording.value = false;
+  await loadMeetings();
+}
+
+onMounted(loadMeetings);
 </script>
 
 <style scoped>
 .library {
-  padding: 24px;
-  font-family: -apple-system, system-ui, sans-serif;
-  background: #f5f5f7;
+  display: flex;
   height: 100vh;
+  font-family: -apple-system, system-ui, sans-serif;
+  box-sizing: border-box;
+}
+
+/* Left panel: meetings list */
+.left-panel {
+  width: 300px;
+  flex-shrink: 0;
+  background: #f5f5f7;
+  border-right: 1px solid #e5e5ea;
+  padding: 24px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
 }
 .title { font-size: 20px; font-weight: 700; margin-bottom: 16px; color: #1d1d1f; flex-shrink: 0; }
 .hint { font-size: 14px; color: #86868b; }
-/* Scrolls vertically when the recordings overflow the window. min-height: 0 lets
-   this flex child shrink below its content height so overflow-y can engage. */
 .list { list-style: none; margin: 0; padding: 0 4px 0 0; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; overflow-y: auto; }
 .recording-row { background: #fff; border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
 .row-main { display: flex; justify-content: space-between; align-items: center; }
@@ -93,9 +137,6 @@ onMounted(async () => {
 .status-transcribing { color: #4f46e5; }
 .status-recording { color: #86868b; }
 .row-sub { display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: #86868b; }
-/* nowrap keeps the player + both buttons on one line; the player flexes to fill
-   the remaining width (see RecordingAudioPlayer .audio-el) while the buttons
-   keep their size. */
 .row-controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: nowrap; }
 .btn-note, .btn-transcript {
   font-size: 13px;
@@ -108,8 +149,39 @@ onMounted(async () => {
   flex-shrink: 0;
   white-space: nowrap;
 }
-.btn-note:disabled, .btn-transcript:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.btn-note:disabled, .btn-transcript:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Right panel: (empty) detail + record control + docked recorder */
+.right-panel {
+  flex: 1;
+  min-width: 0;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
 }
+.right-header {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 16px 20px;
+  flex-shrink: 0;
+}
+.record-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid #e5e5ea;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.record-btn:hover:not(:disabled) { background: #f5f5f7; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+.record-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.record-dot { width: 14px; height: 14px; border-radius: 50%; background: #f43f5e; }
+.right-body { flex: 1; min-height: 0; }
+.recorder-dock { margin: 0 20px 20px; flex-shrink: 0; }
 </style>

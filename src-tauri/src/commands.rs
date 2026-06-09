@@ -595,7 +595,7 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     }
     WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
         .title("Meetings")
-        .inner_size(460.0, 560.0)
+        .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
         .skip_taskbar(true)
