@@ -80,4 +80,14 @@ describe('applyToggle', () => {
     expect(deps.ensurePermission).not.toHaveBeenCalled();
     expect(deps.persist).toHaveBeenCalledWith(false);
   });
+
+  it('keeps denied status and still persists when openSettings throws', async () => {
+    const deps = makeDeps({
+      ensurePermission: vi.fn().mockResolvedValue(false),
+      openSettings: vi.fn().mockRejectedValue(new Error('opener unavailable')),
+    });
+    const res = await applyToggle(true, false, deps);
+    expect(res.status).toBe('denied');
+    expect(deps.persist).toHaveBeenCalledWith(true);
+  });
 });
