@@ -91,6 +91,22 @@ export function useMeetingApi() {
     );
   }
 
+  async function listMeetingsInWindow(
+    startDate: string,
+    endDate: string
+  ): Promise<ScheduledMeeting[]> {
+    const params = new URLSearchParams({
+      start_date: startDate,
+      end_date: endDate,
+    });
+    const res = await api.request('GET', `/meetings?${params.toString()}`);
+    assertOk(res, 200, 'list meetings');
+    const data = res.data as ScheduledMeetingsResponse | null;
+    return [...(data?.meetings ?? [])].sort(
+      (a, b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime()
+    );
+  }
+
   async function getMeeting(
     meetingId: number
   ): Promise<{ meeting: Meeting }> {
@@ -224,6 +240,7 @@ export function useMeetingApi() {
     createMeeting,
     listMeetings,
     listScheduledMeetings,
+    listMeetingsInWindow,
     getMeeting,
     updateMeeting,
     endMeeting,
