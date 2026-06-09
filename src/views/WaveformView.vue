@@ -69,10 +69,11 @@ import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { load } from '@tauri-apps/plugin-store';
-import { useRecorder, type RecordingMode } from '../composables/useRecorder';
+import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend } from '../composables/useBackend';
+import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
+import { deriveRecordingMode } from './recordingSettings';
 
 const recorder = useRecorder();
 const waveform = useWaveform();
@@ -103,9 +104,15 @@ let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
 
 async function startRecording() {
-  const store = await load('settings.json', { autoSave: true });
-  const savedMode = await store.get<string>('recordingMode');
-  const mode: RecordingMode = savedMode === 'mic' ? 'mic' : 'mic_and_system';
+  const enabled = await loadRecordingEnabled();
+  const mode = deriveRecordingMode(enabled);
+  if (mode === null) {
+    // Both recording sources are disabled — nothing to capture. Roll the tray
+    // back to idle and close the window instead of recording silence.
+    await invoke('set_tray_recording', { isRecording: false, isPaused: false });
+    try { await getCurrentWebviewWindow().close(); } catch { /* ignore */ }
+    return;
+  }
 
   try {
     await recorder.startRecording(mode);
