@@ -212,3 +212,18 @@ export async function setBackendSetting(backend: 'ariso' | 'local'): Promise<voi
   const store = await load('settings.json', { autoSave: true });
   await store.set('backend', backend);
 }
+
+export async function isOnboarded(): Promise<boolean> {
+  const store = await load('settings.json', { autoSave: true });
+  return (await store.get<boolean>('onboarded')) === true;
+}
+
+export async function setOnboarded(value: boolean): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('onboarded', value);
+}
+
+/** Open (or focus) the first-run onboarding window. */
+export async function openOnboardingWindow(): Promise<void> {
+  await invoke('create_onboarding_window');
+}
