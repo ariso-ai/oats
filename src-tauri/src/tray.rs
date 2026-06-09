@@ -134,21 +134,13 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 "library" => {
+                    // The Meetings window is backend-aware: its list is
+                    // populated from the active backend (Ariso server meetings
+                    // or local recordings), so open the in-app window for both
+                    // rather than sending Ariso users out to the browser.
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        if crate::commands::active_backend(&app_async) == "local" {
-                            // Local backend: reuse the in-app Library window
-                            // (titled "Meetings").
-                            let _ = crate::commands::create_library_window(app_async).await;
-                        } else {
-                            // Ariso backend: meetings live in the web app.
-                            use tauri_plugin_opener::OpenerExt;
-                            let url = format!(
-                                "{}/my/meetings",
-                                crate::commands::WEB_APP_BASE_URL
-                            );
-                            let _ = app_async.opener().open_url(url, None::<&str>);
-                        }
+                        let _ = crate::commands::create_library_window(app_async).await;
                     });
                 }
                 "check_updates" => {
