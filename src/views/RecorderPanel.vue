@@ -123,7 +123,18 @@ async function handleStop() {
   const endAt = new Date().toISOString();
   const startAt = recorder.startedAt.value;
   isUploading.value = true;
-  const mp3Blob = await recorder.stopRecording();
+  let mp3Blob: Blob;
+  try {
+    mp3Blob = await recorder.stopRecording();
+  } catch (err) {
+    // A stop failure would otherwise leave the panel stuck on the uploading
+    // template, which has no Close button. Reset state and bail to the parent.
+    console.error('Stop failed:', err);
+    isUploading.value = false;
+    isStopping.value = false;
+    emit('done');
+    return;
+  }
 
   if (mp3Blob.size > 0 && backend.value) {
     // Bound only the UI wait; a timed-out local transcription keeps running
