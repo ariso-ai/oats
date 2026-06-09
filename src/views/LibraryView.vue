@@ -3,8 +3,10 @@
     <aside class="left-panel">
       <h1 class="title">Meetings</h1>
       <p v-if="loading" class="hint">Loading…</p>
+      <p v-else-if="error" class="hint">{{ error }}</p>
       <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
       <ul v-else class="list">
+          <!-- key is backend-scoped: the list always comes from a single backend at a time -->
         <li v-for="m in meetings" :key="m.id" class="recording-row">
           <div class="row-main">
             <span class="row-title">{{ m.title }}</span>
@@ -49,6 +51,7 @@ import RecorderPanel from './RecorderPanel.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
+const error = ref<string | null>(null);
 const recording = ref(false);
 
 function formatDuration(secs: number): string {
@@ -64,10 +67,12 @@ function formatDate(iso: string): string {
 
 async function loadMeetings(): Promise<void> {
   loading.value = true;
+  error.value = null;
   try {
     meetings.value = await (await getActiveBackend()).listMeetings();
   } catch (e) {
     console.error('Failed to list meetings', e);
+    error.value = 'Could not load meetings.';
   } finally {
     loading.value = false;
   }

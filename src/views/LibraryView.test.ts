@@ -116,4 +116,12 @@ describe('LibraryView', () => {
     expect(wrapper.find('.recorder-stub').exists()).toBe(false);
     expect(listMeetings).toHaveBeenCalledTimes(2); // reloaded after recording
   });
+
+  it('shows a distinct error message (not the empty state) when loading fails', async () => {
+    listMeetings.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Could not load meetings');
+    expect(wrapper.text()).not.toContain('No meetings yet');
+  });
 });
