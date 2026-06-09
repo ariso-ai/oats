@@ -91,6 +91,11 @@ export function useRecorder() {
 
     const useSystemAudio = (mode === 'mic_and_system' || mode === 'system') && hasTauri;
     const useMic = mode !== 'system';
+    // Outside Tauri, system-audio-only collapses to no usable input; fail fast
+    // rather than building a silent graph and recording zeroes.
+    if (!useMic && !useSystemAudio) {
+      throw new Error('No recording source is available');
+    }
 
     try {
       const debug =

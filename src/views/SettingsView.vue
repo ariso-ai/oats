@@ -101,7 +101,7 @@
               type="checkbox"
               class="toggle-input"
               :checked="micEnabled"
-              :disabled="micToggling"
+              :disabled="recordingToggleBusy"
               @change="onToggleMic"
             />
             <span class="toggle-track">
@@ -123,7 +123,7 @@
               type="checkbox"
               class="toggle-input"
               :checked="systemAudioEnabled"
-              :disabled="systemAudioToggling"
+              :disabled="recordingToggleBusy"
               @change="onToggleSystemAudio"
             />
             <span class="toggle-track">
@@ -248,6 +248,11 @@ const micStatus = ref<PermissionStatus>('');
 const systemAudioStatus = ref<PermissionStatus>('');
 const micToggling = ref(false);
 const systemAudioToggling = ref(false);
+// Shared across both recording toggles so one pending permission flow blocks
+// the other — otherwise the user could start overlapping OS prompts.
+const recordingToggleBusy = computed(
+  () => micToggling.value || systemAudioToggling.value,
+);
 const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
@@ -451,7 +456,7 @@ const initials = computed(() => {
 });
 
 async function onToggleMic(e: Event) {
-  if (micToggling.value) return;
+  if (recordingToggleBusy.value) return;
   micToggling.value = true;
   try {
     const checked = (e.target as HTMLInputElement).checked;
@@ -470,7 +475,7 @@ async function onToggleMic(e: Event) {
 }
 
 async function onToggleSystemAudio(e: Event) {
-  if (systemAudioToggling.value) return;
+  if (recordingToggleBusy.value) return;
   systemAudioToggling.value = true;
   try {
     const checked = (e.target as HTMLInputElement).checked;
@@ -509,14 +514,21 @@ onMounted(async () => {
     await fetchUserProfile();
   }
 
-  const enabled = await loadRecordingEnabled();
-  micEnabled.value = enabled.mic;
-  systemAudioEnabled.value = enabled.systemAudio;
-  // Reflect the current Screen Recording status without prompting. (Mic status
-  // is intentionally left blank on load — there's no silent mic preflight as
-  // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
-  if (enabled.systemAudio) {
-    systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
+  // Bootstrap recording toggles in its own try/catch so a settings-store or
+  // permission-preflight failure doesn't abort the rest of onMounted (update
+  // listeners, sign-in prompt listener, backend/model state).
+  try {
+    const enabled = await loadRecordingEnabled();
+    micEnabled.value = enabled.mic;
+    systemAudioEnabled.value = enabled.systemAudio;
+    // Reflect the current Screen Recording status without prompting. (Mic status
+    // is intentionally left blank on load — there's no silent mic preflight as
+    // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
+    if (enabled.systemAudio) {
+      systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
+    }
+  } catch (e) {
+    console.warn('Failed to initialize recording settings', e);
   }
 
   meetingNotifications.value = await isMeetingNotificationsEnabled();
