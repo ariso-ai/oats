@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const localFinalize = vi.fn();
+const listRecordings = vi.fn();
+const listMeetingsInWindow = vi.fn();
 const apiRequest = vi.fn();
 const putPresigned = vi.fn();
 const checkSession = vi.fn();
@@ -12,6 +14,7 @@ vi.mock('../tauri', () => ({
   local: {
     finalizeRecording: (...a: unknown[]) => localFinalize(...a),
     modelStatus: () => modelStatus(),
+    listRecordings: () => listRecordings(),
   },
   auth: { checkSession: () => checkSession() },
   api: {
@@ -22,10 +25,13 @@ vi.mock('../tauri', () => ({
 }));
 
 vi.mock('./useMeetingApi', () => ({
-  useMeetingApi: () => ({ uploadAudio: (...a: unknown[]) => uploadAudio(...a) }),
+  useMeetingApi: () => ({
+    uploadAudio: (...a: unknown[]) => uploadAudio(...a),
+    listMeetingsInWindow: (...a: unknown[]) => listMeetingsInWindow(...a),
+  }),
 }));
 
-import { ArisoBackend, LocalBackend, getActiveBackend } from './useBackend';
+import { ArisoBackend, LocalBackend, getActiveBackend, arisoMeetingWindow } from './useBackend';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -112,5 +118,59 @@ describe('getActiveBackend', () => {
   it('defaults to Ariso when the setting read throws', async () => {
     getBackendSetting.mockRejectedValue(new Error('store unavailable'));
     expect((await getActiveBackend()).id).toBe('ariso');
+  });
+});
+
+describe('arisoMeetingWindow', () => {
+  it('spans 7 days back to 1 day forward, date-only', () => {
+    // Local midday avoids any tz boundary ambiguity.
+    const now = new Date(2026, 5, 9, 12, 0, 0); // 2026-06-09 local
+    expect(arisoMeetingWindow(now)).toEqual({
+      startDate: '2026-06-02',
+      endDate: '2026-06-10',
+    });
+  });
+});
+
+describe('LocalBackend.listMeetings', () => {
+  it('maps recordings to list items with file affordances', async () => {
+    listRecordings.mockResolvedValue([
+      {
+        id: 'a',
+        title: 'First',
+        createdAt: '2026-06-02T10:00:00Z',
+        durationSeconds: 75,
+        status: 'done',
+        hasAudio: true,
+        hasNote: false,
+        hasTranscript: true,
+      },
+    ]);
+    const items = await new LocalBackend().listMeetings();
+    expect(items).toEqual([
+      {
+        id: 'a',
+        title: 'First',
+        timestamp: '2026-06-02T10:00:00Z',
+        durationSeconds: 75,
+        status: 'done',
+        files: { hasAudio: true, hasNote: false, hasTranscript: true },
+      },
+    ]);
+  });
+});
+
+describe('ArisoBackend.listMeetings', () => {
+  it('queries the date window and maps meetings (no file affordances)', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 7, title: 'Standup', start_at: '2026-06-08T09:00:00Z' },
+      { id: 8, title: null, start_at: '2026-06-09T09:00:00Z' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(listMeetingsInWindow).toHaveBeenCalledTimes(1);
+    expect(items).toEqual([
+      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z' },
+      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z' },
+    ]);
   });
 });

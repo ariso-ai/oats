@@ -1,4 +1,4 @@
-import { local, auth, getBackendSetting } from '../tauri';
+import { local, auth, getBackendSetting, type RecordingSummary } from '../tauri';
 import { useMeetingApi } from './useMeetingApi';
 
 export type BackendId = 'ariso' | 'local';
@@ -20,12 +20,26 @@ export interface FinalizeResult {
   [k: string]: unknown;
 }
 
+export interface MeetingListItem {
+  id: string;
+  title: string;
+  /** ISO timestamp: local `createdAt` or ariso `start_at`. View formats it. */
+  timestamp: string;
+  /** Local recordings only. */
+  durationSeconds?: number;
+  /** Local recordings only. */
+  status?: RecordingSummary['status'];
+  /** Local recordings only — drives the row's audio/note/transcript controls. */
+  files?: { hasAudio: boolean; hasNote: boolean; hasTranscript: boolean };
+}
+
 export interface Backend {
   id: BackendId;
   needsAuth: boolean;
   usesMeetingPicker: boolean;
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
+  listMeetings(): Promise<MeetingListItem[]>;
 }
 
 async function blobToBytes(blob: Blob): Promise<number[]> {
@@ -63,6 +77,17 @@ export class ArisoBackend implements Backend {
     });
     return { backend: 'ariso', meetingId };
   }
+
+  async listMeetings(): Promise<MeetingListItem[]> {
+    const { listMeetingsInWindow } = useMeetingApi();
+    const { startDate, endDate } = arisoMeetingWindow(new Date());
+    const meetings = await listMeetingsInWindow(startDate, endDate);
+    return meetings.map((m) => ({
+      id: String(m.id),
+      title: m.title || 'Untitled meeting',
+      timestamp: m.start_at,
+    }));
+  }
 }
 
 export class LocalBackend implements Backend {
@@ -89,6 +114,34 @@ export class LocalBackend implements Backend {
     );
     return { backend: 'local', ...res };
   }
+
+  async listMeetings(): Promise<MeetingListItem[]> {
+    const recs = await local.listRecordings();
+    return recs.map((r) => ({
+      id: r.id,
+      title: r.title,
+      timestamp: r.createdAt,
+      durationSeconds: r.durationSeconds,
+      status: r.status,
+      files: {
+        hasAudio: r.hasAudio,
+        hasNote: r.hasNote,
+        hasTranscript: r.hasTranscript,
+      },
+    }));
+  }
+}
+
+/** Inclusive day window for the Ariso meetings list: 7 days back … 1 day
+ * forward (covers the next ~24h), formatted as local `YYYY-MM-DD`. */
+export function arisoMeetingWindow(now: Date): { startDate: string; endDate: string } {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const start = new Date(now);
+  start.setDate(start.getDate() - 7);
+  const end = new Date(now);
+  end.setDate(end.getDate() + 1);
+  return { startDate: ymd(start), endDate: ymd(end) };
 }
 
 export async function getActiveBackend(): Promise<Backend> {
