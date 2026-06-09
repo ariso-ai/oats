@@ -448,7 +448,7 @@ pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i6
     };
     WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
-        .inner_size(320.0, 56.0)
+        .inner_size(48.0, 124.0)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
