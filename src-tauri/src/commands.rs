@@ -430,6 +430,27 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
+#[tauri::command]
+pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewWindowBuilder, WebviewUrl};
+
+    // Focus if already exists
+    if let Some(win) = app.get_webview_window("onboarding") {
+        win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, "onboarding", WebviewUrl::App("/#/onboarding".into()))
+        .title("Welcome to Ariso")
+        .inner_size(450.0, 600.0)
+        .resizable(false)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command and by the tray (Local backend path).
 pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i64>) -> Result<(), String> {
