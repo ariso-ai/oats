@@ -130,6 +130,14 @@ describe('arisoMeetingWindow', () => {
       endDate: '2026-06-10',
     });
   });
+
+  it('rolls back across a month/year boundary', () => {
+    const now = new Date(2026, 0, 3, 12, 0, 0); // 2026-01-03 local
+    expect(arisoMeetingWindow(now)).toEqual({
+      startDate: '2025-12-27',
+      endDate: '2026-01-04',
+    });
+  });
 });
 
 describe('LocalBackend.listMeetings', () => {
@@ -168,6 +176,10 @@ describe('ArisoBackend.listMeetings', () => {
     ]);
     const items = await new ArisoBackend().listMeetings();
     expect(listMeetingsInWindow).toHaveBeenCalledTimes(1);
+    expect(listMeetingsInWindow).toHaveBeenCalledWith(
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
+    );
     expect(items).toEqual([
       { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z' },
       { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z' },

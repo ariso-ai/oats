@@ -1,5 +1,5 @@
 import { local, auth, getBackendSetting, type RecordingSummary } from '../tauri';
-import { useMeetingApi } from './useMeetingApi';
+import { useMeetingApi, type ScheduledMeeting } from './useMeetingApi';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -81,7 +81,7 @@ export class ArisoBackend implements Backend {
   async listMeetings(): Promise<MeetingListItem[]> {
     const { listMeetingsInWindow } = useMeetingApi();
     const { startDate, endDate } = arisoMeetingWindow(new Date());
-    const meetings = await listMeetingsInWindow(startDate, endDate);
+    const meetings: ScheduledMeeting[] = await listMeetingsInWindow(startDate, endDate);
     return meetings.map((m) => ({
       id: String(m.id),
       title: m.title || 'Untitled meeting',
@@ -116,6 +116,7 @@ export class LocalBackend implements Backend {
   }
 
   async listMeetings(): Promise<MeetingListItem[]> {
+    // No date window: the local library shows the full recording history.
     const recs = await local.listRecordings();
     return recs.map((r) => ({
       id: r.id,
