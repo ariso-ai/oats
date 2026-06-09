@@ -24,11 +24,16 @@ export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
   if (typeof mic === 'boolean' && typeof sys === 'boolean') {
     return { mic, systemAudio: sys };
   }
-  const legacy = await store.get<string>(LEGACY_KEY);
-  const derived = deriveEnabledFromLegacy(legacy);
-  await store.set(MIC_KEY, derived.mic);
-  await store.set(SYS_KEY, derived.systemAudio);
-  return derived;
+  // At least one new key is missing — migrate the missing one(s) from the
+  // legacy `recordingMode` while preserving any new key already written.
+  const derived = deriveEnabledFromLegacy(await store.get<string>(LEGACY_KEY));
+  const result: RecordingEnabled = {
+    mic: typeof mic === 'boolean' ? mic : derived.mic,
+    systemAudio: typeof sys === 'boolean' ? sys : derived.systemAudio,
+  };
+  if (typeof mic !== 'boolean') await store.set(MIC_KEY, result.mic);
+  if (typeof sys !== 'boolean') await store.set(SYS_KEY, result.systemAudio);
+  return result;
 }
 
 export async function setMicEnabled(enabled: boolean): Promise<void> {
