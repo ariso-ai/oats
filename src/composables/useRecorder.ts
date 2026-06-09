@@ -273,6 +273,12 @@ export function useRecorder() {
     if (processor && micSource) {
       try {
         micSource.disconnect(processor);
+      } catch {
+        // Already disconnected
+      }
+    }
+    if (processor) {
+      try {
         processor.disconnect();
       } catch {
         // Already disconnected
