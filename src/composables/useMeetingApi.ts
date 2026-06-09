@@ -100,8 +100,9 @@ export function useMeetingApi() {
       end_date: endDate,
     });
     const res = await api.request('GET', `/meetings?${params.toString()}`);
-    assertOk(res, 200, 'list meetings');
+    assertOk(res, 200, 'list meetings in window');
     const data = res.data as ScheduledMeetingsResponse | null;
+    // Descending: soonest / most-recent meetings sit at the top of the list.
     return [...(data?.meetings ?? [])].sort(
       (a, b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime()
     );
