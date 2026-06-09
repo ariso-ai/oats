@@ -3,7 +3,8 @@ import lamejs from '@breezystack/lamejs';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-export type RecordingMode = 'mic' | 'mic_and_system';
+export type { RecordingMode } from '../views/recordingSettings';
+import type { RecordingMode } from '../views/recordingSettings';
 
 const hasTauri =
   typeof window !== 'undefined' &&
@@ -22,6 +23,9 @@ export function useRecorder() {
   let micSource: MediaStreamAudioSourceNode | null = null;
   let processor: ScriptProcessorNode | null = null;
   let analyserNode: AnalyserNode | null = null;
+  // Silent sink used only in system-audio-only mode to keep the Web Audio graph
+  // pulling (so the ScriptProcessor fires) without playing the captured audio.
+  let systemGain: GainNode | null = null;
   let mp3Encoder: lamejs.Mp3Encoder | null = null;
   let mp3Chunks: Int8Array[] = [];
   let timerInterval: ReturnType<typeof setInterval> | null = null;
@@ -85,27 +89,34 @@ export function useRecorder() {
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
 
-    const useSystemAudio = mode === 'mic_and_system' && hasTauri;
+    const useSystemAudio = (mode === 'mic_and_system' || mode === 'system') && hasTauri;
+    const useMic = mode !== 'system';
+    // Outside Tauri, system-audio-only collapses to no usable input; fail fast
+    // rather than building a silent graph and recording zeroes.
+    if (!useMic && !useSystemAudio) {
+      throw new Error('No recording source is available');
+    }
 
     try {
       const debug =
         import.meta.env.DEV && import.meta.env.VITE_DEBUG_AUDIO === 'true';
 
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: !debug,
-          noiseSuppression: !debug,
-          sampleRate: 44100,
-        },
-      });
-
       audioContext = new AudioContext({ sampleRate: 44100 });
-      micSource = audioContext.createMediaStreamSource(micStream);
-
-      // Analyser for waveform visualization
       analyserNode = audioContext.createAnalyser();
-      micSource.connect(analyserNode);
+
+      if (useMic) {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: !debug,
+            noiseSuppression: !debug,
+            sampleRate: 44100,
+          },
+        });
+        micSource = audioContext.createMediaStreamSource(micStream);
+        // Analyser for waveform visualization (mic path)
+        micSource.connect(analyserNode);
+      }
 
       if (useSystemAudio) {
         // Start Tauri system audio capture and listen for PCM data events
@@ -133,28 +144,31 @@ export function useRecorder() {
           systemAudioBuffer = merged;
         });
         systemAudioUnlisten = unlisten;
-
-        // Stereo encoder: ch0 = mic, ch1 = system audio
-        mp3Encoder = new lamejs.Mp3Encoder(2, 44100, 128);
-      } else {
-        // Mono mic-only encoder
-        mp3Encoder = new lamejs.Mp3Encoder(1, 44100, 128);
       }
 
-      // ScriptProcessor to capture PCM samples
+      // Stereo (ch0 mic, ch1 system) only when mixing both; otherwise mono.
+      const channels = useMic && useSystemAudio ? 2 : 1;
+      mp3Encoder = new lamejs.Mp3Encoder(channels, 44100, 128);
+
+      // ScriptProcessor to capture PCM samples. Fires whenever it is connected
+      // to the destination — even with no input (the system-audio-only case).
       processor = audioContext.createScriptProcessor(4096, 1, 1);
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
         if (!isRecording.value || isPaused.value || !mp3Encoder) return;
+        const frame = e.inputBuffer.length;
 
-        const samples = e.inputBuffer.getChannelData(0);
-        const micInt16 = new Int16Array(samples.length);
-        for (let i = 0; i < samples.length; i++) {
-          const s = Math.max(-1, Math.min(1, samples[i]));
-          micInt16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        // Mic channel (silent zero when mic is disabled)
+        const micInt16 = new Int16Array(frame);
+        if (useMic) {
+          const samples = e.inputBuffer.getChannelData(0);
+          for (let i = 0; i < samples.length; i++) {
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            micInt16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+          }
         }
 
         let mp3buf: Int8Array;
-        if (useSystemAudio) {
+        if (useMic && useSystemAudio) {
           // Drain system audio buffer, padded/trimmed to match mic frame size
           const sysRaw = drainSystemAudio(micInt16.length);
           const sysInt16 = new Int16Array(micInt16.length); // zero-filled
@@ -162,7 +176,20 @@ export function useRecorder() {
             sysInt16.set(sysRaw.slice(0, micInt16.length));
           }
           mp3buf = mp3Encoder.encodeBuffer(micInt16, sysInt16);
+        } else if (useSystemAudio) {
+          // System-audio-only: mono encode from the ring buffer, and feed the
+          // analyser by writing the same samples to the processor output (which
+          // routes through analyser → silent gain → destination).
+          const sysRaw = drainSystemAudio(frame);
+          const sysInt16 = new Int16Array(frame); // zero-filled
+          if (sysRaw) {
+            sysInt16.set(sysRaw.slice(0, frame));
+          }
+          mp3buf = mp3Encoder.encodeBuffer(sysInt16);
+          const out = e.outputBuffer.getChannelData(0);
+          for (let i = 0; i < frame; i++) out[i] = sysInt16[i] / 0x8000;
         } else {
+          // Mic-only mono encode
           mp3buf = mp3Encoder.encodeBuffer(micInt16);
         }
 
@@ -171,8 +198,19 @@ export function useRecorder() {
         }
       };
 
-      micSource.connect(processor);
-      processor.connect(audioContext.destination);
+      if (useMic) {
+        micSource!.connect(processor);
+        processor.connect(audioContext.destination);
+      } else {
+        // System-audio-only graph: processor → analyser → gain(0) → destination.
+        // The zero gain keeps playback silent while the connection to the
+        // destination keeps the processor firing.
+        systemGain = audioContext.createGain();
+        systemGain.gain.value = 0;
+        processor.connect(analyserNode);
+        analyserNode.connect(systemGain);
+        systemGain.connect(audioContext.destination);
+      }
 
       isRecording.value = true;
       isPaused.value = false;
@@ -240,6 +278,12 @@ export function useRecorder() {
     if (processor && micSource) {
       try {
         micSource.disconnect(processor);
+      } catch {
+        // Already disconnected
+      }
+    }
+    if (processor) {
+      try {
         processor.disconnect();
       } catch {
         // Already disconnected
@@ -248,6 +292,21 @@ export function useRecorder() {
     if (analyserNode && micSource) {
       try {
         micSource.disconnect(analyserNode);
+      } catch {
+        // Already disconnected
+      }
+    }
+    if (systemGain) {
+      try {
+        systemGain.disconnect();
+      } catch {
+        // Already disconnected
+      }
+      systemGain = null;
+    }
+    if (analyserNode) {
+      try {
+        analyserNode.disconnect();
       } catch {
         // Already disconnected
       }

@@ -69,10 +69,11 @@ import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { load } from '@tauri-apps/plugin-store';
-import { useRecorder, type RecordingMode } from '../composables/useRecorder';
+import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend } from '../composables/useBackend';
+import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
+import { deriveRecordingMode } from './recordingSettings';
 
 const recorder = useRecorder();
 const waveform = useWaveform();
@@ -102,18 +103,38 @@ let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
 
+// Reset the tray to idle and close the recording window. Best-effort: a
+// failure of either step must not throw out of the abort/rollback path.
+async function rollbackAndClose() {
+  try {
+    await invoke('set_tray_recording', { isRecording: false, isPaused: false });
+  } catch { /* ignore */ }
+  try {
+    await getCurrentWebviewWindow().close();
+  } catch { /* ignore */ }
+}
+
 async function startRecording() {
-  const store = await load('settings.json', { autoSave: true });
-  const savedMode = await store.get<string>('recordingMode');
-  const mode: RecordingMode = savedMode === 'mic' ? 'mic' : 'mic_and_system';
+  let mode: ReturnType<typeof deriveRecordingMode>;
+  try {
+    mode = deriveRecordingMode(await loadRecordingEnabled());
+  } catch {
+    // Settings store unavailable — abort rather than leaving a frozen UI.
+    await rollbackAndClose();
+    return;
+  }
+  if (mode === null) {
+    // Both recording sources are disabled — nothing to capture. Abort instead
+    // of recording silence.
+    await rollbackAndClose();
+    return;
+  }
 
   try {
     await recorder.startRecording(mode);
   } catch {
     // Recording failed (permission denied, device error, etc.)
-    // Roll back tray to idle state and close the window.
-    await invoke('set_tray_recording', { isRecording: false, isPaused: false });
-    try { await getCurrentWebviewWindow().close(); } catch { /* ignore */ }
+    await rollbackAndClose();
     return;
   }
   const analyser = recorder.getAnalyser();
