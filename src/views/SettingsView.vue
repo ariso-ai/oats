@@ -101,6 +101,7 @@
               type="checkbox"
               class="toggle-input"
               :checked="micEnabled"
+              :disabled="micToggling"
               @change="onToggleMic"
             />
             <span class="toggle-track">
@@ -122,6 +123,7 @@
               type="checkbox"
               class="toggle-input"
               :checked="systemAudioEnabled"
+              :disabled="systemAudioToggling"
               @change="onToggleSystemAudio"
             />
             <span class="toggle-track">
@@ -244,6 +246,8 @@ const micEnabled = ref(true);
 const systemAudioEnabled = ref(true);
 const micStatus = ref<PermissionStatus>('');
 const systemAudioStatus = ref<PermissionStatus>('');
+const micToggling = ref(false);
+const systemAudioToggling = ref(false);
 const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
@@ -447,29 +451,41 @@ const initials = computed(() => {
 });
 
 async function onToggleMic(e: Event) {
-  const checked = (e.target as HTMLInputElement).checked;
-  const previous = micEnabled.value;
-  micEnabled.value = checked;
-  const res = await applyToggle(checked, previous, {
-    ensurePermission: ensureMicPermission,
-    openSettings: openMicSettings,
-    persist: setMicEnabled,
-  });
-  micEnabled.value = res.enabled;
-  micStatus.value = res.status;
+  if (micToggling.value) return;
+  micToggling.value = true;
+  try {
+    const checked = (e.target as HTMLInputElement).checked;
+    const previous = micEnabled.value;
+    micEnabled.value = checked;
+    const res = await applyToggle(checked, previous, {
+      ensurePermission: ensureMicPermission,
+      openSettings: openMicSettings,
+      persist: setMicEnabled,
+    });
+    micEnabled.value = res.enabled;
+    micStatus.value = res.status;
+  } finally {
+    micToggling.value = false;
+  }
 }
 
 async function onToggleSystemAudio(e: Event) {
-  const checked = (e.target as HTMLInputElement).checked;
-  const previous = systemAudioEnabled.value;
-  systemAudioEnabled.value = checked;
-  const res = await applyToggle(checked, previous, {
-    ensurePermission: ensureSystemAudioPermission,
-    openSettings: openSystemAudioSettings,
-    persist: setSystemAudioEnabled,
-  });
-  systemAudioEnabled.value = res.enabled;
-  systemAudioStatus.value = res.status;
+  if (systemAudioToggling.value) return;
+  systemAudioToggling.value = true;
+  try {
+    const checked = (e.target as HTMLInputElement).checked;
+    const previous = systemAudioEnabled.value;
+    systemAudioEnabled.value = checked;
+    const res = await applyToggle(checked, previous, {
+      ensurePermission: ensureSystemAudioPermission,
+      openSettings: openSystemAudioSettings,
+      persist: setSystemAudioEnabled,
+    });
+    systemAudioEnabled.value = res.enabled;
+    systemAudioStatus.value = res.status;
+  } finally {
+    systemAudioToggling.value = false;
+  }
 }
 
 async function fetchUserProfile() {
