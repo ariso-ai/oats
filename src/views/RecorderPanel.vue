@@ -82,6 +82,7 @@ const failLabel = computed(() => (isLocal.value ? 'Transcription failed' : 'Uplo
 const progressLabel = computed(() => (isLocal.value ? 'Transcribing…' : 'Uploading…'));
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
+const isStopping = ref(false);
 
 const formattedDuration = computed(() => {
   const s = recorder.durationSeconds.value;
@@ -116,6 +117,8 @@ async function startRecording() {
 }
 
 async function handleStop() {
+  if (isStopping.value) return;
+  isStopping.value = true;
   waveform.stop();
   const endAt = new Date().toISOString();
   const startAt = recorder.startedAt.value;
@@ -143,6 +146,9 @@ async function handleStop() {
       uploadResult.value = 'failed';
     }
   } else {
+    if (mp3Blob.size > 0 && !backend.value) {
+      console.warn('RecorderPanel: backend not initialized; discarding recording');
+    }
     emit('done');
   }
   isUploading.value = false;
@@ -166,7 +172,14 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  waveform.stop();
+  // useWaveform cleans itself up via its own onUnmounted hook. If the component
+  // is torn down mid-recording, stop the recorder too so the AudioContext, mic
+  // stream, timer, and system-audio listener don't leak (mic indicator staying lit).
+  if (recorder.isRecording.value) {
+    recorder.stopRecording().catch(() => {
+      /* best-effort cleanup */
+    });
+  }
 });
 </script>
 

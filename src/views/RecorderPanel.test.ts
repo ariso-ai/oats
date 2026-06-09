@@ -14,6 +14,7 @@ const loadRecordingEnabled = vi.fn();
 
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
+    isRecording: { value: true },
     isPaused: { value: false },
     durationSeconds: { value: 0 },
     startedAt: { value: '2026-06-09T10:00:00Z' },
@@ -74,5 +75,13 @@ describe('RecorderPanel', () => {
     expect(wrapper.text()).toContain('Transcription complete');
     await wrapper.find('.close-btn').trigger('click');
     expect(wrapper.emitted('done')).toHaveLength(1);
+  });
+
+  it('stops the recorder when unmounted mid-recording', async () => {
+    stopRecording.mockResolvedValue(new Blob([], { type: 'audio/mpeg' }));
+    const wrapper = mount(RecorderPanel);
+    await flushPromises();
+    wrapper.unmount();
+    expect(stopRecording).toHaveBeenCalled();
   });
 });
