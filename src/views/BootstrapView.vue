@@ -3,6 +3,7 @@ import { onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { SYNC_EVENT } from '../composables/useMeetingNotifications';
+import { isOnboarded, openOnboardingWindow } from '../tauri';
 
 // The notification orchestrator lives natively in Rust; this window just asks
 // it to re-evaluate (session + enabled toggle) on launch and whenever a sync
@@ -24,6 +25,17 @@ onMounted(async () => {
   }
   unlisten = off;
   void invoke('sync_meeting_notifications');
+
+  // First-run onboarding: show the onboarding window once, ever. The persisted
+  // `onboarded` flag is the single source of truth (a first launch never has a
+  // session). Best-effort — a failure here must not break the notification worker.
+  try {
+    if (!(await isOnboarded())) {
+      await openOnboardingWindow();
+    }
+  } catch (e) {
+    console.warn('Failed to evaluate first-run onboarding', e);
+  }
 });
 
 onUnmounted(() => {
