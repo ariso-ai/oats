@@ -103,14 +103,30 @@ let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
 
-async function startRecording() {
-  const enabled = await loadRecordingEnabled();
-  const mode = deriveRecordingMode(enabled);
-  if (mode === null) {
-    // Both recording sources are disabled — nothing to capture. Roll the tray
-    // back to idle and close the window instead of recording silence.
+// Reset the tray to idle and close the recording window. Best-effort: a
+// failure of either step must not throw out of the abort/rollback path.
+async function rollbackAndClose() {
+  try {
     await invoke('set_tray_recording', { isRecording: false, isPaused: false });
-    try { await getCurrentWebviewWindow().close(); } catch { /* ignore */ }
+  } catch { /* ignore */ }
+  try {
+    await getCurrentWebviewWindow().close();
+  } catch { /* ignore */ }
+}
+
+async function startRecording() {
+  let mode: ReturnType<typeof deriveRecordingMode>;
+  try {
+    mode = deriveRecordingMode(await loadRecordingEnabled());
+  } catch {
+    // Settings store unavailable — abort rather than leaving a frozen UI.
+    await rollbackAndClose();
+    return;
+  }
+  if (mode === null) {
+    // Both recording sources are disabled — nothing to capture. Abort instead
+    // of recording silence.
+    await rollbackAndClose();
     return;
   }
 
@@ -118,9 +134,7 @@ async function startRecording() {
     await recorder.startRecording(mode);
   } catch {
     // Recording failed (permission denied, device error, etc.)
-    // Roll back tray to idle state and close the window.
-    await invoke('set_tray_recording', { isRecording: false, isPaused: false });
-    try { await getCurrentWebviewWindow().close(); } catch { /* ignore */ }
+    await rollbackAndClose();
     return;
   }
   const analyser = recorder.getAnalyser();
