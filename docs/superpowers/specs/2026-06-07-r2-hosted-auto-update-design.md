@@ -1,7 +1,7 @@
 # R2-Hosted Auto-Update Package — Design
 
 **Date:** 2026-06-07
-**Status:** Approved (pending spec review)
+**Status:** Approved
 
 ## Goal
 
