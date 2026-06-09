@@ -512,7 +512,9 @@ onMounted(async () => {
   const enabled = await loadRecordingEnabled();
   micEnabled.value = enabled.mic;
   systemAudioEnabled.value = enabled.systemAudio;
-  // Reflect the current Screen Recording status without prompting.
+  // Reflect the current Screen Recording status without prompting. (Mic status
+  // is intentionally left blank on load — there's no silent mic preflight as
+  // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
   if (enabled.systemAudio) {
     systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
   }
