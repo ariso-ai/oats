@@ -9,7 +9,7 @@
       @mouseleave="collapse"
       @click="showMeetings"
     >
-      <img class="logo" src="../assets/icon-r-b.png" alt="" />
+      <img class="logo" src="../assets/ariso-logo-w.png" alt="" />
 
       <template v-if="uploadResult">
         <span class="status-icon" :class="uploadResult === 'success' ? 'ok' : 'err'">
@@ -292,9 +292,10 @@ html, body {
   padding: 7px 0;
   box-sizing: border-box;
   overflow: hidden;
-  cursor: grab;
+  cursor: grab; /* open hand on hover */
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
 }
+.pill:active { cursor: grabbing; } /* closed/grabbing hand while pressed */
 
 .logo {
   width: 28px;
@@ -316,7 +317,7 @@ html, body {
 .bar {
   width: 3px;
   border-radius: 2px;
-  background: #ffffff;
+  background: #f9d852;
   transition: height 75ms, background 150ms;
 }
 
@@ -380,7 +381,13 @@ html, body {
   align-items: center;
   margin-top: 7px;
   flex-shrink: 0;
+  cursor: grab;
 }
+/* Children carry the drag-region attribute individually, so give them the
+   grab cursor too; switch to grabbing while actively dragging. */
+.drag-handle * { cursor: grab; }
+.drag-handle:active,
+.drag-handle:active * { cursor: grabbing; }
 
 .divider {
   width: 22px;

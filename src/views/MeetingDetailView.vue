@@ -1,182 +1,158 @@
 <template>
-  <div class="detail">
-    <div v-if="loading" class="detail-state">
+  <div class="card">
+    <div v-if="loading" class="card-state">
       <span class="spinner" />
-      <span>Loading meeting details…</span>
+      <span>Loading meeting…</span>
     </div>
-
-    <div v-else-if="error" class="detail-state detail-state--error">{{ error }}</div>
+    <div v-else-if="error" class="card-state card-state--error">{{ error }}</div>
 
     <template v-else-if="detail">
-      <!-- Branded stripe header: black base + diagonal yellow/purple band -->
-      <header
-        class="stripe"
-        :class="detail.external ? 'stripe--external' : 'stripe--internal'"
-      >
-        <div class="stripe-titles">
-          <h1 class="stripe-title">{{ detail.title }}</h1>
-          <p class="stripe-date">{{ formatDateTime(detail.startAt) }}</p>
+      <!-- Header: title + subtitle, share / link / close -->
+      <header class="card-head">
+        <div class="head-titles">
+          <h1 class="head-title">{{ detail.title }}</h1>
+          <p class="head-sub">{{ subtitle }}</p>
         </div>
-        <span v-if="detail.visibility" class="vis-pill">{{ detail.visibility }}</span>
+        <div class="head-actions">
+          <button class="btn-share" type="button" title="Share">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" /><path d="M16 6l-4-4-4 4" /><path d="M12 2v13" /></svg>
+            Share
+          </button>
+          <button class="btn-icon" type="button" aria-label="Copy link" title="Copy link">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" /></svg>
+          </button>
+          <button class="btn-icon btn-close" type="button" aria-label="Close" title="Close" @click="emit('close')">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
       </header>
 
-      <!-- Metadata bar -->
-      <div v-if="durationLabel || detail.participants.length || scoreBadge" class="meta">
+      <!-- Meta row: duration · attendees · tag -->
+      <div v-if="durationLabel || detail.participants.length || detail.meetingType" class="card-meta">
         <div v-if="durationLabel" class="meta-item">
-          <svg viewBox="0 0 24 24" class="ic"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          <svg viewBox="0 0 24 24" class="ic"><path d="M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" /></svg>
           <span>{{ durationLabel }}</span>
         </div>
-        <div v-if="detail.participants.length" class="avatars">
-          <span
-            v-for="(p, i) in detail.participants.slice(0, 5)"
-            :key="i"
-            class="avatar"
-            :style="{ background: avatarColor(i) }"
-            :title="p.name || p.email || ''"
-          >{{ initials(p.name || p.email) }}</span>
-          <span v-if="detail.participants.length > 5" class="avatar avatar--more">
-            +{{ detail.participants.length - 5 }}
+        <div v-if="detail.participants.length" class="meta-item attendees">
+          <span class="avatars">
+            <span
+              v-for="(p, i) in detail.participants.slice(0, 4)"
+              :key="i"
+              class="avatar"
+              :style="{ background: avatarColor(i) }"
+              :title="p.name || p.email || ''"
+            >{{ initials(p.name || p.email) }}</span>
+            <span v-if="detail.participants.length > 4" class="avatar avatar--more">+{{ detail.participants.length - 4 }}</span>
           </span>
+          <span class="attendees-label">{{ detail.participants.length }} Attendees</span>
         </div>
-        <div
-          v-if="scoreBadge"
-          class="score-pill"
-          :style="{ background: scoreBadge.bg, color: scoreBadge.text }"
-        >
-          <span class="score-dot" :style="{ background: scoreBadge.ring }" />
-          {{ scoreBadge.label }}
-        </div>
+        <span v-if="detail.meetingType" class="chip">
+          <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
+        </span>
       </div>
 
-      <!-- Body -->
-      <div class="body">
-        <!-- Quick Digest -->
-        <section v-if="detail.digest" class="sec">
-          <div class="sec-head">
-            <svg viewBox="0 0 24 24" class="ic ic--purple"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-            <h3>Quick Digest</h3>
-          </div>
-          <div class="md" v-html="renderMarkdown(detail.digest)" />
-        </section>
+      <div class="divider" />
 
-        <!-- Action Items -->
-        <section v-if="detail.actionItems.length" class="sec">
-          <div class="sec-head">
-            <svg viewBox="0 0 24 24" class="ic ic--purple"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
-            <h3>Action Items</h3>
-            <span class="count">{{ detail.actionItems.length }}</span>
-          </div>
-          <div class="ai-groups">
-            <div v-for="(g, gi) in groupedActionItems" :key="gi" class="ai-group">
-              <div v-if="g.name" class="ai-owner">
-                <span class="avatar avatar--sm" :style="{ background: avatarColor(gi) }">{{ initials(g.name) }}</span>
-                <span class="ai-name">{{ g.name }}</span>
-              </div>
-              <ol class="ai-list" :class="{ 'ai-list--indent': g.name }">
-                <li v-for="(it, i) in g.items" :key="i">{{ it.item }}</li>
-              </ol>
-            </div>
-          </div>
-        </section>
-
-        <!-- Full Meeting Notes (expandable) -->
-        <section v-if="detail.summary" class="sec">
-          <div class="acc">
-            <button class="acc-btn" @click="showFullNotes = !showFullNotes">
-              <span class="acc-left">
-                <svg viewBox="0 0 24 24" class="ic ic--gray"><path d="M4 6h16M4 12h16M4 18h7" /></svg>
-                Full Meeting Notes
-              </span>
-              <svg viewBox="0 0 24 24" class="ic ic--gray chevron" :class="{ open: showFullNotes }"><path d="M19 9l-7 7-7-7" /></svg>
-            </button>
-            <div v-if="showFullNotes" class="acc-body">
-              <div class="md" v-html="renderMarkdown(detail.summary)" />
-            </div>
-          </div>
-        </section>
-
-        <!-- Meeting Assessment -->
-        <section v-if="detail.score !== undefined" class="sec">
-          <div class="sec-head">
-            <svg viewBox="0 0 24 24" class="ic ic--purple"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
-            <h3>Meeting Assessment</h3>
-          </div>
-          <div class="assess-score">
-            <div
-              class="score-circle"
-              :style="{ background: scoreBadge?.bg, color: scoreBadge?.text, boxShadow: `0 0 0 4px ${scoreBadge?.ring}` }"
-            >{{ detail.score }}</div>
-            <div>
-              <div class="score-label">{{ scoreBadge?.label }}</div>
-              <div class="score-sub">out of 5</div>
-            </div>
-          </div>
-          <div v-if="detail.rationale" class="assess-block">
-            <div class="assess-h">Why this score</div>
-            <p>{{ detail.rationale }}</p>
-          </div>
-          <div v-if="detail.recommendation" class="assess-block">
-            <div class="assess-h">Recommendation</div>
-            <p>{{ detail.recommendation }}</p>
-          </div>
-        </section>
-
-        <!-- Your Coaching -->
-        <section v-if="hasCoaching" class="sec">
-          <div class="coaching">
-            <div class="sec-head">
-              <svg viewBox="0 0 24 24" class="ic ic--purple"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
-              <h3>Your Coaching</h3>
-            </div>
-            <div v-if="detail.coaching?.strengths?.length" class="coach-block">
-              <div class="coach-h coach-h--green">Strengths</div>
-              <ul class="coach-list">
-                <li v-for="(s, i) in detail.coaching!.strengths" :key="i">
-                  <span class="bullet bullet--green">•</span>{{ s }}
-                </li>
-              </ul>
-            </div>
-            <div v-if="detail.coaching?.improvements?.length" class="coach-block">
-              <div class="coach-h coach-h--amber">Areas to Grow</div>
-              <ul class="coach-list">
-                <li v-for="(s, i) in detail.coaching!.improvements" :key="i">
-                  <span class="bullet bullet--amber">•</span>{{ s }}
-                </li>
-              </ul>
-            </div>
-            <div v-if="detail.coaching?.patterns" class="coach-block coach-pattern">
-              <div class="coach-h coach-h--purple">Pattern Observed</div>
-              <p>{{ detail.coaching!.patterns }}</p>
-            </div>
-          </div>
-        </section>
-
-        <!-- Local recording: notes + transcript -->
-        <section v-if="detail.isLocal && detail.note" class="sec">
-          <div class="sec-head">
-            <svg viewBox="0 0 24 24" class="ic ic--purple"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-            <h3>Notes</h3>
-          </div>
-          <div class="md" v-html="renderMarkdown(detail.note)" />
-        </section>
-        <section v-if="detail.isLocal && detail.transcript" class="sec">
-          <div class="acc">
-            <button class="acc-btn" @click="showTranscript = !showTranscript">
-              <span class="acc-left">
-                <svg viewBox="0 0 24 24" class="ic ic--gray"><path d="M4 6h16M4 12h16M4 18h7" /></svg>
-                Transcript
-              </span>
-              <svg viewBox="0 0 24 24" class="ic ic--gray chevron" :class="{ open: showTranscript }"><path d="M19 9l-7 7-7-7" /></svg>
-            </button>
-            <div v-if="showTranscript" class="acc-body">
-              <div class="md" v-html="renderMarkdown(detail.transcript)" />
-            </div>
-          </div>
-        </section>
-
-        <div v-if="isEmpty" class="detail-state detail-state--empty">
-          {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
+      <!-- Tabs + Chat -->
+      <div class="card-tabs">
+        <div class="segment">
+          <button
+            v-for="t in tabs"
+            :key="t.key"
+            class="seg-btn"
+            :class="{ 'seg-btn--active': activeTab === t.key }"
+            :disabled="t.disabled"
+            type="button"
+            @click="!t.disabled && (activeTab = t.key)"
+          >{{ t.label }}</button>
         </div>
+        <button class="btn-chat" type="button" title="Coming soon">Chat with Meeting</button>
+      </div>
+
+      <!-- Content -->
+      <div class="card-content">
+        <template v-if="activeTab === 'otes'">
+          <div class="notes-head">
+            <h2 class="notes-title">Notes</h2>
+            <p class="notes-date">{{ formatDateTime(detail.startAt) }}</p>
+          </div>
+
+          <div v-if="otesEmpty" class="content-empty">
+            {{ detail.isLocal ? 'No notes generated for this recording yet.' : 'No notes available for this meeting yet.' }}
+          </div>
+
+          <!-- Local note -->
+          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(detail.note)" />
+
+          <!-- Ariso rich content -->
+          <template v-if="!detail.isLocal">
+            <section v-if="detail.digest" class="sec">
+              <h3 class="sec-h">Quick Digest</h3>
+              <div class="md" v-html="renderMarkdown(detail.digest)" />
+            </section>
+
+            <section v-if="detail.actionItems.length" class="sec">
+              <h3 class="sec-h">Action Items <span class="count">{{ detail.actionItems.length }}</span></h3>
+              <div class="ai-groups">
+                <div v-for="(g, gi) in groupedActionItems" :key="gi" class="ai-group">
+                  <div v-if="g.name" class="ai-owner">
+                    <span class="avatar avatar--sm" :style="{ background: avatarColor(gi) }">{{ initials(g.name) }}</span>
+                    <span class="ai-name">{{ g.name }}</span>
+                  </div>
+                  <ol class="ai-list" :class="{ 'ai-list--indent': g.name }">
+                    <li v-for="(it, i) in g.items" :key="i">{{ it.item }}</li>
+                  </ol>
+                </div>
+              </div>
+            </section>
+
+            <section v-if="detail.summary" class="sec">
+              <div class="acc">
+                <button class="acc-btn" type="button" @click="showFullNotes = !showFullNotes">
+                  <span>Full Meeting Notes</span>
+                  <svg viewBox="0 0 24 24" class="ic chevron" :class="{ open: showFullNotes }"><path d="M19 9l-7 7-7-7" /></svg>
+                </button>
+                <div v-if="showFullNotes" class="acc-body"><div class="md" v-html="renderMarkdown(detail.summary)" /></div>
+              </div>
+            </section>
+
+            <section v-if="detail.score !== undefined" class="sec">
+              <h3 class="sec-h">Meeting Assessment</h3>
+              <div class="assess-score">
+                <div class="score-circle" :style="{ background: scoreBadge?.bg, color: scoreBadge?.text, boxShadow: `0 0 0 4px ${scoreBadge?.ring}` }">{{ detail.score }}</div>
+                <div>
+                  <div class="score-label">{{ scoreBadge?.label }}</div>
+                  <div class="score-sub">out of 5</div>
+                </div>
+              </div>
+              <div v-if="detail.rationale" class="assess-block"><div class="assess-h">Why this score</div><p>{{ detail.rationale }}</p></div>
+              <div v-if="detail.recommendation" class="assess-block"><div class="assess-h">Recommendation</div><p>{{ detail.recommendation }}</p></div>
+            </section>
+
+            <section v-if="hasCoaching" class="sec">
+              <div class="coaching">
+                <h3 class="sec-h">Your Coaching</h3>
+                <div v-if="detail.coaching?.strengths?.length" class="coach-block">
+                  <div class="coach-h coach-h--green">Strengths</div>
+                  <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.strengths" :key="i"><span class="bullet bullet--green">•</span>{{ s }}</li></ul>
+                </div>
+                <div v-if="detail.coaching?.improvements?.length" class="coach-block">
+                  <div class="coach-h coach-h--amber">Areas to Grow</div>
+                  <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.improvements" :key="i"><span class="bullet bullet--amber">•</span>{{ s }}</li></ul>
+                </div>
+                <div v-if="detail.coaching?.patterns" class="coach-block coach-pattern">
+                  <div class="coach-h coach-h--purple">Pattern Observed</div>
+                  <p>{{ detail.coaching!.patterns }}</p>
+                </div>
+              </div>
+            </section>
+          </template>
+        </template>
+
+        <template v-else-if="activeTab === 'transcript'">
+          <div v-if="detail.transcript" class="md" v-html="renderMarkdown(detail.transcript)" />
+          <div v-else class="content-empty">No transcript available.</div>
+        </template>
       </div>
     </template>
   </div>
@@ -193,15 +169,14 @@ import {
 } from '../composables/useBackend';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
+const emit = defineEmits<{ close: [] }>();
 
 const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
-const showTranscript = ref(false);
+const activeTab = ref<'otes' | 'transcript' | 'livenotes'>('otes');
 
-// Monotonic token so a slow load for a previously-selected row can't overwrite
-// the detail of the row the user clicked more recently.
 let reqId = 0;
 
 async function load(item: MeetingListItem | null): Promise<void> {
@@ -212,13 +187,13 @@ async function load(item: MeetingListItem | null): Promise<void> {
   detail.value = null;
   error.value = null;
   showFullNotes.value = false;
-  showTranscript.value = false;
+  activeTab.value = 'otes';
   if (!item) return;
   loading.value = true;
   try {
     const backend = await getActiveBackend();
     const d = await backend.getMeetingDetail(item);
-    if (my !== reqId) return; // a newer selection superseded this load
+    if (my !== reqId) return;
     detail.value = d;
   } catch (e) {
     if (my !== reqId) return;
@@ -231,26 +206,44 @@ async function load(item: MeetingListItem | null): Promise<void> {
 
 watch(() => props.item?.id, () => load(props.item), { immediate: true });
 
+const tabs = computed(() => {
+  const hasTranscript = !!detail.value?.transcript;
+  return [
+    { key: 'otes' as const, label: 'My OTES', disabled: false },
+    {
+      key: 'transcript' as const,
+      label: hasTranscript ? 'Live Transcript' : 'Live Transcript (Later)',
+      disabled: !hasTranscript,
+    },
+    { key: 'livenotes' as const, label: 'Live Notes (Later)', disabled: true },
+  ];
+});
+
+const subtitle = computed(() => {
+  const d = detail.value;
+  if (!d) return '';
+  const parts: string[] = [];
+  const dt = new Date(d.startAt);
+  if (!Number.isNaN(dt.getTime())) {
+    parts.push(dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }));
+    parts.push(dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }));
+  }
+  if (durationLabel.value) parts.push(durationLabel.value);
+  return parts.join(' • ');
+});
+
 const hasCoaching = computed(() => {
   const c = detail.value?.coaching;
   return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
 });
 
-const isEmpty = computed(() => {
+const otesEmpty = computed(() => {
   const d = detail.value;
   if (!d) return false;
-  if (d.isLocal) return !d.note && !d.transcript;
-  return (
-    !d.digest &&
-    !d.summary &&
-    !d.actionItems.length &&
-    d.score === undefined &&
-    !hasCoaching.value
-  );
+  if (d.isLocal) return !d.note;
+  return !d.digest && !d.summary && !d.actionItems.length && d.score === undefined && !hasCoaching.value;
 });
 
-// Group action items by owner, preserving first-seen order; items without an
-// owner fall into a single trailing unnamed group.
 const groupedActionItems = computed<{ name?: string; items: MeetingActionItem[] }[]>(() => {
   const groups = new Map<string, MeetingActionItem[]>();
   const ungrouped: MeetingActionItem[] = [];
@@ -289,36 +282,25 @@ function avatarColor(i: number): string {
 
 function initials(name?: string): string {
   if (!name) return '?';
-  return (
-    name
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2) || '?'
-  );
+  return name.split(/\s+/).filter(Boolean).map((n) => n[0]).join('').toUpperCase().slice(0, 2) || '?';
+}
+
+function formatType(t: string): string {
+  return t.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
 const durationLabel = computed<string | null>(() => {
   const d = detail.value;
   if (!d) return null;
   let secs: number | null = null;
-  if (d.durationSeconds != null) {
-    secs = d.durationSeconds;
-  } else if (d.endAt) {
+  if (d.durationSeconds != null) secs = d.durationSeconds;
+  else if (d.endAt) {
     const ms = new Date(d.endAt).getTime() - new Date(d.startAt).getTime();
     if (Number.isFinite(ms) && ms > 0 && ms < 24 * 60 * 60 * 1000) secs = ms / 1000;
   }
@@ -326,196 +308,126 @@ const durationLabel = computed<string | null>(() => {
   const mins = Math.floor(secs / 60);
   const hours = Math.floor(mins / 60);
   const rem = mins % 60;
-  return hours > 0 ? `${hours}h ${rem}m` : `${mins}m`;
+  return hours > 0 ? `${hours}h ${rem}m` : `${Math.max(1, mins)}m`;
 });
 </script>
 
 <style scoped>
-.detail {
-  height: 100%;
+.card {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 16px;
+  overflow: hidden;
+  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
+  color: #1c1c1c;
 }
 
-/* States */
-.detail-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 40px 24px;
-  color: #86868b;
-  font-size: 14px;
-}
-.detail-state--error { color: #dc2626; }
-.detail-state--empty { justify-content: flex-start; }
-.spinner {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #e5e7eb;
-  border-bottom-color: #6c63c0;
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
-}
+.card-state { display: flex; align-items: center; justify-content: center; gap: 10px; flex: 1; color: #6f6f6f; font-size: 14px; }
+.card-state--error { color: #dc2626; }
+.spinner { width: 18px; height: 18px; border: 2px solid #e5e6e3; border-bottom-color: #1c1c1c; border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Stripe header */
-.stripe {
-  flex-shrink: 0;
-  min-height: 72px;
-  padding: 16px 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background-color: #0d0d0d;
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-}
-.stripe--internal {
-  background-image: linear-gradient(110deg, transparent 0%, transparent 45%, #facc15 45%, #facc15 72%, transparent 72%, transparent 78%, #6c63c0 78%, #6c63c0 84%, transparent 84%, transparent 100%);
-}
-.stripe--external {
-  background-image: linear-gradient(110deg, transparent 0%, transparent 45%, #facc15 45%, #facc15 72%, transparent 72%, transparent 78%, #ec4899 78%, #ec4899 84%, transparent 84%, transparent 100%);
-}
-.stripe-titles { min-width: 0; }
-.stripe-title {
-  margin: 0;
-  color: #fff;
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.stripe-date { margin: 2px 0 0; color: rgba(255, 255, 255, 0.8); font-size: 13px; }
-.vis-pill {
-  flex-shrink: 0;
-  padding: 3px 10px;
-  background: rgba(255, 255, 255, 0.85);
-  color: #1d1d1f;
-  font-size: 11px;
-  border-radius: 999px;
-  text-transform: capitalize;
-}
+.ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
-/* Metadata bar */
-.meta {
-  flex-shrink: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 18px;
-  padding: 10px 24px;
-  background: #f9fafb;
-  border-bottom: 1px solid #e5e7eb;
-  font-size: 13px;
+/* Header */
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; }
+.head-titles { min-width: 0; }
+.head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
+.head-sub { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
+.head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.btn-share {
+  display: flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 14px; font-weight: 600; color: #1a1a1a; cursor: pointer;
 }
-.meta-item { display: flex; align-items: center; gap: 6px; color: #4b5563; }
-.ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.ic--purple { color: #6c63c0; width: 18px; height: 18px; }
-.ic--gray { color: #6b7280; width: 18px; height: 18px; }
+.btn-share:hover { background: #fbfbfb; }
+.btn-icon {
+  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1a1a1a; cursor: pointer;
+}
+.btn-icon:hover { background: #fbfbfb; }
+.btn-close { border-radius: 50%; }
 
+/* Meta */
+.card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding: 4px 24px 16px; font-size: 13px; }
+.meta-item { display: flex; align-items: center; gap: 6px; color: #535353; }
+.attendees { gap: 8px; }
 .avatars { display: flex; align-items: center; }
-.avatar {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  border: 2px solid #fff;
-  margin-left: -6px;
-}
+.avatar { width: 23px; height: 23px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 600; border: 2px solid #fff; margin-left: -7px; }
 .avatar:first-child { margin-left: 0; }
 .avatar--more { background: #9ca3af; }
-.avatar--sm { width: 24px; height: 24px; border: none; margin: 0; font-size: 10px; }
-
-.score-pill {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 500;
+.avatar--sm { width: 22px; height: 22px; border: none; margin: 0; font-size: 9px; }
+.attendees-label { color: #535353; }
+.chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 3px 10px; background: #f0eeed; border: 1px solid #dedcdb; border-radius: 999px;
+  font-size: 12px; color: #535353;
 }
-.score-dot { width: 8px; height: 8px; border-radius: 50%; }
+.chip-hash { color: #9a9a96; font-weight: 600; }
 
-/* Body */
-.body { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
-.sec { margin-bottom: 24px; }
+.divider { height: 1px; background: #e5e6e3; }
+
+/* Tabs */
+.card-tabs { display: flex; align-items: center; gap: 12px; padding: 16px 24px; }
+.segment { display: inline-flex; gap: 2px; padding: 3px; background: #ecebe8; border-radius: 10px; }
+.seg-btn {
+  padding: 6px 12px; border: none; background: transparent; border-radius: 7px;
+  font-family: inherit; font-size: 14px; font-weight: 500; color: #6f6f6f; cursor: pointer;
+  white-space: nowrap;
+}
+.seg-btn:disabled { color: #b6b5b1; cursor: default; }
+.seg-btn--active { background: #ffffff; color: #1c1c1c; box-shadow: 1px 1px 0 #d6d6d6; }
+.btn-chat {
+  margin-left: auto;
+  height: 32px; padding: 0 14px;
+  background: #000; color: #fff; border: none; border-radius: 8px;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.25);
+  font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.btn-chat:hover { background: #1a1a1a; }
+
+/* Content */
+.card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
+.notes-head { margin-bottom: 14px; }
+.notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; }
+.notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
+.content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
+
+.sec { margin-bottom: 22px; }
 .sec:last-child { margin-bottom: 0; }
-.sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.sec-head h3 { margin: 0; font-size: 15px; font-weight: 600; color: #111827; }
-.count {
-  padding: 1px 8px;
-  background: rgba(108, 99, 192, 0.1);
-  color: #6c63c0;
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 999px;
-}
+.sec-h { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #1c1c1c; display: flex; align-items: center; gap: 8px; }
+.count { padding: 1px 8px; background: #ecebe8; color: #535353; font-size: 12px; font-weight: 500; border-radius: 999px; }
 
-/* Action items */
 .ai-groups { display: flex; flex-direction: column; gap: 16px; }
 .ai-owner { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.ai-name { font-size: 14px; font-weight: 500; color: #111827; }
-.ai-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; color: #374151; font-size: 14px; }
-.ai-list--indent { margin-left: 32px; }
+.ai-name { font-size: 14px; font-weight: 500; color: #1c1c1c; }
+.ai-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; color: #535353; font-size: 14px; }
+.ai-list--indent { margin-left: 30px; }
 
-/* Accordion (full notes / transcript) */
-.acc { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
-.acc-btn {
-  width: 100%;
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: #fff;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 500;
-  color: #111827;
-}
-.acc-btn:hover { background: #f9fafb; }
-.acc-left { display: flex; align-items: center; gap: 8px; }
-.chevron { transition: transform 0.15s; }
+.acc { border: 1px solid #e5e6e3; border-radius: 10px; overflow: hidden; }
+.acc-btn { width: 100%; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; background: #fff; border: none; cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 500; color: #1c1c1c; }
+.acc-btn:hover { background: #fbfbfb; }
+.chevron { width: 18px; height: 18px; color: #6f6f6f; transition: transform 0.15s; }
 .chevron.open { transform: rotate(180deg); }
-.acc-body { padding: 16px; background: #f9fafb; border-top: 1px solid #e5e7eb; }
+.acc-body { padding: 14px; background: #faf9f7; border-top: 1px solid #e5e6e3; }
 
-/* Assessment */
-.assess-score { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-.score-circle {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  font-weight: 700;
-}
-.score-label { font-weight: 600; color: #111827; font-size: 14px; }
-.score-sub { font-size: 12px; color: #6b7280; }
+.assess-score { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.score-circle { width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; }
+.score-label { font-weight: 600; color: #1c1c1c; font-size: 14px; }
+.score-sub { font-size: 12px; color: #6f6f6f; }
 .assess-block { margin-top: 12px; font-size: 14px; }
-.assess-h { font-weight: 500; color: #374151; margin-bottom: 4px; }
-.assess-block p { margin: 0; color: #4b5563; line-height: 1.5; }
+.assess-h { font-weight: 500; color: #535353; margin-bottom: 4px; }
+.assess-block p { margin: 0; color: #6f6f6f; line-height: 1.5; }
 
-/* Coaching */
-.coaching {
-  background: linear-gradient(135deg, rgba(108, 99, 192, 0.05), rgba(108, 99, 192, 0.1));
-  border: 1px solid rgba(108, 99, 192, 0.2);
-  border-radius: 8px;
-  padding: 16px;
-}
+.coaching { background: linear-gradient(135deg, rgba(108, 99, 192, 0.05), rgba(108, 99, 192, 0.1)); border: 1px solid rgba(108, 99, 192, 0.2); border-radius: 10px; padding: 16px; }
 .coach-block { margin-top: 14px; }
 .coach-block:first-of-type { margin-top: 0; }
 .coach-h { font-weight: 500; font-size: 14px; margin-bottom: 6px; }
@@ -523,25 +435,25 @@ const durationLabel = computed<string | null>(() => {
 .coach-h--amber { color: #b45309; }
 .coach-h--purple { color: #6c63c0; }
 .coach-pattern { padding-top: 12px; border-top: 1px solid rgba(108, 99, 192, 0.2); }
-.coach-pattern p { margin: 0; color: #374151; font-size: 14px; line-height: 1.5; }
-.coach-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; color: #374151; font-size: 14px; }
+.coach-pattern p { margin: 0; color: #535353; font-size: 14px; line-height: 1.5; }
+.coach-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; color: #535353; font-size: 14px; }
 .coach-list li { display: flex; align-items: flex-start; gap: 8px; line-height: 1.45; }
 .bullet { flex-shrink: 0; margin-top: 1px; }
 .bullet--green { color: #22c55e; }
 .bullet--amber { color: #f59e0b; }
 
-/* Rendered markdown (.md) — prose-like styling */
-.md { color: #374151; font-size: 14px; line-height: 1.6; }
-.md :deep(h1), .md :deep(h2), .md :deep(h3) { color: #111827; font-weight: 600; margin: 16px 0 8px; }
+/* Rendered markdown */
+.md { color: #535353; font-size: 14px; line-height: 1.6; }
+.md :deep(h1), .md :deep(h2), .md :deep(h3) { color: #1c1c1c; font-weight: 600; margin: 16px 0 8px; }
 .md :deep(h1) { font-size: 16px; }
 .md :deep(h2) { font-size: 15px; }
 .md :deep(h3) { font-size: 14px; }
 .md :deep(p) { margin: 0 0 10px; }
 .md :deep(ul), .md :deep(ol) { margin: 0 0 10px; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
 .md :deep(li) { line-height: 1.5; }
-.md :deep(strong) { font-weight: 600; color: #111827; }
-.md :deep(code) { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+.md :deep(strong) { font-weight: 600; color: #1c1c1c; }
+.md :deep(code) { background: #f0eeed; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
 .md :deep(a) { color: #6c63c0; text-decoration: underline; }
-.md :deep(blockquote) { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid #e5e7eb; color: #6b7280; }
+.md :deep(blockquote) { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid #e5e6e3; color: #6f6f6f; }
 .md :deep(*:last-child) { margin-bottom: 0; }
 </style>

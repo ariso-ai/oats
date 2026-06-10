@@ -72,6 +72,7 @@ export interface MeetingDetail {
   rationale?: string;
   recommendation?: string;
   coaching?: MeetingCoaching;
+  meetingType?: string;
   // Local-recording fields
   isLocal: boolean;
   durationSeconds?: number;
@@ -98,6 +99,7 @@ interface RawMeetingSummary {
   rationale?: string;
   recommendation?: string;
   coaching?: MeetingCoaching;
+  meetingType?: string;
 }
 
 // `summary` arrives as a JSON string, an already-parsed object, or plain prose.
@@ -206,6 +208,7 @@ export class ArisoBackend implements Backend {
       rationale: s.rationale,
       recommendation: s.recommendation,
       coaching: s.coaching,
+      meetingType: s.meetingType,
       isLocal: false,
     };
   }

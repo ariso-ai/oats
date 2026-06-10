@@ -72,7 +72,7 @@ Stop is above Pause (matches the reference image).
   `tray://resume-recording`, `tray://stop-recording`) and all
   `set_tray_recording` calls are preserved.
 
-## Waveform: 32 bins → 5 bars
+## Waveform: 32 bins → 3 bars
 
 `useWaveform` keeps emitting 32 levels. The view buckets them into 5 averaged
 bars (6–7 bins each) for display — no change to the composable's public API.
@@ -103,7 +103,7 @@ height during status display.
 
 - `RecorderPanel.vue` (embedded internal panel) — not part of the floating
   recorder redesign; left as-is.
-- Logo redesign / new assets — reuse `icon-r-w.png`.
+- Logo redesign / new assets — reuse `ariso-logo-w.png`.
 
 ## Risks / notes
 

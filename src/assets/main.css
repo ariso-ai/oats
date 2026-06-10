@@ -1,1 +1,31 @@
 @import 'tailwindcss';
+
+/* Polymath — the product UI typeface (from the Figma design system). */
+@font-face {
+  font-family: 'Polymath';
+  src: url('./fonts/Polymath-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Polymath';
+  src: url('./fonts/Polymath-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Polymath';
+  src: url('./fonts/Polymath-Semibold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Polymath';
+  src: url('./fonts/Polymath-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
