@@ -54,33 +54,27 @@
       <div class="divider" />
 
       <!-- Tabs + Chat -->
-      <div class="card-tabs">
+      <div v-if="availableTabs.length" class="card-tabs">
         <div class="segment">
           <button
-            v-for="t in tabs"
+            v-for="t in availableTabs"
             :key="t.key"
             class="seg-btn"
             :class="{ 'seg-btn--active': activeTab === t.key }"
-            :disabled="t.disabled"
             type="button"
-            @click="!t.disabled && (activeTab = t.key)"
+            @click="activeTab = t.key"
           >{{ t.label }}</button>
         </div>
-        <button class="btn-chat" type="button" title="Coming soon">Chat with Meeting</button>
+        <!-- add chat with meeting button later -->
       </div>
 
       <!-- Content -->
       <div class="card-content">
-        <template v-if="activeTab === 'otes'">
-          <div class="notes-head">
-            <h2 class="notes-title">Notes</h2>
-            <p class="notes-date">{{ formatDateTime(detail.startAt) }}</p>
-          </div>
+        <div v-if="!availableTabs.length" class="content-empty">
+          {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
+        </div>
 
-          <div v-if="otesEmpty" class="content-empty">
-            {{ detail.isLocal ? 'No notes generated for this recording yet.' : 'No notes available for this meeting yet.' }}
-          </div>
-
+        <template v-if="activeTab === 'note'">
           <!-- Local note -->
           <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(detail.note)" />
 
@@ -150,8 +144,18 @@
         </template>
 
         <template v-else-if="activeTab === 'transcript'">
-          <div v-if="detail.transcript" class="md" v-html="renderMarkdown(detail.transcript)" />
+          <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
+          <div v-else-if="transcriptText" class="md" v-html="renderMarkdown(transcriptText)" />
           <div v-else class="content-empty">No transcript available.</div>
+        </template>
+
+        <template v-else-if="activeTab === 'mynote'">
+          <div class="notes-head">
+            <h2 v-if="individualNote?.title" class="notes-title">{{ individualNote.title }}</h2>
+          </div>
+          <div v-if="loadingIndividualNote" class="card-state"><span class="spinner" /><span>Loading note…</span></div>
+          <div v-else-if="individualNote?.content" class="md" v-html="renderMarkdown(individualNote.content)" />
+          <div v-else class="content-empty">No personal note for this meeting.</div>
         </template>
       </div>
     </template>
@@ -166,6 +170,7 @@ import {
   type MeetingListItem,
   type MeetingDetail,
   type MeetingActionItem,
+  type MeetingCoaching,
 } from '../composables/useBackend';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
@@ -175,7 +180,18 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
-const activeTab = ref<'otes' | 'transcript' | 'livenotes'>('otes');
+const activeTab = ref<'note' | 'transcript' | 'mynote'>('note');
+
+// Transcript is loaded lazily when the Transcript tab is opened (Ariso fetches
+// /meeting-notes/{id}/transcript; local reads transcript.md).
+const transcript = ref<string | null>(null);
+const transcriptLoaded = ref(false);
+const loadingTranscript = ref(false);
+
+// Individual ("My note") — lazily loaded from /meeting-notes/{id}/individual-note.
+const individualNote = ref<{ content: string; title: string | null } | null>(null);
+const individualNoteLoaded = ref(false);
+const loadingIndividualNote = ref(false);
 
 let reqId = 0;
 
@@ -187,7 +203,13 @@ async function load(item: MeetingListItem | null): Promise<void> {
   detail.value = null;
   error.value = null;
   showFullNotes.value = false;
-  activeTab.value = 'otes';
+  activeTab.value = 'note';
+  transcript.value = null;
+  transcriptLoaded.value = false;
+  loadingTranscript.value = false;
+  individualNote.value = null;
+  individualNoteLoaded.value = false;
+  loadingIndividualNote.value = false;
   if (!item) return;
   loading.value = true;
   try {
@@ -195,6 +217,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     const d = await backend.getMeetingDetail(item);
     if (my !== reqId) return;
     detail.value = d;
+    activeTab.value = firstTabFor(d); // default to the first available tab
   } catch (e) {
     if (my !== reqId) return;
     console.error('Failed to load meeting detail', e);
@@ -206,17 +229,86 @@ async function load(item: MeetingListItem | null): Promise<void> {
 
 watch(() => props.item?.id, () => load(props.item), { immediate: true });
 
-const tabs = computed(() => {
-  const hasTranscript = !!detail.value?.transcript;
-  return [
-    { key: 'otes' as const, label: 'My OTES', disabled: false },
-    {
-      key: 'transcript' as const,
-      label: hasTranscript ? 'Live Transcript' : 'Live Transcript (Later)',
-      disabled: !hasTranscript,
-    },
-    { key: 'livenotes' as const, label: 'Live Notes (Later)', disabled: true },
-  ];
+// Local recordings already carry their transcript on the detail; Ariso loads it
+// lazily into `transcript`. Either way this is what the Transcript tab renders.
+const transcriptText = computed<string | null>(() =>
+  detail.value?.isLocal ? detail.value?.transcript ?? null : transcript.value
+);
+
+function coachingPresent(c?: MeetingCoaching | null): boolean {
+  return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
+}
+function notesPresent(d: MeetingDetail): boolean {
+  return d.isLocal
+    ? !!d.note
+    : !!(d.digest || d.summary || d.actionItems.length || d.score !== undefined || coachingPresent(d.coaching));
+}
+function firstTabFor(d: MeetingDetail): 'note' | 'transcript' | 'mynote' {
+  if (notesPresent(d)) return 'note';
+  if (d.hasTranscript) return 'transcript';
+  if (d.hasIndividualNote) return 'mynote';
+  return 'note';
+}
+
+// Tabs appear only when their content exists: Note (meeting notes), Transcript,
+// then My note (the requester's individual note).
+const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
+  const d = detail.value;
+  if (!d) return [];
+  const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
+  if (notesPresent(d)) out.push({ key: 'note', label: 'Note' });
+  if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
+  if (d.hasIndividualNote) out.push({ key: 'mynote', label: 'My note' });
+  return out;
+});
+
+// Fetch the Ariso transcript the first time the tab is opened. Local recordings
+// already have their content, so they skip the round trip.
+async function loadTranscript(): Promise<void> {
+  const d = detail.value;
+  if (!props.item || !d || d.isLocal || transcriptLoaded.value || loadingTranscript.value) return;
+  const my = reqId;
+  loadingTranscript.value = true;
+  try {
+    const backend = await getActiveBackend();
+    const t = await backend.getMeetingTranscript(props.item);
+    if (my !== reqId) return;
+    transcript.value = t;
+    transcriptLoaded.value = true;
+  } catch (e) {
+    if (my !== reqId) return;
+    console.error('Failed to load transcript', e);
+    transcript.value = null;
+    transcriptLoaded.value = true;
+  } finally {
+    if (my === reqId) loadingTranscript.value = false;
+  }
+}
+
+// Fetch the requester's individual note the first time the My-note tab opens.
+async function loadIndividualNote(): Promise<void> {
+  if (!props.item || individualNoteLoaded.value || loadingIndividualNote.value) return;
+  const my = reqId;
+  loadingIndividualNote.value = true;
+  try {
+    const backend = await getActiveBackend();
+    const n = await backend.getIndividualNote(props.item);
+    if (my !== reqId) return;
+    individualNote.value = n;
+    individualNoteLoaded.value = true;
+  } catch (e) {
+    if (my !== reqId) return;
+    console.error('Failed to load individual note', e);
+    individualNote.value = null;
+    individualNoteLoaded.value = true;
+  } finally {
+    if (my === reqId) loadingIndividualNote.value = false;
+  }
+}
+
+watch(activeTab, (t) => {
+  if (t === 'transcript') void loadTranscript();
+  else if (t === 'mynote') void loadIndividualNote();
 });
 
 const subtitle = computed(() => {

@@ -73,6 +73,12 @@ export interface MeetingDetail {
   recommendation?: string;
   coaching?: MeetingCoaching;
   meetingType?: string;
+  /** Whether a transcript exists — drives the Live Transcript tab. Content is
+   *  loaded lazily via `getMeetingTranscript`. */
+  hasTranscript?: boolean;
+  /** Whether the requester has an individual note — drives the "My note" tab.
+   *  Content is loaded lazily via `getIndividualNote`. */
+  hasIndividualNote?: boolean;
   // Local-recording fields
   isLocal: boolean;
   durationSeconds?: number;
@@ -89,6 +95,10 @@ export interface Backend {
   listMeetings(): Promise<MeetingListItem[]>;
   /** Load the detail for a single row (from the list item the user clicked). */
   getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
+  /** Lazily load the meeting's transcript text (null when none). */
+  getMeetingTranscript(item: MeetingListItem): Promise<string | null>;
+  /** Lazily load the requester's individual note (null when none). */
+  getIndividualNote(item: MeetingListItem): Promise<{ content: string; title: string | null } | null>;
 }
 
 interface RawMeetingSummary {
@@ -209,8 +219,22 @@ export class ArisoBackend implements Backend {
       recommendation: s.recommendation,
       coaching: s.coaching,
       meetingType: s.meetingType,
+      hasTranscript: !!data.hasTranscript,
+      hasIndividualNote: !!data.individual_note?.content,
       isLocal: false,
     };
+  }
+
+  async getMeetingTranscript(item: MeetingListItem): Promise<string | null> {
+    const { getMeetingTranscript } = useMeetingApi();
+    return getMeetingTranscript(item.id);
+  }
+
+  async getIndividualNote(
+    item: MeetingListItem
+  ): Promise<{ content: string; title: string | null } | null> {
+    const { getMeetingIndividualNote } = useMeetingApi();
+    return getMeetingIndividualNote(item.id);
   }
 }
 
@@ -277,7 +301,18 @@ export class LocalBackend implements Backend {
       durationSeconds: item.durationSeconds,
       note: note ?? undefined,
       transcript: transcript ?? undefined,
+      hasTranscript: !!item.files?.hasTranscript,
     };
+  }
+
+  async getMeetingTranscript(item: MeetingListItem): Promise<string | null> {
+    if (!item.files?.hasTranscript) return null;
+    return local.readRecordingFile(item.id, 'transcript').catch(() => null);
+  }
+
+  // Local recordings have no per-user individual note.
+  async getIndividualNote(): Promise<{ content: string; title: string | null } | null> {
+    return null;
   }
 }
 
