@@ -164,3 +164,167 @@ mod tests {
         assert_eq!(m.tick(20_000, &pids(&[42]), false), None); // stays recording
     }
 }
+
+/// PIDs (excluding our own) currently running audio input, via CoreAudio.
+/// Returns an empty set off macOS or when the API is unavailable.
+fn external_input_pids() -> HashSet<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        coreaudio::external_input_pids(std::process::id() as i32)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        HashSet::new()
+    }
+}
+
+/// Whether the per-process input API (macOS 14.4+) is available at runtime.
+pub fn is_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        coreaudio::is_supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod coreaudio {
+    use std::collections::HashSet;
+    use std::ffi::c_void;
+
+    type OSStatus = i32;
+    type AudioObjectID = u32;
+
+    const SYSTEM_OBJECT: AudioObjectID = 1; // kAudioObjectSystemObject
+    const SCOPE_GLOBAL: u32 = fourcc(b"glob"); // kAudioObjectPropertyScopeGlobal
+    const ELEMENT_MAIN: u32 = 0; // kAudioObjectPropertyElementMain
+    const PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#"); // kAudioHardwarePropertyProcessObjectList
+    const PROCESS_PID: u32 = fourcc(b"ppid"); // kAudioProcessPropertyPID
+    const IS_RUNNING_INPUT: u32 = fourcc(b"piri"); // kAudioProcessPropertyIsRunningInput (14.4+)
+
+    const fn fourcc(s: &[u8; 4]) -> u32 {
+        ((s[0] as u32) << 24) | ((s[1] as u32) << 16) | ((s[2] as u32) << 8) | (s[3] as u32)
+    }
+
+    #[repr(C)]
+    struct AudioObjectPropertyAddress {
+        selector: u32,
+        scope: u32,
+        element: u32,
+    }
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioObjectGetPropertyDataSize(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            out_size: *mut u32,
+        ) -> OSStatus;
+
+        fn AudioObjectGetPropertyData(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            io_size: *mut u32,
+            out_data: *mut c_void,
+        ) -> OSStatus;
+    }
+
+    fn global_address(selector: u32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress {
+            selector,
+            scope: SCOPE_GLOBAL,
+            element: ELEMENT_MAIN,
+        }
+    }
+
+    fn process_object_list() -> Option<Vec<AudioObjectID>> {
+        let addr = global_address(PROCESS_OBJECT_LIST);
+        let mut size: u32 = 0;
+        let status = unsafe {
+            AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, &addr, 0, std::ptr::null(), &mut size)
+        };
+        if status != 0 {
+            return None;
+        }
+        let count = size as usize / std::mem::size_of::<AudioObjectID>();
+        let mut ids: Vec<AudioObjectID> = vec![0; count];
+        if count == 0 {
+            return Some(ids);
+        }
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                SYSTEM_OBJECT,
+                &addr,
+                0,
+                std::ptr::null(),
+                &mut size,
+                ids.as_mut_ptr() as *mut c_void,
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        Some(ids)
+    }
+
+    fn read_u32(object: AudioObjectID, selector: u32) -> Option<u32> {
+        let addr = global_address(selector);
+        let mut size: u32 = std::mem::size_of::<u32>() as u32;
+        let mut value: u32 = 0;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                object,
+                &addr,
+                0,
+                std::ptr::null(),
+                &mut size,
+                &mut value as *mut u32 as *mut c_void,
+            )
+        };
+        if status != 0 {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    pub fn external_input_pids(our_pid: i32) -> HashSet<i32> {
+        let mut set = HashSet::new();
+        let Some(objects) = process_object_list() else {
+            return set;
+        };
+        for obj in objects {
+            if read_u32(obj, IS_RUNNING_INPUT).unwrap_or(0) == 0 {
+                continue;
+            }
+            if let Some(pid) = read_u32(obj, PROCESS_PID).map(|v| v as i32) {
+                if pid > 0 && pid != our_pid {
+                    set.insert(pid);
+                }
+            }
+        }
+        set
+    }
+
+    /// Probe availability: the process-object-list selector is 14.0+, and the
+    /// IsRunningInput property is 14.4+. If either read fails the API is
+    /// unavailable on this OS and the monitor must stay off.
+    pub fn is_supported() -> bool {
+        let Some(objects) = process_object_list() else {
+            return false;
+        };
+        match objects.first() {
+            Some(&obj) => read_u32(obj, IS_RUNNING_INPUT).is_some(),
+            // No audio processes to probe right now — the list call succeeded,
+            // which already requires 14.0+; treat as supported.
+            None => true,
+        }
+    }
+}
