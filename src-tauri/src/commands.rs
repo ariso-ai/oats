@@ -508,7 +508,9 @@ pub(crate) fn open_waveform_window(
     };
     WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
-        .inner_size(320.0, 56.0)
+        // Fixed size: room for the expanded pill plus its CSS shadow. The pill
+        // itself is anchored to the bottom and grows upward within this window.
+        .inner_size(92.0, 284.0)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -627,6 +629,33 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Upper bound on a note/transcript markdown file we'll read into memory for
+/// in-app rendering. These are plain text; 16 MB is far above any real note or
+/// transcript and just guards against a pathological/corrupt file.
+const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a recording's `note.md` or `transcript.md` as a UTF-8 string so the
+/// frontend can render it inline. Returns `Ok(None)` when the file doesn't
+/// exist yet (a normal "not generated" state), distinct from a read error.
+/// `kind` must be `"note"` or `"transcript"`.
+#[tauri::command]
+pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, String> {
+    let filename = note_or_transcript_filename(&kind)?;
+    let path = recording_dir(&id)?.join(filename);
+    // Only a genuine "not found" means the file hasn't been generated yet;
+    // surface permission/IO errors instead of masking them as `Ok(None)`.
+    let size = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read recording file: {e}")),
+    };
+    if size > MAX_TEXT_BYTES {
+        return Err(format!("recording file too large to read: {size} bytes"));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read recording file: {e}"))?;
+    Ok(Some(text))
+}
+
 /// Open a recording's `note.md` or `transcript.md` in the OS default app.
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
@@ -645,17 +674,25 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
 
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
+        // Restore the window if it was minimized/hidden before focusing it.
+        let _ = win.unminimize();
+        let _ = win.show();
         win.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
+    // Overlay title bar (with the native title hidden) lets the web content
+    // extend under the traffic lights, so the in-app panel toggle can sit on
+    // the same row, just to the right of them.
     WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
         .title("Meetings")
-        .inner_size(460.0, 560.0)
+        .title_bar_style(TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
         .skip_taskbar(true)

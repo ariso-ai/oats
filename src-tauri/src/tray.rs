@@ -134,6 +134,10 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 "library" => {
+                    // The Meetings window is backend-aware: its list is
+                    // populated from the active backend (Ariso server meetings
+                    // or local recordings), so open the in-app window for both
+                    // rather than sending Ariso users out to the browser.
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
                         if crate::commands::active_backend(&app_async) == "local" {

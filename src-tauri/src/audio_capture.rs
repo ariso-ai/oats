@@ -87,6 +87,42 @@ pub fn stop_system_audio_capture() -> Result<(), String> {
     Ok(())
 }
 
+// macOS Screen Recording permission (required to capture system audio via
+// ScreenCaptureKit). `request` surfaces the OS prompt the first time the user
+// is asked; once a decision exists it returns the current status without a
+// prompt. `check` (preflight) never prompts and is used to populate the
+// Settings UI on load.
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
+#[tauri::command]
+pub fn request_screen_capture_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { CGRequestScreenCaptureAccess() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+#[tauri::command]
+pub fn check_screen_capture_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { CGPreflightScreenCaptureAccess() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Extract raw PCM Int16 bytes from a CMSampleBuffer.
 /// ScreenCaptureKit delivers audio as Float32 PCM; we convert to Int16
 /// to match the Deepgram linear16 format.

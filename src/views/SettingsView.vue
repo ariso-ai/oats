@@ -90,17 +90,53 @@
       </div>
     </section>
 
-    <!-- Audio Section -->
+    <!-- Recording Section -->
     <section class="section">
-      <h2 class="section-title">Audio</h2>
+      <h2 class="section-title">Recording</h2>
       <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Recording mode</span>
-          <select v-model="recordingMode" class="setting-select">
-            <option value="mic">Microphone only</option>
-            <option value="mic_and_system">Mic + System Audio</option>
-          </select>
+          <span class="setting-label">Microphone</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="micEnabled"
+              :disabled="recordingToggleBusy"
+              @change="onToggleMic"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
         </div>
+        <p v-if="micStatus === 'granted'" class="notif-status notif-status--ok">
+          Permission granted
+        </p>
+        <p v-else-if="micStatus === 'denied'" class="notif-status notif-status--err">
+          Permission not granted
+        </p>
+
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="setting-label">System Audio</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="systemAudioEnabled"
+              :disabled="recordingToggleBusy"
+              @change="onToggleSystemAudio"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p v-if="systemAudioStatus === 'granted'" class="notif-status notif-status--ok">
+          Permission granted
+        </p>
+        <p v-else-if="systemAudioStatus === 'denied'" class="notif-status notif-status--err">
+          Permission not granted
+        </p>
       </div>
     </section>
 
@@ -178,11 +214,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
-import { load } from '@tauri-apps/plugin-store';
+import { applyToggle, type PermissionStatus } from './recordingSettings';
+import {
+  loadRecordingEnabled,
+  setMicEnabled,
+  setSystemAudioEnabled,
+  ensureMicPermission,
+  ensureSystemAudioPermission,
+  checkSystemAudioPermission,
+  openMicSettings,
+  openSystemAudioSettings,
+} from '../composables/useRecordingPermissions';
 import {
   isMeetingNotificationsEnabled,
   setMeetingNotificationsEnabled,
@@ -196,7 +242,17 @@ const isSigningIn = ref(false);
 const errorMessage = ref('');
 const displayName = ref('');
 const email = ref('');
-const recordingMode = ref<'mic' | 'mic_and_system'>('mic_and_system');
+const micEnabled = ref(true);
+const systemAudioEnabled = ref(true);
+const micStatus = ref<PermissionStatus>('');
+const systemAudioStatus = ref<PermissionStatus>('');
+const micToggling = ref(false);
+const systemAudioToggling = ref(false);
+// Shared across both recording toggles so one pending permission flow blocks
+// the other — otherwise the user could start overlapping OS prompts.
+const recordingToggleBusy = computed(
+  () => micToggling.value || systemAudioToggling.value,
+);
 const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
@@ -399,10 +455,43 @@ const initials = computed(() => {
   return name.slice(0, 2).toUpperCase();
 });
 
-watch(recordingMode, async (newMode) => {
-  const store = await load('settings.json', { autoSave: true });
-  await store.set('recordingMode', newMode);
-});
+async function onToggleMic(e: Event) {
+  if (recordingToggleBusy.value) return;
+  micToggling.value = true;
+  try {
+    const checked = (e.target as HTMLInputElement).checked;
+    const previous = micEnabled.value;
+    micEnabled.value = checked;
+    const res = await applyToggle(checked, previous, {
+      ensurePermission: ensureMicPermission,
+      openSettings: openMicSettings,
+      persist: setMicEnabled,
+    });
+    micEnabled.value = res.enabled;
+    micStatus.value = res.status;
+  } finally {
+    micToggling.value = false;
+  }
+}
+
+async function onToggleSystemAudio(e: Event) {
+  if (recordingToggleBusy.value) return;
+  systemAudioToggling.value = true;
+  try {
+    const checked = (e.target as HTMLInputElement).checked;
+    const previous = systemAudioEnabled.value;
+    systemAudioEnabled.value = checked;
+    const res = await applyToggle(checked, previous, {
+      ensurePermission: ensureSystemAudioPermission,
+      openSettings: openSystemAudioSettings,
+      persist: setSystemAudioEnabled,
+    });
+    systemAudioEnabled.value = res.enabled;
+    systemAudioStatus.value = res.status;
+  } finally {
+    systemAudioToggling.value = false;
+  }
+}
 
 async function fetchUserProfile() {
   try {
@@ -434,10 +523,21 @@ async function refreshSignedInAccount() {
 onMounted(async () => {
   await refreshSignedInAccount();
 
-  const store = await load('settings.json', { autoSave: true });
-  const savedMode = await store.get<string>('recordingMode');
-  if (savedMode === 'mic' || savedMode === 'mic_and_system') {
-    recordingMode.value = savedMode;
+  // Bootstrap recording toggles in its own try/catch so a settings-store or
+  // permission-preflight failure doesn't abort the rest of onMounted (update
+  // listeners, sign-in prompt listener, backend/model state).
+  try {
+    const enabled = await loadRecordingEnabled();
+    micEnabled.value = enabled.mic;
+    systemAudioEnabled.value = enabled.systemAudio;
+    // Reflect the current Screen Recording status without prompting. (Mic status
+    // is intentionally left blank on load — there's no silent mic preflight as
+    // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
+    if (enabled.systemAudio) {
+      systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
+    }
+  } catch (e) {
+    console.warn('Failed to initialize recording settings', e);
   }
 
   meetingNotifications.value = await isMeetingNotificationsEnabled();
