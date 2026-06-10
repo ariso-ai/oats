@@ -42,13 +42,13 @@ describe('OnboardingView', () => {
     expect(wrapper.find('.skip-btn').exists()).toBe(true);
   });
 
-  it('Skip finishes the single-step flow: sets the flag and closes the window', async () => {
+  it('Skip opens settings, sets the flag, and closes the window', async () => {
     const wrapper = mount(OnboardingView);
     await wrapper.find('.skip-btn').trigger('click');
     await flushPromises();
     expect(googleSignIn).not.toHaveBeenCalled();
     expect(setOnboarded).toHaveBeenCalledWith(true);
-    expect(openSettingsWindow).not.toHaveBeenCalled();
+    expect(openSettingsWindow).toHaveBeenCalled();
     expect(close).toHaveBeenCalled();
   });
 

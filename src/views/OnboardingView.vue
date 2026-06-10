@@ -55,11 +55,12 @@ async function finishOnboarding({ openSettings = false } = {}) {
   }
 }
 
-// Advance to the next step, or finish if this was the last one.
+// Advance to the next step, or hand the user back to Settings when onboarding
+// is done. Skip and successful sign-in should land in the same native UI.
 function advance() {
   const next = nextStepIndex(ONBOARDING_STEPS, currentStep.value);
   if (next === null) {
-    void finishOnboarding();
+    void finishOnboarding({ openSettings: true });
   } else {
     currentStep.value = next;
   }
