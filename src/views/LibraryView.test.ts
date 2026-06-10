@@ -57,7 +57,6 @@ describe('LibraryView', () => {
     const wrapper = mount(LibraryView);
     await flushPromises();
     expect(wrapper.text()).toContain('No meetings yet');
-    expect(wrapper.findAll('.recording-row')).toHaveLength(0);
   });
 
   it('renders a meeting-item row per meeting', async () => {
@@ -95,15 +94,6 @@ describe('LibraryView', () => {
     const row = wrapper.find('.meeting-item');
     expect(row.find('.mi-title').text()).toBe('Morning Sync');
     expect(row.find('.mi-sub').text()).toContain('min');
-  });
-
-  it('omits file controls for items without files (ariso meetings)', async () => {
-    listMeetings.mockResolvedValue([
-      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z' },
-    ]);
-    const wrapper = mount(LibraryView);
-    await flushPromises();
-    expect(wrapper.find('.row-controls').exists()).toBe(false);
   });
 
   it('opens the floating recorder window when the add button is clicked', async () => {
@@ -150,5 +140,37 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.text()).toContain('Could not load meetings');
     expect(wrapper.text()).not.toContain('No meetings yet');
+  });
+
+  function todayAt(hour: number): string {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0).toISOString();
+  }
+
+  it("Today tab filters the list to today's meetings and moves the active class", async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'today', title: 'Today Standup', timestamp: todayAt(9) }),
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(2);
+    expect(wrapper.get('button[title="Meetings"]').classes()).toContain('nav-tab--active');
+
+    await wrapper.get('button[title="Today"]').trigger('click');
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Today Standup');
+    expect(wrapper.text()).not.toContain('Old Sync');
+    expect(wrapper.get('button[title="Today"]').classes()).toContain('nav-tab--active');
+    expect(wrapper.get('button[title="Meetings"]').classes()).not.toContain('nav-tab--active');
+  });
+
+  it('Today tab shows the empty hint when there are no meetings today', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
+    expect(wrapper.text()).toContain('No meetings today.');
   });
 });

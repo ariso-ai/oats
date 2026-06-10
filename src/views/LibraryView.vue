@@ -69,7 +69,7 @@
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M4 6h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" /><path d="m16 10 5-3v10l-5-3" /></svg>
             <span>Meetings</span>
           </button>
-          <button class="nav-tab" type="button" title="Todo">
+          <button class="nav-tab" type="button" title="Todo" disabled>
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M9 6h11M9 12h11M9 18h11" /><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17" /></svg>
             <span>Todo</span>
           </button>
@@ -364,6 +364,8 @@ onUnmounted(() => {
 .nav-tab:hover { color: #1c1c1c; }
 .nav-tab--active { background: #1c1c1c; color: #ffffff; }
 .nav-tab--active:hover { color: #ffffff; }
+.nav-tab:disabled { opacity: 0.45; cursor: default; }
+.nav-tab:disabled:hover { color: #6f6f6f; }
 .nav-icon-btn {
   width: 32px;
   height: 32px;
