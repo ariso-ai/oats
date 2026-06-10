@@ -22,8 +22,8 @@ use tauri_plugin_store::StoreExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
-    clear_session_token, get_session_token, http_client, API_BASE_URL, PUSHER_CLUSTER, PUSHER_KEY,
-    WEB_APP_BASE_URL,
+    api_base_url, clear_session_token, get_session_token, http_client, web_app_base_url,
+    PUSHER_CLUSTER, PUSHER_KEY,
 };
 
 const SETTINGS_PATH: &str = "settings.json";
@@ -264,7 +264,7 @@ async fn fetch_me(app: &AppHandle) -> Result<(String, String), SessionError> {
     let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .get(format!("{API_BASE_URL}/auth/me"))
+            .get(format!("{}/auth/me", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .send()
@@ -313,7 +313,7 @@ async fn pusher_auth(
     let body = json!({ "socketId": socket_id, "channelName": channel });
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .post(format!("{API_BASE_URL}/pusher/auth"))
+            .post(format!("{}/pusher/auth", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
@@ -355,7 +355,7 @@ async fn fetch_inbox(app: &AppHandle) -> Result<Vec<InboxItem>, SessionError> {
     let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .get(format!("{API_BASE_URL}/user-inbox-messages?limit=20"))
+            .get(format!("{}/user-inbox-messages?limit=20", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .send()
@@ -470,7 +470,7 @@ fn build_notification(message: Option<&str>) -> (String, String) {
 
 /// The web deep link a meeting-prep notification opens when clicked.
 fn prep_url(prep_id: i64) -> String {
-    format!("{WEB_APP_BASE_URL}/my/meeting-prep-v2/{prep_id}")
+    format!("{}/my/meeting-prep-v2/{prep_id}", web_app_base_url())
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
