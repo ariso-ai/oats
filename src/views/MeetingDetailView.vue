@@ -48,11 +48,11 @@
         </div>
       </header>
 
-      <!-- Meta row: duration · attendees · tag -->
-      <div v-if="durationLabel || detail.participants.length || detail.meetingType" class="card-meta">
+      <!-- Meta band: duration · attendees · category -->
+      <div v-if="hasMeta" class="card-meta">
         <div v-if="durationLabel" class="meta-item">
           <svg viewBox="0 0 24 24" class="ic"><path d="M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" /></svg>
-          <span>{{ durationLabel }}</span>
+          <span class="dur">{{ durationLabel }}</span>
         </div>
         <div v-if="detail.participants.length" class="meta-item attendees">
           <span class="avatars">
@@ -72,7 +72,7 @@
         </span>
       </div>
 
-      <div class="divider" />
+      <div v-else class="divider" />
 
       <!-- Tabs + Chat -->
       <div v-if="availableTabs.length" class="card-tabs">
@@ -422,6 +422,12 @@ const hasCoaching = computed(() => {
   return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
 });
 
+// The meta band (duration · attendees · category) renders only when at least
+// one of its fields is present; otherwise a plain divider separates header and tabs.
+const hasMeta = computed(
+  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType)
+);
+
 const otesEmpty = computed(() => {
   const d = detail.value;
   if (!d) return false;
@@ -520,7 +526,7 @@ const durationLabel = computed<string | null>(() => {
 .ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
 /* Header */
-.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; }
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; border-bottom: 1px solid #e5e6e3; }
 .head-titles { min-width: 0; }
 .head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
 .head-title--editable { cursor: text; }
@@ -549,22 +555,24 @@ const durationLabel = computed<string | null>(() => {
 .btn-icon:hover { background: #fbfbfb; }
 .btn-close { border-radius: 50%; }
 
-/* Meta */
-.card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding: 4px 24px 16px; font-size: 13px; }
-.meta-item { display: flex; align-items: center; gap: 6px; color: #535353; }
-.attendees { gap: 8px; }
+/* Meta band — full-bleed strip below the header (Figma 2827:34384) */
+.card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
+.meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
+.meta-item .ic { width: 15px; height: 15px; }
+.dur { color: #1c1c1c; font-size: 14px; }
+.attendees { gap: 0; }
 .avatars { display: flex; align-items: center; }
-.avatar { width: 23px; height: 23px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 600; border: 2px solid #fff; margin-left: -7px; }
+.avatar { width: 23px; height: 23px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 600; border: 2px solid #f7f6f4; margin-left: -5px; }
 .avatar:first-child { margin-left: 0; }
-.avatar--more { background: #9ca3af; }
+.avatar--more { width: 24px; height: 24px; background: #ecebe8; border: 1px solid #d6d6d6; color: #6f6f6f; font-size: 10px; font-weight: 400; }
 .avatar--sm { width: 22px; height: 22px; border: none; margin: 0; font-size: 9px; }
-.attendees-label { color: #535353; }
+.attendees-label { color: #6f6f6f; font-size: 12px; padding-left: 8px; }
 .chip {
-  display: inline-flex; align-items: center; gap: 3px;
-  padding: 3px 10px; background: #f0eeed; border: 1px solid #dedcdb; border-radius: 999px;
-  font-size: 12px; color: #535353;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; background: #ecebe8; border: 1px solid #d2d2d2; border-radius: 12px;
+  font-size: 12px; color: #6f6f6f;
 }
-.chip-hash { color: #9a9a96; font-weight: 600; }
+.chip-hash { color: #6f6f6f; font-weight: 400; }
 
 .divider { height: 1px; background: #e5e6e3; }
 
