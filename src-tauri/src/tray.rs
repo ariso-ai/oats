@@ -68,22 +68,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                 let _ = app_main.emit("tray://show-sign-in-prompt", ());
                                 return;
                             }
-                            if let Some(picker) = app_main.get_webview_window("meeting-picker") {
-                                let _ = picker.show();
-                                let _ = picker.set_focus();
-                                return;
-                            }
-                            let _ = WebviewWindowBuilder::new(
-                                &app_main,
-                                "meeting-picker",
-                                tauri::WebviewUrl::App("/#/meeting-picker".into()),
-                            )
-                            .title("Select a meeting")
-                            .inner_size(400.0, 500.0)
-                            .resizable(false)
-                            .center()
-                            .skip_taskbar(true)
-                            .build();
+                            let _ = crate::commands::open_meeting_picker_window(&app_main);
                         });
                     });
                 }

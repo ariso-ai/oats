@@ -41,45 +41,35 @@
 
       <!-- Scrollable list with top/bottom fade mask -->
       <div v-else class="meeting-list">
-        <button
-          v-for="m in groups.earlier"
-          :key="m.id"
-          class="meeting-item"
-          :class="{ selected: selectedItem?.id === m.id }"
-          :aria-pressed="selectedItem?.id === m.id"
-          @click="selectMeeting(m)"
-        >
-          <span class="mi-title">{{ m.title }}</span>
-          <span class="mi-sub">{{ itemSub(m) }}</span>
-        </button>
-
-        <div v-if="groups.upcoming.length" class="group-label">UPCOMING</div>
-
-        <button
-          v-for="m in groups.upcoming"
-          :key="m.id"
-          class="meeting-item"
-          :class="{ selected: selectedItem?.id === m.id }"
-          :aria-pressed="selectedItem?.id === m.id"
-          @click="selectMeeting(m)"
-        >
-          <span class="mi-title">{{ m.title }}</span>
-          <span class="mi-sub">{{ itemSub(m) }}</span>
-        </button>
+        <template v-for="section in displayedSections" :key="section.key">
+          <div v-if="section.label" class="group-label">{{ section.label }}</div>
+          <button
+            v-for="m in section.items"
+            :key="m.id"
+            class="meeting-item"
+            :class="{ selected: selectedItem?.id === m.id }"
+            :aria-pressed="selectedItem?.id === m.id"
+            @click="selectMeeting(m)"
+          >
+            <span class="mi-title">{{ m.title }}</span>
+            <span class="mi-sub">{{ itemSub(m) }}</span>
+          </button>
+        </template>
+        <p v-if="displayedSections.length === 0" class="hint">No meetings today.</p>
       </div>
 
       <!-- Floating bottom navigation -->
       <nav class="bottom-nav">
         <div class="nav-pill">
-          <button class="nav-tab" type="button" title="Today">
+          <button class="nav-tab" :class="{ 'nav-tab--active': activeView === 'today' }" type="button" title="Today" @click="activeView = 'today'">
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" /></svg>
             <span>Today</span>
           </button>
-          <button class="nav-tab nav-tab--active" type="button" title="Meetings">
+          <button class="nav-tab" :class="{ 'nav-tab--active': activeView === 'meetings' }" type="button" title="Meetings" @click="activeView = 'meetings'">
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M4 6h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" /><path d="m16 10 5-3v10l-5-3" /></svg>
             <span>Meetings</span>
           </button>
-          <button class="nav-tab" type="button" title="Todo">
+          <button class="nav-tab" type="button" title="Todo" disabled>
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M9 6h11M9 12h11M9 18h11" /><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17" /></svg>
             <span>Todo</span>
           </button>
@@ -102,6 +92,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
+import { groupMeetingsByDate, todaysMeetings, type MeetingSection } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -115,18 +106,14 @@ const now = new Date();
 const dayNum = now.getDate();
 const monthName = now.toLocaleString(undefined, { month: 'long' }).toUpperCase();
 
-// Split into "earlier/today" (already most-recent-first from the backend) and
-// "upcoming" (future, soonest-first) so the list mirrors the design's two
-// sections with an UPCOMING divider.
-const groups = computed(() => {
-  const ts = Date.now();
-  const earlier: MeetingListItem[] = [];
-  const upcoming: MeetingListItem[] = [];
-  for (const m of meetings.value) {
-    (new Date(m.timestamp).getTime() > ts ? upcoming : earlier).push(m);
+const activeView = ref<'today' | 'meetings'>('meetings');
+
+const displayedSections = computed<MeetingSection[]>(() => {
+  if (activeView.value === 'today') {
+    const items = todaysMeetings(meetings.value, now);
+    return items.length ? [{ key: 'today', label: '', items }] : [];
   }
-  upcoming.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  return { earlier, upcoming };
+  return groupMeetingsByDate(meetings.value, now);
 });
 
 function itemSub(m: MeetingListItem): string {
@@ -192,10 +179,17 @@ async function refreshRecordingState(): Promise<void> {
 // Open the floating recorder pill (its own always-on-top window).
 async function startRecording(): Promise<void> {
   try {
+    const backend = await getActiveBackend();
+    if (backend.usesMeetingPicker) {
+      // Picker-using backends (Ariso) choose a meeting first; the picker then
+      // starts the recorder itself.
+      await invoke('open_meeting_picker', {});
+      return;
+    }
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {
-    console.error('Failed to start recording window', e);
+    console.error('Failed to start recording', e);
   }
 }
 
@@ -377,6 +371,8 @@ onUnmounted(() => {
 .nav-tab:hover { color: #1c1c1c; }
 .nav-tab--active { background: #1c1c1c; color: #ffffff; }
 .nav-tab--active:hover { color: #ffffff; }
+.nav-tab:disabled { opacity: 0.45; cursor: default; }
+.nav-tab:disabled:hover { color: #6f6f6f; }
 .nav-icon-btn {
   width: 32px;
   height: 32px;

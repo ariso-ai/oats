@@ -122,12 +122,12 @@ describe('getActiveBackend', () => {
 });
 
 describe('arisoMeetingWindow', () => {
-  it('spans 7 days back to 1 day forward, date-only', () => {
+  it('spans 7 days back to 7 days forward, date-only', () => {
     // Local midday avoids any tz boundary ambiguity.
     const now = new Date(2026, 5, 9, 12, 0, 0); // 2026-06-09 local
     expect(arisoMeetingWindow(now)).toEqual({
       startDate: '2026-06-02',
-      endDate: '2026-06-10',
+      endDate: '2026-06-16',
     });
   });
 
@@ -135,7 +135,7 @@ describe('arisoMeetingWindow', () => {
     const now = new Date(2026, 0, 3, 12, 0, 0); // 2026-01-03 local
     expect(arisoMeetingWindow(now)).toEqual({
       startDate: '2025-12-27',
-      endDate: '2026-01-04',
+      endDate: '2026-01-10',
     });
   });
 });

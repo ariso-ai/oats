@@ -316,15 +316,15 @@ export class LocalBackend implements Backend {
   }
 }
 
-/** Inclusive day window for the Ariso meetings list: 7 days back … 1 day
- * forward (covers the next ~24h), formatted as local `YYYY-MM-DD`. */
+/** Inclusive day window for the Ariso meetings list: 7 days back … 7 days
+ * forward, formatted as local `YYYY-MM-DD`. */
 export function arisoMeetingWindow(now: Date): { startDate: string; endDate: string } {
   const pad = (n: number) => String(n).padStart(2, '0');
   const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const start = new Date(now);
   start.setDate(start.getDate() - 7);
   const end = new Date(now);
-  end.setDate(end.getDate() + 1);
+  end.setDate(end.getDate() + 7);
   return { startDate: ymd(start), endDate: ymd(end) };
 }
 

@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const listMeetings = vi.fn();
+const usesMeetingPicker = vi.fn(() => false);
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
@@ -13,7 +14,8 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getAllWebviewWindows: () => getAllWebviewWindows(),
 }));
 vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () => Promise.resolve({ id: 'local', listMeetings: () => listMeetings() }),
+  getActiveBackend: () =>
+    Promise.resolve({ id: 'local', usesMeetingPicker: usesMeetingPicker(), listMeetings: () => listMeetings() }),
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
@@ -45,6 +47,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   getAllWebviewWindows.mockResolvedValue([]);
   invoke.mockResolvedValue(undefined);
+  usesMeetingPicker.mockReturnValue(false);
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -57,80 +60,70 @@ describe('LibraryView', () => {
     const wrapper = mount(LibraryView);
     await flushPromises();
     expect(wrapper.text()).toContain('No meetings yet');
-    expect(wrapper.findAll('.recording-row')).toHaveLength(0);
   });
 
-  it('renders a row per meeting in the order returned', async () => {
+  it('renders a meeting-item row per meeting', async () => {
     listMeetings.mockResolvedValue([
-      item({ id: 'b', title: 'Second', durationSeconds: 75, status: 'done' }),
-      item({ id: 'a', title: 'First', durationSeconds: 3661, status: 'failed' }),
+      item({ id: 'b', title: 'Second', durationSeconds: 75 }),
+      item({ id: 'a', title: 'First', durationSeconds: 3661 }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    const rows = wrapper.findAll('.recording-row');
+    const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
     expect(rows[0].text()).toContain('Second');
-    expect(rows[0].text()).toContain('01:15');
     expect(rows[1].text()).toContain('First');
-    expect(rows[1].text()).toContain('61:01');
-    expect(rows[1].text()).toContain('failed');
   });
 
-  it('enables/disables Note and Transcript per file-presence flags', async () => {
+  it('clicking a meeting item selects it (aria-pressed becomes true)', async () => {
     listMeetings.mockResolvedValue([
-      item({ id: 'a', files: { hasAudio: false, hasNote: true, hasTranscript: false } }),
+      item({ id: 'a', title: 'Standup' }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect((wrapper.find('.btn-note').element as HTMLButtonElement).disabled).toBe(false);
-    expect((wrapper.find('.btn-transcript').element as HTMLButtonElement).disabled).toBe(true);
+    const btn = wrapper.find('.meeting-item');
+    expect(btn.attributes('aria-pressed')).toBe('false');
+    await btn.trigger('click');
+    expect(btn.attributes('aria-pressed')).toBe('true');
+    expect(btn.classes()).toContain('selected');
   });
 
-  it('clicking an enabled Note button opens the note file', async () => {
-    openRecordingFile.mockResolvedValue(undefined);
+  it('shows the meeting title and time subtitle in each row', async () => {
     listMeetings.mockResolvedValue([
-      item({ id: 'a', files: { hasAudio: false, hasNote: true, hasTranscript: false } }),
+      item({ id: 'a', title: 'Morning Sync', durationSeconds: 300 }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    await wrapper.find('.btn-note').trigger('click');
-    expect(openRecordingFile).toHaveBeenCalledWith('a', 'note');
+    const row = wrapper.find('.meeting-item');
+    expect(row.find('.mi-title').text()).toBe('Morning Sync');
+    expect(row.find('.mi-sub').text()).toContain('min');
   });
 
-  it('omits file controls for items without files (ariso meetings)', async () => {
-    listMeetings.mockResolvedValue([
-      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z' },
-    ]);
-    const wrapper = mount(LibraryView);
-    await flushPromises();
-    expect(wrapper.find('.row-controls').exists()).toBe(false);
-  });
-
-  it('opens the floating recorder window when Record is clicked (no in-window dock)', async () => {
+  it('opens the floating recorder window when the add button is clicked', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    await wrapper.find('.record-btn').trigger('click');
+    await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 
-  it('hides the Record button while a recording (waveform window) is active', async () => {
+  it('hides the sidebar (and add button) while a recording (waveform window) is active', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.record-btn').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(false);
   });
 
-  it('hides the Record button immediately after clicking it', async () => {
+  it('hides the sidebar immediately after clicking the add button', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.record-btn').exists()).toBe(true);
-    await wrapper.find('.record-btn').trigger('click');
+    expect(wrapper.find('.add-btn').exists()).toBe(true);
+    await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
-    expect(wrapper.find('.record-btn').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(false);
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
@@ -150,5 +143,57 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.text()).toContain('Could not load meetings');
     expect(wrapper.text()).not.toContain('No meetings yet');
+  });
+
+  function todayAt(hour: number): string {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0).toISOString();
+  }
+
+  it("Today tab filters the list to today's meetings and moves the active class", async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'today', title: 'Today Standup', timestamp: todayAt(9) }),
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(2);
+    expect(wrapper.get('button[title="Meetings"]').classes()).toContain('nav-tab--active');
+
+    await wrapper.get('button[title="Today"]').trigger('click');
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Today Standup');
+    expect(wrapper.text()).not.toContain('Old Sync');
+    expect(wrapper.get('button[title="Today"]').classes()).toContain('nav-tab--active');
+    expect(wrapper.get('button[title="Meetings"]').classes()).not.toContain('nav-tab--active');
+  });
+
+  it('Today tab shows the empty hint when there are no meetings today', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
+    expect(wrapper.text()).toContain('No meetings today.');
+  });
+
+  it('start-recording button opens the meeting picker for picker backends', async () => {
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('start-recording button opens the recorder directly for local backend', async () => {
+    usesMeetingPicker.mockReturnValue(false);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 });
