@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const listMeetings = vi.fn();
+const usesMeetingPicker = vi.fn(() => false);
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
@@ -13,7 +14,8 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getAllWebviewWindows: () => getAllWebviewWindows(),
 }));
 vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () => Promise.resolve({ id: 'local', listMeetings: () => listMeetings() }),
+  getActiveBackend: () =>
+    Promise.resolve({ id: 'local', usesMeetingPicker: usesMeetingPicker(), listMeetings: () => listMeetings() }),
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
@@ -45,6 +47,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   getAllWebviewWindows.mockResolvedValue([]);
   invoke.mockResolvedValue(undefined);
+  usesMeetingPicker.mockReturnValue(false);
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -172,5 +175,25 @@ describe('LibraryView', () => {
     await wrapper.get('button[title="Today"]').trigger('click');
     expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
     expect(wrapper.text()).toContain('No meetings today.');
+  });
+
+  it('start-recording button opens the meeting picker for picker backends', async () => {
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('start-recording button opens the recorder directly for local backend', async () => {
+    usesMeetingPicker.mockReturnValue(false);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 });

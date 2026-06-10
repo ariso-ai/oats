@@ -179,10 +179,17 @@ async function refreshRecordingState(): Promise<void> {
 // Open the floating recorder pill (its own always-on-top window).
 async function startRecording(): Promise<void> {
   try {
+    const backend = await getActiveBackend();
+    if (backend.usesMeetingPicker) {
+      // Picker-using backends (Ariso) choose a meeting first; the picker then
+      // starts the recorder itself.
+      await invoke('open_meeting_picker', {});
+      return;
+    }
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {
-    console.error('Failed to start recording window', e);
+    console.error('Failed to start recording', e);
   }
 }
 
