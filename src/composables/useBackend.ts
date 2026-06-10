@@ -121,11 +121,12 @@ function normalizeActionItems(
 ): MeetingActionItem[] {
   if (!Array.isArray(items)) return [];
   return items
-    .map((it) =>
-      typeof it === 'string'
-        ? { item: it }
-        : { name: it.name, item: it.item ?? '' }
-    )
+    .map((it) => {
+      if (typeof it === 'string') return { item: it };
+      const name = typeof it.name === 'string' ? it.name : undefined;
+      const item = typeof it.item === 'string' ? it.item : '';
+      return { name, item };
+    })
     .filter((it) => it.item.trim().length > 0);
 }
 

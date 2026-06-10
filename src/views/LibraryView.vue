@@ -12,7 +12,12 @@
           :key="m.id"
           class="recording-row"
           :class="{ selected: selectedItem?.id === m.id }"
+          tabindex="0"
+          role="button"
+          :aria-pressed="selectedItem?.id === m.id"
           @click="selectMeeting(m)"
+          @keydown.enter.prevent="selectMeeting(m)"
+          @keydown.space.prevent="selectMeeting(m)"
         >
           <div class="row-main">
             <span class="row-title">{{ m.title }}</span>

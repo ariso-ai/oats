@@ -205,12 +205,15 @@ const showTranscript = ref(false);
 let reqId = 0;
 
 async function load(item: MeetingListItem | null): Promise<void> {
+  // Bump the token first so any in-flight load for the previous selection
+  // (including one cleared by item=null) is treated as stale on resolve.
+  const my = ++reqId;
+  loading.value = false;
   detail.value = null;
   error.value = null;
   showFullNotes.value = false;
   showTranscript.value = false;
   if (!item) return;
-  const my = ++reqId;
   loading.value = true;
   try {
     const backend = await getActiveBackend();
