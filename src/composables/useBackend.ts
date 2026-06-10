@@ -123,8 +123,12 @@ function normalizeActionItems(
   return items
     .map((it) => {
       if (typeof it === 'string') return { item: it };
-      const name = typeof it.name === 'string' ? it.name : undefined;
-      const item = typeof it.item === 'string' ? it.item : '';
+      const raw =
+        it && typeof it === 'object'
+          ? (it as { name?: unknown; item?: unknown })
+          : {};
+      const name = typeof raw.name === 'string' ? raw.name : undefined;
+      const item = typeof raw.item === 'string' ? raw.item : '';
       return { name, item };
     })
     .filter((it) => it.item.trim().length > 0);
