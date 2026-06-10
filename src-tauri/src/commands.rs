@@ -448,7 +448,9 @@ pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i6
     };
     WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
-        .inner_size(320.0, 56.0)
+        // Fixed size: room for the expanded pill plus its CSS shadow. The pill
+        // itself is anchored to the bottom and grows upward within this window.
+        .inner_size(92.0, 284.0)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -590,6 +592,9 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
+        // Restore the window if it was minimized/hidden before focusing it.
+        let _ = win.unminimize();
+        let _ = win.show();
         win.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
