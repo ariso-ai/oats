@@ -23,7 +23,7 @@ Either kind of recording ends on an explicit Stop **or** on a universal
 finalizes the recording. Auto recordings additionally end on mic-off detection.
 
 The recording itself reuses the existing recorder pipeline (`useRecorder` +
-`RecorderPanel.vue` in the `waveform` window) and finalize/upload flow
+`WaveformView.vue` in the `waveform` window) and finalize/upload flow
 unchanged. The new work is a native microphone-usage monitor, the orchestration
 that connects it to that pipeline, and the silence backstop in the pipeline.
 
@@ -79,7 +79,7 @@ that connects it to that pipeline, and the silence backstop in the pipeline.
 │            │ emits: auto-record://stop                                       │
 └────────────┼────────────────────────────────────────────────────────────────┘
              ▼
-   waveform webview  ── RecorderPanel.vue (auto=1)
+   waveform webview  ── WaveformView.vue (auto=1)
        - start recording immediately
        - match calendar meeting (Ariso) OR show confirm overlay
        - on auto-record://stop → finalize + upload (existing flow)
@@ -94,7 +94,7 @@ that connects it to that pipeline, and the silence backstop in the pipeline.
 - **`src-tauri/src/commands.rs`** — `open_waveform_window` gains an `auto` flag
   that adds `&auto=1` to the URL; `RecordingState` is set/cleared alongside the
   tray menu transitions.
-- **`src/views/RecorderPanel.vue`** — read `auto=1`; start immediately; run the
+- **`src/views/WaveformView.vue`** — read `auto=1`; start immediately; run the
   match-or-confirm flow; render the confirm overlay; listen for
   `auto-record://stop`.
 - **`src/composables/useAutoTrigger.ts`** (new) — pure-ish orchestration the
@@ -173,7 +173,7 @@ recording from self-triggering, regardless of PID attribution.
   success or failure) clears the flag. A window-`Destroyed` handler clears it as
   a fallback so a crashed/closed window can't wedge the monitor off.
 
-## Match-or-prompt flow (`useAutoTrigger.ts` + `RecorderPanel.vue`)
+## Match-or-prompt flow (`useAutoTrigger.ts` + `WaveformView.vue`)
 
 On mount with `auto=1`:
 
@@ -232,7 +232,7 @@ pipeline (frontend) because that is where the captured signal is available.
     never counts toward the 15 minutes.
   - When `now − lastSoundAt ≥ SILENCE_TIMEOUT` (**15 min**) and not paused →
     `shouldAutoStop = true`.
-- `RecorderPanel.vue` evaluates the watch on the existing 1-second timer tick;
+- `WaveformView.vue` evaluates the watch on the existing 1-second timer tick;
   on `shouldAutoStop` it runs the **same Stop path** as a manual/tray stop
   (finalize + upload, or discard if under `MIN_DURATION`). For an auto recording
   this is an additional safety net layered on top of mic-off detection —
