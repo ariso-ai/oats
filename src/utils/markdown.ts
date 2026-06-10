@@ -110,7 +110,19 @@ export function renderMarkdown(src: string): string {
         html.push('<ul>');
         listType = 'ul';
       }
-      html.push(`<li>${renderInline(ul[1])}</li>`);
+      // GFM task list: `[ ]`/`[]` → unchecked, `[x]`/`[X]` → checked. Both are
+      // rendered as disabled checkboxes (display only, not interactive).
+      const task = ul[1].match(/^\[([ xX]?)\]\s+(.*)$/);
+      if (task) {
+        const checked = task[1] === 'x' || task[1] === 'X';
+        html.push(
+          `<li class="task-list-item"><input type="checkbox" disabled${
+            checked ? ' checked' : ''
+          } />${renderInline(task[2])}</li>`,
+        );
+      } else {
+        html.push(`<li>${renderInline(ul[1])}</li>`);
+      }
       continue;
     }
 
