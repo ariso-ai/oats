@@ -32,6 +32,31 @@ interface ScheduledMeeting {
   start_at: string;
 }
 
+interface MeetingNotesParticipant {
+  name?: string;
+  email?: string;
+  role?: string;
+  self?: boolean;
+  avatar_url?: string | null;
+}
+
+// The `/meeting-notes/:id` payload. `summary` is either a JSON string or an
+// already-parsed object holding digest/summary/actionItems/score/coaching.
+interface MeetingNotes {
+  id: number;
+  title: string | null;
+  start_at: string;
+  end_at?: string;
+  status?: string;
+  visibility?: string;
+  external?: boolean;
+  summary?: string | Record<string, unknown> | null;
+  participants?: MeetingNotesParticipant[];
+  hasTranscript?: boolean;
+  // Requester's personal note (authenticated view); null when none written.
+  individual_note?: { content?: string | null; title?: string | null } | null;
+}
+
 interface ScheduledMeetingsResponse {
   meetings: ScheduledMeeting[];
 }
@@ -114,6 +139,59 @@ export function useMeetingApi() {
     const res = await api.request('GET', `/desktop/meetings/${meetingId}`);
     assertOk(res, 200, 'get meeting');
     return res.data as { meeting: Meeting };
+  }
+
+  // Full meeting-notes payload (title, participants, summary JSON, assessment,
+  // coaching). This is the same endpoint the web meeting-notes page uses; the
+  // desktop library renders its detail panel from it.
+  async function getMeetingNotes(
+    meetingId: number | string
+  ): Promise<MeetingNotes> {
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}`);
+    assertOk(res, 200, 'get meeting notes');
+    return res.data as MeetingNotes;
+  }
+
+  // Fetch a meeting's stored transcript. Resolves to null on 404 (no transcript
+  // stored yet) so callers can treat "absent" distinctly from a real error.
+  async function getMeetingTranscript(
+    meetingId: number | string
+  ): Promise<string | null> {
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}/transcript`);
+    if (res.status === 404) return null;
+    assertOk(res, 200, 'get transcript');
+    const data = res.data as { transcript?: string } | null;
+    return typeof data?.transcript === 'string' ? data.transcript : null;
+  }
+
+  // Fetch the requester's individual note. Resolves to null on 404 or when no
+  // note content is stored.
+  async function getMeetingIndividualNote(
+    meetingId: number | string
+  ): Promise<{ content: string; title: string | null } | null> {
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}/individual-note`);
+    if (res.status === 404) return null;
+    assertOk(res, 200, 'get individual note');
+    const data = res.data as
+      | { content?: string | null; title?: string | null; note?: { content?: string | null; title?: string | null } }
+      | null;
+    const content =
+      typeof data?.content === 'string' && data.content
+        ? data.content
+        : typeof data?.note?.content === 'string'
+          ? data.note.content
+          : null;
+    if (!content) return null;
+    const title =
+      typeof data?.title === 'string'
+        ? data.title
+        : typeof data?.note?.title === 'string'
+          ? data.note.title
+          : null;
+    return { content, title };
   }
 
   async function updateMeeting(
@@ -243,6 +321,9 @@ export function useMeetingApi() {
     listScheduledMeetings,
     listMeetingsInWindow,
     getMeeting,
+    getMeetingNotes,
+    getMeetingTranscript,
+    getMeetingIndividualNote,
     updateMeeting,
     endMeeting,
     saveTranscript,
@@ -252,4 +333,4 @@ export function useMeetingApi() {
   };
 }
 
-export type { Meeting, PaginatedResponse, ScheduledMeeting };
+export type { Meeting, PaginatedResponse, ScheduledMeeting, MeetingNotes };
