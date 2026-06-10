@@ -652,6 +652,8 @@ const durationLabel = computed<string | null>(() => {
 .md :deep(p) { margin: 0 0 10px; }
 .md :deep(ul), .md :deep(ol) { margin: 0 0 10px; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
 .md :deep(li) { line-height: 1.5; }
+.md :deep(li.task-list-item) { list-style: none; margin-left: -22px; display: flex; align-items: flex-start; gap: 8px; }
+.md :deep(li.task-list-item input[type="checkbox"]) { margin: 4px 0 0; flex: none; }
 .md :deep(strong) { font-weight: 600; color: #1c1c1c; }
 .md :deep(code) { background: #f0eeed; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
 .md :deep(a) { color: #6c63c0; text-decoration: underline; }
