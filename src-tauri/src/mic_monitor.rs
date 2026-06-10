@@ -4,6 +4,9 @@
 //! sustained mic-off it emits `auto-record://stop`.
 
 use std::collections::HashSet;
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Time (ms) an external app must hold the mic before we start recording.
 const START_DEBOUNCE_MS: u64 = 3_000;
@@ -188,6 +191,102 @@ pub fn is_supported() -> bool {
     {
         false
     }
+}
+
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SETTINGS_PATH: &str = "settings.json";
+const ENABLED_KEY: &str = "autoRecordEnabled";
+
+/// Holds the running monitor task (if any). Mirrors `NotificationManager`.
+#[derive(Default)]
+pub struct MicMonitorManager {
+    handle: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+impl MicMonitorManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Whether the user has auto-record enabled (defaults to true).
+fn enabled(app: &AppHandle) -> bool {
+    use tauri_plugin_store::StoreExt;
+    match app.store(SETTINGS_PATH) {
+        Ok(store) => !matches!(store.get(ENABLED_KEY), Some(serde_json::Value::Bool(false))),
+        Err(_) => true,
+    }
+}
+
+/// Start the monitor if supported and enabled; otherwise stop it. Safe to call
+/// repeatedly (startup, settings toggle).
+pub async fn sync(app: &AppHandle) {
+    let desired = is_supported() && enabled(app);
+    let mgr = app.state::<MicMonitorManager>();
+    let mut guard = mgr.handle.lock().unwrap();
+    if !desired {
+        if let Some(h) = guard.take() {
+            h.abort();
+        }
+        return;
+    }
+    if guard.is_some() {
+        return;
+    }
+    let app = app.clone();
+    *guard = Some(tauri::async_runtime::spawn(async move {
+        run_loop(app).await;
+    }));
+}
+
+/// Stop and tear down the monitor task.
+pub fn stop(app: &AppHandle) {
+    let mgr = app.state::<MicMonitorManager>();
+    let mut guard = mgr.handle.lock().unwrap();
+    if let Some(h) = guard.take() {
+        h.abort();
+    }
+}
+
+async fn run_loop(app: AppHandle) {
+    let mut machine = Machine::new();
+    let mut elapsed: u64 = 0;
+    loop {
+        let external = external_input_pids();
+        let recording_active = app
+            .state::<crate::recording_state::RecordingState>()
+            .is_active();
+        if let Some(action) = machine.tick(elapsed, &external, recording_active) {
+            match action {
+                Action::Start => {
+                    let app_main = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Err(e) =
+                            crate::commands::open_waveform_window(&app_main, None, true)
+                        {
+                            eprintln!("mic-monitor: failed to open recorder window: {e}");
+                        }
+                    });
+                }
+                Action::Stop => {
+                    let _ = app.emit("auto-record://stop", ());
+                }
+            }
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+        elapsed = elapsed.saturating_add(POLL_INTERVAL.as_millis() as u64);
+    }
+}
+
+#[tauri::command]
+pub async fn sync_auto_record(app: AppHandle) -> Result<(), String> {
+    sync(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn auto_record_supported() -> bool {
+    is_supported()
 }
 
 #[cfg(target_os = "macos")]
