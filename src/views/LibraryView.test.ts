@@ -60,41 +60,41 @@ describe('LibraryView', () => {
     expect(wrapper.findAll('.recording-row')).toHaveLength(0);
   });
 
-  it('renders a row per meeting in the order returned', async () => {
+  it('renders a meeting-item row per meeting', async () => {
     listMeetings.mockResolvedValue([
-      item({ id: 'b', title: 'Second', durationSeconds: 75, status: 'done' }),
-      item({ id: 'a', title: 'First', durationSeconds: 3661, status: 'failed' }),
+      item({ id: 'b', title: 'Second', durationSeconds: 75 }),
+      item({ id: 'a', title: 'First', durationSeconds: 3661 }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    const rows = wrapper.findAll('.recording-row');
+    const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
     expect(rows[0].text()).toContain('Second');
-    expect(rows[0].text()).toContain('01:15');
     expect(rows[1].text()).toContain('First');
-    expect(rows[1].text()).toContain('61:01');
-    expect(rows[1].text()).toContain('failed');
   });
 
-  it('enables/disables Note and Transcript per file-presence flags', async () => {
+  it('clicking a meeting item selects it (aria-pressed becomes true)', async () => {
     listMeetings.mockResolvedValue([
-      item({ id: 'a', files: { hasAudio: false, hasNote: true, hasTranscript: false } }),
+      item({ id: 'a', title: 'Standup' }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect((wrapper.find('.btn-note').element as HTMLButtonElement).disabled).toBe(false);
-    expect((wrapper.find('.btn-transcript').element as HTMLButtonElement).disabled).toBe(true);
+    const btn = wrapper.find('.meeting-item');
+    expect(btn.attributes('aria-pressed')).toBe('false');
+    await btn.trigger('click');
+    expect(btn.attributes('aria-pressed')).toBe('true');
+    expect(btn.classes()).toContain('selected');
   });
 
-  it('clicking an enabled Note button opens the note file', async () => {
-    openRecordingFile.mockResolvedValue(undefined);
+  it('shows the meeting title and time subtitle in each row', async () => {
     listMeetings.mockResolvedValue([
-      item({ id: 'a', files: { hasAudio: false, hasNote: true, hasTranscript: false } }),
+      item({ id: 'a', title: 'Morning Sync', durationSeconds: 300 }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    await wrapper.find('.btn-note').trigger('click');
-    expect(openRecordingFile).toHaveBeenCalledWith('a', 'note');
+    const row = wrapper.find('.meeting-item');
+    expect(row.find('.mi-title').text()).toBe('Morning Sync');
+    expect(row.find('.mi-sub').text()).toContain('min');
   });
 
   it('omits file controls for items without files (ariso meetings)', async () => {
@@ -106,31 +106,31 @@ describe('LibraryView', () => {
     expect(wrapper.find('.row-controls').exists()).toBe(false);
   });
 
-  it('opens the floating recorder window when Record is clicked (no in-window dock)', async () => {
+  it('opens the floating recorder window when the add button is clicked', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    await wrapper.find('.record-btn').trigger('click');
+    await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 
-  it('hides the Record button while a recording (waveform window) is active', async () => {
+  it('hides the sidebar (and add button) while a recording (waveform window) is active', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.record-btn').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(false);
   });
 
-  it('hides the Record button immediately after clicking it', async () => {
+  it('hides the sidebar immediately after clicking the add button', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.record-btn').exists()).toBe(true);
-    await wrapper.find('.record-btn').trigger('click');
+    expect(wrapper.find('.add-btn').exists()).toBe(true);
+    await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
-    expect(wrapper.find('.record-btn').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(false);
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
