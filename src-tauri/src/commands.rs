@@ -474,6 +474,35 @@ pub async fn start_recording_window(
     open_waveform_window(&app, meeting_id)
 }
 
+/// Show/focus the meeting-picker window, building it if absent. Shared by the
+/// tray (Ariso path) and the `open_meeting_picker` command so both open the
+/// picker identically.
+pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(picker) = app.get_webview_window("meeting-picker") {
+        let _ = picker.show();
+        let _ = picker.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "meeting-picker", WebviewUrl::App("/#/meeting-picker".into()))
+        .title("Select a meeting")
+        .inner_size(400.0, 500.0)
+        .resizable(false)
+        .center()
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open (or focus) the meeting-picker window. Invoked by the library's
+/// start-recording button for picker-using backends.
+#[tauri::command]
+pub async fn open_meeting_picker(app: tauri::AppHandle) -> Result<(), String> {
+    open_meeting_picker_window(&app)
+}
+
 /// PUT binary data to a presigned URL (bypasses CORS via native HTTP client)
 #[tauri::command]
 pub async fn put_presigned(

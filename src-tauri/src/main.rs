@@ -26,6 +26,7 @@ fn main() {
             commands::set_tray_recording,
             commands::create_settings_window,
             commands::start_recording_window,
+            commands::open_meeting_picker,
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
