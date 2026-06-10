@@ -58,6 +58,19 @@
           </button>
         </div>
 
+        <div v-if="confirmVisible" class="confirm">
+          <button
+            class="ctrl-btn keep-btn"
+            aria-label="Keep recording"
+            @click.stop.prevent="keepRecording"
+          >✓</button>
+          <button
+            class="ctrl-btn discard-btn"
+            aria-label="Discard recording"
+            @click.stop.prevent="discardRecording"
+          >✕</button>
+        </div>
+
         <!-- Tauri only drags when the mousedown target itself carries the
              attribute, so every leaf in the handle needs it. -->
         <div class="drag-handle" data-tauri-drag-region @click.stop>
@@ -84,6 +97,8 @@ import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
 import { bucketLevels } from './waveformBars';
 import { shouldAutoStop } from '../composables/silenceWatch';
+import { resolveAssociation } from '../composables/useAutoTrigger';
+import { useMeetingApi } from '../composables/useMeetingApi';
 
 const SUCCESS_CLOSE_MS = 1500;
 
@@ -101,10 +116,18 @@ const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 20), 5))
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
-const meetingId: number | null =
+const effectiveMeetingId = ref<number | null>(
   typeof meetingIdQuery === 'string' && /^\d+$/.test(meetingIdQuery)
     ? Number(meetingIdQuery)
-    : null;
+    : null,
+);
+const isAuto = route.query.auto === '1';
+const confirmVisible = ref(false);
+let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+const CONFIRM_TIMEOUT_MS = 60_000;
+// Auto recordings shorter than this are discarded, not uploaded (guards against
+// late mic-on / quick-off races). Manual recordings are never length-gated.
+const MIN_AUTO_DURATION_S = 15;
 
 const formattedDuration = computed(() => {
   const s = recorder.durationSeconds.value;
@@ -136,6 +159,7 @@ async function showMeetings() {
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
+let unlistenAutoStop: UnlistenFn | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
 let silenceTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -176,7 +200,69 @@ async function startRecording() {
   await invoke('set_tray_recording', { isRecording: true, isPaused: false });
 }
 
+// Auto-trigger: resolve calendar association, falling back to a confirm prompt.
+async function resolveAuto() {
+  try {
+    if (backend.value?.id === 'ariso') {
+      const now = new Date();
+      const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+      const end = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+      const meetings = await useMeetingApi().listScheduledMeetings(start, end);
+      const assoc = resolveAssociation('ariso', meetings, now);
+      if (assoc.kind === 'matched') {
+        effectiveMeetingId.value = assoc.meetingId ?? null;
+        return;
+      }
+    }
+  } catch (e) {
+    console.error('Auto-trigger match failed; asking for confirmation', e);
+  }
+  showConfirm();
+}
+
+function showConfirm() {
+  confirmVisible.value = true;
+  // No response within the window → discard (per spec).
+  confirmTimer = setTimeout(() => {
+    confirmTimer = null;
+    void discardRecording();
+  }, CONFIRM_TIMEOUT_MS);
+}
+
+function keepRecording() {
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+  }
+  confirmVisible.value = false;
+}
+
+// Discard the in-progress capture without uploading, then close.
+async function discardRecording() {
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+  }
+  confirmVisible.value = false;
+  if (silenceTimer) {
+    clearInterval(silenceTimer);
+    silenceTimer = null;
+  }
+  waveform.stop();
+  try {
+    await recorder.stopRecording();
+  } catch {
+    /* best-effort */
+  }
+  await invoke('set_tray_recording', { isRecording: false, isPaused: false });
+  await closeWindow();
+}
+
 async function handleStop() {
+  if (isAuto && recorder.durationSeconds.value < MIN_AUTO_DURATION_S) {
+    await discardRecording();
+    return;
+  }
   collapse();
   isUploading.value = true;
   waveform.stop();
@@ -199,7 +285,7 @@ async function handleStop() {
           startAt,
           endAt,
           durationSeconds: recorder.durationSeconds.value,
-          meetingId: meetingId ?? undefined,
+          meetingId: effectiveMeetingId.value ?? undefined,
         }),
         timeout,
       ]);
@@ -264,6 +350,11 @@ onMounted(async () => {
       void handleStop();
     }
   }, 1_000);
+
+  unlistenAutoStop = await listen('auto-record://stop', handleStop);
+  if (isAuto) {
+    void resolveAuto();
+  }
 });
 
 onUnmounted(() => {
@@ -272,6 +363,8 @@ onUnmounted(() => {
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();
+  unlistenAutoStop?.();
+  if (confirmTimer) clearTimeout(confirmTimer);
 });
 </script>
 
@@ -426,6 +519,17 @@ html, body {
   border-radius: 50%;
   background: #6b7280;
 }
+
+.confirm {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+.keep-btn { color: #34d399; font-size: 16px; font-weight: 700; }
+.discard-btn { color: #f87171; font-size: 14px; font-weight: 700; }
 
 .status-icon {
   margin-top: 8px;

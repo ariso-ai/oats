@@ -17,7 +17,8 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({ close: closeWin }),
 }));
-vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }) }));
+let routeQuery: Record<string, string> = {};
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: { value: true },
@@ -47,10 +48,20 @@ vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
 }));
 
+const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
+vi.mock('../composables/useMeetingApi', () => ({
+  useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
+}));
+
+vi.mock('../composables/useAutoTrigger', () => ({
+  resolveAssociation: vi.fn(() => ({ kind: 'confirm' })),
+}));
+
 import WaveformView from './WaveformView.vue';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  routeQuery = {};
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -148,6 +159,17 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('auto mode with no calendar match shows the confirm overlay', async () => {
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    expect(wrapper.find('.confirm').exists()).toBe(true);
+    expect(wrapper.find('.keep-btn').exists()).toBe(true);
+    routeQuery = {};
     wrapper.unmount();
   });
 });
