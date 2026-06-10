@@ -123,6 +123,7 @@ const effectiveMeetingId = ref<number | null>(
 );
 const isAuto = route.query.auto === '1';
 const confirmVisible = ref(false);
+const isStopping = ref(false);
 let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 const CONFIRM_TIMEOUT_MS = 60_000;
 // Auto recordings shorter than this are discarded, not uploaded (guards against
@@ -239,6 +240,8 @@ function keepRecording() {
 
 // Discard the in-progress capture without uploading, then close.
 async function discardRecording() {
+  if (isStopping.value) return;
+  isStopping.value = true;
   if (confirmTimer) {
     clearTimeout(confirmTimer);
     confirmTimer = null;
@@ -263,9 +266,26 @@ async function discardRecording() {
 }
 
 async function handleStop() {
+  if (isStopping.value) return;
+  // An unanswered confirm overlay means the user never opted in — a stop of any
+  // kind (native mic-off, silence backstop, tray) must discard, not upload.
+  if (confirmVisible.value) {
+    await discardRecording();
+    return;
+  }
   if (isAuto && recorder.durationSeconds.value < MIN_AUTO_DURATION_S) {
     await discardRecording();
     return;
+  }
+  isStopping.value = true;
+  // Tear down the auto-trigger/backstop timers so they can't fire post-stop.
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+  }
+  if (silenceTimer) {
+    clearInterval(silenceTimer);
+    silenceTimer = null;
   }
   collapse();
   isUploading.value = true;

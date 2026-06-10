@@ -13,7 +13,13 @@ const closeWin = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+const eventHandlers: Record<string, (e: unknown) => void> = {};
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn((name: string, cb: (e: unknown) => void) => {
+    eventHandlers[name] = cb;
+    return Promise.resolve(() => {});
+  }),
+}));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({ close: closeWin }),
 }));
@@ -57,6 +63,7 @@ import WaveformView from './WaveformView.vue';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const k in eventHandlers) delete eventHandlers[k];
   routeQuery = {};
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
 });
@@ -165,6 +172,24 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(wrapper.find('.confirm').exists()).toBe(true);
     expect(wrapper.find('.keep-btn').exists()).toBe(true);
+    routeQuery = {};
+    wrapper.unmount();
+  });
+
+  it('discards (does not upload) when stopped while the confirm overlay is unanswered', async () => {
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    // Confirm overlay should be showing (local backend, no match).
+    expect(wrapper.find('.confirm').exists()).toBe(true);
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    // A native mic-off stop arrives before the user answers.
+    await eventHandlers['auto-record://stop']?.({});
+    await flushPromises();
+    // Must NOT have uploaded; must have stopped + closed.
+    expect(finalizeRecording).not.toHaveBeenCalled();
+    expect(stopRecording).toHaveBeenCalled();
     routeQuery = {};
     wrapper.unmount();
   });
