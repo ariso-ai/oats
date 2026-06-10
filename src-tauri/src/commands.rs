@@ -406,6 +406,10 @@ pub async fn upload_file(
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
     crate::tray::set_menu(&app, is_recording, is_paused);
+    if !is_recording {
+        use tauri::Manager;
+        app.state::<crate::recording_state::RecordingState>().clear();
+    }
     Ok(())
 }
 
@@ -431,9 +435,15 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
 }
 
 /// Shared helper to open the waveform recording window. Used by the
-/// `start_recording_window` command and by the tray (Local backend path).
-pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i64>) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+/// `start_recording_window` command, the tray (Local backend path), and the
+/// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
+/// `RecordingState` as an auto recording.
+pub(crate) fn open_waveform_window(
+    app: &tauri::AppHandle,
+    meeting_id: Option<i64>,
+    auto: bool,
+) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
     if let Some(picker) = app.get_webview_window("meeting-picker") {
         let _ = picker.close();
@@ -442,11 +452,14 @@ pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i6
         let _ = existing.set_focus();
         return Ok(());
     }
-    let url = match meeting_id {
+    let mut url = match meeting_id {
         Some(id) => format!("/#/waveform?meetingId={id}"),
         None => "/#/waveform".to_string(),
     };
-    WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
+    if auto {
+        url.push_str(if url.contains('?') { "&auto=1" } else { "?auto=1" });
+    }
+    let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
@@ -459,6 +472,25 @@ pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i6
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
+
+    let source = if auto {
+        crate::recording_state::RecordingSource::Auto
+    } else {
+        crate::recording_state::RecordingSource::Manual
+    };
+    app.state::<crate::recording_state::RecordingState>().set(source);
+
+    // If the window is destroyed without a clean stop (crash / force-close),
+    // clear the shared flag so the monitor can recover and re-arm.
+    let app_for_event = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            app_for_event
+                .state::<crate::recording_state::RecordingState>()
+                .clear();
+        }
+    });
+
     crate::tray::set_menu(app, true, false);
     Ok(())
 }
@@ -471,7 +503,7 @@ pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
 ) -> Result<(), String> {
-    open_waveform_window(&app, meeting_id)
+    open_waveform_window(&app, meeting_id, false)
 }
 
 /// Show/focus the meeting-picker window, building it if absent. Shared by the
