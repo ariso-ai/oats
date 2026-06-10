@@ -153,6 +153,17 @@ export function useMeetingApi() {
     return res.data as MeetingNotes;
   }
 
+  // Rename a meeting via the shared meeting-notes endpoint (the same one the web
+  // app uses). Used by the desktop detail panel's inline title editing.
+  async function updateMeetingNotesTitle(
+    meetingId: number | string,
+    title: string
+  ): Promise<void> {
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('PATCH', `/meeting-notes/${encodedMeetingId}`, { title });
+    assertOk(res, 200, 'update meeting title');
+  }
+
   // Fetch a meeting's stored transcript. Resolves to null on 404 (no transcript
   // stored yet) so callers can treat "absent" distinctly from a real error.
   async function getMeetingTranscript(
@@ -322,6 +333,7 @@ export function useMeetingApi() {
     listMeetingsInWindow,
     getMeeting,
     getMeetingNotes,
+    updateMeetingNotesTitle,
     getMeetingTranscript,
     getMeetingIndividualNote,
     updateMeeting,
