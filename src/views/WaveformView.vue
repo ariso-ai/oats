@@ -94,9 +94,9 @@ const uploadResult = ref<'success' | 'failed' | null>(null);
 const isExpanded = ref(false);
 
 // Voice energy lives in the low FFT bins; the upper bins are near-silent and
-// would leave bars 2-3 dead. Bucket only the low part of the spectrum so all
-// three bars react to speech.
-const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 12), 3));
+// would leave the higher bars dead. Bucket only the low part of the spectrum
+// so all five bars react to speech.
+const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 20), 5));
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
