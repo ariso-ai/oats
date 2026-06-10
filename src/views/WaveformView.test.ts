@@ -53,10 +53,6 @@ vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
 }));
 
-vi.mock('../composables/useAutoTrigger', () => ({
-  resolveAssociation: vi.fn(() => ({ kind: 'confirm' })),
-}));
-
 import WaveformView from './WaveformView.vue';
 
 beforeEach(() => {

@@ -243,6 +243,10 @@ async function discardRecording() {
     clearTimeout(confirmTimer);
     confirmTimer = null;
   }
+  if (closeTimer) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
   confirmVisible.value = false;
   if (silenceTimer) {
     clearInterval(silenceTimer);
