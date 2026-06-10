@@ -446,6 +446,7 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
 
     // Focus if already exists
     if let Some(win) = app.get_webview_window("onboarding") {
+        win.show().map_err(|e: tauri::Error| e.to_string())?;
         win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
         return Ok(());
     }
