@@ -1,65 +1,73 @@
 <template>
-  <div class="waveform-container" data-tauri-drag-region>
-    <template v-if="uploadResult">
-      <div class="upload-info" data-tauri-drag-region>
-        <span :class="uploadResult === 'success' ? 'upload-check' : 'upload-error-icon'">
+  <!-- The window is a fixed size (room for the expanded pill + its shadow); the
+       pill is anchored to the bottom and grows UPWARD via a CSS transition. -->
+  <div class="stage">
+    <div
+      class="pill"
+      :class="{ expanded: isExpanded, paused: recorder.isPaused.value }"
+      @mouseenter="expand"
+      @mouseleave="collapse"
+      @click="showMeetings"
+    >
+      <img class="logo" src="../assets/icon-r-b.png" alt="" />
+
+      <template v-if="uploadResult">
+        <span class="status-icon" :class="uploadResult === 'success' ? 'ok' : 'err'">
           {{ uploadResult === 'success' ? '✓' : '✗' }}
         </span>
-        <span class="upload-label">
-          {{ uploadResult === 'success' ? successLabel : failLabel }}
-        </span>
-        <button class="close-btn" @click.stop.prevent="closeWindow">Close</button>
-      </div>
-    </template>
-    <template v-else-if="isUploading">
-      <div class="upload-info" data-tauri-drag-region>
-        <span class="upload-spinner" />
-        <span class="upload-label">{{ progressLabel }}</span>
-      </div>
-    </template>
-    <template v-else>
-      <div class="bars" data-tauri-drag-region>
-        <div
-          v-for="(level, i) in waveform.levels.value"
-          :key="i"
-          class="bar"
-          :class="{ paused: recorder.isPaused.value }"
-          :style="{ height: `${Math.max(8, level * 100)}%` }"
-        />
-      </div>
-      <div class="info" data-tauri-drag-region>
-        <template v-if="!recorder.isPaused.value">
-          <span class="rec-dot" />
-          <span class="rec-label">REC</span>
-        </template>
-        <span v-else class="paused-label">PAUSED</span>
-        <span class="timer">{{ formattedDuration }}</span>
-      </div>
-      <div class="controls">
-        <button
-          class="ctrl-btn pause-resume-btn"
-          :aria-label="recorder.isPaused.value ? 'Resume recording' : 'Pause recording'"
-          @click.stop.prevent="recorder.isPaused.value ? handleResume() : handlePause()"
-        >
-          <svg v-if="!recorder.isPaused.value" width="14" height="14" viewBox="0 0 14 14">
-            <rect x="2" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
-            <rect x="8.5" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
-          </svg>
-          <svg v-else width="14" height="14" viewBox="0 0 14 14">
-            <circle cx="7" cy="7" r="5.5" fill="currentColor" />
-          </svg>
-        </button>
-        <button
-          class="ctrl-btn stop-btn"
-          aria-label="Stop recording"
-          @click.stop.prevent="handleStop"
-        >
-          <svg width="12" height="12" viewBox="0 0 12 12">
-            <rect x="1" y="1" width="10" height="10" rx="2" fill="currentColor" />
-          </svg>
-        </button>
-      </div>
-    </template>
+      </template>
+      <template v-else-if="isUploading">
+        <span class="spinner" />
+      </template>
+      <template v-else>
+        <div class="bars">
+          <div
+            v-for="(level, i) in bars"
+            :key="i"
+            class="bar"
+            :class="{ paused: recorder.isPaused.value }"
+            :style="{ height: `${Math.max(12, Math.min(100, Math.sqrt(level) * 150))}%` }"
+          />
+        </div>
+
+        <!-- Always in the DOM so its reveal can animate; clipped + faded when
+             collapsed. Pause sits above Stop. -->
+        <div class="expanded-area" :class="{ open: isExpanded }">
+          <span class="timer">{{ formattedDuration }}</span>
+          <button
+            class="ctrl-btn pause-btn"
+            :aria-label="recorder.isPaused.value ? 'Resume recording' : 'Pause recording'"
+            @click.stop.prevent="recorder.isPaused.value ? handleResume() : handlePause()"
+          >
+            <svg v-if="!recorder.isPaused.value" width="14" height="14" viewBox="0 0 14 14">
+              <rect x="2" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
+              <rect x="8.5" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
+            </svg>
+            <svg v-else width="14" height="14" viewBox="0 0 14 14">
+              <circle cx="7" cy="7" r="5.5" fill="currentColor" />
+            </svg>
+          </button>
+          <button
+            class="ctrl-btn stop-btn"
+            aria-label="Stop recording"
+            @click.stop.prevent="handleStop"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14">
+              <rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Tauri only drags when the mousedown target itself carries the
+             attribute, so every leaf in the handle needs it. -->
+        <div class="drag-handle" data-tauri-drag-region @click.stop>
+          <div class="divider" data-tauri-drag-region />
+          <div class="drag-dots" data-tauri-drag-region>
+            <span v-for="n in 6" :key="n" class="dot" data-tauri-drag-region />
+          </div>
+        </div>
+      </template>
+    </div>
   </div>
 </template>
 
@@ -74,16 +82,21 @@ import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend } from '../composables/useBackend';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
+import { bucketLevels } from './waveformBars';
+
+const SUCCESS_CLOSE_MS = 1500;
 
 const recorder = useRecorder();
 const waveform = useWaveform();
 const backend = ref<Backend | null>(null);
-const isLocal = computed(() => backend.value?.id === 'local');
-const successLabel = computed(() => (isLocal.value ? 'Transcription complete' : 'Upload successful'));
-const failLabel = computed(() => (isLocal.value ? 'Transcription failed' : 'Upload failed'));
-const progressLabel = computed(() => (isLocal.value ? 'Transcribing…' : 'Uploading…'));
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
+const isExpanded = ref(false);
+
+// Voice energy lives in the low FFT bins; the upper bins are near-silent and
+// would leave bars 2-3 dead. Bucket only the low part of the spectrum so all
+// three bars react to speech.
+const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 12), 3));
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
@@ -99,9 +112,30 @@ const formattedDuration = computed(() => {
   return `${mins}:${secs}`;
 });
 
+function expand() {
+  // Don't expand during upload/result states.
+  if (isUploading.value || uploadResult.value) return;
+  isExpanded.value = true;
+}
+
+function collapse() {
+  isExpanded.value = false;
+}
+
+// Clicking the pill body (not the controls or the drag handle) brings up the
+// meetings window.
+async function showMeetings() {
+  try {
+    await invoke('create_library_window');
+  } catch (e) {
+    console.error('Failed to open meetings window', e);
+  }
+}
+
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
+let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
@@ -119,13 +153,10 @@ async function startRecording() {
   try {
     mode = deriveRecordingMode(await loadRecordingEnabled());
   } catch {
-    // Settings store unavailable — abort rather than leaving a frozen UI.
     await rollbackAndClose();
     return;
   }
   if (mode === null) {
-    // Both recording sources are disabled — nothing to capture. Abort instead
-    // of recording silence.
     await rollbackAndClose();
     return;
   }
@@ -133,7 +164,6 @@ async function startRecording() {
   try {
     await recorder.startRecording(mode);
   } catch {
-    // Recording failed (permission denied, device error, etc.)
     await rollbackAndClose();
     return;
   }
@@ -145,10 +175,11 @@ async function startRecording() {
 }
 
 async function handleStop() {
+  collapse();
+  isUploading.value = true;
   waveform.stop();
   const endAt = new Date().toISOString();
   const startAt = recorder.startedAt.value;
-  isUploading.value = true;
   const mp3Blob = await recorder.stopRecording();
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
 
@@ -171,8 +202,11 @@ async function handleStop() {
         timeout,
       ]);
       uploadResult.value = 'success';
+      // Brief confirmation, then auto-close.
+      closeTimer = setTimeout(() => { closeTimer = null; void closeWindow(); }, SUCCESS_CLOSE_MS);
     } catch (err) {
       console.error('Finalize failed:', err);
+      // Stay open on failure so the user can drag away / dismiss via the tray.
       uploadResult.value = 'failed';
     }
   } else {
@@ -217,6 +251,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (closeTimer) clearTimeout(closeTimer);
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();
@@ -229,174 +264,162 @@ html, body {
   background: transparent !important;
   margin: 0;
   padding: 0;
+  height: 100%;
   overflow: hidden;
 }
 </style>
 
 <style scoped>
-.waveform-container {
-  width: 320px;
-  height: 56px;
-  background: #0f0f1a;
-  border-radius: 12px;
+/* Fills the (fixed-size) window and bottom-centers the pill, leaving transparent
+   room above and around it for the shadow and the upward growth. */
+.stage {
+  width: 100vw;
+  height: 100vh;
   display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 22px;
+  box-sizing: border-box;
+}
+
+.pill {
+  width: 48px;
+  background: #0d0d0d;
+  border-radius: 24px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  padding: 0 12px;
+  padding: 7px 0;
+  box-sizing: border-box;
   overflow: hidden;
   cursor: grab;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.logo {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 .bars {
   display: flex;
   align-items: center;
-  gap: 2px;
-  height: 36px;
-  flex: 1;
-  min-width: 0;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  margin-top: 7px;
+  flex-shrink: 0;
 }
 
 .bar {
-  width: 2px;
+  width: 3px;
   border-radius: 2px;
   background: #ffffff;
-  transition: height 75ms, width 150ms, background 150ms;
+  transition: height 75ms, background 150ms;
 }
 
 .bar.paused {
-  width: 3px;
   background: #4b5563;
 }
 
-.info {
+/* Revealed on hover: animates open/closed so the pill grows/shrinks smoothly. */
+.expanded-area {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  margin-left: 10px;
+  gap: 8px;
+  max-height: 0;
+  margin-top: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
   flex-shrink: 0;
+  transition: max-height 180ms ease, margin-top 180ms ease, opacity 150ms ease;
 }
 
-.rec-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #f87171;
-  animation: pulse 1s infinite;
-}
-
-.rec-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: #f87171;
-  letter-spacing: 0.5px;
-}
-
-.paused-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: #9ca3af;
-  letter-spacing: 0.5px;
+.expanded-area.open {
+  max-height: 130px;
+  margin-top: 7px;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .timer {
-  font-size: 11px;
-  color: #999;
+  font-size: 10px;
   font-family: monospace;
-}
-
-.controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: 10px;
-  flex-shrink: 0;
+  color: #9ca3af;
 }
 
 .ctrl-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
   border: none;
   display: flex;
   align-items: center;
   justify-content: center;
+  background: #1f1f1f;
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.pause-resume-btn {
-  background: #1e1e2e;
-  color: #d1d5db;
+.ctrl-btn:hover {
+  background: #2a2a2a;
 }
 
-.pause-resume-btn:hover {
-  background: #2a2a3e;
-}
+.stop-btn { color: #f87171; }
+.pause-btn { color: #ffffff; }
 
-.stop-btn {
-  background: #1e1e2e;
-  color: #f87171;
-}
-
-.stop-btn:hover {
-  background: #2a2a3e;
-}
-
-.upload-info {
+/* Fixed margin above + the pill's bottom padding below give the handle the same
+   surrounding space whether the pill is collapsed or expanded. */
+.drag-handle {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  justify-content: center;
+  margin-top: 7px;
+  flex-shrink: 0;
 }
 
-.upload-spinner {
-  width: 14px;
-  height: 14px;
+.divider {
+  width: 22px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.drag-dots {
+  display: grid;
+  grid-template-columns: repeat(3, 4px);
+  gap: 3px 4px;
+  justify-content: center;
+  margin-top: 6px;
+}
+
+.dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #6b7280;
+}
+
+.status-icon {
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.status-icon.ok { color: #34d399; }
+.status-icon.err { color: #f87171; }
+
+.spinner {
+  margin-top: 8px;
+  width: 16px;
+  height: 16px;
   border: 2px solid #4b5563;
   border-top-color: #818cf8;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
-}
-
-.upload-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #9ca3af;
-  letter-spacing: 0.5px;
-}
-
-.upload-check {
-  font-size: 14px;
-  font-weight: 700;
-  color: #34d399;
-}
-
-.upload-error-icon {
-  font-size: 14px;
-  font-weight: 700;
-  color: #f87171;
-}
-
-.close-btn {
-  margin-left: 8px;
-  padding: 2px 10px;
-  border-radius: 6px;
-  border: none;
-  background: #1e1e2e;
-  color: #d1d5db;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.close-btn:hover {
-  background: #2a2a3e;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
 }
 
 @keyframes spin {

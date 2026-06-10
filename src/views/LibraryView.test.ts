@@ -1,11 +1,17 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
+import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const listMeetings = vi.fn();
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
+const invoke = vi.fn(() => Promise.resolve());
+const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock('@tauri-apps/api/webviewWindow', () => ({
+  getAllWebviewWindows: () => getAllWebviewWindows(),
+}));
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => Promise.resolve({ id: 'local', listMeetings: () => listMeetings() }),
 }));
@@ -15,14 +21,6 @@ vi.mock('../tauri', () => ({
   local: {
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
-  },
-}));
-// Stub the recorder so mounting it never starts a real AudioContext.
-vi.mock('./RecorderPanel.vue', () => ({
-  default: {
-    name: 'RecorderPanel',
-    emits: ['done'],
-    template: '<div class="recorder-stub"><button class="stub-done" @click="$emit(\'done\')">done</button></div>',
   },
 }));
 
@@ -40,7 +38,14 @@ function item(over: Record<string, unknown>) {
   };
 }
 
-beforeEach(() => vi.clearAllMocks());
+// Auto-unmount between tests so each component's window 'focus' listener is
+// removed — otherwise a dispatched focus event would also fire stale listeners.
+enableAutoUnmount(afterEach);
+beforeEach(() => {
+  vi.clearAllMocks();
+  getAllWebviewWindows.mockResolvedValue([]);
+  invoke.mockResolvedValue(undefined);
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -101,20 +106,42 @@ describe('LibraryView', () => {
     expect(wrapper.find('.row-controls').exists()).toBe(false);
   });
 
-  it('hides the recorder until Record is clicked, then hides + reloads on done', async () => {
+  it('opens the floating recorder window when Record is clicked (no in-window dock)', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.recorder-stub').exists()).toBe(false);
+    await wrapper.find('.record-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('hides the Record button while a recording (waveform window) is active', async () => {
+    listMeetings.mockResolvedValue([]);
+    getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.find('.record-btn').exists()).toBe(false);
+  });
+
+  it('hides the Record button immediately after clicking it', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.find('.record-btn').exists()).toBe(true);
+    await wrapper.find('.record-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.record-btn').exists()).toBe(false);
+  });
+
+  it('reloads meetings when the window regains focus (recorder finished)', async () => {
+    listMeetings.mockResolvedValue([]);
+    mount(LibraryView);
+    await flushPromises();
     expect(listMeetings).toHaveBeenCalledTimes(1);
 
-    await wrapper.find('.record-btn').trigger('click');
-    expect(wrapper.find('.recorder-stub').exists()).toBe(true);
-
-    await wrapper.find('.stub-done').trigger('click');
+    window.dispatchEvent(new Event('focus'));
     await flushPromises();
-    expect(wrapper.find('.recorder-stub').exists()).toBe(false);
-    expect(listMeetings).toHaveBeenCalledTimes(2); // reloaded after recording
+    expect(listMeetings).toHaveBeenCalledTimes(2);
   });
 
   it('shows a distinct error message (not the empty state) when loading fails', async () => {

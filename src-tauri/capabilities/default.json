@@ -12,7 +12,6 @@
     "core:webview:allow-set-webview-focus",
     "core:webview:allow-webview-close",
     "core:window:allow-close",
-    "core:window:allow-set-size",
     "core:window:allow-start-dragging",
     "store:default",
     "opener:default",

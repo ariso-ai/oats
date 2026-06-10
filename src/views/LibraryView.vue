@@ -28,8 +28,8 @@
     <section class="right-panel">
       <header class="right-header">
         <button
+          v-if="!recording"
           class="record-btn"
-          :disabled="recording"
           aria-label="Start recording"
           @click="startRecording"
         >
@@ -37,17 +37,17 @@
         </button>
       </header>
       <div class="right-body" />
-      <RecorderPanel v-if="recording" class="recorder-dock" @done="onRecorderDone" />
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
+import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { local } from '../tauri';
 import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
-import RecorderPanel from './RecorderPanel.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -94,16 +94,45 @@ async function openTranscript(id: string): Promise<void> {
   }
 }
 
-function startRecording(): void {
-  recording.value = true;
+// Recording runs in the separate "waveform" window; its presence is our
+// recording signal. Used to hide the Record button while a recording is active.
+async function refreshRecordingState(): Promise<void> {
+  try {
+    const wins = await getAllWebviewWindows();
+    recording.value = wins.some((w) => w.label === 'waveform');
+  } catch (e) {
+    console.error('Failed to read window state', e);
+  }
 }
 
-async function onRecorderDone(): Promise<void> {
-  recording.value = false;
-  await loadMeetings();
+// Open the floating recorder pill (its own always-on-top window) instead of an
+// in-window dock. The window dedups itself if one is already open.
+async function startRecording(): Promise<void> {
+  try {
+    await invoke('start_recording_window', {});
+    recording.value = true; // hide the button immediately; refreshed on focus
+  } catch (e) {
+    console.error('Failed to start recording window', e);
+  }
 }
 
-onMounted(loadMeetings);
+// The floating recorder lives in a separate window, so the list can't react to a
+// "done" callback. On focus (e.g. after the recorder finishes/closes) reload the
+// meetings and re-check whether a recording is still in progress.
+function onWindowFocus(): void {
+  void loadMeetings();
+  void refreshRecordingState();
+}
+
+onMounted(() => {
+  void loadMeetings();
+  void refreshRecordingState();
+  window.addEventListener('focus', onWindowFocus);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('focus', onWindowFocus);
+});
 </script>
 
 <style scoped>
@@ -151,7 +180,7 @@ onMounted(loadMeetings);
 }
 .btn-note:disabled, .btn-transcript:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Right panel: (empty) detail + record control + docked recorder */
+/* Right panel: (empty) detail + record control */
 .right-panel {
   flex: 1;
   min-width: 0;
@@ -183,5 +212,4 @@ onMounted(loadMeetings);
 .record-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .record-dot { width: 14px; height: 14px; border-radius: 50%; background: #f43f5e; }
 .right-body { flex: 1; min-height: 0; }
-.recorder-dock { margin: 0 20px 20px; flex-shrink: 0; }
 </style>
