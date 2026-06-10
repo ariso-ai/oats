@@ -10,7 +10,28 @@
       <!-- Header: title + subtitle, share / link / close -->
       <header class="card-head">
         <div class="head-titles">
-          <h1 class="head-title">{{ detail.title }}</h1>
+          <input
+            v-if="editingTitle"
+            ref="titleInput"
+            v-model="titleDraft"
+            class="head-title head-title--input"
+            type="text"
+            :disabled="savingTitle"
+            aria-label="Meeting title"
+            @keydown.enter.prevent="commitTitle"
+            @keydown.esc.prevent="cancelTitleEdit"
+            @blur="commitTitle"
+          />
+          <h1
+            v-else
+            class="head-title"
+            :class="{ 'head-title--editable': canEditTitle }"
+            :role="canEditTitle ? 'button' : undefined"
+            :tabindex="canEditTitle ? 0 : undefined"
+            :title="canEditTitle ? 'Click to rename' : undefined"
+            @click="startTitleEdit"
+            @keydown.enter="startTitleEdit"
+          >{{ detail.title }}</h1>
           <p class="head-sub">{{ subtitle }}</p>
         </div>
         <div class="head-actions">
@@ -163,8 +184,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import { renderMarkdown } from '../utils/markdown';
+import { useMeetingApi } from '../composables/useMeetingApi';
 import {
   getActiveBackend,
   type MeetingListItem,
@@ -174,13 +196,24 @@ import {
 } from '../composables/useBackend';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{
+  close: [];
+  titleUpdated: [payload: { id: string; title: string }];
+}>();
 
 const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
 const activeTab = ref<'note' | 'transcript' | 'mynote'>('note');
+
+// Inline title editing. Only Ariso meetings have a server-side rename endpoint
+// (PATCH /meeting-notes/{id}); local recordings render a plain title.
+const editingTitle = ref(false);
+const titleDraft = ref('');
+const savingTitle = ref(false);
+const titleInput = ref<HTMLInputElement | null>(null);
+const canEditTitle = computed(() => !!detail.value && !detail.value.isLocal);
 
 // Transcript is loaded lazily when the Transcript tab is opened (Ariso fetches
 // /meeting-notes/{id}/transcript; local reads transcript.md).
@@ -204,6 +237,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   error.value = null;
   showFullNotes.value = false;
   activeTab.value = 'note';
+  editingTitle.value = false;
+  savingTitle.value = false;
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
@@ -240,6 +275,52 @@ watch(
   () => load(props.item),
   { immediate: true }
 );
+
+async function startTitleEdit(): Promise<void> {
+  if (!canEditTitle.value || editingTitle.value) return;
+  titleDraft.value = detail.value?.title ?? '';
+  editingTitle.value = true;
+  await nextTick();
+  titleInput.value?.focus();
+  titleInput.value?.select();
+}
+
+function cancelTitleEdit(): void {
+  editingTitle.value = false;
+  savingTitle.value = false;
+}
+
+// Persist the edited title. Blur and Enter both route here; the savingTitle /
+// editingTitle guards make the second call (Enter then blur) a no-op. A no-op
+// or whitespace-only edit just closes the editor without hitting the API.
+async function commitTitle(): Promise<void> {
+  if (!editingTitle.value || savingTitle.value) return;
+  const d = detail.value;
+  if (!d) {
+    editingTitle.value = false;
+    return;
+  }
+  const next = titleDraft.value.trim();
+  if (!next || next === d.title) {
+    editingTitle.value = false;
+    return;
+  }
+  savingTitle.value = true;
+  const my = reqId;
+  try {
+    const { updateMeetingNotesTitle } = useMeetingApi();
+    await updateMeetingNotesTitle(d.id, next);
+    if (my !== reqId) return; // selection changed mid-save — drop the stale result
+    d.title = next;
+    emit('titleUpdated', { id: d.id, title: next });
+    editingTitle.value = false;
+  } catch (e) {
+    console.error('Failed to update meeting title', e);
+    // Keep the editor open so the user's text survives and they can retry.
+  } finally {
+    if (my === reqId) savingTitle.value = false;
+  }
+}
 
 // Local recordings already carry their transcript on the detail; Ariso loads it
 // lazily into `transcript`. Either way this is what the Transcript tab renders.
@@ -442,6 +523,14 @@ const durationLabel = computed<string | null>(() => {
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; }
 .head-titles { min-width: 0; }
 .head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
+.head-title--editable { cursor: text; }
+.head-title--input {
+  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
+  position: relative; top: -1px;
+  font-family: inherit; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
+  border: none; background: transparent; outline: none; appearance: none;
+}
+.head-title--input:disabled { opacity: 0.6; }
 .head-sub { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .btn-share {

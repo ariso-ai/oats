@@ -79,7 +79,12 @@
 
     <!-- Floating detail card on the backdrop -->
     <section class="detail-wrap">
-      <MeetingDetailView v-if="selectedItem" :item="selectedItem" @close="selectedItem = null" />
+      <MeetingDetailView
+        v-if="selectedItem"
+        :item="selectedItem"
+        @close="selectedItem = null"
+        @title-updated="onTitleUpdated"
+      />
       <div v-else class="empty-card">
         <p>Select a meeting to view its notes.</p>
       </div>
@@ -127,6 +132,16 @@ function itemSub(m: MeetingListItem): string {
 
 function selectMeeting(m: MeetingListItem): void {
   selectedItem.value = m;
+}
+
+// Keep the sidebar (and the selected reference) in sync after an inline rename
+// in the detail panel, so the list label updates without a full reload.
+function onTitleUpdated(payload: { id: string; title: string }): void {
+  const m = meetings.value.find((x) => x.id === payload.id);
+  if (m) m.title = payload.title;
+  if (selectedItem.value?.id === payload.id) {
+    selectedItem.value = { ...selectedItem.value, title: payload.title };
+  }
 }
 
 function toggleLeftPanel(): void {
