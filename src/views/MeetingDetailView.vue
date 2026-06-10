@@ -227,7 +227,19 @@ async function load(item: MeetingListItem | null): Promise<void> {
   }
 }
 
-watch(() => props.item?.id, () => load(props.item), { immediate: true });
+// Watch the detail-relevant fields, not just the id, so same-id metadata
+// updates (e.g. local hasNote/hasTranscript flipping after a refresh) reload.
+watch(
+  () => [
+    props.item?.id,
+    props.item?.timestamp,
+    props.item?.durationSeconds,
+    props.item?.files?.hasNote,
+    props.item?.files?.hasTranscript,
+  ],
+  () => load(props.item),
+  { immediate: true }
+);
 
 // Local recordings already carry their transcript on the detail; Ariso loads it
 // lazily into `transcript`. Either way this is what the Transcript tab renders.

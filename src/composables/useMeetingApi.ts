@@ -147,7 +147,8 @@ export function useMeetingApi() {
   async function getMeetingNotes(
     meetingId: number | string
   ): Promise<MeetingNotes> {
-    const res = await api.request('GET', `/meeting-notes/${meetingId}`);
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}`);
     assertOk(res, 200, 'get meeting notes');
     return res.data as MeetingNotes;
   }
@@ -157,7 +158,8 @@ export function useMeetingApi() {
   async function getMeetingTranscript(
     meetingId: number | string
   ): Promise<string | null> {
-    const res = await api.request('GET', `/meeting-notes/${meetingId}/transcript`);
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}/transcript`);
     if (res.status === 404) return null;
     assertOk(res, 200, 'get transcript');
     const data = res.data as { transcript?: string } | null;
@@ -169,7 +171,8 @@ export function useMeetingApi() {
   async function getMeetingIndividualNote(
     meetingId: number | string
   ): Promise<{ content: string; title: string | null } | null> {
-    const res = await api.request('GET', `/meeting-notes/${meetingId}/individual-note`);
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}/individual-note`);
     if (res.status === 404) return null;
     assertOk(res, 200, 'get individual note');
     const data = res.data as

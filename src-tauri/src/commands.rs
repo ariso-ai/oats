@@ -582,12 +582,13 @@ const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, String> {
     let filename = note_or_transcript_filename(&kind)?;
     let path = recording_dir(&id)?.join(filename);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("read recording file: {e}"))?
-        .len();
+    // Only a genuine "not found" means the file hasn't been generated yet;
+    // surface permission/IO errors instead of masking them as `Ok(None)`.
+    let size = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read recording file: {e}")),
+    };
     if size > MAX_TEXT_BYTES {
         return Err(format!("recording file too large to read: {size} bytes"));
     }
