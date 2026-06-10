@@ -23,6 +23,7 @@ vi.mock('../composables/useRecorder', () => ({
     isRecording: { value: true },
     isPaused: { value: false },
     durationSeconds: { value: 5 },
+    lastSoundAt: { value: 0 },
     startedAt: { value: '2026-06-09T10:00:00Z' },
     getAnalyser,
     startRecording: (...a: unknown[]) => startRecording(...a),
@@ -111,6 +112,7 @@ describe('WaveformView vertical pill', () => {
 
   it('stops, finalizes, shows ✓, and auto-closes on success', async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(0); // keep Date.now() at epoch so silence backstop (lastSoundAt=0) never trips
     stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
     finalizeRecording.mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
@@ -133,5 +135,19 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(wrapper.find('.status-icon.err').exists()).toBe(true);
     expect(closeWin).not.toHaveBeenCalled();
+  });
+
+  it('auto-stops after the silence timeout elapses', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(16 * 60_000); // now well past lastSoundAt (0) + 15min
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(stopRecording).toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
   });
 });

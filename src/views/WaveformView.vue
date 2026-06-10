@@ -83,6 +83,7 @@ import { getActiveBackend, type Backend } from '../composables/useBackend';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
 import { bucketLevels } from './waveformBars';
+import { shouldAutoStop } from '../composables/silenceWatch';
 
 const SUCCESS_CLOSE_MS = 1500;
 
@@ -136,6 +137,7 @@ let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
+let silenceTimer: ReturnType<typeof setInterval> | null = null;
 
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
@@ -248,9 +250,24 @@ onMounted(async () => {
   unlistenStop = await listen('tray://stop-recording', handleStop);
 
   await startRecording();
+
+  // Universal silence backstop: end any recording after 15 min of no sound.
+  silenceTimer = setInterval(() => {
+    if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
+    if (
+      shouldAutoStop(
+        recorder.lastSoundAt.value,
+        Date.now(),
+        recorder.isPaused.value,
+      )
+    ) {
+      void handleStop();
+    }
+  }, 1_000);
 });
 
 onUnmounted(() => {
+  if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
   unlistenPause?.();
   unlistenResume?.();
