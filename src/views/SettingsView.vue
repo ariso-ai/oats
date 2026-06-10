@@ -180,7 +180,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { load } from '@tauri-apps/plugin-store';
 import {
@@ -418,12 +418,21 @@ async function fetchUserProfile() {
 let unlistenSignInPrompt: UnlistenFn | null = null;
 let unlistenUpdates: UnlistenFn[] = [];
 
-onMounted(async () => {
+// Refresh account UI from persisted native session state. The settings window is
+// hidden/pre-created at app startup, so it cannot rely only on its first mount.
+async function refreshSignedInAccount() {
   const session = await auth.checkSession();
   isSignedIn.value = !!session;
   if (isSignedIn.value) {
     await fetchUserProfile();
+  } else {
+    displayName.value = '';
+    email.value = '';
   }
+}
+
+onMounted(async () => {
+  await refreshSignedInAccount();
 
   const store = await load('settings.json', { autoSave: true });
   const savedMode = await store.get<string>('recordingMode');
@@ -435,6 +444,10 @@ onMounted(async () => {
 
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
+  });
+  const unSignedIn = await listen(AUTH_SIGNED_IN_EVENT, async () => {
+    await refreshSignedInAccount();
+    signInPrompt.value = false;
   });
 
   await loadUpdateState();
@@ -455,7 +468,7 @@ onMounted(async () => {
   });
 
   // Save unlisteners so onUnmounted can clear them.
-  unlistenUpdates = [unAvail, unNone, unChecking, unError];
+  unlistenUpdates = [unSignedIn, unAvail, unNone, unChecking, unError];
 
   try {
     backend.value = await getBackendSetting();

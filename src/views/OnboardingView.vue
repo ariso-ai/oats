@@ -30,7 +30,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { auth, setOnboarded } from '../tauri';
+import { emit } from '@tauri-apps/api/event';
+import { AUTH_SIGNED_IN_EVENT, auth, openSettingsWindow, setOnboarded } from '../tauri';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 import { ONBOARDING_STEPS, nextStepIndex } from './onboarding';
 
@@ -42,8 +43,11 @@ const errorMessage = ref('');
 
 // Persist the "finished onboarding" flag once, at the end of the flow, then
 // close this window. Closing is harmless — onboarding is not a background worker.
-async function finishOnboarding() {
+async function finishOnboarding({ openSettings = false } = {}) {
   await setOnboarded(true);
+  if (openSettings) {
+    await openSettingsWindow();
+  }
   try {
     await getCurrentWindow().close();
   } catch {
@@ -76,7 +80,10 @@ async function handleGoogleSignIn() {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync notifications after sign-in', err);
     });
-    advance();
+    void emit(AUTH_SIGNED_IN_EVENT).catch((err) => {
+      console.warn('Failed to broadcast desktop sign-in', err);
+    });
+    await finishOnboarding({ openSettings: true });
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {

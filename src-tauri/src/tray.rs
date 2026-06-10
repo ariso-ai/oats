@@ -1,8 +1,8 @@
 use tauri::{
+    AppHandle, Emitter, Manager, WebviewWindowBuilder,
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
 
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../src/assets/ariso-logo-w.png");
@@ -10,7 +10,9 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../src/assets/ariso-logo-w.png
 /// Rebuild the tray menu in-place. Called from tray events (main thread)
 /// and from the `set_tray_recording` command.
 pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
-    let Some(tray) = app.tray_by_id("main") else { return };
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
     let menu = if is_recording {
         build_recording_menu(app, is_paused)
     } else {
@@ -124,9 +126,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     {
                         let win_clone = win.clone();
                         win.on_window_event(move |event| {
-                            if let tauri::WindowEvent::CloseRequested { api, .. } =
-                                event
-                            {
+                            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                                 api.prevent_close();
                                 let _ = win_clone.hide();
                             }
@@ -143,10 +143,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         } else {
                             // Ariso backend: meetings live in the web app.
                             use tauri_plugin_opener::OpenerExt;
-                            let url = format!(
-                                "{}/my/meetings",
-                                crate::commands::WEB_APP_BASE_URL
-                            );
+                            let url =
+                                format!("{}/my/meetings", crate::commands::web_app_base_url());
                             let _ = app_async.opener().open_url(url, None::<&str>);
                         }
                     });
@@ -172,7 +170,8 @@ pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
     let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
-    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
 
     MenuBuilder::new(app)
@@ -186,7 +185,10 @@ pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
         .build()
 }
 
-pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+pub fn build_recording_menu(
+    app: &AppHandle,
+    is_paused: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let pause_or_resume = if is_paused {
         MenuItemBuilder::with_id("resume_recording", "Resume Recording").build(app)?
     } else {
@@ -194,7 +196,8 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
     };
     let stop = MenuItemBuilder::with_id("stop_recording", "Stop Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
-    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
 
     // Quit is intentionally omitted while recording to prevent
     // losing the current recording and skipping the upload flow.

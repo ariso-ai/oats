@@ -19,11 +19,11 @@ pub(crate) fn http_client() -> reqwest::Client {
 compile_error!("Features `prod-api` and `dev-api` are mutually exclusive");
 
 #[cfg(feature = "prod-api")]
-pub(crate) const API_BASE_URL: &str = "https://api.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const API_BASE_URL: &str = "http://localhost:4000";
+const DEFAULT_API_BASE_URL: &str = "http://localhost:4000";
 
 // Public Pusher client key. dev-api and local both use the dev key, so this
 // gates on prod-api only (unlike WEB_APP_BASE_URL's three-way split).
@@ -35,11 +35,33 @@ pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
 #[cfg(feature = "prod-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
+const DEFAULT_WEB_APP_BASE_URL: &str = "http://localhost:5173";
+
+/// Resolve the API origin used by desktop-native HTTP calls. The environment
+/// override lets local launchers point the app at an isolated Agents dev stack.
+pub(crate) fn api_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_API_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Resolve the browser-facing web origin used for deep links. Keeping this
+/// separate from the API origin matches the Agents dev.sh Caddy /api routing.
+pub(crate) fn web_app_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_WEB_APP_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WEB_APP_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
 
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
@@ -98,7 +120,7 @@ pub async fn is_session_valid(app: &tauri::AppHandle) -> bool {
 
     let client = http_client();
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -135,11 +157,14 @@ pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> 
 pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, String> {
     let client = http_client();
 
-    // Step 1: Get the OAuth redirect URL from the API
+    // Step 1: Get the OAuth redirect URL from the API. The backend expands
+    // these service names into Google scopes and owns credential persistence.
     let response = client
-        .post(format!("{API_BASE_URL}/oauth2/prepare-state"))
+        .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
-        .body(r#"{"integration":"google-signin"}"#)
+        .body(
+            r#"{"integration":"google-signin","scopes":["calendar-readonly"],"newUserSignupIntent":"personal_unless_domain_autojoin"}"#,
+        )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -159,9 +184,11 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
     let (tx, rx) = oneshot::channel::<Result<String, String>>();
     let tx = std::sync::Mutex::new(Some(tx));
 
-    let auth_window = WebviewWindowBuilder::new(&app, "oauth", tauri::WebviewUrl::External(
-        Url::parse(&body.redirect_url).map_err(|e| e.to_string())?,
-    ))
+    let auth_window = WebviewWindowBuilder::new(
+        &app,
+        "oauth",
+        tauri::WebviewUrl::External(Url::parse(&body.redirect_url).map_err(|e| e.to_string())?),
+    )
     .title("Sign in with Google")
     .inner_size(500.0, 700.0)
     .on_navigation(move |url| {
@@ -174,8 +201,12 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
 
             if let Some(sender) = tx.lock().unwrap().take() {
                 match token {
-                    Some(t) => { let _ = sender.send(Ok(t)); }
-                    None => { let _ = sender.send(Err("No token in callback URL".into())); }
+                    Some(t) => {
+                        let _ = sender.send(Ok(t));
+                    }
+                    None => {
+                        let _ = sender.send(Err("No token in callback URL".into()));
+                    }
                 }
             }
 
@@ -203,19 +234,25 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
                 let _ = app_clone.emit("oauth-result", exchange_result);
             }
             Ok(Err(err)) => {
-                let _ = app_clone.emit("oauth-result", SignInResult {
-                    success: None,
-                    session_token: None,
-                    error: Some(err),
-                });
+                let _ = app_clone.emit(
+                    "oauth-result",
+                    SignInResult {
+                        success: None,
+                        session_token: None,
+                        error: Some(err),
+                    },
+                );
             }
             Err(_) => {
                 // Channel dropped — window was closed
-                let _ = app_clone.emit("oauth-result", SignInResult {
-                    success: None,
-                    session_token: None,
-                    error: Some("Auth window closed".into()),
-                });
+                let _ = app_clone.emit(
+                    "oauth-result",
+                    SignInResult {
+                        success: None,
+                        session_token: None,
+                        error: Some("Auth window closed".into()),
+                    },
+                );
             }
         }
     });
@@ -228,14 +265,11 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
     })
 }
 
-async fn exchange_token_for_session(
-    app: &tauri::AppHandle,
-    token: &str,
-) -> SignInResult {
+async fn exchange_token_for_session(app: &tauri::AppHandle, token: &str) -> SignInResult {
     let client = http_client();
 
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/check"))
+        .get(format!("{}/auth/check", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -302,7 +336,7 @@ pub async fn check_session(app: tauri::AppHandle) -> Result<Option<SessionResult
 
     let client = http_client();
     let response = client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -334,7 +368,7 @@ pub async fn api_request(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let mut request = match method.to_uppercase().as_str() {
         "GET" => client.get(&url),
@@ -357,10 +391,7 @@ pub async fn api_request(
 
     let response = request.send().await.map_err(|e| e.to_string())?;
     let status = response.status().as_u16();
-    let data: serde_json::Value = response
-        .json()
-        .await
-        .unwrap_or(serde_json::Value::Null);
+    let data: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
 
     Ok(ApiResponse { status, data })
 }
@@ -376,7 +407,7 @@ pub async fn upload_file(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let file_part = reqwest::multipart::Part::bytes(file_data)
         .file_name(file_name)
@@ -404,17 +435,22 @@ pub async fn upload_file(
 }
 
 #[tauri::command]
-pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
+pub async fn set_tray_recording(
+    app: tauri::AppHandle,
+    is_recording: bool,
+    is_paused: bool,
+) -> Result<(), String> {
     crate::tray::set_menu(&app, is_recording, is_paused);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     // Focus if already exists
     if let Some(win) = app.get_webview_window("settings") {
+        win.show().map_err(|e: tauri::Error| e.to_string())?;
         win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
         return Ok(());
     }
@@ -432,7 +468,7 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
 
 #[tauri::command]
 pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     // Focus if already exists
     if let Some(win) = app.get_webview_window("onboarding") {
@@ -453,7 +489,10 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
 
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command and by the tray (Local backend path).
-pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i64>) -> Result<(), String> {
+pub(crate) fn open_waveform_window(
+    app: &tauri::AppHandle,
+    meeting_id: Option<i64>,
+) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     if let Some(picker) = app.get_webview_window("meeting-picker") {
@@ -528,7 +567,7 @@ pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
-        web_app_base_url: WEB_APP_BASE_URL.to_string(),
+        web_app_base_url: web_app_base_url(),
     }
 }
 
@@ -665,10 +704,14 @@ mod tests {
         // they don't depend on this value.
         // SAFETY: env mutation requires `--test-threads=1` so no concurrent
         // env access races with these calls (same convention as transcribe).
-        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
         let id = "2026-06-02T14-30-05Z";
         let dir = recording_dir(id).unwrap();
         assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
-        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
     }
 }

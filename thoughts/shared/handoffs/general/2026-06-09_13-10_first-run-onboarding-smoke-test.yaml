@@ -1,0 +1,77 @@
+---
+session: general
+date: 2026-06-09
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Implemented first-run Google sign-in onboarding window (dedicated window, Skip button, persisted onboarded flag); fully unit-tested + code-reviewed
+now: Run the real app (npm run tauri:dev) and smoke-test the first-run onboarding flow end-to-end; fix any runtime/compile issues. cargo check could NOT be run in this worktree (missing build artifact)
+test: npm test   # 43/43 pass. Frontend: npm run vite:build (passes). Rust: cargo check --manifest-path src-tauri/Cargo.toml (BLOCKED here, see blockers)
+
+done_this_session:
+  - task: Pure step-sequence logic (ONBOARDING_STEPS, nextStepIndex) + unit tests
+    files: [src/views/onboarding.ts, src/views/onboarding.test.ts]
+  - task: tauri bridge helpers (isOnboarded/setOnboarded read+write settings.json 'onboarded'; openOnboardingWindow invokes Rust command)
+    files: [src/tauri.ts]
+  - task: OnboardingView.vue - single 'signin' step host (Google btn reused from SettingsView + Skip), sets flag at flow end then closes window
+    files: [src/views/OnboardingView.vue, src/views/OnboardingView.test.ts]
+  - task: Registered /onboarding hash route
+    files: [src/main.ts]
+  - task: Rust create_onboarding_window command (copy of create_settings_window; label 'onboarding', url /#/onboarding, 450x600, NO close-interceptor) + registered in generate_handler
+    files: [src-tauri/src/commands.rs, src-tauri/src/main.rs]
+  - task: First-run trigger in hidden 'main' bootstrap window onMounted (best-effort try/catch; opens onboarding when !isOnboarded)
+    files: [src/views/BootstrapView.vue, src/views/BootstrapView.test.ts]
+
+blockers:
+  - "cargo check fails in THIS worktree: tauri build-script validation errors on missing resource binaries/mlx-swift_Cmlx.bundle (referenced in src-tauri/tauri.conf.json:24). Only binaries/ariso-stt-aarch64-apple-darwin is present. This is environmental, NOT our code. Next agent must build/run where the bundle exists (or obtain it) to compile Rust and launch the app."
+
+questions:
+  - "Does the full dev environment have binaries/mlx-swift_Cmlx.bundle so tauri:dev/tauri:build compiles? If not, where is it sourced?"
+  - "Branch feat/settings-toggle pre-existed (user's prior work). package-lock.json had an unrelated unstaged M at session start - left untouched. Confirm before any merge."
+
+decisions:
+  - dedicated-onboarding-window: "Separate 'onboarding' window, NOT the permanent hidden 'main' worker window. Closing it is harmless; main worker (drives meeting-notification sync) must never be coupled to transient first-run UI."
+  - flag-set-at-flow-end: "onboarded flag is written once at finishOnboarding() (end of step sequence), meaning 'finished onboarding' not 'completed a step'. Future steps slot between signin and finish with no window/route/Rust changes."
+  - internal-step-state: "Steps are an internal index over ONBOARDING_STEPS (currently ['signin']) inside OnboardingView, not vue-router routes or extra windows."
+  - no-shared-signin-composable: "OnboardingView duplicates ~8 lines of SettingsView's googleSignIn glue rather than extract a composable (handlers diverge: Settings updates in-page state, Onboarding advances/closes)."
+
+findings:
+  - app-architecture: "Tauri v2 + Vue3 tray/menubar app. NO window shown on launch normally. setup() in src-tauri/src/main.rs creates hidden 'main' window (route /#/ = BootstrapView, a headless JS worker for notification sync) + pre-created hidden 'settings' window. Windows built at runtime via WebviewWindowBuilder."
+  - existing-signin: "Google sign-in already existed end-to-end: auth.googleSignIn/checkSession/signOut in src/tauri.ts; used in SettingsView.vue. Onboarding reuses auth.googleSignIn + emitNotificationsSync."
+  - settings-store: "Flag persisted via @tauri-apps/plugin-store in settings.json. macOS path: ~/Library/Application Support/ai.ariso.desktop/settings.json (identifier ai.ariso.desktop). Key: 'onboarded' (boolean)."
+  - wiring-verified: "Final review confirmed every link by exact string: BootstrapView->openOnboardingWindow->invoke('create_onboarding_window')->Rust builds /#/onboarding window->main.ts route->OnboardingView."
+
+worked:
+  - "TDD per task via subagent-driven-development (implementer + spec review + code-quality review each task); 43/43 tests green."
+  - "Reusing SettingsView .google-btn markup/SVG/styling for visual consistency."
+  - "Template relative img src=../assets/ariso-logo.png (like UpdateView.vue) - resolves under Vite/vitest, no JS import needed."
+
+failed:
+  - "cargo check unrunnable in worktree due to missing mlx-swift bundle - could only verify Rust by careful reading against the known-good create_settings_window."
+
+next:
+  - "Ensure binaries/mlx-swift_Cmlx.bundle is present (or env that has it), then: cargo check --manifest-path src-tauri/Cargo.toml to confirm create_onboarding_window compiles."
+  - "Reset first-run state: delete/clear 'onboarded' key in ~/Library/Application Support/ai.ariso.desktop/settings.json."
+  - "Launch: npm run tauri:dev (or npm run tauri:dev:debug for mcp). Expect a centered ~450x600 'Welcome to Ariso' window with Google button + 'Skip for now'."
+  - "Smoke test A (skip): click Skip for now -> window closes -> relaunch -> window does NOT reappear."
+  - "Smoke test B (sign-in): reset flag, relaunch, click Sign in with Google, complete OAuth -> window closes -> flag set -> relaunch no window -> Settings shows signed-in account."
+  - "Smoke test C (error/cancel): close OAuth popup mid-flow -> onboarding window stays open, no error text for 'Auth window closed'; a real error shows inline message and stays on step."
+  - "Watch for runtime issues: does the onboarding window actually appear at launch (BootstrapView 'main' window is hidden but its JS runs)? Is timing OK (window opens a few ms after launch)? Any console errors from getCurrentWindow().close()."
+  - "If all good, return to finishing-a-development-branch: user was choosing 1)merge to main 2)push+PR 3)keep 4)discard."
+
+files:
+  created:
+    - src/views/onboarding.ts
+    - src/views/onboarding.test.ts
+    - src/views/OnboardingView.vue
+    - src/views/OnboardingView.test.ts
+    - src/views/BootstrapView.test.ts
+    - docs/superpowers/specs/2026-06-09-first-run-google-signin-design.md
+    - docs/superpowers/plans/2026-06-09-first-run-onboarding.md (gitignored - local only)
+  modified:
+    - src/tauri.ts
+    - src/main.ts
+    - src/views/BootstrapView.vue
+    - src-tauri/src/commands.rs
+    - src-tauri/src/main.rs

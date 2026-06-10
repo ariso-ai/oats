@@ -1,0 +1,40 @@
+---
+session: general
+date: 2026-06-09
+status: complete
+outcome: PASS_WITH_LIMITATION
+---
+
+goal: Resume first-run onboarding smoke test, debug runtime issue, and verify host-side build/test checks.
+
+changed:
+  - file: src-tauri/capabilities/default.json
+    summary: Added the new "onboarding" window label to the default Tauri capability window allow-list.
+  - file: src-tauri/gen/schemas/capabilities.json
+    summary: Tauri regenerated the capability schema with the same "onboarding" window label.
+
+why:
+  - The app launched and the first-run onboarding window was visible, but the new window label was missing from the capability manifest.
+  - The onboarding webview needs to be included in the same capability allow-list as the other app windows so its Tauri APIs work consistently.
+
+verified:
+  - npm test: 7 files, 43 tests passed.
+  - npm run vite:build: passed.
+  - cargo check --manifest-path src-tauri/Cargo.toml: passed; the previous mlx-swift_Cmlx.bundle blocker is resolved in this worktree.
+  - npm run tauri:dev: first launch with no settings.json onboarded key showed a visible "Welcome to Ariso" onboarding window.
+  - Skip for now: closed the onboarding window and wrote settings.json onboarded=true.
+  - Relaunch with onboarded=true: no onboarding window appeared.
+  - Google sign-in error path: clicking Sign in with Google while the local backend was unavailable showed inline "Sign in failed", left the onboarding window open, and did not set onboarded.
+
+observed_logs:
+  - "meeting-notifications: session error: error sending request for url (http://localhost:4000/auth/me)" repeated during tauri dev.
+  - "[update_manager] check failed: Could not fetch a valid release JSON from the remote"
+  - Both appear unrelated to first-run onboarding and did not block the smoke tests above.
+
+limitations:
+  - Full OAuth success was not completed because the host-only run had no localhost:4000 backend/Orb stack available for auth.
+  - ~/dev.sh --doctor ./ reported VM dev-feat-settings-toggle missing, so there was no per-worktree OrbStack app URL to include.
+
+final_state:
+  - ~/Library/Application Support/ai.ariso.desktop/settings.json has onboarded=true after the final Skip smoke.
+  - npm run tauri:dev was stopped after validation.

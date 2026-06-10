@@ -15,15 +15,15 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
-    clear_session_token, get_session_token, http_client, API_BASE_URL, PUSHER_CLUSTER, PUSHER_KEY,
-    WEB_APP_BASE_URL,
+    PUSHER_CLUSTER, PUSHER_KEY, api_base_url, clear_session_token, get_session_token, http_client,
+    web_app_base_url,
 };
 
 const SETTINGS_PATH: &str = "settings.json";
@@ -194,9 +194,7 @@ async fn run_session(
 }
 
 type WsWrite = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
@@ -230,7 +228,9 @@ async fn handle_message(
         }
         "pusher:ping" => {
             let _ = write
-                .send(Message::Text(r#"{"event":"pusher:pong","data":"{}"}"#.to_string()))
+                .send(Message::Text(
+                    r#"{"event":"pusher:pong","data":"{}"}"#.to_string(),
+                ))
                 .await;
         }
         "pusher:error" => eprintln!("meeting-notifications: pusher error: {text}"),
@@ -264,15 +264,14 @@ async fn fetch_me(app: &AppHandle) -> Result<(String, String), SessionError> {
     let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .get(format!("{API_BASE_URL}/auth/me"))
+            .get(format!("{}/auth/me", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .send()
             .await
             .map_err(|e| SessionError::Other(e.to_string()))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(SessionError::Auth);
         }
         if !status.is_success() {
@@ -287,8 +286,8 @@ async fn fetch_me(app: &AppHandle) -> Result<(String, String), SessionError> {
     })
     .await
     .map_err(|_| SessionError::Other("/auth/me timed out".into()))??;
-    let org_id =
-        value_to_string(v.get("org_id")).ok_or_else(|| SessionError::Other("missing org_id".into()))?;
+    let org_id = value_to_string(v.get("org_id"))
+        .ok_or_else(|| SessionError::Other("missing org_id".into()))?;
     let user_id =
         value_to_string(v.get("id")).ok_or_else(|| SessionError::Other("missing id".into()))?;
     Ok((org_id, user_id))
@@ -313,7 +312,7 @@ async fn pusher_auth(
     let body = json!({ "socketId": socket_id, "channelName": channel });
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .post(format!("{API_BASE_URL}/pusher/auth"))
+            .post(format!("{}/pusher/auth", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
@@ -321,8 +320,7 @@ async fn pusher_auth(
             .await
             .map_err(|e| SessionError::Other(e.to_string()))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(SessionError::Auth);
         }
         if !status.is_success() {
@@ -355,15 +353,14 @@ async fn fetch_inbox(app: &AppHandle) -> Result<Vec<InboxItem>, SessionError> {
     let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .get(format!("{API_BASE_URL}/user-inbox-messages?limit=20"))
+            .get(format!("{}/user-inbox-messages?limit=20", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .send()
             .await
             .map_err(|e| SessionError::Other(e.to_string()))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(SessionError::Auth);
         }
         if !status.is_success() {
@@ -386,7 +383,11 @@ async fn fetch_inbox(app: &AppHandle) -> Result<Vec<InboxItem>, SessionError> {
     Ok(items
         .iter()
         .map(|it| InboxItem {
-            source: it.get("source").and_then(Value::as_str).unwrap_or("").to_string(),
+            source: it
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             source_id: parse_id(it.get("source_id")),
             message: it.get("message").and_then(Value::as_str).map(String::from),
             unread: it.get("unread").and_then(Value::as_bool).unwrap_or(false),
@@ -470,7 +471,7 @@ fn build_notification(message: Option<&str>) -> (String, String) {
 
 /// The web deep link a meeting-prep notification opens when clicked.
 fn prep_url(prep_id: i64) -> String {
-    format!("{WEB_APP_BASE_URL}/my/meeting-prep-v2/{prep_id}")
+    format!("{}/my/meeting-prep-v2/{prep_id}", web_app_base_url())
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
@@ -510,7 +511,7 @@ mod macos_un {
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
-    use objc2::{define_class, msg_send, AnyThread};
+    use objc2::{AnyThread, define_class, msg_send};
     use objc2_foundation::{NSError, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,

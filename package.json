@@ -7,7 +7,10 @@
     "vite:dev": "vite dev --port 1420",
     "vite:build": "vite build",
     "tauri:dev": "tauri dev",
+    "tauri:dev:dev-api": "tauri dev --features dev-api",
+    "tauri:dev:prod-api": "tauri dev --features prod-api",
     "tauri:dev:debug": "VITE_DEBUG_AUDIO=true tauri dev --features mcp",
+    "tauri:dev:debug:dev-api": "VITE_DEBUG_AUDIO=true tauri dev --features mcp,dev-api",
     "tauri:build": "tauri build",
     "tauri:clean": "cd src-tauri && cargo clean",
     "test": "vitest run"
