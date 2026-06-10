@@ -22,7 +22,13 @@
 
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
 
-      <button class="skip-btn" @click="handleSkip">Skip for now</button>
+      <button
+        class="skip-btn"
+        :disabled="isSigningIn"
+        @click="handleSkip"
+      >
+        Skip for now
+      </button>
     </template>
   </div>
 </template>
@@ -57,10 +63,14 @@ async function finishOnboarding({ openSettings = false } = {}) {
 
 // Advance to the next step, or hand the user back to Settings when onboarding
 // is done. Skip and successful sign-in should land in the same native UI.
-function advance() {
+async function advance() {
   const next = nextStepIndex(ONBOARDING_STEPS, currentStep.value);
   if (next === null) {
-    void finishOnboarding({ openSettings: true });
+    try {
+      await finishOnboarding({ openSettings: true });
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : 'Could not finish onboarding';
+    }
   } else {
     currentStep.value = next;
   }
@@ -92,8 +102,11 @@ async function handleGoogleSignIn() {
   }
 }
 
-function handleSkip() {
-  advance();
+async function handleSkip() {
+  if (isSigningIn.value) {
+    return;
+  }
+  await advance();
 }
 </script>
 
@@ -186,5 +199,11 @@ function handleSkip() {
 .skip-btn:hover {
   color: #1d1d1f;
   text-decoration: underline;
+}
+
+.skip-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  text-decoration: none;
 }
 </style>

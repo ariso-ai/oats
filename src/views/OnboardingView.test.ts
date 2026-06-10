@@ -52,6 +52,33 @@ describe('OnboardingView', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('does not allow Skip while Google sign-in is in progress', async () => {
+    let resolveSignIn!: (value: { success: boolean; sessionToken: string }) => void;
+    googleSignIn.mockReturnValue(new Promise((resolve) => {
+      resolveSignIn = resolve;
+    }));
+    const wrapper = mount(OnboardingView);
+    await wrapper.find('.google-btn').trigger('click');
+    await flushPromises();
+    const skip = wrapper.find<HTMLButtonElement>('.skip-btn');
+    expect(skip.element.disabled).toBe(true);
+    await skip.trigger('click');
+    expect(setOnboarded).not.toHaveBeenCalled();
+    resolveSignIn({ success: true, sessionToken: 't' });
+    await flushPromises();
+    expect(setOnboarded).toHaveBeenCalledWith(true);
+  });
+
+  it('shows a completion error when Skip cannot finish onboarding', async () => {
+    setOnboarded.mockRejectedValue(new Error('settings store failed'));
+    const wrapper = mount(OnboardingView);
+    await wrapper.find('.skip-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('settings store failed');
+    expect(openSettingsWindow).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it('successful sign-in syncs notifications, opens settings, sets the flag, and closes', async () => {
     googleSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
     const wrapper = mount(OnboardingView);
