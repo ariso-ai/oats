@@ -57,10 +57,15 @@ async function finishOnboarding({ openSettings = false } = {}) {
 
 // Advance to the next step, or hand the user back to Settings when onboarding
 // is done. Skip and successful sign-in should land in the same native UI.
-function advance() {
+async function advance() {
   const next = nextStepIndex(ONBOARDING_STEPS, currentStep.value);
   if (next === null) {
-    void finishOnboarding({ openSettings: true });
+    try {
+      await finishOnboarding({ openSettings: true });
+    } catch (error) {
+      errorMessage.value =
+        error instanceof Error ? error.message : 'Could not finish onboarding';
+    }
   } else {
     currentStep.value = next;
   }
@@ -93,7 +98,7 @@ async function handleGoogleSignIn() {
 }
 
 function handleSkip() {
-  advance();
+  void advance();
 }
 </script>
 

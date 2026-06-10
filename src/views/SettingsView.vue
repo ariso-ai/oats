@@ -509,14 +509,24 @@ let unlistenUpdates: UnlistenFn[] = [];
 
 // Refresh account UI from persisted native session state. The settings window is
 // hidden/pre-created at app startup, so it cannot rely only on its first mount.
+// Never throws: a checkSession failure in onMounted would otherwise abort the
+// rest of initialization (update listeners, recording bootstrap, etc.), and a
+// failure inside the AUTH_SIGNED_IN_EVENT callback would reject the listener.
 async function refreshSignedInAccount() {
-  const session = await auth.checkSession();
-  isSignedIn.value = !!session;
-  if (isSignedIn.value) {
-    await fetchUserProfile();
-  } else {
+  try {
+    const session = await auth.checkSession();
+    isSignedIn.value = !!session;
+    if (isSignedIn.value) {
+      await fetchUserProfile();
+    } else {
+      displayName.value = '';
+      email.value = '';
+    }
+  } catch (e) {
+    isSignedIn.value = false;
     displayName.value = '';
     email.value = '';
+    console.warn('Failed to refresh signed-in account', e);
   }
 }
 
