@@ -2,6 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { load } from '@tauri-apps/plugin-store';
 
+// Broadcast when any window completes desktop auth. Settings is pre-created and
+// can mount before onboarding signs in, so it needs a cross-window refresh cue.
+export const AUTH_SIGNED_IN_EVENT = 'auth://signed-in';
+
 interface SignInResult {
   success?: boolean;
   sessionToken?: string;
@@ -216,4 +220,24 @@ export async function getBackendSetting(): Promise<'ariso' | 'local'> {
 export async function setBackendSetting(backend: 'ariso' | 'local'): Promise<void> {
   const store = await load('settings.json', { autoSave: true });
   await store.set('backend', backend);
+}
+
+export async function isOnboarded(): Promise<boolean> {
+  const store = await load('settings.json', { autoSave: true });
+  return (await store.get<boolean>('onboarded')) === true;
+}
+
+export async function setOnboarded(value: boolean): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('onboarded', value);
+}
+
+/** Open (or focus) the first-run onboarding window. */
+export async function openOnboardingWindow(): Promise<void> {
+  await invoke('create_onboarding_window');
+}
+
+/** Open (or focus) Settings after flows that need the user back in native UI. */
+export async function openSettingsWindow(): Promise<void> {
+  await invoke('create_settings_window');
 }

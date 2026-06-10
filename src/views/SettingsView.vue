@@ -297,7 +297,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import {
@@ -660,12 +660,31 @@ async function fetchUserProfile() {
 let unlistenSignInPrompt: UnlistenFn | null = null;
 let unlistenUpdates: UnlistenFn[] = [];
 
-onMounted(async () => {
-  const session = await auth.checkSession();
-  isSignedIn.value = !!session;
-  if (isSignedIn.value) {
-    await fetchUserProfile();
+// Refresh account UI from persisted native session state. The settings window is
+// hidden/pre-created at app startup, so it cannot rely only on its first mount.
+// Never throws: a checkSession failure in onMounted would otherwise abort the
+// rest of initialization (update listeners, recording bootstrap, etc.), and a
+// failure inside the AUTH_SIGNED_IN_EVENT callback would reject the listener.
+async function refreshSignedInAccount() {
+  try {
+    const session = await auth.checkSession();
+    isSignedIn.value = !!session;
+    if (isSignedIn.value) {
+      await fetchUserProfile();
+    } else {
+      displayName.value = '';
+      email.value = '';
+    }
+  } catch (e) {
+    isSignedIn.value = false;
+    displayName.value = '';
+    email.value = '';
+    console.warn('Failed to refresh signed-in account', e);
   }
+}
+
+onMounted(async () => {
+  await refreshSignedInAccount();
 
   // Bootstrap recording toggles in its own try/catch so a settings-store or
   // permission-preflight failure doesn't abort the rest of onMounted (update
@@ -691,6 +710,10 @@ onMounted(async () => {
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
   });
+  const unSignedIn = await listen(AUTH_SIGNED_IN_EVENT, async () => {
+    await refreshSignedInAccount();
+    signInPrompt.value = false;
+  });
 
   await loadUpdateState();
 
@@ -710,7 +733,7 @@ onMounted(async () => {
   });
 
   // Save unlisteners so onUnmounted can clear them.
-  unlistenUpdates = [unAvail, unNone, unChecking, unError];
+  unlistenUpdates = [unSignedIn, unAvail, unNone, unChecking, unError];
 
   try {
     backend.value = await getBackendSetting();
