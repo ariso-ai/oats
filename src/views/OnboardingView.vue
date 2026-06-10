@@ -69,7 +69,8 @@ async function advance() {
     try {
       await finishOnboarding({ openSettings: true });
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : 'Could not finish onboarding';
+      errorMessage.value =
+        error instanceof Error ? error.message : 'Could not finish onboarding';
     }
   } else {
     currentStep.value = next;
