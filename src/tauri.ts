@@ -188,6 +188,11 @@ export const local = {
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
   },
+  /** Read a recording's note/transcript markdown for in-app rendering.
+   *  Resolves to null when the file hasn't been generated yet. */
+  readRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<string | null> {
+    return invoke<string | null>('read_recording_file', { id, kind });
+  },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
   },

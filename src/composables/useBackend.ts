@@ -33,6 +33,52 @@ export interface MeetingListItem {
   files?: { hasAudio: boolean; hasNote: boolean; hasTranscript: boolean };
 }
 
+export interface MeetingActionItem {
+  /** Owner/assignee name; absent for ungrouped items. */
+  name?: string;
+  item: string;
+}
+
+export interface MeetingCoaching {
+  strengths?: string[];
+  improvements?: string[];
+  patterns?: string;
+}
+
+export interface MeetingParticipantInfo {
+  name?: string;
+  email?: string;
+  role?: string;
+  self?: boolean;
+  avatarUrl?: string | null;
+}
+
+/** Normalized meeting detail rendered by the library's right-hand panel.
+ *  Ariso meetings populate the rich fields (digest/summary/assessment/
+ *  coaching); local recordings populate `note`/`transcript` markdown instead. */
+export interface MeetingDetail {
+  id: string;
+  title: string;
+  startAt: string;
+  endAt?: string;
+  visibility?: string;
+  external?: boolean;
+  participants: MeetingParticipantInfo[];
+  // Ariso rich fields (markdown where noted)
+  digest?: string;
+  summary?: string;
+  actionItems: MeetingActionItem[];
+  score?: number;
+  rationale?: string;
+  recommendation?: string;
+  coaching?: MeetingCoaching;
+  // Local-recording fields
+  isLocal: boolean;
+  durationSeconds?: number;
+  note?: string;
+  transcript?: string;
+}
+
 export interface Backend {
   id: BackendId;
   needsAuth: boolean;
@@ -40,6 +86,47 @@ export interface Backend {
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
   listMeetings(): Promise<MeetingListItem[]>;
+  /** Load the detail for a single row (from the list item the user clicked). */
+  getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
+}
+
+interface RawMeetingSummary {
+  digest?: string;
+  summary?: string;
+  actionItems?: Array<string | { name?: string; item?: string }>;
+  score?: number;
+  rationale?: string;
+  recommendation?: string;
+  coaching?: MeetingCoaching;
+}
+
+// `summary` arrives as a JSON string, an already-parsed object, or plain prose.
+// Normalize all three to a structured object; plain prose becomes the summary.
+function parseMeetingSummary(
+  summary: string | Record<string, unknown> | null | undefined
+): RawMeetingSummary {
+  if (!summary) return {};
+  if (typeof summary === 'string') {
+    try {
+      return JSON.parse(summary) as RawMeetingSummary;
+    } catch {
+      return { summary };
+    }
+  }
+  return summary as RawMeetingSummary;
+}
+
+function normalizeActionItems(
+  items: RawMeetingSummary['actionItems']
+): MeetingActionItem[] {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((it) =>
+      typeof it === 'string'
+        ? { item: it }
+        : { name: it.name, item: it.item ?? '' }
+    )
+    .filter((it) => it.item.trim().length > 0);
 }
 
 async function blobToBytes(blob: Blob): Promise<number[]> {
@@ -88,6 +175,35 @@ export class ArisoBackend implements Backend {
       timestamp: m.start_at,
     }));
   }
+
+  async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
+    const { getMeetingNotes } = useMeetingApi();
+    const data = await getMeetingNotes(item.id);
+    const s = parseMeetingSummary(data.summary);
+    return {
+      id: String(data.id ?? item.id),
+      title: data.title || item.title || 'Untitled meeting',
+      startAt: data.start_at || item.timestamp,
+      endAt: data.end_at,
+      visibility: data.visibility,
+      external: data.external,
+      participants: (data.participants ?? []).map((p) => ({
+        name: p.name,
+        email: p.email,
+        role: p.role,
+        self: p.self,
+        avatarUrl: p.avatar_url ?? null,
+      })),
+      digest: s.digest,
+      summary: typeof s.summary === 'string' ? s.summary : undefined,
+      actionItems: normalizeActionItems(s.actionItems),
+      score: typeof s.score === 'number' ? s.score : undefined,
+      rationale: s.rationale,
+      recommendation: s.recommendation,
+      coaching: s.coaching,
+      isLocal: false,
+    };
+  }
 }
 
 export class LocalBackend implements Backend {
@@ -130,6 +246,30 @@ export class LocalBackend implements Backend {
         hasTranscript: r.hasTranscript,
       },
     }));
+  }
+
+  async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
+    // Local recordings have no rich summary — just the generated note and
+    // transcript markdown on disk. Read whichever exist (missing → null).
+    const [note, transcript] = await Promise.all([
+      item.files?.hasNote
+        ? local.readRecordingFile(item.id, 'note').catch(() => null)
+        : Promise.resolve(null),
+      item.files?.hasTranscript
+        ? local.readRecordingFile(item.id, 'transcript').catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    return {
+      id: item.id,
+      title: item.title,
+      startAt: item.timestamp,
+      participants: [],
+      actionItems: [],
+      isLocal: true,
+      durationSeconds: item.durationSeconds,
+      note: note ?? undefined,
+      transcript: transcript ?? undefined,
+    };
   }
 }
 

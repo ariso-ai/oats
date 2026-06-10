@@ -32,6 +32,28 @@ interface ScheduledMeeting {
   start_at: string;
 }
 
+interface MeetingNotesParticipant {
+  name?: string;
+  email?: string;
+  role?: string;
+  self?: boolean;
+  avatar_url?: string | null;
+}
+
+// The `/meeting-notes/:id` payload. `summary` is either a JSON string or an
+// already-parsed object holding digest/summary/actionItems/score/coaching.
+interface MeetingNotes {
+  id: number;
+  title: string | null;
+  start_at: string;
+  end_at?: string;
+  status?: string;
+  visibility?: string;
+  external?: boolean;
+  summary?: string | Record<string, unknown> | null;
+  participants?: MeetingNotesParticipant[];
+}
+
 interface ScheduledMeetingsResponse {
   meetings: ScheduledMeeting[];
 }
@@ -114,6 +136,17 @@ export function useMeetingApi() {
     const res = await api.request('GET', `/desktop/meetings/${meetingId}`);
     assertOk(res, 200, 'get meeting');
     return res.data as { meeting: Meeting };
+  }
+
+  // Full meeting-notes payload (title, participants, summary JSON, assessment,
+  // coaching). This is the same endpoint the web meeting-notes page uses; the
+  // desktop library renders its detail panel from it.
+  async function getMeetingNotes(
+    meetingId: number | string
+  ): Promise<MeetingNotes> {
+    const res = await api.request('GET', `/meeting-notes/${meetingId}`);
+    assertOk(res, 200, 'get meeting notes');
+    return res.data as MeetingNotes;
   }
 
   async function updateMeeting(
@@ -243,6 +276,7 @@ export function useMeetingApi() {
     listScheduledMeetings,
     listMeetingsInWindow,
     getMeeting,
+    getMeetingNotes,
     updateMeeting,
     endMeeting,
     saveTranscript,
@@ -252,4 +286,4 @@ export function useMeetingApi() {
   };
 }
 
-export type { Meeting, PaginatedResponse, ScheduledMeeting };
+export type { Meeting, PaginatedResponse, ScheduledMeeting, MeetingNotes };
