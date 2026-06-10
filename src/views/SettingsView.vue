@@ -137,6 +137,25 @@
         <p v-else-if="systemAudioStatus === 'denied'" class="notif-status notif-status--err">
           Permission not granted
         </p>
+
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="setting-label">Auto-record meetings</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="autoRecordEnabled"
+              :disabled="!autoRecordSupported"
+              @change="onToggleAutoRecord"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p v-if="!autoRecordSupported" class="notif-status notif-status--err">
+          Requires macOS 14.4+
+        </p>
       </div>
     </section>
 
@@ -236,6 +255,11 @@ import {
   openNotificationSettings,
   emitNotificationsSync,
 } from '../composables/useMeetingNotifications';
+import {
+  isAutoRecordEnabled,
+  setAutoRecordEnabled,
+  isAutoRecordSupported,
+} from '../composables/useAutoRecord';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
@@ -244,6 +268,8 @@ const displayName = ref('');
 const email = ref('');
 const micEnabled = ref(true);
 const systemAudioEnabled = ref(true);
+const autoRecordEnabled = ref(true);
+const autoRecordSupported = ref(true);
 const micStatus = ref<PermissionStatus>('');
 const systemAudioStatus = ref<PermissionStatus>('');
 const micToggling = ref(false);
@@ -474,6 +500,17 @@ async function onToggleMic(e: Event) {
   }
 }
 
+async function onToggleAutoRecord(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = autoRecordEnabled.value;
+  autoRecordEnabled.value = checked;
+  try {
+    await setAutoRecordEnabled(checked);
+  } catch {
+    autoRecordEnabled.value = previous;
+  }
+}
+
 async function onToggleSystemAudio(e: Event) {
   if (recordingToggleBusy.value) return;
   systemAudioToggling.value = true;
@@ -521,6 +558,8 @@ onMounted(async () => {
     const enabled = await loadRecordingEnabled();
     micEnabled.value = enabled.mic;
     systemAudioEnabled.value = enabled.systemAudio;
+    autoRecordSupported.value = await isAutoRecordSupported();
+    autoRecordEnabled.value = await isAutoRecordEnabled();
     // Reflect the current Screen Recording status without prompting. (Mic status
     // is intentionally left blank on load — there's no silent mic preflight as
     // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
