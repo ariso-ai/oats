@@ -10,6 +10,10 @@ const hasTauri =
   typeof window !== 'undefined' &&
   ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
+// Peak (absolute Int16) below which a frame counts as "no sound activity".
+// ~0.01 of full scale (32768) — above the noise floor, below real speech.
+const SILENCE_LEVEL = 300;
+
 export function useRecorder() {
   const isRecording: Ref<boolean> = ref(false);
   const isPaused: Ref<boolean> = ref(false);
@@ -17,6 +21,9 @@ export function useRecorder() {
   const durationSeconds: Ref<number> = ref(0);
   const startedAt: Ref<string | null> = ref(null);
   const systemAudioSupported: Ref<boolean> = ref(hasTauri);
+  // Wall-clock of the last frame that carried real sound, for the silence
+  // backstop. Seeded on start and reset on resume so paused gaps don't count.
+  const lastSoundAt: Ref<number> = ref(Date.now());
 
   let audioContext: AudioContext | null = null;
   let micStream: MediaStream | null = null;
@@ -156,6 +163,7 @@ export function useRecorder() {
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
         if (!isRecording.value || isPaused.value || !mp3Encoder) return;
         const frame = e.inputBuffer.length;
+        let drainPeakRef: Int16Array = new Int16Array(0);
 
         // Mic channel (silent zero when mic is disabled)
         const micInt16 = new Int16Array(frame);
@@ -175,6 +183,7 @@ export function useRecorder() {
           if (sysRaw) {
             sysInt16.set(sysRaw.slice(0, micInt16.length));
           }
+          drainPeakRef = sysInt16;
           mp3buf = mp3Encoder.encodeBuffer(micInt16, sysInt16);
         } else if (useSystemAudio) {
           // System-audio-only: mono encode from the ring buffer, and feed the
@@ -185,6 +194,7 @@ export function useRecorder() {
           if (sysRaw) {
             sysInt16.set(sysRaw.slice(0, frame));
           }
+          drainPeakRef = sysInt16;
           mp3buf = mp3Encoder.encodeBuffer(sysInt16);
           const out = e.outputBuffer.getChannelData(0);
           for (let i = 0; i < frame; i++) out[i] = sysInt16[i] / 0x8000;
@@ -195,6 +205,24 @@ export function useRecorder() {
 
         if (mp3buf.length > 0) {
           mp3Chunks.push(new Int8Array(mp3buf));
+        }
+
+        // Silence backstop: note the time if this frame carried real sound on
+        // any active source (mic and/or system).
+        let peak = 0;
+        for (let i = 0; i < micInt16.length; i++) {
+          const a = Math.abs(micInt16[i]);
+          if (a > peak) peak = a;
+        }
+        if (useSystemAudio) {
+          const sys = drainPeakRef;
+          for (let i = 0; i < sys.length; i++) {
+            const a = Math.abs(sys[i]);
+            if (a > peak) peak = a;
+          }
+        }
+        if (peak >= SILENCE_LEVEL) {
+          lastSoundAt.value = Date.now();
         }
       };
 
@@ -215,6 +243,7 @@ export function useRecorder() {
       isRecording.value = true;
       isPaused.value = false;
       startedAt.value = new Date().toISOString();
+      lastSoundAt.value = Date.now();
 
       timerInterval = setInterval(() => {
         if (!isPaused.value) {
@@ -235,6 +264,8 @@ export function useRecorder() {
 
   function resumeRecording(): void {
     if (!isRecording.value || !isPaused.value) return;
+    // Reset so the paused interval never counts as silence.
+    lastSoundAt.value = Date.now();
     isPaused.value = false;
   }
 
@@ -341,6 +372,7 @@ export function useRecorder() {
     error,
     durationSeconds,
     startedAt,
+    lastSoundAt,
     systemAudioSupported,
     getAnalyser,
     startRecording,
