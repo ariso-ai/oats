@@ -49,6 +49,8 @@ export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): Mee
   }
 
   const sections: MeetingSection[] = [];
+  // Lexical sort == chronological because keys are zero-padded YYYY-MM-DD;
+  // .reverse() then puts the newest date first.
   const datedKeys = [...buckets.keys()].filter((k) => k !== 'unknown').sort().reverse();
   for (const key of datedKeys) {
     const items = [...buckets.get(key)!].sort(

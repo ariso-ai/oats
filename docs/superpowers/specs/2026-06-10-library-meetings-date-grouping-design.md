@@ -18,7 +18,7 @@ meeting picker. The Ariso list window only reaches **+1 day forward**, so the
 ## Goals
 
 1. Group the meetings list under **per-calendar-date headers** (TODAY,
-   YESTERDAY, TOMORROW, else `MON JUN 9`), newest date first, with a single
+   YESTERDAY, TOMORROW, else `MON, JUN 9`), newest date first, with a single
    `UPCOMING` section for all future meetings — matching the Figma's single
    divider.
 2. Make the **Today** nav tab work: filter the list to only today's meetings.
@@ -48,7 +48,7 @@ Behavior:
 - Partition by `new Date(m.timestamp) > now` → **upcoming** vs **history**.
 - **History**: bucket by local calendar date (`YYYY-MM-DD`), sections ordered
   newest date first; within a day, newest first. Label via `dateLabel(key, now)`
-  → `TODAY` / `YESTERDAY` (relative) else `MON JUN 9` (uppercased
+  → `TODAY` / `YESTERDAY` (relative) else `MON, JUN 9` (uppercased
   weekday+month+day). Future-but-not-today relative label `TOMORROW` only
   applies inside the upcoming bucket, which is collapsed, so it is unused here.
 - **Upcoming**: a single section `{ key: 'upcoming', label: 'UPCOMING', items }`
