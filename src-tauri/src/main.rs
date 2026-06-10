@@ -7,6 +7,7 @@ mod meeting_notifications;
 mod storage;
 mod transcribe;
 mod model_manager;
+mod recording_state;
 mod tray;
 mod update_manager;
 
@@ -62,6 +63,7 @@ fn main() {
             // Native meeting-prep notification orchestrator. Owns the Pusher
             // connection in the Rust process (webviews get suspended when
             // hidden). Self-gates on session + the enabled toggle.
+            app.manage(recording_state::RecordingState::new());
             app.manage(meeting_notifications::NotificationManager::new());
             // Install the macOS notification-click delegate on the main thread.
             meeting_notifications::init_native(app.handle());
