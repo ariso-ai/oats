@@ -1,4 +1,4 @@
-# Auto-Trigger Recording — Design
+# Auto- & Manual-Trigger Recording — Design
 
 **Date:** 2026-06-10
 **Branch:** `feat/auto-trigger-recording`
@@ -6,21 +6,33 @@
 
 ## Summary
 
-Automatically start a meeting recording when another application (Zoom,
-FaceTime, Google Meet, etc.) begins using the microphone, and automatically end
-it when that application releases the microphone — independent of any calendar
-entry. When a current calendar meeting can be matched, the recording is attached
-to it; otherwise the user is asked to confirm the capture.
+The recorder supports two ways to start a meeting recording, and several ways to
+end one:
+
+- **Auto trigger:** automatically start when another application (Zoom,
+  FaceTime, Google Meet, etc.) begins using the microphone, and automatically
+  end when that application releases it — independent of any calendar entry. When
+  a current calendar meeting can be matched, the recording is attached to it;
+  otherwise the user is asked to confirm the capture.
+- **Manual trigger:** the user starts a recording (tray "Start Recording"),
+  which begins capture and activates the enabled capture sources as needed —
+  today's flow, documented here so both paths share one lifecycle.
+
+Either kind of recording ends on an explicit Stop **or** on a universal
+**silence backstop**: 15 minutes of continuous no-sound activity auto-stops and
+finalizes the recording. Auto recordings additionally end on mic-off detection.
 
 The recording itself reuses the existing recorder pipeline (`useRecorder` +
 `RecorderPanel.vue` in the `waveform` window) and finalize/upload flow
-unchanged. The new work is a native microphone-usage monitor and the
-orchestration that connects it to that pipeline.
+unchanged. The new work is a native microphone-usage monitor, the orchestration
+that connects it to that pipeline, and the silence backstop in the pipeline.
 
 ## Goals
 
 - Start recording within a few seconds of a meeting app taking the mic.
 - Stop recording shortly after the meeting app releases the mic.
+- Let the user start a recording manually at any time (existing flow preserved).
+- Auto-stop **any** recording after 15 minutes of continuous silence.
 - Attach to a "happening now" calendar meeting when one exists (Ariso backend).
 - Never silently capture ad-hoc mic usage without a calendar match — ask first.
 - Never interfere with a manual recording already in progress.
@@ -46,6 +58,9 @@ orchestration that connects it to that pipeline.
 | Local backend (no calendar) | Same confirm prompt as an unmatched Ariso recording |
 | UI surface | Reuse the existing recorder pill + tray menu; fully controllable |
 | OS gating | Monitor active on macOS 14.4+ only; app minimum stays macOS 13 |
+| Manual trigger | Existing tray "Start Recording" flow; activates enabled capture sources |
+| Silence auto-stop | **15 min** continuous silence ends **any** recording (manual or auto) |
+| Silence while paused | Timer **frozen** while paused; resets on resume |
 
 ## Architecture
 
@@ -85,6 +100,13 @@ orchestration that connects it to that pipeline.
 - **`src/composables/useAutoTrigger.ts`** (new) — pure-ish orchestration the
   panel calls: resolve association (match vs prompt), drive the confirm overlay
   state machine, and the timeout. Unit-tested in isolation.
+- **`src/composables/useRecorder.ts`** — compute a per-frame amplitude from the
+  combined captured samples (mic + system, all modes) in the existing
+  `onaudioprocess` handler and track `lastSoundAt`; expose it so the silence
+  backstop can observe real captured audio (not just the mic analyser).
+- **`src/composables/silenceWatch.ts`** (new) — pure state machine over
+  `(lastSoundAt, now, paused)` → `shouldAutoStop`, encapsulating the 15-min
+  threshold and the pause-freeze rule. Unit-tested in isolation.
 - **`src/views/SettingsView.vue`** + **`src/composables/useRecordingPermissions.ts`**
   — new "Auto-record meetings" toggle persisted to `settings.json`
   (`autoRecordEnabled`), and a sync call so toggling it starts/stops the native
@@ -176,6 +198,46 @@ On mount with `auto=1`:
 Auto-recordings shorter than **MIN_DURATION (15 s)** at stop time are discarded
 rather than uploaded (guards against late mic-on/quick-off races).
 
+## Manual trigger
+
+The existing tray **"Start Recording"** flow is unchanged and is the manual
+trigger:
+
+- **Local backend:** opens the recorder window directly (after the model-ready
+  gate).
+- **Ariso backend:** session gate → meeting-picker → recorder window.
+
+"Activates if need" means starting a recording **activates the enabled capture
+sources** (mic and/or system audio per the recording-source toggles), prompting
+for OS permission where required — today's behavior. No new manual-start work is
+introduced beyond making manual recordings participate in the shared
+`RecordingState` (so the auto monitor stays quiet) and the silence backstop
+below.
+
+## Silence auto-stop (universal backstop)
+
+Applies to **every** recording, manual or auto. Implemented in the recorder
+pipeline (frontend) because that is where the captured signal is available.
+
+- In `useRecorder`'s `onaudioprocess` handler, compute a per-frame peak/RMS over
+  the **combined** captured samples (mic + system, whichever sources are
+  active). When the frame's level exceeds `SILENCE_LEVEL`, update `lastSoundAt`.
+  `SILENCE_LEVEL` is a small amplitude floor tuned to ignore ambient noise floor
+  but catch any real speech/system sound (starting point: peak ≥ ~0.01 of full
+  scale; revisited during manual verification).
+- `silenceWatch.ts` (pure) decides `shouldAutoStop` from
+  `(lastSoundAt, now, paused)`:
+  - While **paused**, the timer is **frozen** — elapsed silence does not
+    accumulate, and `lastSoundAt` is effectively reset on resume so a paused gap
+    never counts toward the 15 minutes.
+  - When `now − lastSoundAt ≥ SILENCE_TIMEOUT` (**15 min**) and not paused →
+    `shouldAutoStop = true`.
+- `RecorderPanel.vue` evaluates the watch on the existing 1-second timer tick;
+  on `shouldAutoStop` it runs the **same Stop path** as a manual/tray stop
+  (finalize + upload, or discard if under `MIN_DURATION`). For an auto recording
+  this is an additional safety net layered on top of mic-off detection —
+  whichever fires first wins.
+
 ## Settings
 
 - New toggle **"Auto-record meetings"** in `SettingsView.vue`, persisted to
@@ -204,12 +266,21 @@ rather than uploaded (guards against late mic-on/quick-off races).
   is alive until all release.
 - **Window/finalize crash:** `Destroyed` handler clears `RecordingState` so the
   monitor recovers.
+- **Silence during a real meeting:** continuous speech/system audio keeps
+  `lastSoundAt` fresh, so a normal meeting never trips the 15-min backstop.
+- **Long deliberate pause:** the silence timer is frozen while paused, so a
+  paused recording is never auto-stopped by the backstop.
+- **Forgotten recording after a call ends:** if mic-off detection somehow misses
+  (or it's a manual recording with no app to release the mic), 15 min of silence
+  finalizes it instead of recording indefinitely.
 
 ## Testing
 
 - **Pure unit (Vitest):**
   - `useAutoTrigger`: association resolution (current/none), confirm state
     machine (keep/discard/timeout via injected clock), min-duration discard.
+  - `silenceWatch`: accumulates to `shouldAutoStop` at 15 min via injected
+    clock; resets on sound activity; stays frozen while paused; resumes cleanly.
   - Reuse `pickDefaultMeeting` tests for the match boundary.
 - **Rust unit:** the state-machine transitions modeled as a pure function over
   `(state, external_pid_set, recording_active, now)` so debounce/snapshot logic
@@ -219,7 +290,8 @@ rather than uploaded (guards against late mic-on/quick-off races).
   confirm recorder opens and arms after ~3 s; end the call → confirm it stops
   after ~8 s and finalizes; verify manual recording suppresses auto-trigger;
   verify the confirm overlay keep/discard/timeout paths; verify the toggle
-  starts/stops the monitor live.
+  starts/stops the monitor live; verify a manual recording auto-stops after a
+  (test-shortened) silence window and that ongoing audio keeps it alive.
 
 ## Risks & verification items
 
@@ -233,4 +305,3 @@ rather than uploaded (guards against late mic-on/quick-off races).
    constants and behave consistently; keep the runtime-availability guard.
 4. **Poll interval vs. responsiveness/CPU** — 1 s poll is the starting point;
    switch to a CoreAudio property listener if a poll proves too laggy or costly.
-```
