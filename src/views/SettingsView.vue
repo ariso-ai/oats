@@ -10,15 +10,25 @@
     <section class="section">
       <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Backend</span>
-          <div class="backend-select">
+          <span id="backend-label" class="setting-label">Backend</span>
+          <div
+            ref="backendSelectRef"
+            class="backend-select"
+            @focusout="onBackendFocusOut"
+            @keydown.escape.prevent="closeBackendMenu"
+          >
             <button
+              ref="backendTriggerRef"
               type="button"
               class="backend-trigger"
               aria-haspopup="listbox"
               :aria-expanded="backendOpen"
-              @click="backendOpen = !backendOpen"
-              @blur="backendOpen = false"
+              aria-controls="backend-listbox"
+              @click="toggleBackendMenu"
+              @keydown.down.prevent="openBackendMenu(0)"
+              @keydown.up.prevent="openBackendMenu(backendOptions.length - 1)"
+              @keydown.enter.prevent="toggleBackendMenu"
+              @keydown.space.prevent="toggleBackendMenu"
             >
               <span class="backend-trigger-text">{{ currentBackend.label }}</span>
               <svg v-if="backend === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -33,15 +43,28 @@
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-            <ul v-if="backendOpen" class="backend-menu" role="listbox">
+            <ul
+              v-if="backendOpen"
+              id="backend-listbox"
+              class="backend-menu"
+              role="listbox"
+              aria-labelledby="backend-label"
+            >
               <li
-                v-for="opt in backendOptions"
+                v-for="(opt, idx) in backendOptions"
                 :key="opt.value"
                 class="backend-option"
                 :class="{ 'backend-option--active': backend === opt.value }"
                 role="option"
                 :aria-selected="backend === opt.value"
+                tabindex="-1"
                 @mousedown.prevent="selectBackend(opt.value)"
+                @keydown.down.prevent="focusOption(idx + 1)"
+                @keydown.up.prevent="focusOption(idx - 1)"
+                @keydown.home.prevent="focusOption(0)"
+                @keydown.end.prevent="focusOption(backendOptions.length - 1)"
+                @keydown.enter.prevent="selectBackend(opt.value)"
+                @keydown.space.prevent="selectBackend(opt.value)"
               >
                 <span>{{ opt.label }}</span>
                 <svg v-if="opt.value === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -272,7 +295,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
@@ -346,12 +369,56 @@ const backendOptions = [
   { value: 'local', label: 'Local' },
 ] as const;
 const backendOpen = ref(false);
+const backendSelectRef = ref<HTMLElement | null>(null);
+const backendTriggerRef = ref<HTMLButtonElement | null>(null);
 const currentBackend = computed(
   () => backendOptions.find((o) => o.value === backend.value) ?? backendOptions[0],
 );
 
+function focusOption(idx: number) {
+  const wrapper = backendSelectRef.value;
+  if (!wrapper) return;
+  const options = wrapper.querySelectorAll<HTMLElement>('.backend-option');
+  if (options.length === 0) return;
+  const wrapped = ((idx % options.length) + options.length) % options.length;
+  options[wrapped]?.focus();
+}
+
+async function openBackendMenu(focusIdx: number) {
+  if (!backendOpen.value) {
+    backendOpen.value = true;
+    await nextTick();
+  }
+  focusOption(focusIdx);
+}
+
+function closeBackendMenu() {
+  if (!backendOpen.value) return;
+  backendOpen.value = false;
+  backendTriggerRef.value?.focus();
+}
+
+function toggleBackendMenu() {
+  if (backendOpen.value) {
+    closeBackendMenu();
+  } else {
+    const selectedIdx = backendOptions.findIndex((o) => o.value === backend.value);
+    void openBackendMenu(selectedIdx >= 0 ? selectedIdx : 0);
+  }
+}
+
+function onBackendFocusOut(e: FocusEvent) {
+  // Close when focus moves outside the wrapper (e.g., Tab away or click
+  // elsewhere). Keep open when focus moves between trigger and options.
+  const next = e.relatedTarget as Node | null;
+  if (!next || !backendSelectRef.value?.contains(next)) {
+    backendOpen.value = false;
+  }
+}
+
 async function selectBackend(next: 'ariso' | 'local') {
   backendOpen.value = false;
+  backendTriggerRef.value?.focus();
   if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
@@ -953,6 +1020,12 @@ async function handleSignOut() {
 
 .backend-option:hover {
   background: #f5f5f7;
+}
+
+.backend-option:focus-visible {
+  background: #f5f5f7;
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
 }
 
 .backend-option--active {
