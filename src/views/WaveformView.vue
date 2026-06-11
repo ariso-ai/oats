@@ -85,10 +85,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
@@ -137,6 +137,32 @@ const formattedDuration = computed(() => {
   return `${mins}:${secs}`;
 });
 
+// Mirror the recording to the library window's embedded recorder strip. The
+// bars ride on frameLevels (sampled in the audio callback, so the cadence
+// survives this window being hidden, unlike rAF-driven waveform.levels).
+type RecorderPhase = 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
+
+function currentPhase(): RecorderPhase {
+  if (uploadResult.value) return uploadResult.value;
+  if (isUploading.value) return 'uploading';
+  return 'recording';
+}
+
+function broadcastState(phase: RecorderPhase = currentPhase()): void {
+  emit('recorder://state', {
+    bars: centerWeightedBars(recorder.frameLevels.value.slice(0, 20), 3),
+    durationSeconds: recorder.durationSeconds.value,
+    isPaused: recorder.isPaused.value,
+    phase,
+  }).catch(() => { /* no listeners / shutting down */ });
+}
+
+watch(() => recorder.frameLevels.value, () => broadcastState());
+watch(
+  [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
+  () => broadcastState(),
+);
+
 function expand() {
   // Don't expand during upload/result states.
   if (isUploading.value || uploadResult.value) return;
@@ -167,6 +193,7 @@ let silenceTimer: ReturnType<typeof setInterval> | null = null;
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
 async function rollbackAndClose() {
+  broadcastState('closed');
   try {
     await invoke('set_tray_recording', { isRecording: false, isPaused: false });
   } catch { /* ignore */ }
@@ -332,6 +359,7 @@ async function handleStop() {
 }
 
 async function closeWindow() {
+  broadcastState('closed');
   try {
     await getCurrentWebviewWindow().close();
   } catch {

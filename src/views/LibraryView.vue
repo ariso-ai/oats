@@ -80,17 +80,21 @@
       </nav>
     </aside>
 
-    <!-- Floating detail card on the backdrop -->
+    <!-- Floating detail card on the backdrop, with the recorder strip
+         (mirroring an on-going recording) docked underneath. -->
     <section class="detail-wrap">
-      <MeetingDetailView
-        v-if="selectedItem"
-        :item="selectedItem"
-        @close="selectedItem = null"
-        @title-updated="onTitleUpdated"
-      />
-      <div v-else class="empty-card">
-        <p>Select a meeting to view its notes.</p>
+      <div class="detail-card">
+        <MeetingDetailView
+          v-if="selectedItem"
+          :item="selectedItem"
+          @close="selectedItem = null"
+          @title-updated="onTitleUpdated"
+        />
+        <div v-else class="empty-card">
+          <p>Select a meeting to view its notes.</p>
+        </div>
       </div>
+      <RecorderStrip />
     </section>
   </div>
 </template>
@@ -109,6 +113,7 @@ import {
   type MeetingSection,
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
+import RecorderStrip from './RecorderStrip.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -488,14 +493,21 @@ onUnmounted(() => {
 .nav-icon-btn:hover { color: #1c1c1c; }
 .nav-ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
-/* Detail card area */
+/* Detail card area: card on top, recorder strip docked at the bottom while
+   a recording is on-going. */
 .detail-wrap {
   flex: 1;
   min-width: 0;
   padding: 28px 18px 18px 8px;
   box-sizing: border-box;
   display: flex;
+  flex-direction: column;
   min-height: 0;
+}
+.detail-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 .empty-card {
   flex: 1;

@@ -5,7 +5,7 @@ mod audio_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
-mod recorder_attach;
+mod recorder_pill;
 mod storage;
 mod transcribe;
 mod model_manager;

@@ -14,11 +14,13 @@ const invoke = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 const eventHandlers: Record<string, (e: unknown) => void> = {};
+const emitEvent = vi.fn(() => Promise.resolve());
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn((name: string, cb: (e: unknown) => void) => {
     eventHandlers[name] = cb;
     return Promise.resolve(() => {});
   }),
+  emit: (...a: unknown[]) => emitEvent(...a),
 }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({ close: closeWin }),
@@ -30,6 +32,7 @@ vi.mock('../composables/useRecorder', () => ({
     isRecording: { value: true },
     isPaused: { value: false },
     durationSeconds: { value: 5 },
+    frameLevels: { value: new Array(32).fill(0.5) },
     lastSoundAt: { value: 0 },
     startedAt: { value: '2026-06-09T10:00:00Z' },
     getAnalyser,
@@ -163,6 +166,28 @@ describe('WaveformView vertical pill', () => {
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
+  });
+
+  it('broadcasts recorder://state through the stop flow, ending with closed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    const phases = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => (payload as { phase: string }).phase);
+    expect(phases).toContain('uploading');
+    expect(phases).toContain('success');
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const last = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state').at(-1);
+    expect((last?.[1] as { phase: string }).phase).toBe('closed');
+    vi.useRealTimers();
   });
 
   it('auto mode with no calendar match shows the confirm overlay', async () => {

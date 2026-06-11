@@ -532,6 +532,9 @@ pub(crate) fn open_waveform_window(
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
         .inner_size(92.0, 284.0)
+        // Born hidden while the library window shows the embedded recorder
+        // strip; the visibility watcher reveals it on minimize/close.
+        .visible(crate::recorder_pill::should_show_now(app))
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -563,9 +566,9 @@ pub(crate) fn open_waveform_window(
 
     crate::tray::set_menu(app, true, false);
 
-    // Pin the recorder to the library window's right edge for the duration
-    // of the recording (released while the library is minimized or absent).
-    crate::recorder_attach::spawn_watcher(app);
+    // Show the pill only while the library window (with its embedded
+    // recorder strip) can't be seen — minimized or closed.
+    crate::recorder_pill::spawn_watcher(app);
 
     // Tell every window (the library in particular) which meeting the new
     // recording is attached to, so it can surface that meeting immediately.
