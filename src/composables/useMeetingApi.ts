@@ -7,6 +7,15 @@ interface TranscriptSegment {
   end: number;
 }
 
+// A single line of a stored transcript: the speaker-attributed `content`
+// (e.g. "Speaker 1: …"), its zero-based `chunk_index`, and `start_ms` offset
+// from the start of the recording.
+interface TranscriptChunk {
+  chunk_index: number;
+  start_ms: number;
+  content: string;
+}
+
 interface Meeting {
   id: number;
   title: string | null;
@@ -60,6 +69,22 @@ interface MeetingNotes {
 
 interface ScheduledMeetingsResponse {
   meetings: ScheduledMeeting[];
+}
+
+// Normalize a raw `transcript` payload into ordered chunks, tolerating missing
+// or mistyped fields. Returns null when there are no usable chunks so callers
+// can treat it the same as an absent transcript.
+function parseTranscriptChunks(raw: unknown): TranscriptChunk[] | null {
+  if (!Array.isArray(raw)) return null;
+  const chunks = raw
+    .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object')
+    .map((c) => ({
+      chunk_index: typeof c.chunk_index === 'number' ? c.chunk_index : 0,
+      start_ms: typeof c.start_ms === 'number' ? c.start_ms : 0,
+      content: typeof c.content === 'string' ? c.content.trim() : '',
+    }))
+    .filter((c) => c.content.length > 0);
+  return chunks.length ? chunks : null;
 }
 
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
@@ -165,17 +190,19 @@ export function useMeetingApi() {
     assertOk(res, 200, 'update meeting title');
   }
 
-  // Fetch a meeting's stored transcript. Resolves to null on 404 (no transcript
-  // stored yet) so callers can treat "absent" distinctly from a real error.
+  // Fetch a meeting's stored transcript as an ordered list of chunks. Resolves
+  // to null on 404 (no transcript stored yet) so callers can treat "absent"
+  // distinctly from a real error, and also when the payload holds no usable
+  // chunks.
   async function getMeetingTranscript(
     meetingId: number | string
-  ): Promise<string | null> {
+  ): Promise<TranscriptChunk[] | null> {
     const encodedMeetingId = encodeURIComponent(String(meetingId));
     const res = await api.request('GET', `/meeting-notes/${encodedMeetingId}/transcript`);
     if (res.status === 404) return null;
     assertOk(res, 200, 'get transcript');
-    const data = res.data as { transcript?: string } | null;
-    return typeof data?.transcript === 'string' ? data.transcript : null;
+    const data = res.data as { transcript?: unknown } | null;
+    return parseTranscriptChunks(data?.transcript);
   }
 
   // Fetch the requester's individual note. Resolves to null on 404 or when no
@@ -346,4 +373,4 @@ export function useMeetingApi() {
   };
 }
 
-export type { Meeting, PaginatedResponse, ScheduledMeeting, MeetingNotes };
+export type { Meeting, PaginatedResponse, ScheduledMeeting, MeetingNotes, TranscriptChunk };

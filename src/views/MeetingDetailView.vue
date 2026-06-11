@@ -166,7 +166,13 @@
 
         <template v-else-if="activeTab === 'transcript'">
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
-          <div v-else-if="transcriptText" class="md" v-html="renderMarkdown(transcriptText)" />
+          <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
+          <ol v-else-if="transcriptChunks" class="transcript">
+            <li v-for="c in transcriptChunks" :key="c.chunk_index" class="transcript-line">
+              <span class="transcript-ts">{{ formatTimestamp(c.start_ms) }}</span>
+              <span class="transcript-content">{{ c.content }}</span>
+            </li>
+          </ol>
           <div v-else class="content-empty">No transcript available.</div>
         </template>
 
@@ -186,7 +192,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
 import { renderMarkdown } from '../utils/markdown';
-import { useMeetingApi } from '../composables/useMeetingApi';
+import { useMeetingApi, type TranscriptChunk } from '../composables/useMeetingApi';
 import {
   getActiveBackend,
   type MeetingListItem,
@@ -216,8 +222,8 @@ const titleInput = ref<HTMLInputElement | null>(null);
 const canEditTitle = computed(() => !!detail.value && !detail.value.isLocal);
 
 // Transcript is loaded lazily when the Transcript tab is opened (Ariso fetches
-// /meeting-notes/{id}/transcript; local reads transcript.md).
-const transcript = ref<string | null>(null);
+// /meeting-notes/{id}/transcript as chunks; local reads transcript.md markdown).
+const transcript = ref<string | TranscriptChunk[] | null>(null);
 const transcriptLoaded = ref(false);
 const loadingTranscript = ref(false);
 
@@ -322,11 +328,26 @@ async function commitTitle(): Promise<void> {
   }
 }
 
-// Local recordings already carry their transcript on the detail; Ariso loads it
-// lazily into `transcript`. Either way this is what the Transcript tab renders.
-const transcriptText = computed<string | null>(() =>
-  detail.value?.isLocal ? detail.value?.transcript ?? null : transcript.value
+// Local recordings carry their transcript as markdown on the detail; Ariso
+// loads structured chunks lazily into `transcript`. The Transcript tab renders
+// whichever is present.
+const transcriptMarkdown = computed<string | null>(() =>
+  detail.value?.isLocal ? detail.value?.transcript ?? null : null
 );
+const transcriptChunks = computed<TranscriptChunk[] | null>(() => {
+  if (detail.value?.isLocal) return null;
+  return Array.isArray(transcript.value) ? transcript.value : null;
+});
+
+// Render a chunk's `start_ms` offset as M:SS (or H:MM:SS past an hour).
+function formatTimestamp(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
 
 function coachingPresent(c?: MeetingCoaching | null): boolean {
   return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
@@ -642,6 +663,12 @@ const durationLabel = computed<string | null>(() => {
 .bullet { flex-shrink: 0; margin-top: 1px; }
 .bullet--green { color: #22c55e; }
 .bullet--amber { color: #f59e0b; }
+
+/* Structured transcript (Ariso chunks) */
+.transcript { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+.transcript-line { display: flex; gap: 12px; align-items: baseline; font-size: 14px; line-height: 1.6; }
+.transcript-ts { flex-shrink: 0; min-width: 48px; font-variant-numeric: tabular-nums; font-size: 12px; color: #9a9a9a; padding-top: 1px; }
+.transcript-content { color: #535353; }
 
 /* Rendered markdown */
 .md { color: #535353; font-size: 14px; line-height: 1.6; }

@@ -1,5 +1,5 @@
 import { local, auth, getBackendSetting, type RecordingSummary } from '../tauri';
-import { useMeetingApi, type ScheduledMeeting } from './useMeetingApi';
+import { useMeetingApi, type ScheduledMeeting, type TranscriptChunk } from './useMeetingApi';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -97,8 +97,9 @@ export interface Backend {
   listMeetings(): Promise<MeetingListItem[]>;
   /** Load the detail for a single row (from the list item the user clicked). */
   getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
-  /** Lazily load the meeting's transcript text (null when none). */
-  getMeetingTranscript(item: MeetingListItem): Promise<string | null>;
+  /** Lazily load the meeting's transcript (null when none). Ariso meetings
+   *  resolve to structured chunks; local recordings resolve to markdown text. */
+  getMeetingTranscript(item: MeetingListItem): Promise<string | TranscriptChunk[] | null>;
   /** Lazily load the requester's individual note (null when none). */
   getIndividualNote(item: MeetingListItem): Promise<{ content: string; title: string | null } | null>;
 }
@@ -228,7 +229,7 @@ export class ArisoBackend implements Backend {
     };
   }
 
-  async getMeetingTranscript(item: MeetingListItem): Promise<string | null> {
+  async getMeetingTranscript(item: MeetingListItem): Promise<TranscriptChunk[] | null> {
     const { getMeetingTranscript } = useMeetingApi();
     return getMeetingTranscript(item.id);
   }
