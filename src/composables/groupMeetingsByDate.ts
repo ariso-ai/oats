@@ -11,6 +11,41 @@ function localDateKey(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** ms at which a meeting is considered over: its end timestamp when known,
+ *  otherwise its start (unknown-duration meetings are "over" once they begin). */
+function meetingEndMs(m: MeetingListItem): number {
+  if (m.endTimestamp) {
+    const end = new Date(m.endTimestamp).getTime();
+    if (!Number.isNaN(end)) return end;
+  }
+  return new Date(m.timestamp).getTime();
+}
+
+/** True while a meeting is happening: start <= now < end. Needs a real end. */
+export function isMeetingInProgress(m: MeetingListItem, now: Date): boolean {
+  if (!m.endTimestamp) return false;
+  const start = new Date(m.timestamp).getTime();
+  const end = new Date(m.endTimestamp).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return false;
+  const t = now.getTime();
+  return start <= t && t < end;
+}
+
+/** Relative label for an upcoming meeting: "Now" while in progress, otherwise
+ *  the time until it starts ("in 20min" / "in 2h" / "in 3d"). Empty for an
+ *  unparseable start or a meeting that is already over. */
+export function upcomingRelLabel(m: MeetingListItem, now: Date): string {
+  const start = new Date(m.timestamp).getTime();
+  if (Number.isNaN(start)) return '';
+  const t = now.getTime();
+  if (start <= t) return isMeetingInProgress(m, now) ? 'Now' : '';
+  const mins = Math.round((start - t) / 60_000);
+  if (mins < 60) return `in ${Math.max(1, mins)}min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
 export function dateLabel(key: string, now: Date): string {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
@@ -34,8 +69,8 @@ export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): Mee
   const history: MeetingListItem[] = [];
   const upcoming: MeetingListItem[] = [];
   for (const meeting of meetings) {
-    const ts = new Date(meeting.timestamp).getTime();
-    if (!Number.isNaN(ts) && ts > nowMs) upcoming.push(meeting);
+    // "Upcoming" = not yet over: future meetings and ones in progress right now.
+    if (meetingEndMs(meeting) > nowMs) upcoming.push(meeting);
     else history.push(meeting);
   }
 
@@ -78,7 +113,8 @@ export function groupTodaysMeetings(meetings: MeetingListItem[], now: Date): Mee
   for (const meeting of meetings) {
     const d = new Date(meeting.timestamp);
     if (Number.isNaN(d.getTime()) || localDateKey(d) !== today) continue;
-    if (d.getTime() > nowMs) upcoming.push(meeting);
+    // In-progress meetings (started but not ended) count as upcoming.
+    if (meetingEndMs(meeting) > nowMs) upcoming.push(meeting);
     else earlier.push(meeting);
   }
 
