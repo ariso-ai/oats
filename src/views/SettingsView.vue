@@ -15,6 +15,7 @@
             <button
               type="button"
               class="backend-trigger"
+              :disabled="recordingActive"
               aria-haspopup="listbox"
               :aria-expanded="backendOpen"
               @click="backendOpen = !backendOpen"
@@ -56,6 +57,9 @@
             </ul>
           </div>
         </div>
+        <p v-if="recordingActive" class="setting-hint">
+          Backend can't be changed while recording.
+        </p>
       </div>
     </section>
 
@@ -272,8 +276,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -346,12 +351,35 @@ const backendOptions = [
   { value: 'local', label: 'Local' },
 ] as const;
 const backendOpen = ref(false);
+const recordingActive = ref(false);
+
+// Recording runs in the separate "waveform" window; its presence is the
+// source of truth on mount/focus, and recording://state keeps it live while
+// this (persistent) window stays open in the background.
+async function refreshRecordingState() {
+  try {
+    const wins = await getAllWebviewWindows();
+    recordingActive.value = wins.some((w) => w.label === 'waveform');
+  } catch (e) {
+    console.error('Failed to read window state', e);
+  }
+}
+
+function onWindowFocus() {
+  void refreshRecordingState();
+}
+
+watch(recordingActive, (active) => {
+  if (active) backendOpen.value = false;
+});
+
 const currentBackend = computed(
   () => backendOptions.find((o) => o.value === backend.value) ?? backendOptions[0],
 );
 
 async function selectBackend(next: 'ariso' | 'local') {
   backendOpen.value = false;
+  if (recordingActive.value) return;
   if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
@@ -664,11 +692,19 @@ onMounted(async () => {
     modelPrompt.value = true;
   });
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
+
+  void refreshRecordingState();
+  window.addEventListener('focus', onWindowFocus);
+  const unRecording = await listen<boolean>('recording://state', (e) => {
+    recordingActive.value = e.payload;
+  });
+  unlistenUpdates.push(unRecording);
 });
 
 onUnmounted(() => {
   unlistenSignInPrompt?.();
   unlistenUpdates.forEach((un) => un());
+  window.removeEventListener('focus', onWindowFocus);
 });
 
 async function handleGoogleSignIn() {
@@ -908,6 +944,17 @@ async function handleSignOut() {
   background: white;
   color: #6366f1;
   cursor: pointer;
+}
+
+.backend-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.setting-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6f6f6f;
 }
 
 .backend-icon {
