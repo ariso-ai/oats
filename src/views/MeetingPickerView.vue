@@ -121,8 +121,9 @@ onMounted(async () => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #0f0f1a;
-  color: #e5e7eb;
+  background: #f7f6f4; /* Backdrop/Primary — matches the Meetings window */
+  color: #1c1c1c;
+  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   padding: 20px;
   box-sizing: border-box;
 }
@@ -130,6 +131,7 @@ onMounted(async () => {
 .title {
   font-size: 16px;
   font-weight: 600;
+  color: #1c1c1c;
   margin: 0 0 16px;
 }
 
@@ -137,9 +139,10 @@ onMounted(async () => {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: #9ca3af;
-  margin: 0 0 8px;
+  letter-spacing: 1.5px;
+  color: #9a9a96;
+  margin: 0 0 6px;
+  padding: 0 2px;
 }
 
 .link-btn {
@@ -148,13 +151,15 @@ onMounted(async () => {
   padding: 0;
   border: none;
   background: none;
-  color: #818cf8;
+  color: #6f6f6f;
+  font-family: inherit;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 
 .link-btn:hover {
+  color: #1c1c1c;
   text-decoration: underline;
 }
 
@@ -164,15 +169,15 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  color: #9ca3af;
-  font-size: 13px;
+  color: #6f6f6f;
+  font-size: 14px;
 }
 
 .spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid #4b5563;
-  border-top-color: #818cf8;
+  border: 2px solid #d6d6d6;
+  border-top-color: #1c1c1c;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -181,8 +186,8 @@ onMounted(async () => {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #f87171;
-  color: #0f0f1a;
+  background: #d96a5a;
+  color: #f7f6f4;
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -190,33 +195,41 @@ onMounted(async () => {
   font-size: 12px;
 }
 
+/* Scrollable list with the same top/bottom fade as the Meetings window. */
 .meeting-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
 }
+.meeting-list::-webkit-scrollbar { width: 6px; }
+.meeting-list::-webkit-scrollbar-thumb { background: #d6d6d6; border-radius: 3px; }
 
 .meeting-row {
-  width: 100%;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
-  border: none;
-  background: #1e1e2e;
-  color: #e5e7eb;
-  border-radius: 8px;
-  margin-bottom: 6px;
-  cursor: pointer;
-  font-size: 13px;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: #1c1c1c;
+  font-family: inherit;
   text-align: left;
-  transition: background 0.15s;
+  cursor: pointer;
+  transition: background 0.12s;
 }
 
 .meeting-row:hover {
-  background: #2a2a3e;
+  background: rgba(0, 0, 0, 0.03);
 }
 
 .meeting-row:disabled,
@@ -226,35 +239,39 @@ onMounted(async () => {
 }
 
 .meeting-title {
+  font-size: 15px;
   font-weight: 500;
+  color: #1c1c1c;
+  line-height: 1.25;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-right: 10px;
 }
 
 .meeting-time {
-  color: #9ca3af;
-  font-family: monospace;
-  flex-shrink: 0;
+  font-size: 12px;
+  color: #6f6f6f;
 }
 
 .skip-btn {
   margin-top: 14px;
   padding: 10px 14px;
-  border-radius: 8px;
-  border: none;
-  background: #1e1e2e;
-  color: #d1d5db;
+  border-radius: 12px;
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1c1c1c;
+  font-family: inherit;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: transform 0.1s, box-shadow 0.1s;
 }
 
 .skip-btn:hover {
-  background: #2a2a3e;
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 
 @keyframes spin {
