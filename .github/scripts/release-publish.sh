@@ -38,6 +38,17 @@ require_env() {
 
 require_env RELEASE_TAG R2_ENDPOINT R2_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
+# R2_BUCKET must be the bucket NAME (e.g. ariso-app), not the public
+# pub-<hash>.r2.dev domain that serves it. Bucket names can't contain dots,
+# and the AWS CLI surfaces the mixup as an unhelpful InvalidBucketName error
+# from CreateMultipartUpload.
+if [[ "$R2_BUCKET" == *.* ]]; then
+  echo "R2_BUCKET looks like a domain ('${R2_BUCKET}'), not a bucket name." >&2
+  echo "Set it to the R2 bucket name (no dots), e.g. via" \
+    "'gh variable set R2_BUCKET --env release --body <bucket>'." >&2
+  exit 1
+fi
+
 # Ensure the AWS CLI is available on the self-hosted runner.
 if ! command -v aws >/dev/null 2>&1; then
   echo "AWS CLI not found on runner; install with 'brew install awscli'." >&2
