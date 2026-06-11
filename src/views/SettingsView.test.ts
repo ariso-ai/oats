@@ -4,7 +4,7 @@ import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const getBackendSetting = vi.fn(() => Promise.resolve('ariso' as const));
-const setBackendSetting = vi.fn(() => Promise.resolve());
+const setBackendSetting = vi.fn((_b: unknown) => Promise.resolve());
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -37,7 +37,7 @@ vi.mock('../tauri', () => ({
     setAutoCheck: vi.fn(),
   },
   getBackendSetting: () => getBackendSetting(),
-  setBackendSetting: (b: unknown) => setBackendSetting(b as never),
+  setBackendSetting: (b: unknown) => setBackendSetting(b),
   local: {
     modelStatus: () => Promise.resolve({ state: 'not_downloaded' }),
     downloadStt: vi.fn(),
@@ -135,5 +135,19 @@ describe('SettingsView backend switching during recording', () => {
     window.dispatchEvent(new Event('focus'));
     await flushPromises();
     expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeDefined();
+  });
+
+  it('ignores a backend selection that lands as recording starts', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await wrapper.get('.backend-trigger').trigger('click');
+    // Recording starts while the menu is still rendered: fire the event but
+    // don't flush, so the option below is clicked before the menu reacts.
+    fireRecordingState(true);
+    await wrapper.findAll('.backend-option')[1].trigger('mousedown');
+    await flushPromises();
+
+    expect(setBackendSetting).not.toHaveBeenCalled();
   });
 });

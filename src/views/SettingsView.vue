@@ -692,7 +692,11 @@ onMounted(async () => {
     modelPrompt.value = true;
   });
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
+});
 
+// Registered as its own hook so a failure in the main bootstrap above can't
+// prevent the recording guard from arming.
+onMounted(async () => {
   void refreshRecordingState();
   window.addEventListener('focus', onWindowFocus);
   const unRecording = await listen<boolean>('recording://state', (e) => {
