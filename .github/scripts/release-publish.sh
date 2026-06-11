@@ -3,8 +3,9 @@
 # Build the Tauri updater manifest (latest.json) and publish the release
 # artifacts (updater tarball, DMG, manifest) to Cloudflare R2.
 #
-# Invoked by the release job in .github/workflows/desktop.yaml after the
-# bundler has produced its outputs under src-tauri/target/release/bundle/.
+# Invoked by the publish job in .github/workflows/desktop.yaml after the
+# release job has uploaded the bundler outputs (restored under
+# src-tauri/target/release/bundle/).
 #
 # Required environment:
 #   RELEASE_TAG    release tag (e.g. v0.3.1); leading 'v' is stripped for VERSION
