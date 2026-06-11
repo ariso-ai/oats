@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const listMeetings = vi.fn();
+const getMeetingDetail = vi.fn();
 const usesMeetingPicker = vi.fn(() => false);
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
@@ -15,7 +16,12 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 }));
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () =>
-    Promise.resolve({ id: 'local', usesMeetingPicker: usesMeetingPicker(), listMeetings: () => listMeetings() }),
+    Promise.resolve({
+      id: 'local',
+      usesMeetingPicker: usesMeetingPicker(),
+      listMeetings: () => listMeetings(),
+      getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
+    }),
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
@@ -46,6 +52,18 @@ enableAutoUnmount(afterEach);
 beforeEach(() => {
   vi.clearAllMocks();
   getAllWebviewWindows.mockResolvedValue([]);
+  getMeetingDetail.mockImplementation((meeting) =>
+    Promise.resolve({
+      id: meeting.id,
+      title: meeting.title,
+      startAt: meeting.timestamp,
+      participants: [],
+      actionItems: [],
+      isLocal: true,
+      durationSeconds: meeting.durationSeconds,
+      hasTranscript: meeting.files?.hasTranscript ?? false,
+    })
+  );
   invoke.mockResolvedValue(undefined);
   usesMeetingPicker.mockReturnValue(false);
 });
@@ -75,15 +93,13 @@ describe('LibraryView', () => {
     expect(rows[1].text()).toContain('First');
   });
 
-  it('clicking a meeting item selects it (aria-pressed becomes true)', async () => {
+  it('auto-selects the first meeting item', async () => {
     listMeetings.mockResolvedValue([
       item({ id: 'a', title: 'Standup' }),
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
     const btn = wrapper.find('.meeting-item');
-    expect(btn.attributes('aria-pressed')).toBe('false');
-    await btn.trigger('click');
     expect(btn.attributes('aria-pressed')).toBe('true');
     expect(btn.classes()).toContain('selected');
   });

@@ -36,6 +36,8 @@ fn main() {
             commands::create_library_window,
             commands::read_recording_audio,
             commands::read_recording_file,
+            commands::read_recording_note,
+            commands::write_recording_note,
             commands::open_recording_file,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,

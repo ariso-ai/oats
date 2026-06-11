@@ -21,7 +21,7 @@ compile_error!("Features `prod-api` and `dev-api` are mutually exclusive");
 #[cfg(feature = "prod-api")]
 pub(crate) const API_BASE_URL: &str = "https://api.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
+pub(crate) const API_BASE_URL: &str = "http://100.88.135.32:4000";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
 pub(crate) const API_BASE_URL: &str = "http://localhost:4000";
 
@@ -37,7 +37,7 @@ pub(crate) const PUSHER_CLUSTER: &str = "us2";
 #[cfg(feature = "prod-api")]
 pub(crate) const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
+pub(crate) const WEB_APP_BASE_URL: &str = "https://dev-agents-desktop-12.cheetah-oratrice.ts.net";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
 pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
 
@@ -701,6 +701,28 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Read the local note artifact used by the Library editor. Missing notes
+/// return an empty string so a fresh local recording can start autosaving into
+/// `note.md` without a separate draft file.
+#[tauri::command]
+pub fn read_recording_note(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("note.md");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read recording note: {e}")),
+    }
+}
+
+/// Persist user-authored in-meeting notes to `note.md` beside the recording.
+/// Generated notes already use the same atomic writer, so manual and generated
+/// notes remain one durable local artifact instead of creating parallel stores.
+#[tauri::command]
+pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    crate::storage::write_notes(&dir, &markdown)
+}
+
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
@@ -775,5 +797,26 @@ mod tests {
         let dir = recording_dir(id).unwrap();
         assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn recording_note_roundtrips_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note commands resolve through ARISO_ROOT, so this test follows the
+        // same serial test command requirement as the recording-dir tests.
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        assert_eq!(read_recording_note(id.into()).unwrap(), "");
+        write_recording_note(id.into(), "# Note\n- point".into()).unwrap();
+        let saved = read_recording_note(id.into()).unwrap();
+        assert_eq!(saved, "# Note\n- point");
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
     }
 }

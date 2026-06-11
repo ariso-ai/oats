@@ -84,8 +84,9 @@
     <section class="detail-wrap">
       <MeetingDetailView
         v-if="selectedItem"
+        ref="detailView"
         :item="selectedItem"
-        @close="selectedItem = null"
+        @close="clearSelection"
         @title-updated="onTitleUpdated"
       />
       <div v-else class="empty-card">
@@ -115,6 +116,10 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
+  saveNotesNow?: () => Promise<void>;
+};
+const detailView = ref<MeetingDetailViewExposed | null>(null);
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
 // split stay fresh while the window sits open.
@@ -171,8 +176,17 @@ function itemSub(m: MeetingListItem): string {
   return time;
 }
 
-function selectMeeting(m: MeetingListItem): void {
+// Selection changes ask the detail pane to flush editable notes first, so a
+// slow autosave from the previous meeting cannot land after the row changed.
+async function selectMeeting(m: MeetingListItem): Promise<void> {
+  if (selectedItem.value?.id === m.id) return;
+  await detailView.value?.saveNotesNow?.();
   selectedItem.value = m;
+}
+
+async function clearSelection(): Promise<void> {
+  await detailView.value?.saveNotesNow?.();
+  selectedItem.value = null;
 }
 
 // Keep the sidebar (and the selected reference) in sync after an inline rename
@@ -214,6 +228,12 @@ async function loadMeetings(): Promise<void> {
   error.value = null;
   try {
     meetings.value = await (await getActiveBackend()).listMeetings();
+    if (!selectedItem.value && meetings.value.length > 0) {
+      await selectMeeting(meetings.value[0]);
+    } else if (selectedItem.value) {
+      selectedItem.value =
+        meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
+    }
   } catch (e) {
     console.error('Failed to list meetings', e);
     error.value = 'Could not load meetings.';
@@ -236,6 +256,15 @@ async function refreshRecordingState(): Promise<void> {
 async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
+    const meetingId =
+      selectedItem.value && !selectedItem.value.files && /^\d+$/.test(selectedItem.value.id)
+        ? Number(selectedItem.value.id)
+        : undefined;
+    if (meetingId != null) {
+      await invoke('start_recording_window', { meetingId });
+      setRecording(true);
+      return;
+    }
     if (backend.usesMeetingPicker) {
       // Picker-using backends (Ariso) choose a meeting first; the picker then
       // starts the recorder itself.
