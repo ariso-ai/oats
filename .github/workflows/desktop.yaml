@@ -103,7 +103,7 @@ jobs:
     # the required-reviewer protection rule (see README → Signing & Notarization).
     environment: release
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -173,6 +173,41 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- -- --features prod-api
+
+      # Hand the bundler outputs to the publish job. Paths share the common
+      # ancestor bundle/, so the artifact preserves the macos/ and dmg/
+      # subdirectories that release-publish.sh expects. The DMG and tarball are
+      # already compressed, so skip recompression.
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          path: |
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/dmg/*.dmg
+
+  publish:
+    name: Generate manifest and publish artifacts to R2
+    needs: release
+    runs-on: [self-hosted, macOS, ARM64]
+    # The R2 credentials live in the `release` environment alongside the Apple
+    # signing secrets (see README → Signing & Notarization).
+    environment: release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Download release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: release-bundle
+          path: src-tauri/target/release/bundle
 
       - name: Generate manifest and publish artifacts to R2
         env:

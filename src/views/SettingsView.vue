@@ -10,16 +10,26 @@
     <section class="section">
       <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Backend</span>
-          <div class="backend-select">
+          <span id="backend-label" class="setting-label">Backend</span>
+          <div
+            ref="backendSelectRef"
+            class="backend-select"
+            @focusout="onBackendFocusOut"
+            @keydown.escape.prevent="closeBackendMenu"
+          >
             <button
+              ref="backendTriggerRef"
               type="button"
               class="backend-trigger"
               :disabled="recordingActive"
               aria-haspopup="listbox"
               :aria-expanded="backendOpen"
-              @click="backendOpen = !backendOpen"
-              @blur="backendOpen = false"
+              aria-controls="backend-listbox"
+              @click="toggleBackendMenu"
+              @keydown.down.prevent="openBackendMenu(0)"
+              @keydown.up.prevent="openBackendMenu(backendOptions.length - 1)"
+              @keydown.enter.prevent="toggleBackendMenu"
+              @keydown.space.prevent="toggleBackendMenu"
             >
               <span class="backend-trigger-text">{{ currentBackend.label }}</span>
               <svg v-if="backend === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -34,15 +44,28 @@
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-            <ul v-if="backendOpen" class="backend-menu" role="listbox">
+            <ul
+              v-if="backendOpen"
+              id="backend-listbox"
+              class="backend-menu"
+              role="listbox"
+              aria-labelledby="backend-label"
+            >
               <li
-                v-for="opt in backendOptions"
+                v-for="(opt, idx) in backendOptions"
                 :key="opt.value"
                 class="backend-option"
                 :class="{ 'backend-option--active': backend === opt.value }"
                 role="option"
                 :aria-selected="backend === opt.value"
+                tabindex="-1"
                 @mousedown.prevent="selectBackend(opt.value)"
+                @keydown.down.prevent="focusOption(idx + 1)"
+                @keydown.up.prevent="focusOption(idx - 1)"
+                @keydown.home.prevent="focusOption(0)"
+                @keydown.end.prevent="focusOption(backendOptions.length - 1)"
+                @keydown.enter.prevent="selectBackend(opt.value)"
+                @keydown.space.prevent="selectBackend(opt.value)"
               >
                 <span>{{ opt.label }}</span>
                 <svg v-if="opt.value === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -276,10 +299,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import {
@@ -373,12 +396,56 @@ watch(recordingActive, (active) => {
   if (active) backendOpen.value = false;
 });
 
+const backendSelectRef = ref<HTMLElement | null>(null);
+const backendTriggerRef = ref<HTMLButtonElement | null>(null);
 const currentBackend = computed(
   () => backendOptions.find((o) => o.value === backend.value) ?? backendOptions[0],
 );
 
+function focusOption(idx: number) {
+  const wrapper = backendSelectRef.value;
+  if (!wrapper) return;
+  const options = wrapper.querySelectorAll<HTMLElement>('.backend-option');
+  if (options.length === 0) return;
+  const wrapped = ((idx % options.length) + options.length) % options.length;
+  options[wrapped]?.focus();
+}
+
+async function openBackendMenu(focusIdx: number) {
+  if (!backendOpen.value) {
+    backendOpen.value = true;
+    await nextTick();
+  }
+  focusOption(focusIdx);
+}
+
+function closeBackendMenu() {
+  if (!backendOpen.value) return;
+  backendOpen.value = false;
+  backendTriggerRef.value?.focus();
+}
+
+function toggleBackendMenu() {
+  if (backendOpen.value) {
+    closeBackendMenu();
+  } else {
+    const selectedIdx = backendOptions.findIndex((o) => o.value === backend.value);
+    void openBackendMenu(selectedIdx >= 0 ? selectedIdx : 0);
+  }
+}
+
+function onBackendFocusOut(e: FocusEvent) {
+  // Close when focus moves outside the wrapper (e.g., Tab away or click
+  // elsewhere). Keep open when focus moves between trigger and options.
+  const next = e.relatedTarget as Node | null;
+  if (!next || !backendSelectRef.value?.contains(next)) {
+    backendOpen.value = false;
+  }
+}
+
 async function selectBackend(next: 'ariso' | 'local') {
   backendOpen.value = false;
+  backendTriggerRef.value?.focus();
   if (recordingActive.value) return;
   if (next === backend.value) return;
   backend.value = next;
@@ -621,12 +688,31 @@ async function fetchUserProfile() {
 let unlistenSignInPrompt: UnlistenFn | null = null;
 const unlistenUpdates: UnlistenFn[] = [];
 
-onMounted(async () => {
-  const session = await auth.checkSession();
-  isSignedIn.value = !!session;
-  if (isSignedIn.value) {
-    await fetchUserProfile();
+// Refresh account UI from persisted native session state. The settings window is
+// hidden/pre-created at app startup, so it cannot rely only on its first mount.
+// Never throws: a checkSession failure in onMounted would otherwise abort the
+// rest of initialization (update listeners, recording bootstrap, etc.), and a
+// failure inside the AUTH_SIGNED_IN_EVENT callback would reject the listener.
+async function refreshSignedInAccount() {
+  try {
+    const session = await auth.checkSession();
+    isSignedIn.value = !!session;
+    if (isSignedIn.value) {
+      await fetchUserProfile();
+    } else {
+      displayName.value = '';
+      email.value = '';
+    }
+  } catch (e) {
+    isSignedIn.value = false;
+    displayName.value = '';
+    email.value = '';
+    console.warn('Failed to refresh signed-in account', e);
   }
+}
+
+onMounted(async () => {
+  await refreshSignedInAccount();
 
   // Bootstrap recording toggles in its own try/catch so a settings-store or
   // permission-preflight failure doesn't abort the rest of onMounted (update
@@ -652,6 +738,10 @@ onMounted(async () => {
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
   });
+  const unSignedIn = await listen(AUTH_SIGNED_IN_EVENT, async () => {
+    await refreshSignedInAccount();
+    signInPrompt.value = false;
+  });
 
   await loadUpdateState();
 
@@ -670,7 +760,7 @@ onMounted(async () => {
     checking.value = false;
   });
 
-  unlistenUpdates.push(unAvail, unNone, unChecking, unError);
+  unlistenUpdates.push(unSignedIn, unAvail, unNone, unChecking, unError);
 
   try {
     backend.value = await getBackendSetting();
@@ -1014,6 +1104,12 @@ async function handleSignOut() {
 
 .backend-option:hover {
   background: rgba(0, 0, 0, 0.03);
+}
+
+.backend-option:focus-visible {
+  background: #f5f5f7;
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
 }
 
 .backend-option--active {

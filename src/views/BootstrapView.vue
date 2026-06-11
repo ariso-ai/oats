@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { SYNC_EVENT } from '../composables/useMeetingNotifications';
 import { AUTO_RECORD_SYNC_EVENT } from '../composables/useAutoRecord';
+import { auth, isOnboarded, openOnboardingWindow, setOnboarded } from '../tauri';
 
 // The notification orchestrator lives natively in Rust; this window just asks
 // it to re-evaluate (session + enabled toggle) on launch and whenever a sync
@@ -35,6 +36,23 @@ onMounted(async () => {
   } else {
     unlistenAuto = offAuto;
     void invoke('sync_auto_record');
+  }
+
+  // First-run onboarding: the persisted `onboarded` flag owns whether the
+  // desktop prompt has been dismissed, while an existing valid session marks
+  // upgraded installs as already past sign-in.
+  try {
+    if (await isOnboarded()) {
+      return;
+    }
+    const session = await auth.checkSession();
+    if (session) {
+      await setOnboarded(true);
+    } else {
+      await openOnboardingWindow();
+    }
+  } catch (e) {
+    console.warn('Failed to evaluate first-run onboarding', e);
   }
 });
 

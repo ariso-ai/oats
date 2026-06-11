@@ -19,6 +19,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 vi.mock('../tauri', () => ({
+  AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
   auth: {
     checkSession: () => Promise.resolve(null),
     googleSignIn: vi.fn(),
