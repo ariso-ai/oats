@@ -563,6 +563,10 @@ pub(crate) fn open_waveform_window(
 
     crate::tray::set_menu(app, true, false);
 
+    // Pin the recorder to the library window's right edge for the duration
+    // of the recording (released while the library is minimized or absent).
+    crate::recorder_attach::spawn_watcher(app);
+
     // Tell every window (the library in particular) which meeting the new
     // recording is attached to, so it can surface that meeting immediately.
     let _ = app.emit(
