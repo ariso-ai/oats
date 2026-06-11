@@ -98,6 +98,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
 import {
@@ -249,6 +250,24 @@ async function startRecording(): Promise<void> {
   }
 }
 
+// The Rust side announces every new recording (picker, tray, auto) with the
+// meeting id it was started against. Collapse the sidebar right away and pull
+// the picked meeting into the detail panel so the user sees what's recording.
+async function onRecordingStarted(event: { payload: { meetingId: number | null } }): Promise<void> {
+  setRecording(true);
+  const id = event.payload?.meetingId;
+  if (id == null) return;
+  const idStr = String(id);
+  let m = meetings.value.find((x) => x.id === idStr);
+  if (!m) {
+    // The picker can start a meeting the library hasn't loaded yet (e.g. it
+    // appeared on the calendar after our last refresh) — reload once.
+    await loadMeetings();
+    m = meetings.value.find((x) => x.id === idStr);
+  }
+  if (m) selectedItem.value = m;
+}
+
 function onWindowFocus(): void {
   now.value = new Date();
   void loadMeetings();
@@ -256,10 +275,14 @@ function onWindowFocus(): void {
 }
 
 let clockTimer: number | undefined;
+let unlistenRecordingStarted: UnlistenFn | null = null;
 
 onMounted(() => {
   void loadMeetings();
   void refreshRecordingState();
+  void listen('recording://started', onRecordingStarted).then((un) => {
+    unlistenRecordingStarted = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -269,6 +292,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
+  unlistenRecordingStarted?.();
 });
 </script>
 

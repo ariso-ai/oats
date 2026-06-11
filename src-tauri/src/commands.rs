@@ -562,6 +562,13 @@ pub(crate) fn open_waveform_window(
     });
 
     crate::tray::set_menu(app, true, false);
+
+    // Tell every window (the library in particular) which meeting the new
+    // recording is attached to, so it can surface that meeting immediately.
+    let _ = app.emit(
+        "recording://started",
+        serde_json::json!({ "meetingId": meeting_id }),
+    );
     Ok(())
 }
 
