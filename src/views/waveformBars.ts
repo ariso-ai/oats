@@ -16,11 +16,18 @@ export function bucketLevels(levels: number[], buckets: number): number[] {
   return out;
 }
 
+/** How much the side bars track the center bar. Voice energy concentrates in
+ *  the center's low-frequency bucket; without blending, the side bars (mid /
+ *  high buckets) sit nearly dead during speech. */
+const SIDE_FOLLOW = 0.5;
+
 /**
  * Bucket levels, then arrange the bars so the lowest-frequency bucket — where
  * voice energy concentrates, making it the most reactive — sits in the
- * center, with later (quieter) buckets fanning out left/right. Renders the
- * recorder's 3-bar waveform.
+ * center, with later (quieter) buckets fanning out left/right. Each side bar
+ * is blended toward the center's level so the whole waveform moves with
+ * speech instead of only the middle bar. Renders the recorder's 3-bar
+ * waveform.
  */
 export function centerWeightedBars(levels: number[], buckets: number): number[] {
   const byFrequency = bucketLevels(levels, buckets);
@@ -33,5 +40,8 @@ export function centerWeightedBars(levels: number[], buckets: number): number[] 
     else if ((i % 2 === 1 && left >= 0) || right >= out.length) out[left--] = v;
     else out[right++] = v;
   });
+  for (let i = 0; i < out.length; i++) {
+    if (i !== center) out[i] = out[i] * (1 - SIDE_FOLLOW) + out[center] * SIDE_FOLLOW;
+  }
   return out;
 }
