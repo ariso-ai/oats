@@ -8,14 +8,53 @@
 
     <!-- Transcription Backend Section -->
     <section class="section">
-      <h2 class="section-title">Transcription Backend</h2>
       <div class="card">
         <div class="setting-row">
           <span class="setting-label">Backend</span>
-          <select :value="backend" class="setting-select" @change="onSelectBackend">
-            <option value="ariso">Ariso (cloud)</option>
-            <option value="local">Local (on-device)</option>
-          </select>
+          <div class="backend-select">
+            <button
+              type="button"
+              class="backend-trigger"
+              aria-haspopup="listbox"
+              :aria-expanded="backendOpen"
+              @click="backendOpen = !backendOpen"
+              @blur="backendOpen = false"
+            >
+              <span class="backend-trigger-text">{{ currentBackend.label }}</span>
+              <svg v-if="backend === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+              </svg>
+              <svg v-else class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+              <svg class="backend-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            <ul v-if="backendOpen" class="backend-menu" role="listbox">
+              <li
+                v-for="opt in backendOptions"
+                :key="opt.value"
+                class="backend-option"
+                :class="{ 'backend-option--active': backend === opt.value }"
+                role="option"
+                :aria-selected="backend === opt.value"
+                @mousedown.prevent="selectBackend(opt.value)"
+              >
+                <span>{{ opt.label }}</span>
+                <svg v-if="opt.value === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                </svg>
+                <svg v-else class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                  <line x1="8" y1="21" x2="16" y2="21" />
+                  <line x1="12" y1="17" x2="12" y2="21" />
+                </svg>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </section>
@@ -302,8 +341,18 @@ async function refreshModelStatus() {
   }
 }
 
-async function onSelectBackend(e: Event) {
-  const next = (e.target as HTMLSelectElement).value === 'local' ? 'local' : 'ariso';
+const backendOptions = [
+  { value: 'ariso', label: 'ariso.ai' },
+  { value: 'local', label: 'Local' },
+] as const;
+const backendOpen = ref(false);
+const currentBackend = computed(
+  () => backendOptions.find((o) => o.value === backend.value) ?? backendOptions[0],
+);
+
+async function selectBackend(next: 'ariso' | 'local') {
+  backendOpen.value = false;
+  if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
   if (next === 'local') {
@@ -844,12 +893,69 @@ async function handleSignOut() {
   line-height: 1;
 }
 
-.setting-select {
+.backend-select {
+  position: relative;
+}
+
+.backend-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 13px;
   padding: 4px 8px;
   border: 1px solid #d1d5db;
   border-radius: 6px;
   background: white;
+  color: #6366f1;
+  cursor: pointer;
+}
+
+.backend-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.backend-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: #9ca3af;
+}
+
+.backend-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  min-width: 100%;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: white;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.backend-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #1d1d1f;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.backend-option:hover {
+  background: #f5f5f7;
+}
+
+.backend-option--active {
   color: #6366f1;
 }
 
