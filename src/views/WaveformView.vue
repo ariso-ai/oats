@@ -148,7 +148,13 @@ function currentPhase(): RecorderPhase {
   return 'recording';
 }
 
+// Once `closed` is sent, stay silent: a heartbeat firing between the closed
+// broadcast and the window's destruction would otherwise revive the strip.
+let closedSent = false;
+
 function broadcastState(phase: RecorderPhase = currentPhase()): void {
+  if (closedSent) return;
+  if (phase === 'closed') closedSent = true;
   emit('recorder://state', {
     bars: centerWeightedBars(recorder.frameLevels.value.slice(0, 20), 3),
     durationSeconds: recorder.durationSeconds.value,
@@ -163,6 +169,10 @@ watch(
   [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
   () => broadcastState(),
 );
+// Heartbeat so the strip can detect a dead recorder (no events ≈ crashed):
+// frame/duration watchers go quiet during upload and after stop.
+const stateHeartbeat = setInterval(() => broadcastState(), 1_000);
+onUnmounted(() => clearInterval(stateHeartbeat));
 
 function expand() {
   // Don't expand during upload/result states.
