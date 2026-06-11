@@ -68,13 +68,27 @@ export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): Mee
   return sections;
 }
 
-/** Today's meetings only, soonest-first; drops other days and invalid dates. */
-export function todaysMeetings(meetings: MeetingListItem[], now: Date): MeetingListItem[] {
+/** Today's meetings split into UPCOMING (still to come) then EARLIER (already
+ *  started), each ordered earliest-first; drops other days and invalid dates. */
+export function groupTodaysMeetings(meetings: MeetingListItem[], now: Date): MeetingSection[] {
+  const nowMs = now.getTime();
   const today = localDateKey(now);
-  return meetings
-    .filter((meeting) => {
-      const d = new Date(meeting.timestamp);
-      return !Number.isNaN(d.getTime()) && localDateKey(d) === today;
-    })
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const upcoming: MeetingListItem[] = [];
+  const earlier: MeetingListItem[] = [];
+  for (const meeting of meetings) {
+    const d = new Date(meeting.timestamp);
+    if (Number.isNaN(d.getTime()) || localDateKey(d) !== today) continue;
+    if (d.getTime() > nowMs) upcoming.push(meeting);
+    else earlier.push(meeting);
+  }
+
+  const byTimeAsc = (a: MeetingListItem, b: MeetingListItem) =>
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+  upcoming.sort(byTimeAsc);
+  earlier.sort(byTimeAsc);
+
+  const sections: MeetingSection[] = [];
+  if (upcoming.length) sections.push({ key: 'upcoming', label: 'UPCOMING', items: upcoming });
+  if (earlier.length) sections.push({ key: 'earlier', label: 'EARLIER', items: earlier });
+  return sections;
 }

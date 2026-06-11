@@ -97,7 +97,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
-import { groupMeetingsByDate, todaysMeetings, type MeetingSection } from '../composables/groupMeetingsByDate';
+import { groupMeetingsByDate, groupTodaysMeetings, type MeetingSection } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -115,8 +115,7 @@ const activeView = ref<'today' | 'meetings'>('meetings');
 
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
-    const items = todaysMeetings(meetings.value, now);
-    return items.length ? [{ key: 'today', label: '', items }] : [];
+    return groupTodaysMeetings(meetings.value, now);
   }
   return groupMeetingsByDate(meetings.value, now);
 });
@@ -268,9 +267,9 @@ onUnmounted(() => {
 
 /* Sidebar */
 .sidebar {
-  width: 276px;
+  width: 300px;
   flex-shrink: 0;
-  padding: 40px 18px 16px;
+  padding: 40px 18px 18px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -356,7 +355,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-top: 12px;
+  padding-top: 24px;
 }
 .nav-pill,
 .nav-circle {
@@ -407,7 +406,7 @@ onUnmounted(() => {
 .detail-wrap {
   flex: 1;
   min-width: 0;
-  padding: 28px 24px 24px 8px;
+  padding: 28px 18px 18px 8px;
   box-sizing: border-box;
   display: flex;
   min-height: 0;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupMeetingsByDate, todaysMeetings, dateLabel } from './groupMeetingsByDate';
+import { groupMeetingsByDate, groupTodaysMeetings, dateLabel } from './groupMeetingsByDate';
 import type { MeetingListItem } from './useBackend';
 
 // Fixed "now": Wed 2026-06-10 15:00 local.
@@ -49,14 +49,32 @@ describe('groupMeetingsByDate', () => {
   });
 });
 
-describe('todaysMeetings', () => {
-  it('returns only today, soonest-first, dropping other days and NaN', () => {
+describe('groupTodaysMeetings', () => {
+  it('splits today into UPCOMING then EARLIER, each earliest-first', () => {
     const meetings = [
       m('y', '2026-06-09T09:00:00'),
-      m('t2', '2026-06-10T18:00:00'),
-      m('t1', '2026-06-10T08:00:00'),
+      m('up-late', '2026-06-10T18:00:00'),
+      m('up-soon', '2026-06-10T16:30:00'),
+      m('past-late', '2026-06-10T11:00:00'),
+      m('past-early', '2026-06-10T09:00:00'),
       m('bad', 'nope'),
     ];
-    expect(todaysMeetings(meetings, NOW).map((x) => x.id)).toEqual(['t1', 't2']);
+    const sections = groupTodaysMeetings(meetings, NOW);
+    expect(sections.map((s) => s.label)).toEqual(['UPCOMING', 'EARLIER']);
+    expect(sections[0].items.map((x) => x.id)).toEqual(['up-soon', 'up-late']);
+    expect(sections[1].items.map((x) => x.id)).toEqual(['past-early', 'past-late']);
+  });
+
+  it('omits a group when it has no meetings', () => {
+    expect(groupTodaysMeetings([m('p', '2026-06-10T09:00:00')], NOW).map((s) => s.label)).toEqual([
+      'EARLIER',
+    ]);
+    expect(groupTodaysMeetings([m('u', '2026-06-10T18:00:00')], NOW).map((s) => s.label)).toEqual([
+      'UPCOMING',
+    ]);
+  });
+
+  it('returns an empty array when nothing is today', () => {
+    expect(groupTodaysMeetings([m('y', '2026-06-09T09:00:00'), m('bad', 'nope')], NOW)).toEqual([]);
   });
 });
