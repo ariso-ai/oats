@@ -409,6 +409,7 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
     if !is_recording {
         use tauri::Manager;
         app.state::<crate::recording_state::RecordingState>().clear();
+        let _ = app.emit("recording://state", false);
     }
     Ok(())
 }
@@ -479,6 +480,7 @@ pub(crate) fn open_waveform_window(
         crate::recording_state::RecordingSource::Manual
     };
     app.state::<crate::recording_state::RecordingState>().set(source);
+    let _ = app.emit("recording://state", true);
 
     // If the window is destroyed without a clean stop (crash / force-close),
     // clear the shared flag so the monitor can recover and re-arm.
@@ -488,6 +490,7 @@ pub(crate) fn open_waveform_window(
             app_for_event
                 .state::<crate::recording_state::RecordingState>()
                 .clear();
+            let _ = app_for_event.emit("recording://state", false);
         }
     });
 
