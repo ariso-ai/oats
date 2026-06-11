@@ -135,11 +135,14 @@ pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> 
 pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, String> {
     let client = http_client();
 
-    // Step 1: Get the OAuth redirect URL from the API
+    // Step 1: Get the OAuth redirect URL from the API. The backend expands
+    // these service names into Google scopes and owns credential persistence.
     let response = client
         .post(format!("{API_BASE_URL}/oauth2/prepare-state"))
         .header(CONTENT_TYPE, "application/json")
-        .body(r#"{"integration":"google-signin"}"#)
+        .body(
+            r#"{"integration":"google-signin","scopes":["calendar-readonly"],"newUserSignupIntent":"personal_unless_domain_autojoin"}"#,
+        )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -419,6 +422,7 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
 
     // Focus if already exists
     if let Some(win) = app.get_webview_window("settings") {
+        win.show().map_err(|e: tauri::Error| e.to_string())?;
         win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
         return Ok(());
     }
@@ -426,6 +430,30 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/#/settings".into()))
         .title("Ariso Settings")
         .inner_size(450.0, 800.0)
+        .resizable(false)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Open the dedicated first-run onboarding window. It is separate from Settings
+/// so a fresh install can explain sign-in before the main preferences surface.
+#[tauri::command]
+pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Focus if already exists
+    if let Some(win) = app.get_webview_window("onboarding") {
+        win.show().map_err(|e: tauri::Error| e.to_string())?;
+        win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, "onboarding", WebviewUrl::App("/#/onboarding".into()))
+        .title("Welcome to Ariso")
+        .inner_size(450.0, 600.0)
         .resizable(false)
         .center()
         .build()

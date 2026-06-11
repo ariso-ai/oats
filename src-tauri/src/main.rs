@@ -27,6 +27,7 @@ fn main() {
             commands::upload_file,
             commands::set_tray_recording,
             commands::create_settings_window,
+            commands::create_onboarding_window,
             commands::start_recording_window,
             commands::open_meeting_picker,
             commands::put_presigned,
