@@ -119,4 +119,23 @@ describe('RecorderStrip', () => {
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
+
+  it('clears itself when state broadcasts stop (recorder died without closing)', async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RecorderStrip, { props: { meetingId: null } });
+    await flushPromises();
+    sendState(recording({ meetingId: null }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    // Heartbeats keep it alive…
+    sendState(recording({ meetingId: null }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    // …but silence means the recorder is gone.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    vi.useRealTimers();
+  });
 });

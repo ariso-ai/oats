@@ -65,8 +65,13 @@ interface RecorderState {
 /** The meeting currently shown in the detail panel (null when none). */
 const props = defineProps<{ meetingId: string | null }>();
 
+// The recorder heartbeats state about every second; a longer silence means it
+// died without broadcasting `closed` (crash / force-close) — clear the strip.
+const STALE_MS = 4000;
+
 const state = ref<RecorderState | null>(null);
 let unlistenState: UnlistenFn | null = null;
+let staleTimer: ReturnType<typeof setTimeout> | null = null;
 
 // The strip belongs to the recorded meeting: render it only while the detail
 // panel shows that meeting. Meeting-less recordings have no home section, so
@@ -90,12 +95,21 @@ function control(event: string): void {
 
 onMounted(async () => {
   unlistenState = await listen<RecorderState>('recorder://state', (e) => {
-    state.value = e.payload.phase === 'closed' ? null : e.payload;
+    if (staleTimer) clearTimeout(staleTimer);
+    if (e.payload.phase === 'closed') {
+      state.value = null;
+      return;
+    }
+    state.value = e.payload;
+    staleTimer = setTimeout(() => {
+      state.value = null;
+    }, STALE_MS);
   });
 });
 
 onUnmounted(() => {
   unlistenState?.();
+  if (staleTimer) clearTimeout(staleTimer);
 });
 </script>
 

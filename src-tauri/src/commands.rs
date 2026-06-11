@@ -448,9 +448,13 @@ pub async fn upload_file(
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
     crate::tray::set_menu(&app, is_recording, is_paused);
-    if !is_recording {
-        use tauri::Manager;
-        app.state::<crate::recording_state::RecordingState>().clear();
+    let state = app.state::<crate::recording_state::RecordingState>();
+    if is_recording {
+        // The recorder window reports this right after capture starts; the
+        // pill visibility watcher waits for it before hiding the window.
+        state.mark_capture_active();
+    } else {
+        state.clear();
         let _ = app.emit("recording://state", false);
     }
     Ok(())
@@ -532,11 +536,12 @@ pub(crate) fn open_waveform_window(
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
         .inner_size(92.0, 284.0)
-        // Born hidden while the library window shows the embedded recorder
-        // strip; the visibility watcher reveals it on minimize/close.
-        .visible(crate::recorder_pill::should_show_now(app))
-        // A hidden WKWebView is suspended by macOS, which would stall the
-        // recording and its recorder://state broadcasts until first shown.
+        // Born visible even when the library's embedded strip is the real UI:
+        // WebKit won't resolve getUserMedia for a hidden window, so the pill
+        // must stay on screen until capture starts. The visibility watcher
+        // hides it then (set_tray_recording marks capture active).
+        // Throttling is disabled so the hidden webview keeps recording and
+        // broadcasting recorder://state.
         .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
