@@ -70,11 +70,11 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('WaveformView vertical pill', () => {
-  it('starts recording on mount and renders 5 waveform bars + 6 drag dots', async () => {
+  it('starts recording on mount and renders 3 waveform bars + 6 drag dots', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();
     expect(startRecording).toHaveBeenCalledWith('mic');
-    expect(wrapper.findAll('.bar')).toHaveLength(5);
+    expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.findAll('.dot')).toHaveLength(6);
   });
 

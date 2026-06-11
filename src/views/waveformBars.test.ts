@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bucketLevels } from './waveformBars';
+import { bucketLevels, centerWeightedBars } from './waveformBars';
 
 describe('bucketLevels', () => {
   it('returns the requested number of bars', () => {
@@ -18,5 +18,22 @@ describe('bucketLevels', () => {
 
   it('returns zeros for empty input', () => {
     expect(bucketLevels([], 5)).toEqual([0, 0, 0, 0, 0]);
+  });
+});
+
+describe('centerWeightedBars', () => {
+  it('puts the lowest-frequency (most energetic) bucket in the center', () => {
+    // 9 bins → 3 buckets averaging [1, 0.5, 0.25]; the hot low bucket must
+    // land on the middle bar, not the first.
+    const levels = [1, 1, 1, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25];
+    expect(centerWeightedBars(levels, 3)).toEqual([0.5, 1, 0.25]);
+  });
+
+  it('returns the requested number of bars', () => {
+    expect(centerWeightedBars(new Array(32).fill(0.5), 3)).toHaveLength(3);
+  });
+
+  it('returns zeros for empty input', () => {
+    expect(centerWeightedBars([], 3)).toEqual([0, 0, 0]);
   });
 });

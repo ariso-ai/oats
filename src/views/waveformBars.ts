@@ -1,6 +1,5 @@
 /**
  * Downsample an array of normalized levels (0–1) into `buckets` averaged bars.
- * Used to render the 5-bar recorder waveform from the 32-bin audio analyser.
  */
 export function bucketLevels(levels: number[], buckets: number): number[] {
   if (buckets <= 0) return [];
@@ -14,5 +13,25 @@ export function bucketLevels(levels: number[], buckets: number): number[] {
     const sum = slice.reduce((acc, v) => acc + v, 0);
     out.push(slice.length ? sum / slice.length : 0);
   }
+  return out;
+}
+
+/**
+ * Bucket levels, then arrange the bars so the lowest-frequency bucket — where
+ * voice energy concentrates, making it the most reactive — sits in the
+ * center, with later (quieter) buckets fanning out left/right. Renders the
+ * recorder's 3-bar waveform.
+ */
+export function centerWeightedBars(levels: number[], buckets: number): number[] {
+  const byFrequency = bucketLevels(levels, buckets);
+  const out = new Array<number>(byFrequency.length).fill(0);
+  const center = Math.floor(byFrequency.length / 2);
+  let left = center - 1;
+  let right = center + 1;
+  byFrequency.forEach((v, i) => {
+    if (i === 0) out[center] = v;
+    else if ((i % 2 === 1 && left >= 0) || right >= out.length) out[left--] = v;
+    else out[right++] = v;
+  });
   return out;
 }

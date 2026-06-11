@@ -95,7 +95,7 @@ import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend } from '../composables/useBackend';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
-import { bucketLevels } from './waveformBars';
+import { centerWeightedBars } from './waveformBars';
 import { shouldAutoStop } from '../composables/silenceWatch';
 import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
@@ -110,9 +110,9 @@ const uploadResult = ref<'success' | 'failed' | null>(null);
 const isExpanded = ref(false);
 
 // Voice energy lives in the low FFT bins; the upper bins are near-silent and
-// would leave the higher bars dead. Bucket only the low part of the spectrum
-// so all five bars react to speech.
-const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 20), 5));
+// would leave the higher bars dead. Bucket only the low part of the spectrum,
+// center-weighted so the middle bar carries the hottest (lowest) bucket.
+const bars = computed(() => centerWeightedBars(waveform.levels.value.slice(0, 20), 3));
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
@@ -443,7 +443,7 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 28px;
+  height: 18px;
   margin-top: 7px;
   flex-shrink: 0;
 }
