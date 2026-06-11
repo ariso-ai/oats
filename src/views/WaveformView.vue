@@ -531,15 +531,15 @@ html, body {
 
 .drag-dots {
   display: grid;
-  grid-template-columns: repeat(3, 4px);
-  gap: 3px 4px;
+  grid-template-columns: repeat(3, 3.2px);
+  gap: 2.4px 3.2px;
   justify-content: center;
   margin-top: 6px;
 }
 
 .dot {
-  width: 4px;
-  height: 4px;
+  width: 3.2px;
+  height: 3.2px;
   border-radius: 50%;
   background: #6b7280;
 }
