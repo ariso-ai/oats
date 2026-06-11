@@ -535,6 +535,9 @@ pub(crate) fn open_waveform_window(
         // Born hidden while the library window shows the embedded recorder
         // strip; the visibility watcher reveals it on minimize/close.
         .visible(crate::recorder_pill::should_show_now(app))
+        // A hidden WKWebView is suspended by macOS, which would stall the
+        // recording and its recorder://state broadcasts until first shown.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
