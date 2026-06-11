@@ -21,6 +21,7 @@
               ref="backendTriggerRef"
               type="button"
               class="backend-trigger"
+              :disabled="recordingActive"
               aria-haspopup="listbox"
               :aria-expanded="backendOpen"
               aria-controls="backend-listbox"
@@ -79,6 +80,9 @@
             </ul>
           </div>
         </div>
+        <p v-if="recordingActive" class="setting-hint">
+          Backend can't be changed while recording.
+        </p>
       </div>
     </section>
 
@@ -295,8 +299,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
 import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -369,6 +374,28 @@ const backendOptions = [
   { value: 'local', label: 'Local' },
 ] as const;
 const backendOpen = ref(false);
+const recordingActive = ref(false);
+
+// Recording runs in the separate "waveform" window; its presence is the
+// source of truth on mount/focus, and recording://state keeps it live while
+// this (persistent) window stays open in the background.
+async function refreshRecordingState() {
+  try {
+    const wins = await getAllWebviewWindows();
+    recordingActive.value = wins.some((w) => w.label === 'waveform');
+  } catch (e) {
+    console.error('Failed to read window state', e);
+  }
+}
+
+function onWindowFocus() {
+  void refreshRecordingState();
+}
+
+watch(recordingActive, (active) => {
+  if (active) backendOpen.value = false;
+});
+
 const backendSelectRef = ref<HTMLElement | null>(null);
 const backendTriggerRef = ref<HTMLButtonElement | null>(null);
 const currentBackend = computed(
@@ -419,6 +446,7 @@ function onBackendFocusOut(e: FocusEvent) {
 async function selectBackend(next: 'ariso' | 'local') {
   backendOpen.value = false;
   backendTriggerRef.value?.focus();
+  if (recordingActive.value) return;
   if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
@@ -658,7 +686,7 @@ async function fetchUserProfile() {
 }
 
 let unlistenSignInPrompt: UnlistenFn | null = null;
-let unlistenUpdates: UnlistenFn[] = [];
+const unlistenUpdates: UnlistenFn[] = [];
 
 // Refresh account UI from persisted native session state. The settings window is
 // hidden/pre-created at app startup, so it cannot rely only on its first mount.
@@ -732,8 +760,7 @@ onMounted(async () => {
     checking.value = false;
   });
 
-  // Save unlisteners so onUnmounted can clear them.
-  unlistenUpdates = [unSignedIn, unAvail, unNone, unChecking, unError];
+  unlistenUpdates.push(unSignedIn, unAvail, unNone, unChecking, unError);
 
   try {
     backend.value = await getBackendSetting();
@@ -756,9 +783,21 @@ onMounted(async () => {
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
 });
 
+// Registered as its own hook so a failure in the main bootstrap above can't
+// prevent the recording guard from arming.
+onMounted(async () => {
+  void refreshRecordingState();
+  window.addEventListener('focus', onWindowFocus);
+  const unRecording = await listen<boolean>('recording://state', (e) => {
+    recordingActive.value = e.payload;
+  });
+  unlistenUpdates.push(unRecording);
+});
+
 onUnmounted(() => {
   unlistenSignInPrompt?.();
   unlistenUpdates.forEach((un) => un());
+  window.removeEventListener('focus', onWindowFocus);
 });
 
 async function handleGoogleSignIn() {
@@ -799,8 +838,9 @@ async function handleSignOut() {
 <style scoped>
 .settings {
   padding: 24px;
-  font-family: -apple-system, system-ui, sans-serif;
-  background: #f5f5f7;
+  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
+  background: #f7f6f4;
+  color: #1c1c1c;
   min-height: 100vh;
 }
 
@@ -808,13 +848,13 @@ async function handleSignOut() {
   font-size: 20px;
   font-weight: 700;
   margin-bottom: 24px;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .signin-banner {
-  background: #fef3c7;
-  border: 1px solid #fcd34d;
-  color: #92400e;
+  background: #f7efdc;
+  border: 1px solid #e3d3a8;
+  color: #7a5c1e;
   font-size: 13px;
   font-weight: 500;
   padding: 10px 14px;
@@ -831,15 +871,15 @@ async function handleSignOut() {
 }
 
 .notif-status--ok {
-  background: #dcfce7;
-  border: 1px solid #86efac;
-  color: #166534;
+  background: #e6f2ea;
+  border: 1px solid #bfe0cc;
+  color: #226741;
 }
 
 .notif-status--err {
-  background: #fee2e2;
-  border: 1px solid #fca5a5;
-  color: #991b1b;
+  background: #f7e7e4;
+  border: 1px solid #e0c0ba;
+  color: #9c3a2e;
 }
 
 .section {
@@ -847,19 +887,20 @@ async function handleSignOut() {
 }
 
 .section-title {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
-  color: #86868b;
+  color: #9a9a96;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
   margin-bottom: 8px;
 }
 
 .card {
-  background: white;
-  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
   padding: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: 2px 2px 0 #e7e5e2;
 }
 
 .account-info {
@@ -872,7 +913,7 @@ async function handleSignOut() {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #6366f1;
+  background: #1c1c1c;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -890,12 +931,12 @@ async function handleSignOut() {
 .account-name {
   font-size: 14px;
   font-weight: 500;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .account-email {
   font-size: 12px;
-  color: #86868b;
+  color: #6f6f6f;
 }
 
 .sign-out-btn {
@@ -922,19 +963,20 @@ async function handleSignOut() {
   justify-content: center;
   gap: 12px;
   padding: 10px 16px;
-  background: white;
-  border: 1px solid #d1d5db;
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  border-radius: 999px;
+  box-shadow: 2px 2px 0 #e7e5e2;
   font-size: 14px;
   font-weight: 500;
-  color: #374151;
+  color: #1c1c1c;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: transform 0.1s, box-shadow 0.1s;
 }
 
-.google-btn:hover {
-  background: #f9fafb;
+.google-btn:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 
 .google-btn:disabled {
@@ -962,7 +1004,7 @@ async function handleSignOut() {
 
 .setting-label {
   font-size: 14px;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .model-controls {
@@ -973,11 +1015,11 @@ async function handleSignOut() {
 
 .model-status {
   font-size: 13px;
-  color: #6b7280;
+  color: #6f6f6f;
 }
 
 .model-ready {
-  color: #16a34a;
+  color: #2e8b4f;
   font-size: 16px;
   font-weight: 700;
   line-height: 1;
@@ -992,12 +1034,31 @@ async function handleSignOut() {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  padding: 4px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: white;
-  color: #6366f1;
+  padding: 5px 12px;
+  border: 1px solid #d6d6d6;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1c1c1c;
+  font-family: inherit;
   cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.backend-trigger:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
+}
+
+.backend-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.setting-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6f6f6f;
 }
 
 .backend-icon {
@@ -1010,7 +1071,7 @@ async function handleSignOut() {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  color: #9ca3af;
+  color: #9a9a96;
 }
 
 .backend-menu {
@@ -1022,10 +1083,10 @@ async function handleSignOut() {
   margin: 0;
   padding: 4px;
   list-style: none;
-  background: white;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  box-shadow: 2px 2px 0 #e7e5e2;
 }
 
 .backend-option {
@@ -1033,16 +1094,16 @@ async function handleSignOut() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
   font-size: 13px;
-  color: #1d1d1f;
+  color: #1c1c1c;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .backend-option:hover {
-  background: #f5f5f7;
+  background: rgba(0, 0, 0, 0.03);
 }
 
 .backend-option:focus-visible {
@@ -1052,7 +1113,12 @@ async function handleSignOut() {
 }
 
 .backend-option--active {
-  color: #6366f1;
+  background: #1c1c1c;
+  color: #ffffff;
+}
+
+.backend-option--active:hover {
+  background: #1c1c1c;
 }
 
 .about-header {
@@ -1065,16 +1131,16 @@ async function handleSignOut() {
 .version-text {
   font-size: 14px;
   font-weight: 500;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .status-line {
   font-size: 12px;
 }
 
-.status-ok       { color: #16a34a; }
-.status-checking { color: #86868b; }
-.status-available { color: #4f46e5; font-weight: 500; }
+.status-ok       { color: #2e8b4f; }
+.status-checking { color: #6f6f6f; }
+.status-available { color: #1c1c1c; font-weight: 500; }
 
 .update-controls {
   margin-bottom: 12px;
@@ -1082,23 +1148,32 @@ async function handleSignOut() {
 
 .primary-btn {
   font-size: 13px;
-  padding: 5px 14px;
-  border-radius: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
   border: none;
-  background: linear-gradient(to bottom, #6366f1, #4f46e5);
+  background: #1c1c1c;
   color: white;
   font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
 }
 
 .secondary-btn {
   font-size: 13px;
   padding: 5px 14px;
-  border-radius: 6px;
-  border: 1px solid #d1d5db;
-  background: white;
-  color: #1d1d1f;
+  border-radius: 999px;
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1c1c1c;
+  font-family: inherit;
   cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.secondary-btn:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 
 .secondary-btn:disabled {
@@ -1111,7 +1186,7 @@ async function handleSignOut() {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #1d1d1f;
+  color: #1c1c1c;
   cursor: pointer;
 }
 
@@ -1138,7 +1213,7 @@ async function handleSignOut() {
   padding: 2px;
   box-sizing: border-box;
   border-radius: 12px;
-  background: #d1d5db;
+  background: #d6d6d6;
   transition: background 0.2s ease;
 }
 
@@ -1152,7 +1227,7 @@ async function handleSignOut() {
 }
 
 .toggle-input:checked + .toggle-track {
-  background: #4f46e5;
+  background: #1c1c1c;
 }
 
 .toggle-input:checked + .toggle-track .toggle-thumb {
@@ -1160,7 +1235,7 @@ async function handleSignOut() {
 }
 
 .toggle-input:focus-visible + .toggle-track {
-  outline: 2px solid #6366f1;
+  outline: 2px solid #1c1c1c;
   outline-offset: 2px;
 }
 </style>
