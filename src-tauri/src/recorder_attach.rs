@@ -11,14 +11,22 @@ use tauri::{AppHandle, Manager, PhysicalPosition};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Target outer position for the recorder: flush against the library
-/// window's right edge, vertically centered. All values in physical pixels.
+/// The waveform window is wider than the visible pill: the pill (48px) is
+/// centered in the 92px window, leaving 22 logical px of transparent margin
+/// per side. Pull the window left by that margin minus a small visual gap so
+/// the pill itself sits close to the library's edge.
+const X_OFFSET_LOGICAL: f64 = -18.0; // 22px margin - 4px visual gap
+
+/// Target outer position for the recorder: against the library window's
+/// right edge (shifted by `x_offset`), vertically centered. All values in
+/// physical pixels.
 fn attach_position(
     lib_pos: (i32, i32),
     lib_size: (u32, u32),
     wave_size: (u32, u32),
+    x_offset: i32,
 ) -> (i32, i32) {
-    let x = lib_pos.0 + lib_size.0 as i32;
+    let x = lib_pos.0 + lib_size.0 as i32 + x_offset;
     let y = lib_pos.1 + (lib_size.1 as i32 - wave_size.1 as i32) / 2;
     (x, y)
 }
@@ -49,10 +57,12 @@ pub(crate) fn spawn_watcher(app: &AppHandle) {
             ) else {
                 continue;
             };
+            let scale = lib.scale_factor().unwrap_or(1.0);
             let (x, y) = attach_position(
                 (lib_pos.x, lib_pos.y),
                 (lib_size.width, lib_size.height),
                 (wave_size.width, wave_size.height),
+                (X_OFFSET_LOGICAL * scale).round() as i32,
             );
             if (wave_pos.x, wave_pos.y) != (x, y) {
                 let _ = wave.set_position(PhysicalPosition::new(x, y));
@@ -66,19 +76,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attach_position_is_flush_right_and_vertically_centered() {
-        // Library at (100, 50), 900x600; recorder 92x284.
-        // x: flush to the right edge = 100 + 900.
+    fn attach_position_overlaps_the_right_edge_and_centers_vertically() {
+        // Library at (100, 50), 900x600; recorder 92x284, pulled 18px left so
+        // the pill (inset 22px inside its transparent window) sits close.
+        // x: 100 + 900 - 18 = 982.
         // y: centered = 50 + (600 - 284) / 2 = 208.
         assert_eq!(
-            attach_position((100, 50), (900, 600), (92, 284)),
-            (1000, 208)
+            attach_position((100, 50), (900, 600), (92, 284), -18),
+            (982, 208)
         );
     }
 
     #[test]
     fn attach_position_centers_a_recorder_taller_than_the_library() {
         // Library 100 tall at y=0, recorder 284 tall: y = (100 - 284) / 2 = -92.
-        assert_eq!(attach_position((0, 0), (300, 100), (92, 284)), (300, -92));
+        assert_eq!(
+            attach_position((0, 0), (300, 100), (92, 284), 0),
+            (300, -92)
+        );
     }
 }
