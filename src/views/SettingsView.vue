@@ -619,7 +619,7 @@ async function fetchUserProfile() {
 }
 
 let unlistenSignInPrompt: UnlistenFn | null = null;
-let unlistenUpdates: UnlistenFn[] = [];
+const unlistenUpdates: UnlistenFn[] = [];
 
 onMounted(async () => {
   const session = await auth.checkSession();
@@ -670,8 +670,7 @@ onMounted(async () => {
     checking.value = false;
   });
 
-  // Save unlisteners so onUnmounted can clear them.
-  unlistenUpdates = [unAvail, unNone, unChecking, unError];
+  unlistenUpdates.push(unAvail, unNone, unChecking, unError);
 
   try {
     backend.value = await getBackendSetting();

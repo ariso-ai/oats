@@ -150,4 +150,12 @@ describe('SettingsView backend switching during recording', () => {
 
     expect(setBackendSetting).not.toHaveBeenCalled();
   });
+
+  it('removes the recording://state listener on unmount', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(listeners.has('recording://state')).toBe(true);
+    wrapper.unmount();
+    expect(listeners.has('recording://state')).toBe(false);
+  });
 });
