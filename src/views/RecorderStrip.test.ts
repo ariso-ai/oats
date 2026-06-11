@@ -97,4 +97,26 @@ describe('RecorderStrip', () => {
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(false);
   });
+
+  it('shows only when the displayed meeting is the one being recorded', async () => {
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
+    await flushPromises();
+    sendState(recording({ meetingId: 42 }));
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    await wrapper.setProps({ meetingId: '7' });
+    expect(wrapper.find('.strip').exists()).toBe(false);
+
+    await wrapper.setProps({ meetingId: null });
+    expect(wrapper.find('.strip').exists()).toBe(false);
+  });
+
+  it('shows regardless of selection when the recording has no meeting', async () => {
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '7' } });
+    await flushPromises();
+    sendState(recording({ meetingId: null }));
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+  });
 });

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="state" class="strip">
+  <div v-if="visible" class="strip">
     <template v-if="state.phase === 'success' || state.phase === 'failed'">
       <span class="status-icon" :class="state.phase === 'success' ? 'ok' : 'err'">
         {{ state.phase === 'success' ? '✓' : '✗' }}
@@ -58,11 +58,24 @@ interface RecorderState {
   bars: number[];
   durationSeconds: number;
   isPaused: boolean;
+  meetingId: number | null;
   phase: 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 }
 
+/** The meeting currently shown in the detail panel (null when none). */
+const props = defineProps<{ meetingId: string | null }>();
+
 const state = ref<RecorderState | null>(null);
 let unlistenState: UnlistenFn | null = null;
+
+// The strip belongs to the recorded meeting: render it only while the detail
+// panel shows that meeting. Meeting-less recordings have no home section, so
+// they show wherever the user is.
+const visible = computed(() => {
+  if (!state.value) return false;
+  if (state.value.meetingId == null) return true;
+  return String(state.value.meetingId) === props.meetingId;
+});
 
 const formattedDuration = computed(() => {
   const s = state.value?.durationSeconds ?? 0;

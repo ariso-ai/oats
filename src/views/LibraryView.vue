@@ -94,7 +94,7 @@
           <p>Select a meeting to view its notes.</p>
         </div>
       </div>
-      <RecorderStrip />
+      <RecorderStrip :meeting-id="selectedItem?.id ?? null" />
     </section>
   </div>
 </template>

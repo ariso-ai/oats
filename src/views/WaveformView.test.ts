@@ -171,6 +171,7 @@ describe('WaveformView vertical pill', () => {
   it('broadcasts recorder://state through the stop flow, ending with closed', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
+    routeQuery = { meetingId: '42' };
     stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
     finalizeRecording.mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
@@ -178,11 +179,13 @@ describe('WaveformView vertical pill', () => {
     await wrapper.find('.stop-btn').trigger('click');
     await vi.runOnlyPendingTimersAsync();
 
-    const phases = emitEvent.mock.calls
+    const states = emitEvent.mock.calls
       .filter(([name]) => name === 'recorder://state')
-      .map(([, payload]) => (payload as { phase: string }).phase);
+      .map(([, payload]) => payload as { phase: string; meetingId: number | null });
+    const phases = states.map((s) => s.phase);
     expect(phases).toContain('uploading');
     expect(phases).toContain('success');
+    expect(states[0]?.meetingId).toBe(42);
 
     await vi.advanceTimersByTimeAsync(2000);
     const last = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state').at(-1);

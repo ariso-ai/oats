@@ -153,6 +153,7 @@ function broadcastState(phase: RecorderPhase = currentPhase()): void {
     bars: centerWeightedBars(recorder.frameLevels.value.slice(0, 20), 3),
     durationSeconds: recorder.durationSeconds.value,
     isPaused: recorder.isPaused.value,
+    meetingId: effectiveMeetingId.value,
     phase,
   }).catch(() => { /* no listeners / shutting down */ });
 }
