@@ -1,12 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { groupMeetingsByDate, groupTodaysMeetings, dateLabel } from './groupMeetingsByDate';
+import {
+  groupMeetingsByDate,
+  groupTodaysMeetings,
+  dateLabel,
+  upcomingRelLabel,
+  isMeetingInProgress,
+} from './groupMeetingsByDate';
 import type { MeetingListItem } from './useBackend';
 
 // Fixed "now": Wed 2026-06-10 15:00 local.
 const NOW = new Date(2026, 5, 10, 15, 0, 0);
 
-function m(id: string, iso: string): MeetingListItem {
-  return { id, title: `M${id}`, timestamp: iso };
+function m(id: string, iso: string, end?: string): MeetingListItem {
+  return { id, title: `M${id}`, timestamp: iso, ...(end ? { endTimestamp: end } : {}) };
 }
 
 describe('dateLabel', () => {
@@ -47,6 +53,14 @@ describe('groupMeetingsByDate', () => {
     expect(labels).toContain('UNDATED');
     expect(labels.indexOf('UNDATED')).toBeGreaterThan(labels.indexOf('TODAY'));
   });
+
+  it('treats an in-progress meeting (not yet ended) as UPCOMING, not history', () => {
+    const sections = groupMeetingsByDate(
+      [m('live', '2026-06-10T14:30:00', '2026-06-10T15:30:00'), m('past', '2026-06-10T09:00:00')],
+      NOW
+    );
+    expect(sections.find((s) => s.label === 'UPCOMING')?.items.map((x) => x.id)).toEqual(['live']);
+  });
 });
 
 describe('groupTodaysMeetings', () => {
@@ -76,5 +90,45 @@ describe('groupTodaysMeetings', () => {
 
   it('returns an empty array when nothing is today', () => {
     expect(groupTodaysMeetings([m('y', '2026-06-09T09:00:00'), m('bad', 'nope')], NOW)).toEqual([]);
+  });
+
+  it('keeps an in-progress meeting in UPCOMING, ahead of later ones', () => {
+    const meetings = [
+      m('live', '2026-06-10T14:30:00', '2026-06-10T15:30:00'), // started, not ended → in progress
+      m('soon', '2026-06-10T16:00:00'),
+      m('done', '2026-06-10T09:00:00', '2026-06-10T10:00:00'), // ended → earlier
+    ];
+    const sections = groupTodaysMeetings(meetings, NOW);
+    expect(sections.map((s) => s.label)).toEqual(['UPCOMING', 'EARLIER']);
+    expect(sections[0].items.map((x) => x.id)).toEqual(['live', 'soon']);
+    expect(sections[1].items.map((x) => x.id)).toEqual(['done']);
+  });
+});
+
+describe('isMeetingInProgress', () => {
+  it('is true only between start and end', () => {
+    expect(isMeetingInProgress(m('a', '2026-06-10T14:30:00', '2026-06-10T15:30:00'), NOW)).toBe(true);
+    expect(isMeetingInProgress(m('b', '2026-06-10T15:30:00', '2026-06-10T16:30:00'), NOW)).toBe(false);
+    expect(isMeetingInProgress(m('c', '2026-06-10T13:00:00', '2026-06-10T14:00:00'), NOW)).toBe(false);
+  });
+
+  it('is false without an end timestamp', () => {
+    expect(isMeetingInProgress(m('d', '2026-06-10T14:30:00'), NOW)).toBe(false);
+  });
+});
+
+describe('upcomingRelLabel', () => {
+  it('formats the time until start, scaling minutes → hours → days', () => {
+    expect(upcomingRelLabel(m('a', '2026-06-10T15:20:00'), NOW)).toBe('in 20min');
+    expect(upcomingRelLabel(m('b', '2026-06-10T17:00:00'), NOW)).toBe('in 2h');
+    expect(upcomingRelLabel(m('c', '2026-06-12T15:00:00'), NOW)).toBe('in 2d');
+  });
+
+  it('says "Now" for a meeting in progress', () => {
+    expect(upcomingRelLabel(m('live', '2026-06-10T14:30:00', '2026-06-10T15:30:00'), NOW)).toBe('Now');
+  });
+
+  it('returns an empty string for an invalid start', () => {
+    expect(upcomingRelLabel(m('bad', 'nope'), NOW)).toBe('');
   });
 });

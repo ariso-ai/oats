@@ -51,8 +51,11 @@
             :aria-pressed="selectedItem?.id === m.id"
             @click="selectMeeting(m)"
           >
-            <span class="mi-title">{{ m.title }}</span>
-            <span class="mi-sub">{{ itemSub(m) }}</span>
+            <span class="mi-head">
+              <span class="mi-title">{{ m.title }}</span>
+              <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
+            </span>
+            <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
           </button>
         </template>
         <p v-if="displayedSections.length === 0" class="hint">No meetings today.</p>
@@ -97,7 +100,13 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
-import { groupMeetingsByDate, groupTodaysMeetings, type MeetingSection } from '../composables/groupMeetingsByDate';
+import {
+  groupMeetingsByDate,
+  groupTodaysMeetings,
+  upcomingRelLabel,
+  isMeetingInProgress,
+  type MeetingSection,
+} from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -107,18 +116,51 @@ const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
 
-const now = new Date();
-const dayNum = now.getDate();
-const monthName = now.toLocaleString(undefined, { month: 'long' }).toUpperCase();
+// A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
+// split stay fresh while the window sits open.
+const now = ref(new Date());
+const dayNum = computed(() => now.value.getDate());
+const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'long' }).toUpperCase());
 
 const activeView = ref<'today' | 'meetings'>('meetings');
 
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
-    return groupTodaysMeetings(meetings.value, now);
+    return groupTodaysMeetings(meetings.value, now.value);
   }
-  return groupMeetingsByDate(meetings.value, now);
+  return groupMeetingsByDate(meetings.value, now.value);
 });
+
+// Only the next upcoming meeting (soonest, or the one in progress) carries a
+// relative-time chip; it's the first item of the trailing UPCOMING section.
+const nextUpcomingId = computed<string | null>(() => {
+  const up = displayedSections.value.find((s) => s.key === 'upcoming');
+  return up?.items[0]?.id ?? null;
+});
+
+function relLabel(m: MeetingListItem): string {
+  return m.id === nextUpcomingId.value ? upcomingRelLabel(m, now.value) : '';
+}
+
+function isNextNow(m: MeetingListItem): boolean {
+  return m.id === nextUpcomingId.value && isMeetingInProgress(m, now.value);
+}
+
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+// The in-progress next meeting shows its start–end range (rendered green);
+// every other row keeps the normal start-time subtitle.
+function subFor(m: MeetingListItem): string {
+  if (isNextNow(m) && m.endTimestamp) {
+    return `${fmtClock(m.timestamp)} – ${fmtClock(m.endTimestamp)}`;
+  }
+  return itemSub(m);
+}
 
 function itemSub(m: MeetingListItem): string {
   const d = new Date(m.timestamp);
@@ -208,17 +250,24 @@ async function startRecording(): Promise<void> {
 }
 
 function onWindowFocus(): void {
+  now.value = new Date();
   void loadMeetings();
   void refreshRecordingState();
 }
 
+let clockTimer: number | undefined;
+
 onMounted(() => {
   void loadMeetings();
   void refreshRecordingState();
+  clockTimer = window.setInterval(() => {
+    now.value = new Date();
+  }, 30_000);
   window.addEventListener('focus', onWindowFocus);
 });
 
 onUnmounted(() => {
+  if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
 });
 </script>
@@ -346,8 +395,21 @@ onUnmounted(() => {
   border-color: #1c1c1c;
   box-shadow: 3px 3px 0 #e7e5e2;
 }
-.mi-title { font-size: 15px; font-weight: 500; color: #1c1c1c; line-height: 1.25; }
+.mi-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mi-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #1c1c1c;
+  line-height: 1.25;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mi-rel { flex-shrink: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; color: #6f6f6f; }
+.mi-rel--now { color: #2e8b4f; }
 .mi-sub { font-size: 12px; color: #6f6f6f; }
+.mi-sub--now { color: #2e8b4f; font-weight: 500; }
 
 /* Bottom nav */
 .bottom-nav {

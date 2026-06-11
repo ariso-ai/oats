@@ -25,6 +25,8 @@ export interface MeetingListItem {
   title: string;
   /** ISO timestamp: local `createdAt` or ariso `start_at`. View formats it. */
   timestamp: string;
+  /** ISO end timestamp (ariso `end_at`); drives "Now" / start–end display. */
+  endTimestamp?: string;
   /** Local recordings only. */
   durationSeconds?: number;
   /** Local recordings only. */
@@ -190,6 +192,7 @@ export class ArisoBackend implements Backend {
       id: String(m.id),
       title: m.title || 'Untitled meeting',
       timestamp: m.start_at,
+      endTimestamp: m.end_at,
     }));
   }
 

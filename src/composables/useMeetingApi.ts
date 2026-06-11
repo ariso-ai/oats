@@ -30,6 +30,7 @@ interface ScheduledMeeting {
   id: number;
   title: string | null;
   start_at: string;
+  end_at?: string;
 }
 
 interface MeetingNotesParticipant {
