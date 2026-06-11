@@ -762,9 +762,9 @@ async function handleSignOut() {
 }
 
 .signin-banner {
-  background: #fef3c7;
-  border: 1px solid #fcd34d;
-  color: #92400e;
+  background: #f7efdc;
+  border: 1px solid #e3d3a8;
+  color: #7a5c1e;
   font-size: 13px;
   font-weight: 500;
   padding: 10px 14px;
@@ -783,13 +783,13 @@ async function handleSignOut() {
 .notif-status--ok {
   background: #e6f2ea;
   border: 1px solid #bfe0cc;
-  color: #2e8b4f;
+  color: #226741;
 }
 
 .notif-status--err {
-  background: #fee2e2;
-  border: 1px solid #fca5a5;
-  color: #991b1b;
+  background: #f7e7e4;
+  border: 1px solid #e0c0ba;
+  color: #9c3a2e;
 }
 
 .section {
@@ -884,7 +884,7 @@ async function handleSignOut() {
   transition: transform 0.1s, box-shadow 0.1s;
 }
 
-.google-btn:hover {
+.google-btn:hover:not(:disabled) {
   box-shadow: 1px 1px 0 #e7e5e2;
   transform: translate(1px, 1px);
 }
@@ -952,6 +952,12 @@ async function handleSignOut() {
   color: #1c1c1c;
   font-family: inherit;
   cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.backend-trigger:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 
 .backend-trigger:disabled {
@@ -1111,7 +1117,7 @@ async function handleSignOut() {
   padding: 2px;
   box-sizing: border-box;
   border-radius: 12px;
-  background: #d1d5db;
+  background: #d6d6d6;
   transition: background 0.2s ease;
 }
 
