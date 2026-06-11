@@ -4,10 +4,15 @@ import { mount, flushPromises } from '@vue/test-utils';
 import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 
 const getMeetingDetail = vi.fn();
+const getMeetingTranscript = vi.fn();
 const updateMeetingNotesTitle = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () => Promise.resolve({ getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i) }),
+  getActiveBackend: () =>
+    Promise.resolve({
+      getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
+      getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
+    }),
 }));
 vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({ updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a) }),
@@ -39,6 +44,7 @@ async function mountWith(d: MeetingDetail) {
 beforeEach(() => {
   vi.clearAllMocks();
   updateMeetingNotesTitle.mockResolvedValue(undefined);
+  getMeetingTranscript.mockResolvedValue(null);
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -97,6 +103,31 @@ describe('MeetingDetailView inline title editing', () => {
     expect(wrapper.find('.head-title--editable').exists()).toBe(false);
     await wrapper.find('.head-title').trigger('click');
     expect(wrapper.find('input.head-title--input').exists()).toBe(false);
+  });
+
+  it('renders structured transcript chunks with timestamps for an Ariso meeting', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'Speaker 1: Five is five bars. Should be' },
+      { chunk_index: 1, start_ms: 3120, content: 'Speaker 1: should be three. Anyway' },
+    ]);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    // Transcript is the only available tab, so it loads on mount.
+    await flushPromises();
+
+    const lines = wrapper.findAll('.transcript-line');
+    expect(lines).toHaveLength(2);
+    expect(lines[0].find('.transcript-ts').text()).toBe('0:00');
+    expect(lines[0].find('.transcript-content').text()).toBe('Speaker 1: Five is five bars. Should be');
+    expect(lines[1].find('.transcript-ts').text()).toBe('0:03');
+    expect(lines[1].find('.transcript-content').text()).toBe('Speaker 1: should be three. Anyway');
+  });
+
+  it('shows the empty state when an Ariso meeting has no transcript chunks', async () => {
+    getMeetingTranscript.mockResolvedValue(null);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await flushPromises();
+    expect(wrapper.find('.transcript-line').exists()).toBe(false);
+    expect(wrapper.find('.content-empty').text()).toBe('No transcript available.');
   });
 
   it('keeps the editor open and does not emit when the API fails', async () => {
