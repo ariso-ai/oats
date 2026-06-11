@@ -4,9 +4,11 @@
 mod audio_capture;
 mod commands;
 mod meeting_notifications;
+mod mic_monitor;
 mod storage;
 mod transcribe;
 mod model_manager;
+mod recording_state;
 mod tray;
 mod update_manager;
 
@@ -40,6 +42,8 @@ fn main() {
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            mic_monitor::sync_auto_record,
+            mic_monitor::auto_record_supported,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
             audio_capture::request_screen_capture_permission,
@@ -62,6 +66,14 @@ fn main() {
             // Native meeting-prep notification orchestrator. Owns the Pusher
             // connection in the Rust process (webviews get suspended when
             // hidden). Self-gates on session + the enabled toggle.
+            app.manage(recording_state::RecordingState::new());
+            app.manage(mic_monitor::MicMonitorManager::new());
+            // Start the auto-record mic monitor (self-gates on OS support + the
+            // enabled setting).
+            let mic_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                mic_monitor::sync(&mic_handle).await;
+            });
             app.manage(meeting_notifications::NotificationManager::new());
             // Install the macOS notification-click delegate on the main thread.
             meeting_notifications::init_native(app.handle());

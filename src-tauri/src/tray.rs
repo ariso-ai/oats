@@ -51,7 +51,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                     let _ = app_main.emit("tray://show-model-prompt", ());
                                     return;
                                 }
-                                let _ = crate::commands::open_waveform_window(&app_main, None);
+                                let _ = crate::commands::open_waveform_window(&app_main, None, false);
                             });
                             return;
                         }

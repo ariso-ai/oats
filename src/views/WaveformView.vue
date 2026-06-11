@@ -58,6 +58,19 @@
           </button>
         </div>
 
+        <div v-if="confirmVisible" class="confirm">
+          <button
+            class="ctrl-btn keep-btn"
+            aria-label="Keep recording"
+            @click.stop.prevent="keepRecording"
+          >✓</button>
+          <button
+            class="ctrl-btn discard-btn"
+            aria-label="Discard recording"
+            @click.stop.prevent="discardRecording"
+          >✕</button>
+        </div>
+
         <!-- Tauri only drags when the mousedown target itself carries the
              attribute, so every leaf in the handle needs it. -->
         <div class="drag-handle" data-tauri-drag-region @click.stop>
@@ -83,6 +96,9 @@ import { getActiveBackend, type Backend } from '../composables/useBackend';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
 import { bucketLevels } from './waveformBars';
+import { shouldAutoStop } from '../composables/silenceWatch';
+import { resolveAssociation } from '../composables/useAutoTrigger';
+import { useMeetingApi } from '../composables/useMeetingApi';
 
 const SUCCESS_CLOSE_MS = 1500;
 
@@ -100,10 +116,19 @@ const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 20), 5))
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
-const meetingId: number | null =
+const effectiveMeetingId = ref<number | null>(
   typeof meetingIdQuery === 'string' && /^\d+$/.test(meetingIdQuery)
     ? Number(meetingIdQuery)
-    : null;
+    : null,
+);
+const isAuto = route.query.auto === '1';
+const confirmVisible = ref(false);
+const isStopping = ref(false);
+let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+const CONFIRM_TIMEOUT_MS = 60_000;
+// Auto recordings shorter than this are discarded, not uploaded (guards against
+// late mic-on / quick-off races). Manual recordings are never length-gated.
+const MIN_AUTO_DURATION_S = 15;
 
 const formattedDuration = computed(() => {
   const s = recorder.durationSeconds.value;
@@ -135,7 +160,9 @@ async function showMeetings() {
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
+let unlistenAutoStop: UnlistenFn | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
+let silenceTimer: ReturnType<typeof setInterval> | null = null;
 
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
@@ -174,7 +201,92 @@ async function startRecording() {
   await invoke('set_tray_recording', { isRecording: true, isPaused: false });
 }
 
+// Auto-trigger: resolve calendar association, falling back to a confirm prompt.
+async function resolveAuto() {
+  try {
+    if (backend.value?.id === 'ariso') {
+      const now = new Date();
+      const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+      const end = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+      const meetings = await useMeetingApi().listScheduledMeetings(start, end);
+      const assoc = resolveAssociation('ariso', meetings, now);
+      if (assoc.kind === 'matched') {
+        effectiveMeetingId.value = assoc.meetingId ?? null;
+        return;
+      }
+    }
+  } catch (e) {
+    console.error('Auto-trigger match failed; asking for confirmation', e);
+  }
+  showConfirm();
+}
+
+function showConfirm() {
+  confirmVisible.value = true;
+  // No response within the window → discard (per spec).
+  confirmTimer = setTimeout(() => {
+    confirmTimer = null;
+    void discardRecording();
+  }, CONFIRM_TIMEOUT_MS);
+}
+
+function keepRecording() {
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+  }
+  confirmVisible.value = false;
+}
+
+// Discard the in-progress capture without uploading, then close.
+async function discardRecording() {
+  if (isStopping.value) return;
+  isStopping.value = true;
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+  }
+  if (closeTimer) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+  confirmVisible.value = false;
+  if (silenceTimer) {
+    clearInterval(silenceTimer);
+    silenceTimer = null;
+  }
+  waveform.stop();
+  try {
+    await recorder.stopRecording();
+  } catch {
+    /* best-effort */
+  }
+  await invoke('set_tray_recording', { isRecording: false, isPaused: false });
+  await closeWindow();
+}
+
 async function handleStop() {
+  if (isStopping.value) return;
+  // An unanswered confirm overlay means the user never opted in — a stop of any
+  // kind (native mic-off, silence backstop, tray) must discard, not upload.
+  if (confirmVisible.value) {
+    await discardRecording();
+    return;
+  }
+  if (isAuto && recorder.durationSeconds.value < MIN_AUTO_DURATION_S) {
+    await discardRecording();
+    return;
+  }
+  isStopping.value = true;
+  // Tear down the auto-trigger/backstop timers so they can't fire post-stop.
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+  }
+  if (silenceTimer) {
+    clearInterval(silenceTimer);
+    silenceTimer = null;
+  }
   collapse();
   isUploading.value = true;
   waveform.stop();
@@ -197,7 +309,7 @@ async function handleStop() {
           startAt,
           endAt,
           durationSeconds: recorder.durationSeconds.value,
-          meetingId: meetingId ?? undefined,
+          meetingId: effectiveMeetingId.value ?? undefined,
         }),
         timeout,
       ]);
@@ -248,13 +360,35 @@ onMounted(async () => {
   unlistenStop = await listen('tray://stop-recording', handleStop);
 
   await startRecording();
+
+  // Universal silence backstop: end any recording after 15 min of no sound.
+  silenceTimer = setInterval(() => {
+    if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
+    if (
+      shouldAutoStop(
+        recorder.lastSoundAt.value,
+        Date.now(),
+        recorder.isPaused.value,
+      )
+    ) {
+      void handleStop();
+    }
+  }, 1_000);
+
+  unlistenAutoStop = await listen('auto-record://stop', handleStop);
+  if (isAuto) {
+    void resolveAuto();
+  }
 });
 
 onUnmounted(() => {
+  if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();
+  unlistenAutoStop?.();
+  if (confirmTimer) clearTimeout(confirmTimer);
 });
 </script>
 
@@ -409,6 +543,17 @@ html, body {
   border-radius: 50%;
   background: #6b7280;
 }
+
+.confirm {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+.keep-btn { color: #34d399; font-size: 16px; font-weight: 700; }
+.discard-btn { color: #f87171; font-size: 14px; font-weight: 700; }
 
 .status-icon {
   margin-top: 8px;

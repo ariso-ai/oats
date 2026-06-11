@@ -3,11 +3,13 @@ import { onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { SYNC_EVENT } from '../composables/useMeetingNotifications';
+import { AUTO_RECORD_SYNC_EVENT } from '../composables/useAutoRecord';
 
 // The notification orchestrator lives natively in Rust; this window just asks
 // it to re-evaluate (session + enabled toggle) on launch and whenever a sync
 // is broadcast (sign-in/out, settings toggle).
 let unlisten: UnlistenFn | null = null;
+let unlistenAuto: UnlistenFn | null = null;
 let disposed = false;
 
 onMounted(async () => {
@@ -24,12 +26,24 @@ onMounted(async () => {
   }
   unlisten = off;
   void invoke('sync_meeting_notifications');
+
+  const offAuto = await listen(AUTO_RECORD_SYNC_EVENT, () => {
+    void invoke('sync_auto_record');
+  });
+  if (disposed) {
+    offAuto();
+  } else {
+    unlistenAuto = offAuto;
+    void invoke('sync_auto_record');
+  }
 });
 
 onUnmounted(() => {
   disposed = true;
   unlisten?.();
   unlisten = null;
+  unlistenAuto?.();
+  unlistenAuto = null;
 });
 </script>
 

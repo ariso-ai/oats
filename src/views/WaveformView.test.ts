@@ -13,16 +13,24 @@ const closeWin = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+const eventHandlers: Record<string, (e: unknown) => void> = {};
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn((name: string, cb: (e: unknown) => void) => {
+    eventHandlers[name] = cb;
+    return Promise.resolve(() => {});
+  }),
+}));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({ close: closeWin }),
 }));
-vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }) }));
+let routeQuery: Record<string, string> = {};
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: { value: true },
     isPaused: { value: false },
     durationSeconds: { value: 5 },
+    lastSoundAt: { value: 0 },
     startedAt: { value: '2026-06-09T10:00:00Z' },
     getAnalyser,
     startRecording: (...a: unknown[]) => startRecording(...a),
@@ -46,10 +54,17 @@ vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
 }));
 
+const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
+vi.mock('../composables/useMeetingApi', () => ({
+  useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
+}));
+
 import WaveformView from './WaveformView.vue';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const k in eventHandlers) delete eventHandlers[k];
+  routeQuery = {};
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -111,6 +126,7 @@ describe('WaveformView vertical pill', () => {
 
   it('stops, finalizes, shows ✓, and auto-closes on success', async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(0); // keep Date.now() at epoch so silence backstop (lastSoundAt=0) never trips
     stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
     finalizeRecording.mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
@@ -133,5 +149,48 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(wrapper.find('.status-icon.err').exists()).toBe(true);
     expect(closeWin).not.toHaveBeenCalled();
+  });
+
+  it('auto-stops after the silence timeout elapses', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(16 * 60_000); // now well past lastSoundAt (0) + 15min
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(stopRecording).toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('auto mode with no calendar match shows the confirm overlay', async () => {
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    expect(wrapper.find('.confirm').exists()).toBe(true);
+    expect(wrapper.find('.keep-btn').exists()).toBe(true);
+    routeQuery = {};
+    wrapper.unmount();
+  });
+
+  it('discards (does not upload) when stopped while the confirm overlay is unanswered', async () => {
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    // Confirm overlay should be showing (local backend, no match).
+    expect(wrapper.find('.confirm').exists()).toBe(true);
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    // A native mic-off stop arrives before the user answers.
+    await eventHandlers['auto-record://stop']?.({});
+    await flushPromises();
+    // Must NOT have uploaded; must have stopped + closed.
+    expect(finalizeRecording).not.toHaveBeenCalled();
+    expect(stopRecording).toHaveBeenCalled();
+    routeQuery = {};
+    wrapper.unmount();
   });
 });
