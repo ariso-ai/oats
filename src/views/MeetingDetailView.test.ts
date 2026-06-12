@@ -7,9 +7,20 @@ const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const activeBackend = vi.fn();
+const notesCanEdit = vi.fn(() => false);
+const loadNote = vi.fn();
+const saveNote = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
+}));
+vi.mock('../composables/useMeetingNotesPersistence', () => ({
+  useMeetingNotesPersistence: () => ({
+    modeFor: () => 'local',
+    canEdit: (meeting: MeetingListItem) => notesCanEdit(meeting),
+    load: (meeting: MeetingListItem) => loadNote(meeting),
+    save: (meeting: MeetingListItem, markdown: string) => saveNote(meeting, markdown),
+  }),
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
@@ -44,6 +55,9 @@ beforeEach(() => {
     getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
   });
+  notesCanEdit.mockReturnValue(false);
+  loadNote.mockResolvedValue('');
+  saveNote.mockResolvedValue(undefined);
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -241,5 +255,98 @@ describe('MeetingDetailView inline title editing', () => {
     expect(renameMeeting).toHaveBeenCalledOnce();
     expect(wrapper.emitted('titleUpdated')).toBeUndefined();
     expect(wrapper.find('input.head-title--input').exists()).toBe(true);
+  });
+
+  it('does not autosave an empty note before the selected note has loaded', async () => {
+    vi.useFakeTimers();
+    notesCanEdit.mockReturnValue(true);
+    loadNote.mockResolvedValue('Already saved');
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
+
+    const localItem: MeetingListItem = {
+      ...item,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(800);
+    expect(saveNote).not.toHaveBeenCalledWith(localItem, '');
+
+    vi.useRealTimers();
+  });
+
+  it('loads My Notes when switching between meetings that keep My Notes selected', async () => {
+    notesCanEdit.mockReturnValue(true);
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(detail({ id: meeting.id, title: meeting.title, isLocal: true }))
+    );
+    loadNote.mockImplementation((meeting: MeetingListItem) => Promise.resolve(`note ${meeting.id}`));
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+    expect(loadNote).toHaveBeenCalledWith(first);
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    expect(loadNote).toHaveBeenCalledWith(second);
+  });
+
+  it('ignores stale note save completions after switching meetings', async () => {
+    notesCanEdit.mockReturnValue(true);
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(detail({ id: meeting.id, title: meeting.title, isLocal: true }))
+    );
+    loadNote.mockImplementation((meeting: MeetingListItem) => Promise.resolve(`note ${meeting.id}`));
+
+    let resolveFirstSave: (() => void) | null = null;
+    saveNote.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveFirstSave = resolve;
+        })
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+
+    const save = (wrapper.vm as unknown as { saveNotesNow: () => Promise<void> }).saveNotesNow();
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    resolveFirstSave?.();
+    await save;
+    await flushPromises();
+
+    expect(saveNote).toHaveBeenCalledWith(first, 'note a');
+    expect(wrapper.text()).toContain('Second');
+    expect(wrapper.text()).not.toContain('First');
   });
 });

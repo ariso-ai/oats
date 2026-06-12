@@ -98,7 +98,7 @@
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
         </div>
 
-        <template v-if="activeTab === 'note'">
+        <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
           <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(detail.note)" />
 
@@ -165,9 +165,9 @@
               </div>
             </section>
           </template>
-        </template>
+        </div>
 
-        <template v-else-if="activeTab === 'transcript'">
+        <div v-show="activeTab === 'transcript'" class="tab-pane">
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
           <ol v-else-if="transcriptChunks" class="transcript">
@@ -177,25 +177,31 @@
             </li>
           </ol>
           <div v-else class="content-empty">No transcript available.</div>
-        </template>
+        </div>
 
-        <template v-else-if="activeTab === 'mynote'">
+        <div v-show="activeTab === 'mynote'" class="tab-pane tab-pane--editor">
           <div class="notes-head">
             <h2 v-if="individualNote?.title" class="notes-title">{{ individualNote.title }}</h2>
           </div>
           <div v-if="loadingIndividualNote" class="card-state"><span class="spinner" /><span>Loading note…</span></div>
-          <div v-else-if="individualNote?.content" class="md" v-html="renderMarkdown(individualNote.content)" />
-          <div v-else class="content-empty">No personal note for this meeting.</div>
-        </template>
+          <MeetingNotesEditor
+            v-else
+            v-model="notesMarkdown"
+            :editable="notesCanEdit && !loadingIndividualNote"
+            :placeholder="notesPlaceholder"
+            @blur="saveNotesNow"
+          />
+        </div>
       </div>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue';
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
 import { renderMarkdown } from '../utils/markdown';
 import type { TranscriptChunk } from '../composables/useMeetingApi';
+import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
 import {
   getActiveBackend,
   type Backend,
@@ -204,6 +210,7 @@ import {
   type MeetingActionItem,
   type MeetingCoaching,
 } from '../composables/useBackend';
+import MeetingNotesEditor from './MeetingNotesEditor.vue';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
 const emit = defineEmits<{
@@ -243,8 +250,20 @@ const loadingTranscript = ref(false);
 const individualNote = ref<{ content: string; title: string | null } | null>(null);
 const individualNoteLoaded = ref(false);
 const loadingIndividualNote = ref(false);
+const notesMarkdown = ref('');
+const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
+const notesPersistence = useMeetingNotesPersistence();
 
 let reqId = 0;
+let noteReqId = 0;
+let saveReqId = 0;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let suppressAutoSave = false;
+
+const notesCanEdit = computed(() => !!props.item && notesPersistence.canEdit(props.item));
+const notesPlaceholder = computed(() =>
+  notesCanEdit.value ? 'Start typing notes.' : 'Notes are read-only for this meeting.'
+);
 
 // The backend instance that loaded `detail`. Renames and lazy loads reuse it
 // so a backend flip in Settings mid-view can't route a save or fetch through
@@ -269,6 +288,16 @@ async function load(item: MeetingListItem | null): Promise<void> {
   individualNote.value = null;
   individualNoteLoaded.value = false;
   loadingIndividualNote.value = false;
+  saveReqId++;
+  // Clearing view state during a meeting switch is not a user edit. Keep
+  // autosave suppressed until the selected note has loaded or the user types.
+  suppressAutoSave = true;
+  notesMarkdown.value = '';
+  saveState.value = 'idle';
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
   if (!item) return;
   loading.value = true;
   try {
@@ -277,24 +306,29 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (my !== reqId) return;
     detail.value = d;
     detailBackend = backend;
-    activeTab.value = firstTabFor(d); // default to the first available tab
+    activeTab.value = firstTabFor(d, item); // default to the first available tab
+    if (activeTab.value === 'mynote') {
+      await loadIndividualNote();
+    }
   } catch (e) {
     if (my !== reqId) return;
     console.error('Failed to load meeting detail', e);
     error.value = 'Could not load this meeting.';
   } finally {
-    if (my === reqId) loading.value = false;
+    if (my === reqId) {
+      loading.value = false;
+      if (activeTab.value !== 'mynote') suppressAutoSave = false;
+    }
   }
 }
 
-// Watch the detail-relevant fields, not just the id, so same-id metadata
-// updates (e.g. local hasNote/hasTranscript flipping after a refresh) reload.
+// Watch stable detail fields only. User-note autosaves must not reload the
+// whole pane or change Ari's Notes tab visibility while the user switches tabs.
 watch(
   () => [
     props.item?.id,
     props.item?.timestamp,
     props.item?.durationSeconds,
-    props.item?.files?.hasNote,
     props.item?.files?.hasTranscript,
   ],
   () => load(props.item),
@@ -388,22 +422,26 @@ function notesPresent(d: MeetingDetail): boolean {
     ? !!d.note
     : !!(d.digest || d.summary || d.actionItems.length || d.score !== undefined || coachingPresent(d.coaching));
 }
-function firstTabFor(d: MeetingDetail): 'note' | 'transcript' | 'mynote' {
+// The initial tab follows available content, but editable personal notes count
+// as available even before the first note has been saved.
+function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
-  if (d.hasIndividualNote) return 'mynote';
+  if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
   return 'note';
 }
 
-// Tabs appear only when their content exists: Note (meeting notes), Transcript,
-// then My note (the requester's individual note).
+// Tabs appear only when their content exists: Ari's Notes (generated/shared
+// meeting notes), Transcript, then My Notes (the user's editable note).
 const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
   const d = detail.value;
   if (!d) return [];
   const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: 'Note' });
+  if (notesPresent(d)) out.push({ key: 'note', label: "Ari's Notes" });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
-  if (d.hasIndividualNote) out.push({ key: 'mynote', label: 'My note' });
+  if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
+    out.push({ key: 'mynote', label: 'My Notes' });
+  }
   return out;
 });
 
@@ -430,30 +468,88 @@ async function loadTranscript(): Promise<void> {
   }
 }
 
-// Fetch the requester's individual note the first time the My-note tab opens.
+// Fetch the requester's individual note through the persistence seam the first
+// time the My-note tab opens. The sequence token prevents stale loads after a
+// fast meeting switch from replacing the current draft.
 async function loadIndividualNote(): Promise<void> {
-  const backend = detailBackend;
-  if (!props.item || !backend || individualNoteLoaded.value || loadingIndividualNote.value) return;
-  const my = reqId;
+  if (!props.item || individualNoteLoaded.value || loadingIndividualNote.value) return;
+  const my = ++noteReqId;
   loadingIndividualNote.value = true;
+  saveState.value = 'idle';
+  suppressAutoSave = true;
   try {
-    const n = await backend.getIndividualNote(props.item);
-    if (my !== reqId) return;
-    individualNote.value = n;
+    const item = props.item;
+    const content = await notesPersistence.load(item);
+    if (my !== noteReqId || props.item?.id !== item.id) return;
+    notesMarkdown.value = content;
+    individualNote.value = { content, title: null };
     individualNoteLoaded.value = true;
   } catch (e) {
-    if (my !== reqId) return;
+    if (my !== noteReqId) return;
     console.error('Failed to load individual note', e);
     individualNote.value = null;
+    notesMarkdown.value = '';
     individualNoteLoaded.value = true;
+    saveState.value = 'error';
   } finally {
-    if (my === reqId) loadingIndividualNote.value = false;
+    if (my === noteReqId) {
+      loadingIndividualNote.value = false;
+      suppressAutoSave = false;
+    }
   }
 }
+
+// Save the editable note target currently selected in the detail pane. The
+// parent calls this before changing selection, and the editor calls it on blur.
+async function saveNotesNow(): Promise<void> {
+  const item = props.item;
+  if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
+  const my = ++saveReqId;
+  const markdown = notesMarkdown.value;
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  saveState.value = 'saving';
+  try {
+    await notesPersistence.save(item, markdown);
+    if (my !== saveReqId || props.item?.id !== item.id) return;
+    if (detail.value) {
+      detail.value.hasIndividualNote = markdown.trim().length > 0;
+    }
+    individualNote.value = { content: markdown, title: individualNote.value?.title ?? null };
+    individualNoteLoaded.value = true;
+    saveState.value = 'saved';
+  } catch (e) {
+    if (my !== saveReqId || props.item?.id !== item.id) return;
+    console.error('Failed to save individual note', e);
+    saveState.value = 'error';
+  }
+}
+
+defineExpose({ saveNotesNow });
 
 watch(activeTab, (t) => {
   if (t === 'transcript') void loadTranscript();
   else if (t === 'mynote') void loadIndividualNote();
+});
+
+watch(notesMarkdown, () => {
+  if (
+    suppressAutoSave ||
+    loadingIndividualNote.value ||
+    !individualNoteLoaded.value ||
+    !props.item ||
+    !notesPersistence.canEdit(props.item)
+  ) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    void saveNotesNow();
+  }, 700);
+});
+
+onUnmounted(() => {
+  if (saveTimer) clearTimeout(saveTimer);
 });
 
 const subtitle = computed(() => {
@@ -650,6 +746,8 @@ const durationLabel = computed<string | null>(() => {
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
+.tab-pane { min-height: 100%; }
+.tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
 .notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }

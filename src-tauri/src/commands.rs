@@ -448,9 +448,13 @@ pub async fn upload_file(
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
     crate::tray::set_menu(&app, is_recording, is_paused);
-    if !is_recording {
-        use tauri::Manager;
-        app.state::<crate::recording_state::RecordingState>().clear();
+    let state = app.state::<crate::recording_state::RecordingState>();
+    if is_recording {
+        // The recorder window reports this right after capture starts; the
+        // pill visibility watcher waits for it before hiding the window.
+        state.mark_capture_active();
+    } else {
+        state.clear();
         let _ = app.emit("recording://state", false);
     }
     Ok(())
@@ -532,6 +536,13 @@ pub(crate) fn open_waveform_window(
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
         .inner_size(92.0, 284.0)
+        // Born visible even when the library's embedded strip is the real UI:
+        // WebKit won't resolve getUserMedia for a hidden window, so the pill
+        // must stay on screen until capture starts. The visibility watcher
+        // hides it then (set_tray_recording marks capture active).
+        // Throttling is disabled so the hidden webview keeps recording and
+        // broadcasting recorder://state.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -546,7 +557,8 @@ pub(crate) fn open_waveform_window(
     } else {
         crate::recording_state::RecordingSource::Manual
     };
-    app.state::<crate::recording_state::RecordingState>().set(source);
+    app.state::<crate::recording_state::RecordingState>()
+        .set(source, meeting_id);
     let _ = app.emit("recording://state", true);
 
     // If the window is destroyed without a clean stop (crash / force-close),
@@ -562,6 +574,17 @@ pub(crate) fn open_waveform_window(
     });
 
     crate::tray::set_menu(app, true, false);
+
+    // Show the pill only while the library window (with its embedded
+    // recorder strip) can't be seen — minimized or closed.
+    crate::recorder_pill::spawn_watcher(app);
+
+    // Tell every window (the library in particular) which meeting the new
+    // recording is attached to, so it can surface that meeting immediately.
+    let _ = app.emit(
+        "recording://started",
+        serde_json::json!({ "meetingId": meeting_id }),
+    );
     Ok(())
 }
 
@@ -672,7 +695,7 @@ fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
 /// `transcript` are valid; anything else is an error.
 fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
     match kind {
-        "note" => Ok("note.md"),
+        "note" => Ok("ari-note.md"),
         "transcript" => Ok("transcript.md"),
         other => Err(format!("invalid recording file kind: {other}")),
     }
@@ -705,7 +728,7 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
 /// transcript and just guards against a pathological/corrupt file.
 const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Read a recording's `note.md` or `transcript.md` as a UTF-8 string so the
+/// Read a recording's `ari-note.md` or `transcript.md` as UTF-8 so the
 /// frontend can render it inline. Returns `Ok(None)` when the file doesn't
 /// exist yet (a normal "not generated" state), distinct from a read error.
 /// `kind` must be `"note"` or `"transcript"`.
@@ -727,7 +750,7 @@ pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, S
     Ok(Some(text))
 }
 
-/// Open a recording's `note.md` or `transcript.md` in the OS default app.
+/// Open a recording's `ari-note.md` or `transcript.md` in the OS default app.
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
@@ -762,6 +785,39 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
     let mut meta = crate::storage::read_meta(&dir)?;
     meta.title = title.to_string();
     crate::storage::write_meta(&dir, &meta)
+}
+
+/// Read the user-authored local note artifact used by the Library editor.
+/// Missing notes return an empty string so a fresh recording can autosave into
+/// `user-note.md` without affecting generated Overview content.
+#[tauri::command]
+pub fn read_recording_note(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("user-note.md");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read recording note: {e}")),
+    }
+}
+
+/// Persist user-authored in-meeting notes to `user-note.md` beside the
+/// recording. Generated meeting notes use `ari-note.md`, keeping Overview
+/// visibility independent from My note autosaves.
+#[tauri::command]
+pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
+}
+
+/// Return the meeting id the active recording is attached to, if any. The
+/// library window queries this on mount so it can re-select the attached
+/// meeting after being closed/reopened mid-recording — the `recording://started`
+/// event is one-shot and the new window would otherwise miss it.
+#[tauri::command]
+pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i64> {
+    app.state::<crate::recording_state::RecordingState>()
+        .active_meeting_id()
 }
 
 #[tauri::command]
@@ -799,7 +855,7 @@ mod tests {
 
     #[test]
     fn note_or_transcript_filename_maps_known_kinds() {
-        assert_eq!(note_or_transcript_filename("note").unwrap(), "note.md");
+        assert_eq!(note_or_transcript_filename("note").unwrap(), "ari-note.md");
         assert_eq!(
             note_or_transcript_filename("transcript").unwrap(),
             "transcript.md"
@@ -910,5 +966,27 @@ mod tests {
         let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
         assert!(res.is_err());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn recording_note_roundtrips_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note commands resolve through ARISO_ROOT, so this test follows the
+        // same serial test command requirement as the recording-dir tests.
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        assert_eq!(read_recording_note(id.into()).unwrap(), "");
+        write_recording_note(id.into(), "# Note\n- point".into()).unwrap();
+        let saved = read_recording_note(id.into()).unwrap();
+        assert_eq!(saved, "# Note\n- point");
+        assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
     }
 }

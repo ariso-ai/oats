@@ -5,7 +5,10 @@ use tauri::{
     AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
 
-const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../src/assets/ariso-logo-w.png");
+// Monochrome (black + alpha) logo rendered as a template image: macOS
+// recolors it per menu bar appearance. The previous white icon with
+// icon_as_template(false) was invisible on a light-mode menu bar.
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../src/assets/ariso-logo-b.png");
 
 /// Rebuild the tray menu in-place. Called from tray events (main thread)
 /// and from the `set_tray_recording` command.
@@ -26,7 +29,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main")
         .icon(Image::from_bytes(TRAY_ICON_BYTES)?)
-        .icon_as_template(false)
+        .icon_as_template(true)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
