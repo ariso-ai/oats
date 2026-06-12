@@ -8,6 +8,7 @@ const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
+const emitNotificationsSync = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -37,6 +38,9 @@ function emitEvent(name: string, payload: unknown): void {
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () =>
     Promise.resolve({ id: 'local', usesMeetingPicker: usesMeetingPicker(), listMeetings: () => listMeetings() }),
+}));
+vi.mock('../composables/useMeetingNotifications', () => ({
+  emitNotificationsSync: () => emitNotificationsSync(),
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
@@ -95,6 +99,13 @@ describe('LibraryView', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].text()).toContain('Second');
     expect(rows[1].text()).toContain('First');
+  });
+
+  it('broadcasts native sync after a successful meeting list refresh', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Synced' })]);
+    mount(LibraryView);
+    await flushPromises();
+    expect(emitNotificationsSync).toHaveBeenCalledTimes(1);
   });
 
   it('clicking a meeting item selects it (aria-pressed becomes true)', async () => {

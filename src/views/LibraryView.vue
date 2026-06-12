@@ -118,6 +118,7 @@ import {
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 import RecorderStrip from './RecorderStrip.vue';
+import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -234,6 +235,11 @@ async function loadMeetings(): Promise<void> {
     const next = await (await getActiveBackend()).listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
+    // The native tray owns its own meeting cache. When this visible list gets
+    // fresh data, nudge Rust to re-fetch so the menu-bar title updates now.
+    void emitNotificationsSync().catch((err) => {
+      console.warn('Failed to sync tray after meeting list refresh', err);
+    });
   } catch (e) {
     if (requestId !== loadMeetingsRequest) return;
     console.error('Failed to list meetings', e);

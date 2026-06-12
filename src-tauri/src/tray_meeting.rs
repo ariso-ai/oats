@@ -66,20 +66,22 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Countdown redraw cadence.
 const TICK: Duration = Duration::from_secs(60);
 
-/// Full server re-fetch happens every N ticks (5 minutes).
+/// Full server re-fetch happens every N ticks (5 minutes). Explicit sync calls
+/// restart the loop, so user-visible meeting-list refreshes can still pull now.
 const FETCH_EVERY_TICKS: u32 = 5;
 
 /// `Auth` means the server rejected the stored session (401/403) — the
 /// orchestrator tears down instead of retrying (mirrors meeting_notifications).
+#[derive(Debug)]
 enum FetchError {
     Auth,
     Other(String),
 }
 
-/// Start the orchestrator iff the active backend is Ariso and a session token
-/// is present; otherwise stop it. Safe to call repeatedly (sign-in/out,
-/// backend change). The Local backend has no scheduled meetings, so it gets
-/// no tray title and the unchanged idle menu.
+/// Start or refresh the orchestrator iff the active backend is Ariso and a
+/// session token is present; otherwise stop it. A repeated sync aborts the old
+/// loop and starts a fresh one so a visible meeting-list reload gets tray data
+/// immediately instead of waiting for the 5-minute poll.
 pub fn sync(app: &AppHandle) {
     let desired =
         crate::commands::active_backend(app) == "ariso" && get_session_token(app).is_some();
@@ -89,8 +91,8 @@ pub fn sync(app: &AppHandle) {
     }
     let mgr = app.state::<TrayMeetingManager>();
     let mut guard = mgr.handle.lock().unwrap();
-    if guard.is_some() {
-        return;
+    if let Some(handle) = guard.take() {
+        handle.abort();
     }
     let app = app.clone();
     *guard = Some(tauri::async_runtime::spawn(async move {
@@ -116,15 +118,15 @@ pub fn stop(app: &AppHandle) {
 /// refreshed (which clears it). `rebuild_menu` skips a full idle-menu rebuild
 /// on countdown-only ticks so an open tray menu isn't yanked shut.
 fn refresh_tray(app: &AppHandle, rebuild_menu: bool) {
-    let app = app.clone();
-    let _ = app.clone().run_on_main_thread(move || {
-        let recording = app
+    let app_for_menu = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let recording = app_for_menu
             .state::<crate::recording_state::RecordingState>()
             .is_active();
         if rebuild_menu && !recording {
-            crate::tray::set_menu(&app, false, false);
+            crate::tray::set_menu(&app_for_menu, false, false);
         } else {
-            crate::tray::refresh_tray_title(&app);
+            crate::tray::refresh_tray_title(&app_for_menu);
         }
     });
 }
@@ -163,18 +165,14 @@ async fn run_loop(app: AppHandle) {
                 let end_at = match end_cache.get(&m.id) {
                     Some(cached) => *cached,
                     None => {
-                        let end = match fetch_end_at(&app, m.id).await {
+                        match cache_end_lookup(&mut end_cache, m.id, fetch_end_at(&app, m.id).await)
+                        {
                             Ok(end) => end,
                             Err(FetchError::Auth) => break,
-                            Err(FetchError::Other(e)) => {
-                                eprintln!(
-                                    "tray-meeting: end_at fetch failed (start-only display): {e}"
-                                );
-                                None
-                            }
-                        };
-                        end_cache.insert(m.id, end);
-                        end
+                            Err(FetchError::Other(_)) => unreachable!(
+                                "cache_end_lookup converts transient end_at failures into a retryable None"
+                            ),
+                        }
                     }
                 };
                 Some(FeaturedMeeting {
@@ -207,6 +205,27 @@ async fn run_loop(app: AppHandle) {
     refresh_tray(&app, true);
 }
 
+/// Store successful end-time lookups only. A timeout or 5xx should show a
+/// start-only row for this tick, but leave the cache empty so the next tick can
+/// try the detail endpoint again.
+fn cache_end_lookup(
+    end_cache: &mut HashMap<i64, Option<DateTime<Utc>>>,
+    meeting_id: i64,
+    result: Result<Option<DateTime<Utc>>, FetchError>,
+) -> Result<Option<DateTime<Utc>>, FetchError> {
+    match result {
+        Ok(end) => {
+            end_cache.insert(meeting_id, end);
+            Ok(end)
+        }
+        Err(FetchError::Auth) => Err(FetchError::Auth),
+        Err(FetchError::Other(e)) => {
+            eprintln!("tray-meeting: end_at fetch failed (start-only display): {e}");
+            Ok(None)
+        }
+    }
+}
+
 /// GET /meetings?startDate&endDate (local-day bounds) → parsed list.
 async fn fetch_today_meetings(app: &AppHandle) -> Result<Vec<ScheduledMeeting>, FetchError> {
     let token = get_session_token(app).ok_or(FetchError::Auth)?;
@@ -215,7 +234,10 @@ async fn fetch_today_meetings(app: &AppHandle) -> Result<Vec<ScheduledMeeting>, 
         let resp = http_client()
             .get(format!("{}/meetings", api_base_url()))
             .query(&[
-                ("startDate", start.to_rfc3339_opts(SecondsFormat::Millis, true)),
+                (
+                    "startDate",
+                    start.to_rfc3339_opts(SecondsFormat::Millis, true),
+                ),
                 ("endDate", end.to_rfc3339_opts(SecondsFormat::Millis, true)),
             ])
             .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -224,8 +246,7 @@ async fn fetch_today_meetings(app: &AppHandle) -> Result<Vec<ScheduledMeeting>, 
             .await
             .map_err(|e| FetchError::Other(e.to_string()))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(FetchError::Auth);
         }
         if !status.is_success() {
@@ -258,8 +279,7 @@ async fn fetch_end_at(
             .await
             .map_err(|e| FetchError::Other(e.to_string()))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(FetchError::Auth);
         }
         if !status.is_success() {
@@ -305,13 +325,21 @@ pub(crate) fn truncate_title(title: Option<&str>) -> String {
     out
 }
 
-/// Relative countdown to a future start time: `in 12min`, or `in <1min`
-/// under a minute. Callers only pass strictly-upcoming meetings; a stale
-/// (already-started) one reads `in <1min` until the next tick drops it.
+/// Relative countdown to a future start time: `in 12min`, `in 1h39min`, or
+/// `in <1min` under a minute. Callers only pass strictly-upcoming meetings; a
+/// stale (already-started) one reads `in <1min` until the next tick drops it.
 pub(crate) fn format_countdown(start: DateTime<Utc>, now: DateTime<Utc>) -> String {
     // num_minutes truncates toward zero == floor for positive durations.
     let mins = (start - now).num_minutes();
-    if mins >= 1 {
+    if mins >= 60 {
+        let hours = mins / 60;
+        let minutes = mins % 60;
+        if minutes == 0 {
+            format!("in {hours}h")
+        } else {
+            format!("in {hours}h{minutes}min")
+        }
+    } else if mins >= 1 {
         format!("in {mins}min")
     } else {
         "in <1min".to_string()
@@ -453,7 +481,10 @@ mod tests {
 
     #[test]
     fn truncate_title_long_truncated_to_10_plus_ellipsis() {
-        assert_eq!(truncate_title(Some("Weekly Engineering Sync")), "Weekly Eng…");
+        assert_eq!(
+            truncate_title(Some("Weekly Engineering Sync")),
+            "Weekly Eng…"
+        );
     }
 
     #[test]
@@ -499,6 +530,43 @@ mod tests {
     }
 
     #[test]
+    fn countdown_over_an_hour_includes_hours_and_minutes() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T11:39:00Z"), t("2026-06-11T10:00:00Z")),
+            "in 1h39min"
+        );
+    }
+
+    #[test]
+    fn countdown_exact_hours_omit_zero_minutes() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T12:00:00Z"), t("2026-06-11T10:00:00Z")),
+            "in 2h"
+        );
+    }
+
+    #[test]
+    fn transient_end_lookup_failure_does_not_fill_cache() {
+        let mut cache = HashMap::new();
+        let end = cache_end_lookup(&mut cache, 7, Err(FetchError::Other("timeout".into())))
+            .expect("transient end_at failures fall back to start-only display");
+
+        assert_eq!(end, None);
+        assert!(!cache.contains_key(&7));
+    }
+
+    #[test]
+    fn successful_end_lookup_fills_cache() {
+        let mut cache = HashMap::new();
+        let end_at = Some(t("2026-06-11T10:30:00Z"));
+        let end = cache_end_lookup(&mut cache, 7, Ok(end_at))
+            .expect("successful end_at lookups are cacheable");
+
+        assert_eq!(end, end_at);
+        assert_eq!(cache.get(&7), Some(&end_at));
+    }
+
+    #[test]
     fn title_bar_composes_truncated_title_and_countdown() {
         assert_eq!(
             format_title_bar(
@@ -531,12 +599,18 @@ mod tests {
 
     #[test]
     fn time_range_same_meridiem_shares_suffix() {
-        assert_eq!(format_time_range(at(10, 0), Some(at(10, 30))), "10:00 – 10:30 AM");
+        assert_eq!(
+            format_time_range(at(10, 0), Some(at(10, 30))),
+            "10:00 – 10:30 AM"
+        );
     }
 
     #[test]
     fn time_range_cross_meridiem_shows_both() {
-        assert_eq!(format_time_range(at(11, 30), Some(at(12, 15))), "11:30 AM – 12:15 PM");
+        assert_eq!(
+            format_time_range(at(11, 30), Some(at(12, 15))),
+            "11:30 AM – 12:15 PM"
+        );
     }
 
     #[test]
@@ -545,7 +619,11 @@ mod tests {
     }
 
     fn meeting(id: i64, start: &str) -> ScheduledMeeting {
-        ScheduledMeeting { id, title: None, start_at: t(start) }
+        ScheduledMeeting {
+            id,
+            title: None,
+            start_at: t(start),
+        }
     }
 
     #[test]
@@ -555,7 +633,10 @@ mod tests {
 
     #[test]
     fn pick_all_past_is_none() {
-        let ms = [meeting(1, "2026-06-11T08:00:00Z"), meeting(2, "2026-06-11T09:00:00Z")];
+        let ms = [
+            meeting(1, "2026-06-11T08:00:00Z"),
+            meeting(2, "2026-06-11T09:00:00Z"),
+        ];
         assert!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).is_none());
     }
 
@@ -566,13 +647,26 @@ mod tests {
             meeting(2, "2026-06-11T11:00:00Z"),
             meeting(3, "2026-06-11T08:00:00Z"),
         ];
-        assert_eq!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).unwrap().id, 2);
+        assert_eq!(
+            pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z"))
+                .unwrap()
+                .id,
+            2
+        );
     }
 
     #[test]
     fn pick_excludes_meeting_starting_exactly_now() {
-        let ms = [meeting(1, "2026-06-11T10:00:00Z"), meeting(2, "2026-06-11T11:00:00Z")];
-        assert_eq!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).unwrap().id, 2);
+        let ms = [
+            meeting(1, "2026-06-11T10:00:00Z"),
+            meeting(2, "2026-06-11T11:00:00Z"),
+        ];
+        assert_eq!(
+            pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z"))
+                .unwrap()
+                .id,
+            2
+        );
     }
 
     #[test]
@@ -608,7 +702,10 @@ mod tests {
         let v = serde_json::json!({ "id": 7, "end_at": "2026-06-11T14:30:00Z" });
         assert_eq!(parse_end_at(&v), Some(t("2026-06-11T14:30:00Z")));
         assert_eq!(parse_end_at(&serde_json::json!({ "id": 7 })), None);
-        assert_eq!(parse_end_at(&serde_json::json!({ "end_at": "garbage" })), None);
+        assert_eq!(
+            parse_end_at(&serde_json::json!({ "end_at": "garbage" })),
+            None
+        );
     }
 
     #[test]
