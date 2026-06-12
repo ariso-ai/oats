@@ -86,6 +86,56 @@ pub fn recordings_dir(root: &Path) -> PathBuf {
     root.join("recordings")
 }
 
+/// Where Ariso recordings are buffered between "stop" and a confirmed upload.
+/// Files here are plain playable mp3s; an orphan left by a crash can be
+/// recovered manually from this folder.
+pub fn pending_uploads_dir(root: &Path) -> PathBuf {
+    root.join("pending-uploads")
+}
+
+/// Reject ids that could escape the pending-uploads dir. Mirrors the guard in
+/// `commands::recording_dir`; `sanitize_iso_to_id` strips `:` but passes `/`
+/// and `\` through, so a hostile timestamp must be caught here.
+fn validate_pending_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || id.contains("..")
+    {
+        return Err(format!("invalid pending audio id: {id}"));
+    }
+    Ok(())
+}
+
+fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
+    let id = sanitize_iso_to_id(created_at);
+    validate_pending_id(&id)?;
+    Ok(pending_uploads_dir(root).join(format!("{id}.mp3")))
+}
+
+/// Buffer a stopped recording's mp3 under `pending-uploads/<id>.mp3`, where
+/// the id is the sanitized `created_at` timestamp. Returns the id. Writing
+/// the same timestamp again overwrites (the retry path re-buffers).
+pub fn write_pending_audio(root: &Path, created_at: &str, bytes: &[u8]) -> Result<String, String> {
+    let path = pending_audio_path(root, created_at)?;
+    fs::create_dir_all(pending_uploads_dir(root))
+        .map_err(|e| format!("create pending-uploads dir: {e}"))?;
+    write_atomic(&path, bytes)?;
+    Ok(sanitize_iso_to_id(created_at))
+}
+
+/// Delete the buffered mp3 for `created_at`. Missing file is not an error —
+/// the success path and an explicit dismiss both call this unconditionally.
+pub fn discard_pending_audio(root: &Path, created_at: &str) -> Result<(), String> {
+    let path = pending_audio_path(root, created_at)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("discard pending audio: {e}")),
+    }
+}
+
 /// Turn a UTC ISO-8601 instant into a filesystem-safe, sortable folder id.
 /// "2026-06-02T14:30:05.123Z" -> "2026-06-02T14-30-05Z"
 ///
@@ -383,6 +433,46 @@ mod tests {
         write_notes(dir, "# Notes\n- point").unwrap();
         let body = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert_eq!(body, "# Notes\n- point");
+    }
+
+    #[test]
+    fn pending_audio_write_and_discard_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = write_pending_audio(root, "2026-06-12T10:00:00.000Z", b"mp3bytes").unwrap();
+        assert_eq!(id, "2026-06-12T10-00-00Z");
+        let path = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
+        assert_eq!(std::fs::read(&path).unwrap(), b"mp3bytes");
+
+        discard_pending_audio(root, "2026-06-12T10:00:00.000Z").unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn pending_audio_overwrite_is_allowed() {
+        // Retry buffers again under the same timestamp; last write wins.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pending_audio(root, "2026-06-12T10:00:00Z", b"first").unwrap();
+        write_pending_audio(root, "2026-06-12T10:00:00Z", b"second").unwrap();
+        let path = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    }
+
+    #[test]
+    fn discard_pending_audio_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No pending-uploads dir, no file — still Ok.
+        discard_pending_audio(tmp.path(), "2026-06-12T10:00:00.000Z").unwrap();
+    }
+
+    #[test]
+    fn pending_audio_rejects_traversal_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        // sanitize_iso_to_id passes '/' and '\\' through; the guard must catch them.
+        assert!(write_pending_audio(tmp.path(), "a/b", b"x").is_err());
+        assert!(write_pending_audio(tmp.path(), "\\evil", b"x").is_err());
+        assert!(discard_pending_audio(tmp.path(), "a/b").is_err());
     }
 
     #[test]
