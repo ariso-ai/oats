@@ -493,9 +493,10 @@ onUnmounted(() => {
 .nav-icon-btn:hover { color: #1c1c1c; }
 .nav-ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
-/* Detail card area: card on top, recorder strip docked at the bottom while
-   a recording is on-going. */
+/* Detail card area: the recorder strip floats bottom-centered over the card
+   while a recording is on-going (it positions against this wrapper). */
 .detail-wrap {
+  position: relative;
   flex: 1;
   min-width: 0;
   padding: 28px 18px 18px 8px;

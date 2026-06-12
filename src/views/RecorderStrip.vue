@@ -115,15 +115,19 @@ onUnmounted(() => {
 
 <style scoped>
 /* Horizontal sibling of the floating pill: same dark surface, yellow bars,
-   and control colors, laid out as a slim bottom strip. */
+   and control colors. Floats as a compact overlay bottom-centered over the
+   detail card (the positioning context is .detail-wrap). */
 .strip {
+  position: absolute;
+  bottom: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 14px;
   height: 44px;
-  flex-shrink: 0;
-  margin-top: 10px;
   padding: 0 18px;
   border-radius: 22px;
   background: #0d0d0d;
