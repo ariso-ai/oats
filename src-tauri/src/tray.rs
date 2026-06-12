@@ -44,14 +44,16 @@ pub fn refresh_tray_title(app: &AppHandle) {
         .unwrap()
         .clone();
     let title = match featured {
-        Some(f) if !recording => Some(crate::tray_meeting::format_title_bar(
+        Some(f) if !recording => crate::tray_meeting::format_title_bar(
             f.title.as_deref(),
             f.start_at,
             chrono::Utc::now(),
-        )),
-        _ => None,
+        ),
+        // macOS keeps the previous status-item title when passed `None`; use
+        // an explicit empty string for signed-out, Local, and recording states.
+        _ => String::new(),
     };
-    let _ = tray.set_title(title);
+    let _ = tray.set_title(Some(title));
 }
 
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
