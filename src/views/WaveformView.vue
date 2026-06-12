@@ -372,8 +372,11 @@ async function handleStop() {
 
 // Upload the stopped recording. Shared by the stop flow and the failed pill's
 // Retry button — blob and meta stay in refs so retry needs no re-record.
+let isFinalizing = false;
 async function runFinalize() {
   if (!stoppedBlob.value || !stoppedMeta.value || !backend.value) return;
+  if (isFinalizing) return;
+  isFinalizing = true;
   isUploading.value = true;
   uploadResult.value = null;
   // This only bounds the UI wait. A timed-out local transcription keeps
@@ -381,9 +384,10 @@ async function runFinalize() {
   // Library (source of truth) may show 'done'/'failed' even if the window
   // showed a timeout. Audio is persisted before transcription/upload, so
   // nothing is lost.
-  const timeout = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error('Operation timed out')), 120_000)
-  );
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error('Operation timed out')), 120_000);
+  });
   try {
     await Promise.race([
       backend.value.finalizeRecording(stoppedBlob.value, stoppedMeta.value),
@@ -391,20 +395,25 @@ async function runFinalize() {
     ]);
     uploadResult.value = 'success';
     stoppedBlob.value = null;
+    stoppedMeta.value = null;
     // Brief confirmation, then auto-close.
     closeTimer = setTimeout(() => { closeTimer = null; void closeWindow(); }, SUCCESS_CLOSE_MS);
   } catch (err) {
     console.error('Finalize failed:', err);
     // Stay open on failure so the user can retry or dismiss.
     uploadResult.value = 'failed';
+  } finally {
+    clearTimeout(timeoutId);
+    isFinalizing = false;
+    isUploading.value = false;
   }
-  isUploading.value = false;
 }
 
 // Explicit discard of a failed upload: delete the on-disk buffer and close.
 async function dismissFailed() {
   const meta = stoppedMeta.value;
   stoppedBlob.value = null;
+  stoppedMeta.value = null;
   if (meta) {
     try {
       await pending.discardAudio(meta.startAt ?? meta.endAt);
