@@ -822,7 +822,13 @@ pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i6
 
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+    open_library_window(&app)
+}
+
+/// Open (or focus) the meetings library window. Shared by the
+/// `create_library_window` command and the macOS dock-icon Reopen handler.
+pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
@@ -836,7 +842,7 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
     // the same row, just to the right of them.
-    WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
+    WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
         .title("Meetings")
         .title_bar_style(TitleBarStyle::Overlay)
         .hidden_title(true)
