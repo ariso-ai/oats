@@ -448,9 +448,13 @@ pub async fn upload_file(
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
     crate::tray::set_menu(&app, is_recording, is_paused);
-    if !is_recording {
-        use tauri::Manager;
-        app.state::<crate::recording_state::RecordingState>().clear();
+    let state = app.state::<crate::recording_state::RecordingState>();
+    if is_recording {
+        // The recorder window reports this right after capture starts; the
+        // pill visibility watcher waits for it before hiding the window.
+        state.mark_capture_active();
+    } else {
+        state.clear();
         let _ = app.emit("recording://state", false);
     }
     Ok(())
@@ -532,6 +536,13 @@ pub(crate) fn open_waveform_window(
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
         .inner_size(92.0, 284.0)
+        // Born visible even when the library's embedded strip is the real UI:
+        // WebKit won't resolve getUserMedia for a hidden window, so the pill
+        // must stay on screen until capture starts. The visibility watcher
+        // hides it then (set_tray_recording marks capture active).
+        // Throttling is disabled so the hidden webview keeps recording and
+        // broadcasting recorder://state.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -546,7 +557,8 @@ pub(crate) fn open_waveform_window(
     } else {
         crate::recording_state::RecordingSource::Manual
     };
-    app.state::<crate::recording_state::RecordingState>().set(source);
+    app.state::<crate::recording_state::RecordingState>()
+        .set(source, meeting_id);
     let _ = app.emit("recording://state", true);
 
     // If the window is destroyed without a clean stop (crash / force-close),
@@ -562,6 +574,17 @@ pub(crate) fn open_waveform_window(
     });
 
     crate::tray::set_menu(app, true, false);
+
+    // Show the pill only while the library window (with its embedded
+    // recorder strip) can't be seen — minimized or closed.
+    crate::recorder_pill::spawn_watcher(app);
+
+    // Tell every window (the library in particular) which meeting the new
+    // recording is attached to, so it can surface that meeting immediately.
+    let _ = app.emit(
+        "recording://started",
+        serde_json::json!({ "meetingId": meeting_id }),
+    );
     Ok(())
 }
 
@@ -741,6 +764,16 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
     app.opener()
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// Return the meeting id the active recording is attached to, if any. The
+/// library window queries this on mount so it can re-select the attached
+/// meeting after being closed/reopened mid-recording — the `recording://started`
+/// event is one-shot and the new window would otherwise miss it.
+#[tauri::command]
+pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i64> {
+    app.state::<crate::recording_state::RecordingState>()
+        .active_meeting_id()
 }
 
 #[tauri::command]

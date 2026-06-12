@@ -239,15 +239,6 @@ pub async fn sync(app: &AppHandle) {
     }));
 }
 
-/// Stop and tear down the monitor task.
-pub fn stop(app: &AppHandle) {
-    let mgr = app.state::<MicMonitorManager>();
-    let mut guard = mgr.handle.lock().unwrap();
-    if let Some(h) = guard.take() {
-        h.abort();
-    }
-}
-
 async fn run_loop(app: AppHandle) {
     let mut machine = Machine::new();
     let mut elapsed: u64 = 0;

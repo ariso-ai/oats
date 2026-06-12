@@ -13,6 +13,27 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getAllWebviewWindows: () => getAllWebviewWindows(),
 }));
+
+// In-test event bus standing in for Tauri's app-wide events: `listen` records
+// handlers, `emitEvent` drives them the way the Rust side would.
+type EventHandler = (e: { payload: unknown }) => void;
+const eventHandlers = new Map<string, EventHandler[]>();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (name: string, cb: EventHandler) => {
+    const arr = eventHandlers.get(name) ?? [];
+    arr.push(cb);
+    eventHandlers.set(name, arr);
+    return Promise.resolve(() => {
+      const list = eventHandlers.get(name) ?? [];
+      const i = list.indexOf(cb);
+      if (i >= 0) list.splice(i, 1);
+    });
+  },
+}));
+
+function emitEvent(name: string, payload: unknown): void {
+  for (const cb of [...(eventHandlers.get(name) ?? [])]) cb({ payload });
+}
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () =>
     Promise.resolve({ id: 'local', usesMeetingPicker: usesMeetingPicker(), listMeetings: () => listMeetings() }),
@@ -45,6 +66,7 @@ function item(over: Record<string, unknown>) {
 enableAutoUnmount(afterEach);
 beforeEach(() => {
   vi.clearAllMocks();
+  eventHandlers.clear();
   getAllWebviewWindows.mockResolvedValue([]);
   invoke.mockResolvedValue(undefined);
   usesMeetingPicker.mockReturnValue(false);
@@ -185,6 +207,67 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('marks the recording meeting with a red dot in the sidebar list', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan' }),
+      item({ id: '7', title: 'Other Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.find('.mi-rec-dot').exists()).toBe(false);
+
+    // The recorder strip relays recorder://state to the library.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'recording',
+    });
+    await flushPromises();
+    const rows = wrapper.findAll('.meeting-item');
+    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
+  it('selects the picked meeting in the detail panel when a recording starts', async () => {
+    listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.find('.empty-card').exists()).toBe(true);
+
+    emitEvent('recording://started', { meetingId: 42 });
+    await flushPromises();
+    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    // The recording transition also collapses the sidebar immediately.
+    expect(wrapper.find('.add-btn').exists()).toBe(false);
+  });
+
+  it('leaves the detail panel unchanged when a recording starts without a meeting', async () => {
+    listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://started', { meetingId: null });
+    await flushPromises();
+    expect(wrapper.find('.empty-card').exists()).toBe(true);
+    expect(wrapper.find('.add-btn').exists()).toBe(false);
+  });
+
+  it('reloads the meeting list when the picked meeting is not loaded yet', async () => {
+    listMeetings
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(listMeetings).toHaveBeenCalledTimes(1);
+
+    emitEvent('recording://started', { meetingId: 42 });
+    await flushPromises();
+    expect(listMeetings).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('.empty-card').exists()).toBe(false);
   });
 
   it('start-recording button opens the recorder directly for local backend', async () => {

@@ -5,6 +5,7 @@ mod audio_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
+mod recorder_pill;
 mod storage;
 mod transcribe;
 mod model_manager;
@@ -34,6 +35,7 @@ fn main() {
             commands::get_desktop_config,
             commands::list_local_recordings,
             commands::create_library_window,
+            commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
             commands::read_recording_file,
             commands::open_recording_file,
