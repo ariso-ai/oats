@@ -19,6 +19,8 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
             .0
             .lock()
             .unwrap_or_else(|poisoned| {
+                // If a previous tray update panicked while holding this lock,
+                // keep the last meeting instead of crashing the whole tray.
                 eprintln!("tray: FeaturedMeetingState mutex poisoned; recovering");
                 poisoned.into_inner()
             })
@@ -45,6 +47,8 @@ pub fn refresh_tray_title(app: &AppHandle) {
         .0
         .lock()
         .unwrap_or_else(|poisoned| {
+            // If the shared meeting state was poisoned, use the stored value
+            // anyway so the tray can clear or redraw instead of panicking.
             eprintln!("tray: FeaturedMeetingState mutex poisoned; recovering");
             poisoned.into_inner()
         })
@@ -121,6 +125,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                             .0
                             .lock()
                             .unwrap_or_else(|poisoned| {
+                                // A poisoned lock still contains the selected
+                                // meeting; recover it so one-click record works.
                                 eprintln!(
                                     "tray: FeaturedMeetingState mutex poisoned; recovering"
                                 );
@@ -265,6 +271,8 @@ pub fn build_idle_menu(
         .build()
 }
 
+/// Build the smaller tray menu shown while a recording is running. It exposes
+/// only controls that are safe during capture, so users cannot quit mid-upload.
 pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let pause_or_resume = if is_paused {
         MenuItemBuilder::with_id("resume_recording", "Resume Recording").build(app)?

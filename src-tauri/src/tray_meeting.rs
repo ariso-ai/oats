@@ -133,6 +133,9 @@ fn refresh_tray(app: &AppHandle, rebuild_menu: bool) {
 /// redraw + promote-on-start) and re-fetch every 5min. Exits only on an auth
 /// rejection; transient errors keep the last known state and retry.
 async fn run_loop(app: AppHandle) {
+    // Keep the latest meeting list in memory so normal one-minute ticks do not
+    // hit the API every time. End times are cached separately because they need
+    // a per-meeting detail request.
     let mut meetings: Vec<ScheduledMeeting> = Vec::new();
     let mut end_cache: HashMap<i64, Option<DateTime<Utc>>> = HashMap::new();
     let mut ticks_until_fetch = 0u32;
@@ -397,6 +400,8 @@ fn parse_id(v: Option<&Value>) -> Option<i64> {
 }
 
 fn parse_datetime(v: Option<&Value>) -> Option<DateTime<Utc>> {
+    // Server times arrive as strings with offsets. Normalise them to UTC so
+    // comparisons and countdown maths use one clock.
     v.and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
