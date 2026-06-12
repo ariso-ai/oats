@@ -739,6 +739,52 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Meeting ids are numeric on the Ariso backend; rejecting anything else also
+/// keeps the id from smuggling path segments into the URL below.
+fn validate_meeting_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("invalid meeting id: {id}"));
+    }
+    Ok(())
+}
+
+/// Fetch a meeting's recorded audio from the Ariso API as raw bytes (the
+/// endpoint streams the file directly). Non-200 responses become an error
+/// whose message is prefixed with the HTTP status so the frontend can map
+/// 404 to a "no audio" state.
+#[tauri::command]
+pub async fn fetch_meeting_audio(
+    app: tauri::AppHandle,
+    meeting_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    validate_meeting_id(&meeting_id)?;
+    let token = get_session_token(&app).unwrap_or_default();
+    let client = http_client();
+    let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
+
+    let response = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("{status}: audio fetch failed"));
+    }
+    if let Some(len) = response.content_length() {
+        if len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {len} bytes"));
+        }
+    }
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_AUDIO_BYTES {
+        return Err(format!("meeting audio too large to play: {} bytes", bytes.len()));
+    }
+    Ok(tauri::ipc::Response::new(bytes.to_vec()))
+}
+
 /// Upper bound on a note/transcript markdown file we'll read into memory for
 /// in-app rendering. These are plain text; 16 MB is far above any real note or
 /// transcript and just guards against a pathological/corrupt file.
@@ -982,6 +1028,15 @@ mod tests {
         let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
         assert!(res.is_err());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn meeting_id_must_be_digits_only() {
+        assert!(validate_meeting_id("123").is_ok());
+        assert!(validate_meeting_id("").is_err());
+        assert!(validate_meeting_id("12/audio").is_err());
+        assert!(validate_meeting_id("abc").is_err());
+        assert!(validate_meeting_id("12 ").is_err());
     }
 
     #[test]
