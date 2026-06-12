@@ -9,6 +9,7 @@
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 /// A meeting from `GET /meetings` (list payload carries no end time).
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +129,46 @@ pub(crate) fn pick_next_upcoming(
         .iter()
         .filter(|m| m.start_at > now)
         .min_by_key(|m| m.start_at)
+}
+
+/// Parse the `GET /meetings` payload `{ "meetings": [{ id, title, start_at }] }`.
+/// Entries with a missing/unparseable id or start_at are skipped.
+pub(crate) fn parse_meetings(v: &Value) -> Vec<ScheduledMeeting> {
+    let items = v
+        .get("meetings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    items
+        .iter()
+        .filter_map(|it| {
+            Some(ScheduledMeeting {
+                id: parse_id(it.get("id"))?,
+                title: it.get("title").and_then(Value::as_str).map(String::from),
+                start_at: parse_datetime(it.get("start_at"))?,
+            })
+        })
+        .collect()
+}
+
+/// Read the optional `end_at` from a `GET /meeting-notes/:id` payload.
+pub(crate) fn parse_end_at(v: &Value) -> Option<DateTime<Utc>> {
+    parse_datetime(v.get("end_at"))
+}
+
+/// id may arrive as a JSON number or a numeric string.
+fn parse_id(v: Option<&Value>) -> Option<i64> {
+    match v {
+        Some(Value::Number(n)) => n.as_i64(),
+        Some(Value::String(s)) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn parse_datetime(v: Option<&Value>) -> Option<DateTime<Utc>> {
+    v.and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -273,5 +314,41 @@ mod tests {
     fn pick_excludes_meeting_starting_exactly_now() {
         let ms = [meeting(1, "2026-06-11T10:00:00Z"), meeting(2, "2026-06-11T11:00:00Z")];
         assert_eq!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).unwrap().id, 2);
+    }
+
+    #[test]
+    fn parse_meetings_reads_payload_and_skips_bad_entries() {
+        let v = serde_json::json!({ "meetings": [
+            { "id": 7, "title": "Standup", "start_at": "2026-06-11T14:00:00.000Z" },
+            { "id": "8", "title": null, "start_at": "2026-06-11T15:00:00Z" },
+            { "id": 9, "title": "Bad date", "start_at": "not-a-date" },
+            { "title": "No id", "start_at": "2026-06-11T16:00:00Z" }
+        ]});
+        let ms = parse_meetings(&v);
+        assert_eq!(ms.len(), 2);
+        assert_eq!(
+            ms[0],
+            ScheduledMeeting {
+                id: 7,
+                title: Some("Standup".to_string()),
+                start_at: t("2026-06-11T14:00:00Z"),
+            }
+        );
+        assert_eq!(ms[1].id, 8);
+        assert_eq!(ms[1].title, None);
+    }
+
+    #[test]
+    fn parse_meetings_tolerates_missing_array() {
+        assert!(parse_meetings(&serde_json::json!({})).is_empty());
+        assert!(parse_meetings(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn parse_end_at_reads_optional_field() {
+        let v = serde_json::json!({ "id": 7, "end_at": "2026-06-11T14:30:00Z" });
+        assert_eq!(parse_end_at(&v), Some(t("2026-06-11T14:30:00Z")));
+        assert_eq!(parse_end_at(&serde_json::json!({ "id": 7 })), None);
+        assert_eq!(parse_end_at(&serde_json::json!({ "end_at": "garbage" })), None);
     }
 }
