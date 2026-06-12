@@ -244,7 +244,6 @@ const notesPersistence = useMeetingNotesPersistence();
 
 let reqId = 0;
 let noteReqId = 0;
-let saveReqId = 0;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressAutoSave = false;
 
@@ -270,7 +269,6 @@ async function load(item: MeetingListItem | null): Promise<void> {
   individualNote.value = null;
   individualNoteLoaded.value = false;
   loadingIndividualNote.value = false;
-  saveReqId++;
   // Clearing view state during a meeting switch is not a user edit. Keep
   // autosave suppressed until the selected note has loaded or the user types.
   suppressAutoSave = true;
@@ -288,9 +286,6 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (my !== reqId) return;
     detail.value = d;
     activeTab.value = firstTabFor(d, item); // default to the first available tab
-    if (activeTab.value === 'mynote') {
-      await loadIndividualNote();
-    }
   } catch (e) {
     if (my !== reqId) return;
     console.error('Failed to load meeting detail', e);
@@ -473,24 +468,20 @@ async function loadIndividualNote(): Promise<void> {
 async function saveNotesNow(): Promise<void> {
   const item = props.item;
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
-  const my = ++saveReqId;
-  const markdown = notesMarkdown.value;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
   saveState.value = 'saving';
   try {
-    await notesPersistence.save(item, markdown);
-    if (my !== saveReqId || props.item?.id !== item.id) return;
+    await notesPersistence.save(item, notesMarkdown.value);
     if (detail.value) {
-      detail.value.hasIndividualNote = markdown.trim().length > 0;
+      detail.value.hasIndividualNote = notesMarkdown.value.trim().length > 0;
     }
-    individualNote.value = { content: markdown, title: individualNote.value?.title ?? null };
+    individualNote.value = { content: notesMarkdown.value, title: individualNote.value?.title ?? null };
     individualNoteLoaded.value = true;
     saveState.value = 'saved';
   } catch (e) {
-    if (my !== saveReqId || props.item?.id !== item.id) return;
     console.error('Failed to save individual note', e);
     saveState.value = 'error';
   }

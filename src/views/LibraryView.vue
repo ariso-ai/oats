@@ -190,20 +190,14 @@ function itemSub(m: MeetingListItem): string {
 
 // Selection changes ask the detail pane to flush editable notes first, so a
 // slow autosave from the previous meeting cannot land after the row changed.
-let selectionReqId = 0;
-
 async function selectMeeting(m: MeetingListItem): Promise<void> {
   if (selectedItem.value?.id === m.id) return;
-  const my = ++selectionReqId;
   await detailView.value?.saveNotesNow?.();
-  if (my !== selectionReqId) return;
   selectedItem.value = m;
 }
 
 async function clearSelection(): Promise<void> {
-  const my = ++selectionReqId;
   await detailView.value?.saveNotesNow?.();
-  if (my !== selectionReqId) return;
   selectedItem.value = null;
 }
 

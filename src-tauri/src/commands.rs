@@ -772,16 +772,9 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
 #[tauri::command]
 pub fn read_recording_note(id: String) -> Result<String, String> {
     let path = recording_dir(&id)?.join("user-note.md");
-    let size = match std::fs::metadata(&path) {
-        Ok(m) => m.len(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(e) => return Err(format!("read recording note: {e}")),
-    };
-    if size > MAX_TEXT_BYTES {
-        return Err(format!("recording note too large to read: {size} bytes"));
-    }
     match std::fs::read_to_string(&path) {
         Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(format!("read recording note: {e}")),
     }
 }
@@ -791,10 +784,6 @@ pub fn read_recording_note(id: String) -> Result<String, String> {
 /// visibility independent from My note autosaves.
 #[tauri::command]
 pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
-    let len = markdown.as_bytes().len() as u64;
-    if len > MAX_TEXT_BYTES {
-        return Err(format!("recording note too large to write: {len} bytes"));
-    }
     let dir = recording_dir(&id)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
     crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
@@ -902,32 +891,6 @@ mod tests {
         let saved = read_recording_note(id.into()).unwrap();
         assert_eq!(saved, "# Note\n- point");
         assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
-
-        unsafe {
-            std::env::remove_var("ARISO_ROOT");
-        }
-    }
-
-    #[test]
-    fn recording_note_rejects_oversized_reads_and_writes() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Note commands resolve through ARISO_ROOT, so keep env mutation local
-        // to this serial test command.
-        unsafe {
-            std::env::set_var("ARISO_ROOT", tmp.path());
-        }
-
-        let id = "2026-06-02T14-30-05Z";
-        let dir = crate::storage::recordings_dir(tmp.path()).join(id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let too_large = "x".repeat(MAX_TEXT_BYTES as usize + 1);
-        let write_err = write_recording_note(id.into(), too_large.clone()).unwrap_err();
-        assert!(write_err.contains("too large to write"), "got: {write_err}");
-
-        std::fs::write(dir.join("user-note.md"), too_large).unwrap();
-        let read_err = read_recording_note(id.into()).unwrap_err();
-        assert!(read_err.contains("too large to read"), "got: {read_err}");
 
         unsafe {
             std::env::remove_var("ARISO_ROOT");
