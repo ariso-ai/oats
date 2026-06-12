@@ -11,6 +11,7 @@ mod transcribe;
 mod model_manager;
 mod recording_state;
 mod tray;
+mod tray_meeting;
 mod update_manager;
 
 fn main() {
@@ -48,6 +49,7 @@ fn main() {
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            tray_meeting::sync_tray_meeting,
             mic_monitor::sync_auto_record,
             mic_monitor::auto_record_supported,
             audio_capture::start_system_audio_capture,
@@ -64,7 +66,18 @@ fn main() {
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
 
+            // Managed state must exist before the tray is created: tray menu
+            // rebuilds and the title refresher read RecordingState and
+            // FeaturedMeetingState.
+            app.manage(recording_state::RecordingState::new());
+            app.manage(tray_meeting::TrayMeetingManager::new());
+            app.manage(tray_meeting::FeaturedMeetingState::new());
+
             tray::create_tray(app.handle())?;
+
+            // Native next-meeting tray orchestrator. Self-gates on Ariso
+            // backend + session; re-synced from BootstrapView on SYNC_EVENT.
+            tray_meeting::sync(app.handle());
 
             let initial_state = update_manager::load_state(&app.handle());
             app.manage(update_manager::Manager::new(initial_state));
@@ -72,7 +85,6 @@ fn main() {
             // Native meeting-prep notification orchestrator. Owns the Pusher
             // connection in the Rust process (webviews get suspended when
             // hidden). Self-gates on session + the enabled toggle.
-            app.manage(recording_state::RecordingState::new());
             app.manage(mic_monitor::MicMonitorManager::new());
             // Start the auto-record mic monitor (self-gates on OS support + the
             // enabled setting).

@@ -447,16 +447,16 @@ pub async fn upload_file(
 
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
-    crate::tray::set_menu(&app, is_recording, is_paused);
     let state = app.state::<crate::recording_state::RecordingState>();
     if is_recording {
-        // The recorder window reports this right after capture starts; the
-        // pill visibility watcher waits for it before hiding the window.
+        // Mark capture before redrawing the tray so the title refresh sees the
+        // active recording and clears the countdown text in the menu bar.
         state.mark_capture_active();
     } else {
         state.clear();
         let _ = app.emit("recording://state", false);
     }
+    crate::tray::set_menu(&app, is_recording, is_paused);
     Ok(())
 }
 
