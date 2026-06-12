@@ -102,13 +102,13 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, Strin
 }
 
 /// Best-effort notes generation: runs the sidecar and writes either
-/// `meeting-note.md` or `meta.notes_error`. Failures here never affect the
+/// `ari-note.md` or `meta.notes_error`. Failures here never affect the
 /// recording's `Done` status.
 async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
     match run_notes(&transcript_path, &models).await {
         // Empty output is a silent failure: it would write a blank
-        // meeting-note.md with notes_error unset, reading as success. Record it.
+        // ari-note.md with notes_error unset, reading as success. Record it.
         Ok(notes) if notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
@@ -136,7 +136,7 @@ use crate::storage::{self, RecordingMeta, RecordingStatus};
 /// Returns as soon as the transcript is persisted and marked `Done`. Notes
 /// generation runs in a detached background task whose `JoinHandle` is
 /// returned alongside the result — production callers drop it; tests
-/// `.await` it to observe `meeting-note.md` / `meta.notes_error`.
+/// `.await` it to observe `ari-note.md` / `meta.notes_error`.
 pub async fn finalize_core(
     root: &Path,
     audio: Vec<u8>,
@@ -177,7 +177,7 @@ pub async fn finalize_core(
             storage::write_meta(&dir, &meta)?;
 
             // Spawn notes generation detached: it's best-effort and writes
-            // its outcome (meeting-note.md or meta.notes_error) directly to disk,
+            // its outcome (ari-note.md or meta.notes_error) directly to disk,
             // so the UI/library state never has to wait on it.
             let notes_handle = tokio::spawn(process_notes(dir.clone(), models, meta.clone()));
 
@@ -271,7 +271,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
         // Branch on the `notes` subcommand so the stub's transcript JSON isn't
-        // dumped into meeting-note.md; this test exercises only the transcribe path.
+        // dumped into ari-note.md; this test exercises only the transcribe path.
         let body =
             format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
         let stub = write_stub(tmp.path(), &body);
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_writes_meeting_note_md_when_notes_succeed() {
+    async fn finalize_writes_ari_note_md_when_notes_succeed() {
         let tmp = tempfile::tempdir().unwrap();
         let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
         // Stub: `notes` subcommand prints markdown; otherwise print transcript JSON.
@@ -334,7 +334,7 @@ mod tests {
 
         assert_eq!(res.status, RecordingStatus::Done);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
-        let notes = std::fs::read_to_string(dir.join("meeting-note.md")).unwrap();
+        let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert!(notes.contains("# Notes"), "got: {notes}");
         assert!(crate::storage::read_meta(&dir).unwrap().notes_error.is_none());
     }
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(res.status, RecordingStatus::Done);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         assert!(dir.join("transcript.md").exists());
-        assert!(!dir.join("meeting-note.md").exists());
+        assert!(!dir.join("ari-note.md").exists());
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
         assert!(meta.notes_error.is_some());

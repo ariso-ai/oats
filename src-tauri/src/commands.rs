@@ -695,7 +695,7 @@ fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
 /// `transcript` are valid; anything else is an error.
 fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
     match kind {
-        "note" => Ok("meeting-note.md"),
+        "note" => Ok("ari-note.md"),
         "transcript" => Ok("transcript.md"),
         other => Err(format!("invalid recording file kind: {other}")),
     }
@@ -728,7 +728,7 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
 /// transcript and just guards against a pathological/corrupt file.
 const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Read a recording's `meeting-note.md` or `transcript.md` as UTF-8 so the
+/// Read a recording's `ari-note.md` or `transcript.md` as UTF-8 so the
 /// frontend can render it inline. Returns `Ok(None)` when the file doesn't
 /// exist yet (a normal "not generated" state), distinct from a read error.
 /// `kind` must be `"note"` or `"transcript"`.
@@ -750,7 +750,7 @@ pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, S
     Ok(Some(text))
 }
 
-/// Open a recording's `meeting-note.md` or `transcript.md` in the OS default app.
+/// Open a recording's `ari-note.md` or `transcript.md` in the OS default app.
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
@@ -780,7 +780,7 @@ pub fn read_recording_note(id: String) -> Result<String, String> {
 }
 
 /// Persist user-authored in-meeting notes to `user-note.md` beside the
-/// recording. Generated meeting notes use `meeting-note.md`, keeping Overview
+/// recording. Generated meeting notes use `ari-note.md`, keeping Overview
 /// visibility independent from My note autosaves.
 #[tauri::command]
 pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn note_or_transcript_filename_maps_known_kinds() {
-        assert_eq!(note_or_transcript_filename("note").unwrap(), "meeting-note.md");
+        assert_eq!(note_or_transcript_filename("note").unwrap(), "ari-note.md");
         assert_eq!(
             note_or_transcript_filename("transcript").unwrap(),
             "transcript.md"
