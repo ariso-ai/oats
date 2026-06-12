@@ -35,6 +35,7 @@ fn main() {
             commands::get_desktop_config,
             commands::list_local_recordings,
             commands::create_library_window,
+            commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
             commands::read_recording_file,
             commands::open_recording_file,

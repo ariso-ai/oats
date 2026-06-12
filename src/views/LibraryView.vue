@@ -53,6 +53,7 @@
           >
             <span class="mi-head">
               <span class="mi-title">{{ m.title }}</span>
+              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
@@ -94,7 +95,10 @@
           <p>Select a meeting to view its notes.</p>
         </div>
       </div>
-      <RecorderStrip :meeting-id="selectedItem?.id ?? null" />
+      <RecorderStrip
+        :meeting-id="selectedItem?.id ?? null"
+        @recording-change="recordingMeetingId = $event"
+      />
     </section>
   </div>
 </template>
@@ -121,6 +125,8 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+// Meeting currently being recorded (reported by the strip) — red dot in the list.
+const recordingMeetingId = ref<string | null>(null);
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
 // split stay fresh while the window sits open.
@@ -215,16 +221,25 @@ function setRecording(next: boolean): void {
   recording.value = next;
 }
 
+// Bump per call so an older in-flight `listMeetings()` can't clobber a newer
+// reload (e.g. the recording://started fallback firing while the initial
+// onMounted load is still pending).
+let loadMeetingsRequest = 0;
+
 async function loadMeetings(): Promise<void> {
+  const requestId = ++loadMeetingsRequest;
   loading.value = true;
   error.value = null;
   try {
-    meetings.value = await (await getActiveBackend()).listMeetings();
+    const next = await (await getActiveBackend()).listMeetings();
+    if (requestId !== loadMeetingsRequest) return;
+    meetings.value = next;
   } catch (e) {
+    if (requestId !== loadMeetingsRequest) return;
     console.error('Failed to list meetings', e);
     error.value = 'Could not load meetings.';
   } finally {
-    loading.value = false;
+    if (requestId === loadMeetingsRequest) loading.value = false;
   }
 }
 
@@ -260,7 +275,13 @@ async function startRecording(): Promise<void> {
 // the picked meeting into the detail panel so the user sees what's recording.
 async function onRecordingStarted(event: { payload: { meetingId: number | null } }): Promise<void> {
   setRecording(true);
-  const id = event.payload?.meetingId;
+  await selectRecordingMeeting(event.payload?.meetingId);
+}
+
+// Shared resolver for "the recording is attached to meeting X, surface it in
+// the detail panel". Used by both the live `recording://started` event and the
+// mount-time backend query that recovers state after the library was closed.
+async function selectRecordingMeeting(id: number | null | undefined): Promise<void> {
   if (id == null) return;
   const idStr = String(id);
   let m = meetings.value.find((x) => x.id === idStr);
@@ -282,8 +303,22 @@ function onWindowFocus(): void {
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 
+// Recover the attached meeting for a recording that started before this
+// library window existed. The `recording://started` event is one-shot, so a
+// window opened mid-recording would otherwise never see the selection.
+async function recoverActiveRecording(): Promise<void> {
+  try {
+    const id = await invoke<number | null>('get_active_recording_meeting_id');
+    if (id != null && selectedItem.value == null) {
+      await selectRecordingMeeting(id);
+    }
+  } catch (e) {
+    console.error('Failed to query active recording', e);
+  }
+}
+
 onMounted(() => {
-  void loadMeetings();
+  void loadMeetings().then(() => recoverActiveRecording());
   void refreshRecordingState();
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;
@@ -424,7 +459,23 @@ onUnmounted(() => {
   border-color: #1c1c1c;
   box-shadow: 3px 3px 0 #e7e5e2;
 }
-.mi-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+/* Title hugs the left, rel-label pushed right; the recording dot (when
+   present) sits right after the title's end. */
+.mi-head { display: flex; align-items: baseline; gap: 8px; }
+.mi-rel { margin-left: auto; }
+.mi-rec-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e0443e;
+  align-self: center;
+  animation: rec-pulse 1s infinite;
+}
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 .mi-title {
   font-size: 15px;
   font-weight: 500;
@@ -493,9 +544,10 @@ onUnmounted(() => {
 .nav-icon-btn:hover { color: #1c1c1c; }
 .nav-ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
-/* Detail card area: card on top, recorder strip docked at the bottom while
-   a recording is on-going. */
+/* Detail card area: the recorder strip floats bottom-centered over the card
+   while a recording is on-going (it positions against this wrapper). */
 .detail-wrap {
+  position: relative;
   flex: 1;
   min-width: 0;
   padding: 28px 18px 18px 8px;

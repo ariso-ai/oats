@@ -120,6 +120,18 @@ describe('RecorderStrip', () => {
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
 
+  it('reports the recorded meeting id to its parent, and null when over', async () => {
+    const wrapper = mount(RecorderStrip, { props: { meetingId: null } });
+    await flushPromises();
+    sendState(recording({ meetingId: 42 }));
+    await flushPromises();
+    expect(wrapper.emitted('recording-change')?.at(-1)).toEqual(['42']);
+
+    sendState(recording({ meetingId: 42, phase: 'closed' }));
+    await flushPromises();
+    expect(wrapper.emitted('recording-change')?.at(-1)).toEqual([null]);
+  });
+
   it('clears itself when state broadcasts stop (recorder died without closing)', async () => {
     vi.useFakeTimers();
     const wrapper = mount(RecorderStrip, { props: { meetingId: null } });

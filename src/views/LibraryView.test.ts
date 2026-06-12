@@ -209,6 +209,29 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
   });
 
+  it('marks the recording meeting with a red dot in the sidebar list', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan' }),
+      item({ id: '7', title: 'Other Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.find('.mi-rec-dot').exists()).toBe(false);
+
+    // The recorder strip relays recorder://state to the library.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'recording',
+    });
+    await flushPromises();
+    const rows = wrapper.findAll('.meeting-item');
+    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
   it('selects the picked meeting in the detail panel when a recording starts', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);

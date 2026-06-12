@@ -48,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 /** Mirror of the recording running in the (hidden) waveform window. This
@@ -65,6 +65,10 @@ interface RecorderState {
 /** The meeting currently shown in the detail panel (null when none). */
 const props = defineProps<{ meetingId: string | null }>();
 
+/** Tells the parent which meeting is being recorded (null when none) —
+ *  drives the red dot on the sidebar list. */
+const emitToParent = defineEmits<{ 'recording-change': [string | null] }>();
+
 // The recorder heartbeats state about every second; a longer silence means it
 // died without broadcasting `closed` (crash / force-close) — clear the strip.
 const STALE_MS = 4000;
@@ -80,6 +84,10 @@ const visible = computed(() => {
   if (!state.value) return false;
   if (state.value.meetingId == null) return true;
   return String(state.value.meetingId) === props.meetingId;
+});
+
+watch(state, (s) => {
+  emitToParent('recording-change', s && s.meetingId != null ? String(s.meetingId) : null);
 });
 
 const formattedDuration = computed(() => {
@@ -115,15 +123,19 @@ onUnmounted(() => {
 
 <style scoped>
 /* Horizontal sibling of the floating pill: same dark surface, yellow bars,
-   and control colors, laid out as a slim bottom strip. */
+   and control colors. Floats as a compact overlay bottom-centered over the
+   detail card (the positioning context is .detail-wrap). */
 .strip {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 14px;
   height: 44px;
-  flex-shrink: 0;
-  margin-top: 10px;
   padding: 0 18px;
   border-radius: 22px;
   background: #0d0d0d;

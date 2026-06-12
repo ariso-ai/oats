@@ -154,6 +154,9 @@ let closedSent = false;
 
 function broadcastState(phase: RecorderPhase = currentPhase()): void {
   if (closedSent) return;
+  // Don't announce "recording" while startRecording() is still awaiting
+  // getUserMedia/setup — the strip would render a phantom active recorder.
+  if (phase === 'recording' && !recorder.isRecording.value) return;
   if (phase === 'closed') closedSent = true;
   emit('recorder://state', {
     bars: centerWeightedBars(recorder.frameLevels.value.slice(0, 20), 3),
