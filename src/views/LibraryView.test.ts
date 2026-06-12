@@ -154,6 +154,40 @@ describe('LibraryView', () => {
     expect(rows[1].classes()).toContain('selected');
   });
 
+  it('keeps the latest clicked meeting selected when pending note saves finish out of order', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'a', title: 'Standup' }),
+      item({ id: 'b', title: 'Planning' }),
+      item({ id: 'c', title: 'Retro' }),
+    ]);
+    const saveResolvers: Array<() => void> = [];
+    writeRecordingNote.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          saveResolvers.push(resolve);
+        })
+    );
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    const rows = wrapper.findAll('.meeting-item');
+
+    void rows[1].trigger('click');
+    await flushPromises();
+    void rows[2].trigger('click');
+    await flushPromises();
+
+    expect(saveResolvers).toHaveLength(2);
+    saveResolvers[1]();
+    await flushPromises();
+    saveResolvers[0]();
+    await flushPromises();
+
+    expect(rows[1].attributes('aria-pressed')).toBe('false');
+    expect(rows[2].attributes('aria-pressed')).toBe('true');
+    expect(rows[2].classes()).toContain('selected');
+  });
+
   it('shows the meeting title and time subtitle in each row', async () => {
     listMeetings.mockResolvedValue([
       item({ id: 'a', title: 'Morning Sync', durationSeconds: 300 }),
