@@ -24,6 +24,10 @@ export function useRecorder() {
   // Wall-clock of the last frame that carried real sound, for the silence
   // backstop. Seeded on start and reset on resume so paused gaps don't count.
   const lastSoundAt: Ref<number> = ref(Date.now());
+  // Analyser spectrum (0–1 per bin) sampled once per audio frame (~10/s).
+  // Unlike a rAF-driven loop, this keeps updating while the window is hidden,
+  // so it can drive waveform mirrors in other windows.
+  const frameLevels: Ref<number[]> = ref([]);
 
   let audioContext: AudioContext | null = null;
   let micStream: MediaStream | null = null;
@@ -161,6 +165,14 @@ export function useRecorder() {
       // to the destination — even with no input (the system-audio-only case).
       processor = audioContext.createScriptProcessor(4096, 1, 1);
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        // Sample the analyser before the paused/stopped early-return so the
+        // waveform mirrors keep moving (matching the local rAF display, which
+        // also keeps reading the analyser while paused).
+        if (analyserNode) {
+          const bins = new Uint8Array(analyserNode.frequencyBinCount);
+          analyserNode.getByteFrequencyData(bins);
+          frameLevels.value = Array.from(bins, (v) => v / 255);
+        }
         if (!isRecording.value || isPaused.value || !mp3Encoder) return;
         const frame = e.inputBuffer.length;
         let drainPeakRef: Int16Array = new Int16Array(0);
@@ -364,6 +376,7 @@ export function useRecorder() {
     mp3Chunks = [];
     isRecording.value = false;
     isPaused.value = false;
+    frameLevels.value = [];
   }
 
   return {
@@ -373,6 +386,7 @@ export function useRecorder() {
     durationSeconds,
     startedAt,
     lastSoundAt,
+    frameLevels,
     systemAudioSupported,
     getAnalyser,
     startRecording,

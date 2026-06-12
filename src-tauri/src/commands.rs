@@ -19,11 +19,11 @@ pub(crate) fn http_client() -> reqwest::Client {
 compile_error!("Features `prod-api` and `dev-api` are mutually exclusive");
 
 #[cfg(feature = "prod-api")]
-pub(crate) const API_BASE_URL: &str = "https://api.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const API_BASE_URL: &str = "http://100.88.135.32:4000";
+const DEFAULT_API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const API_BASE_URL: &str = "http://localhost:4000";
+const DEFAULT_API_BASE_URL: &str = "http://localhost:4000";
 
 // Public Pusher client key. dev-api and local both use the dev key, so this
 // gates on prod-api only (unlike WEB_APP_BASE_URL's three-way split).
@@ -35,11 +35,50 @@ pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
 #[cfg(feature = "prod-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://dev-agents-desktop-12.cheetah-oratrice.ts.net";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
+const DEFAULT_WEB_APP_BASE_URL: &str = "http://localhost:5173";
+
+/// Resolve the production API origin from the baked binary constant. Production
+/// builds intentionally ignore environment overrides so deployment endpoints
+/// cannot be changed outside the signed app.
+#[cfg(feature = "prod-api")]
+pub(crate) fn api_base_url() -> String {
+    DEFAULT_API_BASE_URL.to_string()
+}
+
+/// Resolve the API origin used by desktop-native HTTP calls in development.
+/// Non-production launchers can point the app at an isolated Agents dev stack.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn api_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_API_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Resolve the production web origin from the baked binary constant. Production
+/// builds intentionally ignore environment overrides to keep deep links fixed.
+#[cfg(feature = "prod-api")]
+pub(crate) fn web_app_base_url() -> String {
+    DEFAULT_WEB_APP_BASE_URL.to_string()
+}
+
+/// Resolve the browser-facing web origin used for deep links in development.
+/// Keeping this separate from the API origin matches the Agents dev.sh Caddy /api routing.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn web_app_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_WEB_APP_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WEB_APP_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
 
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
@@ -98,7 +137,7 @@ pub async fn is_session_valid(app: &tauri::AppHandle) -> bool {
 
     let client = http_client();
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -138,7 +177,7 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
     // Step 1: Get the OAuth redirect URL from the API. The backend expands
     // these service names into Google scopes and owns credential persistence.
     let response = client
-        .post(format!("{API_BASE_URL}/oauth2/prepare-state"))
+        .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
         .body(
             r#"{"integration":"google-signin","scopes":["calendar-readonly"],"newUserSignupIntent":"personal_unless_domain_autojoin"}"#,
@@ -238,7 +277,7 @@ async fn exchange_token_for_session(
     let client = http_client();
 
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/check"))
+        .get(format!("{}/auth/check", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -305,7 +344,7 @@ pub async fn check_session(app: tauri::AppHandle) -> Result<Option<SessionResult
 
     let client = http_client();
     let response = client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -337,7 +376,7 @@ pub async fn api_request(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let mut request = match method.to_uppercase().as_str() {
         "GET" => client.get(&url),
@@ -379,7 +418,7 @@ pub async fn upload_file(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let file_part = reqwest::multipart::Part::bytes(file_data)
         .file_name(file_name)
@@ -409,9 +448,14 @@ pub async fn upload_file(
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
     crate::tray::set_menu(&app, is_recording, is_paused);
-    if !is_recording {
-        use tauri::Manager;
-        app.state::<crate::recording_state::RecordingState>().clear();
+    let state = app.state::<crate::recording_state::RecordingState>();
+    if is_recording {
+        // The recorder window reports this right after capture starts; the
+        // pill visibility watcher waits for it before hiding the window.
+        state.mark_capture_active();
+    } else {
+        state.clear();
+        let _ = app.emit("recording://state", false);
     }
     Ok(())
 }
@@ -492,6 +536,13 @@ pub(crate) fn open_waveform_window(
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
         .inner_size(92.0, 284.0)
+        // Born visible even when the library's embedded strip is the real UI:
+        // WebKit won't resolve getUserMedia for a hidden window, so the pill
+        // must stay on screen until capture starts. The visibility watcher
+        // hides it then (set_tray_recording marks capture active).
+        // Throttling is disabled so the hidden webview keeps recording and
+        // broadcasting recorder://state.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -506,7 +557,9 @@ pub(crate) fn open_waveform_window(
     } else {
         crate::recording_state::RecordingSource::Manual
     };
-    app.state::<crate::recording_state::RecordingState>().set(source);
+    app.state::<crate::recording_state::RecordingState>()
+        .set(source, meeting_id);
+    let _ = app.emit("recording://state", true);
 
     // If the window is destroyed without a clean stop (crash / force-close),
     // clear the shared flag so the monitor can recover and re-arm.
@@ -516,10 +569,22 @@ pub(crate) fn open_waveform_window(
             app_for_event
                 .state::<crate::recording_state::RecordingState>()
                 .clear();
+            let _ = app_for_event.emit("recording://state", false);
         }
     });
 
     crate::tray::set_menu(app, true, false);
+
+    // Show the pill only while the library window (with its embedded
+    // recorder strip) can't be seen — minimized or closed.
+    crate::recorder_pill::spawn_watcher(app);
+
+    // Tell every window (the library in particular) which meeting the new
+    // recording is attached to, so it can surface that meeting immediately.
+    let _ = app.emit(
+        "recording://started",
+        serde_json::json!({ "meetingId": meeting_id }),
+    );
     Ok(())
 }
 
@@ -598,7 +663,7 @@ pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
-        web_app_base_url: WEB_APP_BASE_URL.to_string(),
+        web_app_base_url: web_app_base_url(),
     }
 }
 
@@ -722,6 +787,16 @@ pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> 
     let dir = recording_dir(&id)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
     crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
+}
+
+/// Return the meeting id the active recording is attached to, if any. The
+/// library window queries this on mount so it can re-select the attached
+/// meeting after being closed/reopened mid-recording — the `recording://started`
+/// event is one-shot and the new window would otherwise miss it.
+#[tauri::command]
+pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i64> {
+    app.state::<crate::recording_state::RecordingState>()
+        .active_meeting_id()
 }
 
 #[tauri::command]
