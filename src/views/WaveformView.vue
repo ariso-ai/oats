@@ -9,7 +9,7 @@
       @mouseleave="collapse"
       @click="showMeetings"
     >
-      <img class="logo" src="../assets/ariso-logo-w.png" alt="" />
+      <img class="logo" src="../assets/ariso-logo-w.svg" alt="" />
 
       <template v-if="uploadResult">
         <span class="status-icon" :class="uploadResult === 'success' ? 'ok' : 'err'">
@@ -85,18 +85,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend } from '../composables/useBackend';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
-import { bucketLevels } from './waveformBars';
+import { centerWeightedBars } from './waveformBars';
 import { shouldAutoStop } from '../composables/silenceWatch';
+import { localRecordingIdFromStart } from '../composables/localRecordingId';
 import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
 
@@ -110,9 +111,9 @@ const uploadResult = ref<'success' | 'failed' | null>(null);
 const isExpanded = ref(false);
 
 // Voice energy lives in the low FFT bins; the upper bins are near-silent and
-// would leave the higher bars dead. Bucket only the low part of the spectrum
-// so all five bars react to speech.
-const bars = computed(() => bucketLevels(waveform.levels.value.slice(0, 20), 5));
+// would leave the higher bars dead. Bucket only the low part of the spectrum,
+// center-weighted so the middle bar carries the hottest (lowest) bucket.
+const bars = computed(() => centerWeightedBars(waveform.levels.value.slice(0, 20), 3));
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
@@ -136,6 +137,53 @@ const formattedDuration = computed(() => {
   const secs = (s % 60).toString().padStart(2, '0');
   return `${mins}:${secs}`;
 });
+
+// Mirror the recording to the library window's embedded recorder strip. The
+// bars ride on frameLevels (sampled in the audio callback, so the cadence
+// survives this window being hidden, unlike rAF-driven waveform.levels).
+type RecorderPhase = 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
+
+function currentPhase(): RecorderPhase {
+  if (uploadResult.value) return uploadResult.value;
+  if (isUploading.value) return 'uploading';
+  return 'recording';
+}
+
+// Once `closed` is sent, stay silent: a heartbeat firing between the closed
+// broadcast and the window's destruction would otherwise revive the strip.
+let closedSent = false;
+
+function broadcastState(phase: RecorderPhase = currentPhase()): void {
+  if (closedSent) return;
+  // Don't announce "recording" while startRecording() is still awaiting
+  // getUserMedia/setup — the strip would render a phantom active recorder.
+  if (phase === 'recording' && !recorder.isRecording.value) return;
+  if (phase === 'closed') closedSent = true;
+  emit('recorder://state', {
+    bars: centerWeightedBars(recorder.frameLevels.value.slice(0, 20), 3),
+    durationSeconds: recorder.durationSeconds.value,
+    isPaused: recorder.isPaused.value,
+    meetingId: effectiveMeetingId.value,
+    // Local recordings have no meeting id, but their finalized recording id is
+    // deterministic from the start time — broadcast it so the library can pin
+    // the strip / red dot to the row the recording will land on.
+    localRecordingId:
+      backend.value?.id === 'local' && recorder.startedAt.value
+        ? localRecordingIdFromStart(recorder.startedAt.value)
+        : null,
+    phase,
+  }).catch(() => { /* no listeners / shutting down */ });
+}
+
+watch(() => recorder.frameLevels.value, () => broadcastState());
+watch(
+  [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
+  () => broadcastState(),
+);
+// Heartbeat so the strip can detect a dead recorder (no events ≈ crashed):
+// frame/duration watchers go quiet during upload and after stop.
+const stateHeartbeat = setInterval(() => broadcastState(), 1_000);
+onUnmounted(() => clearInterval(stateHeartbeat));
 
 function expand() {
   // Don't expand during upload/result states.
@@ -167,6 +215,7 @@ let silenceTimer: ReturnType<typeof setInterval> | null = null;
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
 async function rollbackAndClose() {
+  broadcastState('closed');
   try {
     await invoke('set_tray_recording', { isRecording: false, isPaused: false });
   } catch { /* ignore */ }
@@ -332,6 +381,7 @@ async function handleStop() {
 }
 
 async function closeWindow() {
+  broadcastState('closed');
   try {
     await getCurrentWebviewWindow().close();
   } catch {
@@ -443,7 +493,7 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 28px;
+  height: 18px;
   margin-top: 7px;
   flex-shrink: 0;
 }
@@ -531,15 +581,15 @@ html, body {
 
 .drag-dots {
   display: grid;
-  grid-template-columns: repeat(3, 4px);
-  gap: 3px 4px;
+  grid-template-columns: repeat(3, 3.2px);
+  gap: 2.4px 3.2px;
   justify-content: center;
   margin-top: 6px;
 }
 
 .dot {
-  width: 4px;
-  height: 4px;
+  width: 3.2px;
+  height: 3.2px;
   border-radius: 50%;
   background: #6b7280;
 }

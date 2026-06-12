@@ -14,22 +14,26 @@ const invoke = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 const eventHandlers: Record<string, (e: unknown) => void> = {};
+const emitEvent = vi.fn(() => Promise.resolve());
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn((name: string, cb: (e: unknown) => void) => {
     eventHandlers[name] = cb;
     return Promise.resolve(() => {});
   }),
+  emit: (...a: unknown[]) => emitEvent(...a),
 }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({ close: closeWin }),
 }));
 let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
+const recorderIsRecording = { value: true };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
-    isRecording: { value: true },
+    isRecording: recorderIsRecording,
     isPaused: { value: false },
     durationSeconds: { value: 5 },
+    frameLevels: { value: new Array(32).fill(0.5) },
     lastSoundAt: { value: 0 },
     startedAt: { value: '2026-06-09T10:00:00Z' },
     getAnalyser,
@@ -65,16 +69,17 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const k in eventHandlers) delete eventHandlers[k];
   routeQuery = {};
+  recorderIsRecording.value = true;
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('WaveformView vertical pill', () => {
-  it('starts recording on mount and renders 5 waveform bars + 6 drag dots', async () => {
+  it('starts recording on mount and renders 3 waveform bars + 6 drag dots', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();
     expect(startRecording).toHaveBeenCalledWith('mic');
-    expect(wrapper.findAll('.bar')).toHaveLength(5);
+    expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.findAll('.dot')).toHaveLength(6);
   });
 
@@ -163,6 +168,61 @@ describe('WaveformView vertical pill', () => {
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
+  });
+
+  it('does not broadcast a recording phase before capture has started', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    // getUserMedia still pending: the recorder reports not-recording.
+    recorderIsRecording.value = false;
+    mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    emitEvent.mockClear();
+    await vi.advanceTimersByTimeAsync(2_100); // heartbeats fire
+    const states = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state');
+    expect(states).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('broadcasts recorder://state through the stop flow, ending with closed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    routeQuery = { meetingId: '42' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    const states = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => payload as { phase: string; meetingId: number | null });
+    const phases = states.map((s) => s.phase);
+    expect(phases).toContain('uploading');
+    expect(phases).toContain('success');
+    expect(states[0]?.meetingId).toBe(42);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const last = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state').at(-1);
+    expect((last?.[1] as { phase: string }).phase).toBe('closed');
+    vi.useRealTimers();
+  });
+
+  it('broadcasts the deterministic local recording id for the local backend', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await vi.advanceTimersByTimeAsync(1_100); // heartbeat
+
+    const state = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => payload as { localRecordingId: string | null })
+      .at(-1);
+    // Mirrors Rust sanitize_iso_to_id over the mocked startedAt.
+    expect(state?.localRecordingId).toBe('2026-06-09T10-00-00Z');
+    vi.useRealTimers();
   });
 
   it('auto mode with no calendar match shows the confirm overlay', async () => {

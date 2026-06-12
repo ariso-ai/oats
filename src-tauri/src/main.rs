@@ -5,11 +5,13 @@ mod audio_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
+mod recorder_pill;
 mod storage;
 mod transcribe;
 mod model_manager;
 mod recording_state;
 mod tray;
+mod tray_meeting;
 mod update_manager;
 
 fn main() {
@@ -34,15 +36,20 @@ fn main() {
             commands::get_desktop_config,
             commands::list_local_recordings,
             commands::create_library_window,
+            commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
             commands::read_recording_file,
+            commands::read_recording_note,
+            commands::write_recording_note,
             commands::open_recording_file,
+            commands::rename_local_recording,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
             model_manager::download_local_stt,
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            tray_meeting::sync_tray_meeting,
             mic_monitor::sync_auto_record,
             mic_monitor::auto_record_supported,
             audio_capture::start_system_audio_capture,
@@ -59,7 +66,18 @@ fn main() {
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
 
+            // Managed state must exist before the tray is created: tray menu
+            // rebuilds and the title refresher read RecordingState and
+            // FeaturedMeetingState.
+            app.manage(recording_state::RecordingState::new());
+            app.manage(tray_meeting::TrayMeetingManager::new());
+            app.manage(tray_meeting::FeaturedMeetingState::new());
+
             tray::create_tray(app.handle())?;
+
+            // Native next-meeting tray orchestrator. Self-gates on Ariso
+            // backend + session; re-synced from BootstrapView on SYNC_EVENT.
+            tray_meeting::sync(app.handle());
 
             let initial_state = update_manager::load_state(&app.handle());
             app.manage(update_manager::Manager::new(initial_state));
@@ -67,7 +85,6 @@ fn main() {
             // Native meeting-prep notification orchestrator. Owns the Pusher
             // connection in the Rust process (webviews get suspended when
             // hidden). Self-gates on session + the enabled toggle.
-            app.manage(recording_state::RecordingState::new());
             app.manage(mic_monitor::MicMonitorManager::new());
             // Start the auto-record mic monitor (self-gates on OS support + the
             // enabled setting).
@@ -159,6 +176,17 @@ fn main() {
     }
 
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon re-activates the app (Reopen).
+            // Surface the meetings window — every other window is a hidden
+            // utility (bootstrap, settings) or transient (recorder pill).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Err(e) = commands::open_library_window(_app) {
+                    eprintln!("Failed to open meetings window on dock reopen: {e}");
+                }
+            }
+        });
 }

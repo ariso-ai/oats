@@ -102,6 +102,9 @@ export interface Backend {
   getMeetingTranscript(item: MeetingListItem): Promise<string | TranscriptChunk[] | null>;
   /** Lazily load the requester's individual note (null when none). */
   getIndividualNote(item: MeetingListItem): Promise<{ content: string; title: string | null } | null>;
+  /** Rename a meeting. Ariso PATCHes the meeting-notes endpoint; local
+   *  rewrites the title in the recording's meta.json. */
+  renameMeeting(id: string, title: string): Promise<void>;
 }
 
 interface RawMeetingSummary {
@@ -153,7 +156,7 @@ async function blobToBytes(blob: Blob): Promise<number[]> {
   return [...new Uint8Array(await blob.arrayBuffer())];
 }
 
-function timestampTitle(iso: string): string {
+export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
   // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same
@@ -240,6 +243,11 @@ export class ArisoBackend implements Backend {
     const { getMeetingIndividualNote } = useMeetingApi();
     return getMeetingIndividualNote(item.id);
   }
+
+  async renameMeeting(id: string, title: string): Promise<void> {
+    const { updateMeetingNotesTitle } = useMeetingApi();
+    await updateMeetingNotesTitle(id, title);
+  }
 }
 
 export class LocalBackend implements Backend {
@@ -317,6 +325,10 @@ export class LocalBackend implements Backend {
   // Local recordings have no per-user individual note.
   async getIndividualNote(): Promise<{ content: string; title: string | null } | null> {
     return null;
+  }
+
+  async renameMeeting(id: string, title: string): Promise<void> {
+    await local.renameRecording(id, title);
   }
 }
 

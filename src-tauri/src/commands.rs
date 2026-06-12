@@ -19,11 +19,11 @@ pub(crate) fn http_client() -> reqwest::Client {
 compile_error!("Features `prod-api` and `dev-api` are mutually exclusive");
 
 #[cfg(feature = "prod-api")]
-pub(crate) const API_BASE_URL: &str = "https://api.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const API_BASE_URL: &str = "http://localhost:4000";
+const DEFAULT_API_BASE_URL: &str = "http://localhost:4000";
 
 // Public Pusher client key. dev-api and local both use the dev key, so this
 // gates on prod-api only (unlike WEB_APP_BASE_URL's three-way split).
@@ -35,11 +35,50 @@ pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
 #[cfg(feature = "prod-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
+const DEFAULT_WEB_APP_BASE_URL: &str = "http://localhost:5173";
+
+/// Resolve the production API origin from the baked binary constant. Production
+/// builds intentionally ignore environment overrides so deployment endpoints
+/// cannot be changed outside the signed app.
+#[cfg(feature = "prod-api")]
+pub(crate) fn api_base_url() -> String {
+    DEFAULT_API_BASE_URL.to_string()
+}
+
+/// Resolve the API origin used by desktop-native HTTP calls in development.
+/// Non-production launchers can point the app at an isolated Agents dev stack.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn api_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_API_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Resolve the production web origin from the baked binary constant. Production
+/// builds intentionally ignore environment overrides to keep deep links fixed.
+#[cfg(feature = "prod-api")]
+pub(crate) fn web_app_base_url() -> String {
+    DEFAULT_WEB_APP_BASE_URL.to_string()
+}
+
+/// Resolve the browser-facing web origin used for deep links in development.
+/// Keeping this separate from the API origin matches the Agents dev.sh Caddy /api routing.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn web_app_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_WEB_APP_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WEB_APP_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
 
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
@@ -98,7 +137,7 @@ pub async fn is_session_valid(app: &tauri::AppHandle) -> bool {
 
     let client = http_client();
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -138,7 +177,7 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
     // Step 1: Get the OAuth redirect URL from the API. The backend expands
     // these service names into Google scopes and owns credential persistence.
     let response = client
-        .post(format!("{API_BASE_URL}/oauth2/prepare-state"))
+        .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
         .body(
             r#"{"integration":"google-signin","scopes":["calendar-readonly"],"newUserSignupIntent":"personal_unless_domain_autojoin"}"#,
@@ -238,7 +277,7 @@ async fn exchange_token_for_session(
     let client = http_client();
 
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/check"))
+        .get(format!("{}/auth/check", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -305,7 +344,7 @@ pub async fn check_session(app: tauri::AppHandle) -> Result<Option<SessionResult
 
     let client = http_client();
     let response = client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -337,7 +376,7 @@ pub async fn api_request(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let mut request = match method.to_uppercase().as_str() {
         "GET" => client.get(&url),
@@ -379,7 +418,7 @@ pub async fn upload_file(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let file_part = reqwest::multipart::Part::bytes(file_data)
         .file_name(file_name)
@@ -408,11 +447,16 @@ pub async fn upload_file(
 
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
-    crate::tray::set_menu(&app, is_recording, is_paused);
-    if !is_recording {
-        use tauri::Manager;
-        app.state::<crate::recording_state::RecordingState>().clear();
+    let state = app.state::<crate::recording_state::RecordingState>();
+    if is_recording {
+        // Mark capture before redrawing the tray so the title refresh sees the
+        // active recording and clears the countdown text in the menu bar.
+        state.mark_capture_active();
+    } else {
+        state.clear();
+        let _ = app.emit("recording://state", false);
     }
+    crate::tray::set_menu(&app, is_recording, is_paused);
     Ok(())
 }
 
@@ -492,6 +536,13 @@ pub(crate) fn open_waveform_window(
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
         .inner_size(92.0, 284.0)
+        // Born visible even when the library's embedded strip is the real UI:
+        // WebKit won't resolve getUserMedia for a hidden window, so the pill
+        // must stay on screen until capture starts. The visibility watcher
+        // hides it then (set_tray_recording marks capture active).
+        // Throttling is disabled so the hidden webview keeps recording and
+        // broadcasting recorder://state.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -506,7 +557,9 @@ pub(crate) fn open_waveform_window(
     } else {
         crate::recording_state::RecordingSource::Manual
     };
-    app.state::<crate::recording_state::RecordingState>().set(source);
+    app.state::<crate::recording_state::RecordingState>()
+        .set(source, meeting_id);
+    let _ = app.emit("recording://state", true);
 
     // If the window is destroyed without a clean stop (crash / force-close),
     // clear the shared flag so the monitor can recover and re-arm.
@@ -516,10 +569,22 @@ pub(crate) fn open_waveform_window(
             app_for_event
                 .state::<crate::recording_state::RecordingState>()
                 .clear();
+            let _ = app_for_event.emit("recording://state", false);
         }
     });
 
     crate::tray::set_menu(app, true, false);
+
+    // Show the pill only while the library window (with its embedded
+    // recorder strip) can't be seen — minimized or closed.
+    crate::recorder_pill::spawn_watcher(app);
+
+    // Tell every window (the library in particular) which meeting the new
+    // recording is attached to, so it can surface that meeting immediately.
+    let _ = app.emit(
+        "recording://started",
+        serde_json::json!({ "meetingId": meeting_id }),
+    );
     Ok(())
 }
 
@@ -598,7 +663,7 @@ pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
-        web_app_base_url: WEB_APP_BASE_URL.to_string(),
+        web_app_base_url: web_app_base_url(),
     }
 }
 
@@ -630,7 +695,7 @@ fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
 /// `transcript` are valid; anything else is an error.
 fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
     match kind {
-        "note" => Ok("note.md"),
+        "note" => Ok("ari-note.md"),
         "transcript" => Ok("transcript.md"),
         other => Err(format!("invalid recording file kind: {other}")),
     }
@@ -663,7 +728,7 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
 /// transcript and just guards against a pathological/corrupt file.
 const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Read a recording's `note.md` or `transcript.md` as a UTF-8 string so the
+/// Read a recording's `ari-note.md` or `transcript.md` as UTF-8 so the
 /// frontend can render it inline. Returns `Ok(None)` when the file doesn't
 /// exist yet (a normal "not generated" state), distinct from a read error.
 /// `kind` must be `"note"` or `"transcript"`.
@@ -685,7 +750,7 @@ pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, S
     Ok(Some(text))
 }
 
-/// Open a recording's `note.md` or `transcript.md` in the OS default app.
+/// Open a recording's `ari-note.md` or `transcript.md` in the OS default app.
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
@@ -701,9 +766,69 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Maximum local recording title length, in characters. Mirrors the frontend
+/// limit (the UI validates first; this is defense in depth).
+const MAX_TITLE_CHARS: usize = 40;
+
+/// Rename a local recording by updating `title` in its `meta.json`. The folder
+/// id stays immutable; serde_json escapes quotes/special characters natively.
+#[tauri::command]
+pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("title must not be empty".to_string());
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("title must be {MAX_TITLE_CHARS} characters or fewer"));
+    }
+    let dir = recording_dir(&id)?;
+    let mut meta = crate::storage::read_meta(&dir)?;
+    meta.title = title.to_string();
+    crate::storage::write_meta(&dir, &meta)
+}
+
+/// Read the user-authored local note artifact used by the Library editor.
+/// Missing notes return an empty string so a fresh recording can autosave into
+/// `user-note.md` without affecting generated Overview content.
+#[tauri::command]
+pub fn read_recording_note(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("user-note.md");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read recording note: {e}")),
+    }
+}
+
+/// Persist user-authored in-meeting notes to `user-note.md` beside the
+/// recording. Generated meeting notes use `ari-note.md`, keeping Overview
+/// visibility independent from My note autosaves.
+#[tauri::command]
+pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
+}
+
+/// Return the meeting id the active recording is attached to, if any. The
+/// library window queries this on mount so it can re-select the attached
+/// meeting after being closed/reopened mid-recording — the `recording://started`
+/// event is one-shot and the new window would otherwise miss it.
+#[tauri::command]
+pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i64> {
+    app.state::<crate::recording_state::RecordingState>()
+        .active_meeting_id()
+}
+
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+    open_library_window(&app)
+}
+
+/// Open (or focus) the meetings library window. Shared by the
+/// `create_library_window` command and the macOS dock-icon Reopen handler.
+pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
@@ -717,7 +842,7 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
     // the same row, just to the right of them.
-    WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
+    WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
         .title("Meetings")
         .title_bar_style(TitleBarStyle::Overlay)
         .hidden_title(true)
@@ -736,7 +861,7 @@ mod tests {
 
     #[test]
     fn note_or_transcript_filename_maps_known_kinds() {
-        assert_eq!(note_or_transcript_filename("note").unwrap(), "note.md");
+        assert_eq!(note_or_transcript_filename("note").unwrap(), "ari-note.md");
         assert_eq!(
             note_or_transcript_filename("transcript").unwrap(),
             "transcript.md"
@@ -775,5 +900,99 @@ mod tests {
         let dir = recording_dir(id).unwrap();
         assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    fn test_meta(id: &str) -> crate::storage::RecordingMeta {
+        crate::storage::RecordingMeta {
+            id: id.into(),
+            title: "Old".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 1,
+            status: crate::storage::RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+        }
+    }
+
+    #[test]
+    fn rename_local_recording_updates_title_in_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // Quotes round-trip through meta.json (serde escapes them); whitespace
+        // is trimmed before saving. Only `title` changes.
+        rename_local_recording(id.to_string(), "  Team sync \"Q2\"  ".to_string()).unwrap();
+
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Team sync \"Q2\"");
+        assert_eq!(meta.created_at, "2026-06-02T14:30:05Z");
+        assert_eq!(meta.status, crate::storage::RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_empty_title() {
+        // Validation runs before any filesystem access, so no ARISO_ROOT needed.
+        assert!(rename_local_recording("any-id".to_string(), "".to_string()).is_err());
+        assert!(rename_local_recording("any-id".to_string(), "   ".to_string()).is_err());
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_over_limit_title_but_allows_40() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // 41 characters is rejected without touching the file.
+        assert!(rename_local_recording(id.to_string(), "x".repeat(41)).is_err());
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "Old");
+
+        // Exactly 40 characters saves.
+        rename_local_recording(id.to_string(), "x".repeat(40)).unwrap();
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "x".repeat(40));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_missing_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
+        assert!(res.is_err());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn recording_note_roundtrips_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note commands resolve through ARISO_ROOT, so this test follows the
+        // same serial test command requirement as the recording-dir tests.
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        assert_eq!(read_recording_note(id.into()).unwrap(), "");
+        write_recording_note(id.into(), "# Note\n- point".into()).unwrap();
+        let saved = read_recording_note(id.into()).unwrap();
+        assert_eq!(saved, "# Note\n- point");
+        assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
     }
 }
