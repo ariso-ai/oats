@@ -146,7 +146,7 @@ fn main() {
         let home_dir = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"));
         if let Some(home_dir) = home_dir {
-            let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/sage-mcp.sock");
+            let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/oats-mcp.sock");
             let dir_ready = match socket_path.parent() {
                 Some(dir) => match std::fs::create_dir_all(dir) {
                     Ok(()) => true,
