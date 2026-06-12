@@ -92,6 +92,30 @@ pub(crate) fn format_title_bar(
     format!("{} {}", truncate_title(title), format_countdown(start, now))
 }
 
+/// Gray time row under the menu title row: `10:00 – 10:30 AM` (or `10:00 AM`
+/// when the end time is unknown). Takes already-localized datetimes; the
+/// caller converts with `.with_timezone(&chrono::Local)`. Generic over the
+/// timezone so tests can pin a `FixedOffset`.
+pub(crate) fn format_time_range<Tz: chrono::TimeZone>(
+    start: DateTime<Tz>,
+    end: Option<DateTime<Tz>>,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match end {
+        Some(end) if start.format("%p").to_string() == end.format("%p").to_string() => {
+            format!("{} – {}", start.format("%-I:%M"), end.format("%-I:%M %p"))
+        }
+        Some(end) => format!(
+            "{} – {}",
+            start.format("%-I:%M %p"),
+            end.format("%-I:%M %p")
+        ),
+        None => start.format("%-I:%M %p").to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +202,31 @@ mod tests {
             format_title_bar(None, t("2026-06-11T10:00:30Z"), t("2026-06-11T10:00:00Z")),
             "Untitled meeting in <1min"
         );
+    }
+
+    use chrono::{FixedOffset, TimeZone};
+
+    /// Fixed UTC-4 zone so these tests don't depend on the machine timezone.
+    fn tz() -> FixedOffset {
+        FixedOffset::west_opt(4 * 3600).unwrap()
+    }
+
+    fn at(h: u32, m: u32) -> DateTime<FixedOffset> {
+        tz().with_ymd_and_hms(2026, 6, 11, h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn time_range_same_meridiem_shares_suffix() {
+        assert_eq!(format_time_range(at(10, 0), Some(at(10, 30))), "10:00 – 10:30 AM");
+    }
+
+    #[test]
+    fn time_range_cross_meridiem_shows_both() {
+        assert_eq!(format_time_range(at(11, 30), Some(at(12, 15))), "11:30 AM – 12:15 PM");
+    }
+
+    #[test]
+    fn time_range_start_only() {
+        assert_eq!(format_time_range(at(10, 0), None), "10:00 AM");
     }
 }
