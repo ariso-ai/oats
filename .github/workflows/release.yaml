@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Queue runs instead of overlapping: two concurrent release-please runs can
+# race on the release PR, and cancelling a sync-lock mid-push could leave the
+# release PR with stale lockfiles.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: [self-hosted, macOS, ARM64]
+    outputs:
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      prs: ${{ steps.release.outputs.prs }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # Must be a PAT/App token, not the default GITHUB_TOKEN: the GitHub
+          # Release this action publishes has to fire desktop.yaml's
+          # `release: published` trigger, and events authored by the default
+          # token never trigger other workflows.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+
+  # release-please only stamps the version into files declared in its config;
+  # it can't regenerate lockfiles. desktop.yaml builds with `cargo build
+  # --locked`, which fails if Cargo.lock disagrees with Cargo.toml's version,
+  # so sync both lockfiles on the release PR branch. Neither command compiles
+  # anything (no sidecar binary needed).
+  sync-lock:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.prs_created == 'true' }}
+    runs-on: [self-hosted, macOS, ARM64]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release-please PR branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ fromJson(needs.release-please.outputs.prs)[0].headBranchName }}
+          # Same PAT as above so the lockfile push re-triggers the PR's
+          # validate checks (default-token pushes don't trigger workflows).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync package-lock.json
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Sync Cargo.lock
+        working-directory: src-tauri
+        run: cargo update --workspace
+
+      - name: Commit and push lockfiles if changed
+        run: |
+          if git diff --quiet package-lock.json src-tauri/Cargo.lock; then
+            echo "lockfiles unchanged — nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json src-tauri/Cargo.lock
+          git commit -m "chore: sync lockfiles for release"
+          git push
