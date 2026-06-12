@@ -189,7 +189,7 @@ export const local = {
   readRecordingAudio(id: string): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('read_recording_audio', { id });
   },
-  /** Reads the same local `note.md` artifact the Library editor autosaves. */
+  /** Reads the local `user-note.md` artifact the Library editor autosaves. */
   readRecordingNote(id: string): Promise<string> {
     return invoke<string>('read_recording_note', { id });
   },

@@ -9,7 +9,7 @@ import TaskItem from '@tiptap/extension-task-item';
 import { Markdown } from 'tiptap-markdown';
 
 // Compact TipTap surface for in-meeting notes. It speaks Markdown at the
-// boundary so local `note.md` files and future backend notes share one format.
+// boundary so local `user-note.md` files and future backend notes share one format.
 const props = withDefaults(
   defineProps<{
     modelValue: string;
@@ -51,7 +51,7 @@ const editor = useEditor({
   },
   onUpdate: ({ editor: ed }) => {
     // Emit markdown rather than HTML so the editor stays compatible with the
-    // local `note.md` artifact and Agents' existing Tiptap markdown convention.
+    // local `user-note.md` artifact and Agents' existing Tiptap markdown convention.
     emit('update:modelValue', ed.storage.markdown.getMarkdown());
   },
   onCreate: ({ editor: ed }) => {
@@ -98,7 +98,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 100%;
   outline: none;
-  padding: 28px 32px 44px;
+  padding: 18px 0 44px;
   font: 15px/1.58 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   color: #1d1d1f;
 }

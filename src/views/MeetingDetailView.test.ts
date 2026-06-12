@@ -6,6 +6,9 @@ import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const updateMeetingNotesTitle = vi.fn();
+const notesCanEdit = vi.fn(() => false);
+const loadNote = vi.fn();
+const saveNote = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () =>
@@ -16,6 +19,14 @@ vi.mock('../composables/useBackend', () => ({
 }));
 vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({ updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a) }),
+}));
+vi.mock('../composables/useMeetingNotesPersistence', () => ({
+  useMeetingNotesPersistence: () => ({
+    modeFor: () => 'local',
+    canEdit: (meeting: MeetingListItem) => notesCanEdit(meeting),
+    load: (meeting: MeetingListItem) => loadNote(meeting),
+    save: (meeting: MeetingListItem, markdown: string) => saveNote(meeting, markdown),
+  }),
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
@@ -45,6 +56,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   updateMeetingNotesTitle.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
+  notesCanEdit.mockReturnValue(false);
+  loadNote.mockResolvedValue('');
+  saveNote.mockResolvedValue(undefined);
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -144,5 +158,24 @@ describe('MeetingDetailView inline title editing', () => {
     expect(updateMeetingNotesTitle).toHaveBeenCalledOnce();
     expect(wrapper.emitted('titleUpdated')).toBeUndefined();
     expect(wrapper.find('input.head-title--input').exists()).toBe(true);
+  });
+
+  it('does not autosave an empty note before the selected note has loaded', async () => {
+    vi.useFakeTimers();
+    notesCanEdit.mockReturnValue(true);
+    loadNote.mockResolvedValue('Already saved');
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
+
+    const localItem: MeetingListItem = {
+      ...item,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(800);
+    expect(saveNote).not.toHaveBeenCalledWith(localItem, '');
+
+    vi.useRealTimers();
   });
 });

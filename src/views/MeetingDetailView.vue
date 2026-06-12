@@ -95,7 +95,7 @@
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
         </div>
 
-        <template v-if="activeTab === 'note'">
+        <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
           <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(detail.note)" />
 
@@ -162,9 +162,9 @@
               </div>
             </section>
           </template>
-        </template>
+        </div>
 
-        <template v-else-if="activeTab === 'transcript'">
+        <div v-show="activeTab === 'transcript'" class="tab-pane">
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
           <ol v-else-if="transcriptChunks" class="transcript">
@@ -174,9 +174,9 @@
             </li>
           </ol>
           <div v-else class="content-empty">No transcript available.</div>
-        </template>
+        </div>
 
-        <template v-else-if="activeTab === 'mynote'">
+        <div v-show="activeTab === 'mynote'" class="tab-pane tab-pane--editor">
           <div class="notes-head">
             <h2 v-if="individualNote?.title" class="notes-title">{{ individualNote.title }}</h2>
           </div>
@@ -188,8 +188,7 @@
             :placeholder="notesPlaceholder"
             @blur="saveNotesNow"
           />
-          <div v-if="saveState !== 'idle'" class="save-state">{{ saveState }}</div>
-        </template>
+        </div>
       </div>
     </template>
   </div>
@@ -270,9 +269,11 @@ async function load(item: MeetingListItem | null): Promise<void> {
   individualNote.value = null;
   individualNoteLoaded.value = false;
   loadingIndividualNote.value = false;
+  // Clearing view state during a meeting switch is not a user edit. Keep
+  // autosave suppressed until the selected note has loaded or the user types.
+  suppressAutoSave = true;
   notesMarkdown.value = '';
   saveState.value = 'idle';
-  suppressAutoSave = false;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -290,18 +291,20 @@ async function load(item: MeetingListItem | null): Promise<void> {
     console.error('Failed to load meeting detail', e);
     error.value = 'Could not load this meeting.';
   } finally {
-    if (my === reqId) loading.value = false;
+    if (my === reqId) {
+      loading.value = false;
+      if (activeTab.value !== 'mynote') suppressAutoSave = false;
+    }
   }
 }
 
-// Watch the detail-relevant fields, not just the id, so same-id metadata
-// updates (e.g. local hasNote/hasTranscript flipping after a refresh) reload.
+// Watch stable detail fields only. User-note autosaves must not reload the
+// whole pane or change Ari's Notes tab visibility while the user switches tabs.
 watch(
   () => [
     props.item?.id,
     props.item?.timestamp,
     props.item?.durationSeconds,
-    props.item?.files?.hasNote,
     props.item?.files?.hasTranscript,
   ],
   () => load(props.item),
@@ -392,16 +395,16 @@ function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcr
   return 'note';
 }
 
-// Tabs appear only when their content exists: Note (meeting notes), Transcript,
-// then My note (the requester's individual note).
+// Tabs appear only when their content exists: Ari's Notes (generated/shared
+// meeting notes), Transcript, then My Notes (the user's editable note).
 const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
   const d = detail.value;
   if (!d) return [];
   const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: 'Note' });
+  if (notesPresent(d)) out.push({ key: 'note', label: "Ari's Notes" });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
-    out.push({ key: 'mynote', label: 'My note' });
+    out.push({ key: 'mynote', label: 'My Notes' });
   }
   return out;
 });
@@ -464,7 +467,7 @@ async function loadIndividualNote(): Promise<void> {
 // parent calls this before changing selection, and the editor calls it on blur.
 async function saveNotesNow(): Promise<void> {
   const item = props.item;
-  if (!item || loadingIndividualNote.value || !notesPersistence.canEdit(item)) return;
+  if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -472,9 +475,6 @@ async function saveNotesNow(): Promise<void> {
   saveState.value = 'saving';
   try {
     await notesPersistence.save(item, notesMarkdown.value);
-    if (item.files) {
-      item.files.hasNote = notesMarkdown.value.trim().length > 0;
-    }
     if (detail.value) {
       detail.value.hasIndividualNote = notesMarkdown.value.trim().length > 0;
     }
@@ -498,6 +498,7 @@ watch(notesMarkdown, () => {
   if (
     suppressAutoSave ||
     loadingIndividualNote.value ||
+    !individualNoteLoaded.value ||
     !props.item ||
     !notesPersistence.canEdit(props.item)
   ) return;
@@ -704,6 +705,8 @@ const durationLabel = computed<string | null>(() => {
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
+.tab-pane { min-height: 100%; }
+.tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
 .notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }

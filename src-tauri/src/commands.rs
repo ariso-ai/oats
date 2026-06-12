@@ -630,7 +630,7 @@ fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
 /// `transcript` are valid; anything else is an error.
 fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
     match kind {
-        "note" => Ok("note.md"),
+        "note" => Ok("meeting-note.md"),
         "transcript" => Ok("transcript.md"),
         other => Err(format!("invalid recording file kind: {other}")),
     }
@@ -663,7 +663,7 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
 /// transcript and just guards against a pathological/corrupt file.
 const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Read a recording's `note.md` or `transcript.md` as a UTF-8 string so the
+/// Read a recording's `meeting-note.md` or `transcript.md` as UTF-8 so the
 /// frontend can render it inline. Returns `Ok(None)` when the file doesn't
 /// exist yet (a normal "not generated" state), distinct from a read error.
 /// `kind` must be `"note"` or `"transcript"`.
@@ -685,7 +685,7 @@ pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, S
     Ok(Some(text))
 }
 
-/// Open a recording's `note.md` or `transcript.md` in the OS default app.
+/// Open a recording's `meeting-note.md` or `transcript.md` in the OS default app.
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
@@ -701,12 +701,12 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
-/// Read the local note artifact used by the Library editor. Missing notes
-/// return an empty string so a fresh local recording can start autosaving into
-/// `note.md` without a separate draft file.
+/// Read the user-authored local note artifact used by the Library editor.
+/// Missing notes return an empty string so a fresh recording can autosave into
+/// `user-note.md` without affecting generated Overview content.
 #[tauri::command]
 pub fn read_recording_note(id: String) -> Result<String, String> {
-    let path = recording_dir(&id)?.join("note.md");
+    let path = recording_dir(&id)?.join("user-note.md");
     match std::fs::read_to_string(&path) {
         Ok(contents) => Ok(contents),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -714,13 +714,14 @@ pub fn read_recording_note(id: String) -> Result<String, String> {
     }
 }
 
-/// Persist user-authored in-meeting notes to `note.md` beside the recording.
-/// Generated notes already use the same atomic writer, so manual and generated
-/// notes remain one durable local artifact instead of creating parallel stores.
+/// Persist user-authored in-meeting notes to `user-note.md` beside the
+/// recording. Generated meeting notes use `meeting-note.md`, keeping Overview
+/// visibility independent from My note autosaves.
 #[tauri::command]
 pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
     let dir = recording_dir(&id)?;
-    crate::storage::write_notes(&dir, &markdown)
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
 }
 
 #[tauri::command]
@@ -758,7 +759,7 @@ mod tests {
 
     #[test]
     fn note_or_transcript_filename_maps_known_kinds() {
-        assert_eq!(note_or_transcript_filename("note").unwrap(), "note.md");
+        assert_eq!(note_or_transcript_filename("note").unwrap(), "meeting-note.md");
         assert_eq!(
             note_or_transcript_filename("transcript").unwrap(),
             "transcript.md"
@@ -814,6 +815,7 @@ mod tests {
         write_recording_note(id.into(), "# Note\n- point".into()).unwrap();
         let saved = read_recording_note(id.into()).unwrap();
         assert_eq!(saved, "# Note\n- point");
+        assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
 
         unsafe {
             std::env::remove_var("ARISO_ROOT");

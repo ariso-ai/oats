@@ -21,7 +21,7 @@ interface IndividualNoteResponse {
 const REMOTE_LIBRARY_NOTE_WRITES_ENABLED = true;
 
 // Local meetings are identified by recording files because they have a real
-// filesystem directory where `note.md` can be the durable artifact.
+// filesystem directory where `user-note.md` can be the durable artifact.
 function isLocalRecording(meeting: MeetingListItem): boolean {
   return Boolean(meeting.files);
 }
@@ -60,7 +60,7 @@ async function saveRemoteNote(meeting: MeetingListItem, markdown: string): Promi
 // intentionally a plain object rather than a provider or app-wide state system.
 export function useMeetingNotesPersistence(): MeetingNotesPersistence {
   return {
-    // Local recordings have a durable `note.md` beside the recording. Remote
+    // Local recordings have a durable `user-note.md` beside the recording. Remote
     // Library writes stay disabled until the backend accepts notes before a
     // generated meeting summary exists, instead of creating hidden local drafts.
     modeFor(meeting) {
@@ -73,7 +73,7 @@ export function useMeetingNotesPersistence(): MeetingNotesPersistence {
 
     async load(meeting) {
       if (isLocalRecording(meeting)) {
-        return meeting.files?.hasNote ? local.readRecordingNote(meeting.id) : '';
+        return local.readRecordingNote(meeting.id);
       }
       if (modeForMeeting(meeting) === 'remote') return loadRemoteNote(meeting);
       return '';
