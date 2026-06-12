@@ -41,11 +41,14 @@ New Tauri commands in `src-tauri/src/commands.rs`, helpers in `storage.rs`:
 - `buffer_pending_audio(audio: Vec<u8>, created_at: String) -> Result<String, String>` —
   sanitizes the ISO timestamp into an id via `sanitize_iso_to_id`, writes
   `pending-uploads/<id>.mp3` via the existing `write_atomic` helper, and
-  returns the id. Sanitization stays Rust-only; the frontend never derives ids.
-- `discard_pending_audio(id: String) -> Result<(), String>` — deletes
-  `pending-uploads/<id>.mp3`; missing file is not an error (idempotent).
+  returns the id (for logging/tests).
+- `discard_pending_audio(created_at: String) -> Result<(), String>` — sanitizes
+  the same ISO timestamp and deletes `pending-uploads/<id>.mp3`; a missing file
+  is not an error (idempotent). Keying both commands by the raw ISO timestamp
+  keeps sanitization Rust-only and means the failure path never needs to thread
+  an id back to the recorder window.
 
-`discard_pending_audio` validates the id with the same path-traversal guard as
+Both commands validate the sanitized id with the same path-traversal guard as
 `recording_dir` (reject empty, `/`, `\\`, `:`, `..`).
 
 Frontend bridge in `src/tauri.ts` under a small `pending` namespace.
@@ -59,9 +62,9 @@ Sequence (in `src/composables/useBackend.ts`):
    timestamp into the id). A buffering failure is logged but does NOT block
    the upload attempt (buffering is a safety net).
 3. `uploadAudio(blob, …)` (existing presign → PUT → confirm).
-4. On confirm success: `discard_pending_audio(id)` (best-effort; a failed
-   delete is logged, not thrown).
-5. Return `{ backend: 'ariso', meetingId, pendingId: id }`.
+4. On confirm success: `discard_pending_audio(createdAt)` (best-effort; a
+   failed delete is logged, not thrown).
+5. Return `{ backend: 'ariso', meetingId }` (unchanged shape).
 
 `finalizeRecording` keeps its current error behavior: any upload-step failure
 still throws to the caller. The buffer file remains on disk in that case.
@@ -72,16 +75,17 @@ State additions:
 
 - Keep the stopped recording's `mp3Blob` and meta (`startAt`, `endAt`,
   `durationSeconds`, `meetingId`) in refs after `handleStop` so retry can
-  re-run finalize without re-recording.
-- Track the pending buffer id (derived/returned during finalize) for dismiss.
+  re-run finalize without re-recording. Dismiss derives the buffer key from
+  the kept meta (`startAt ?? endAt`); no id needs to round-trip.
 
 UI in the `uploadResult === 'failed'` template branch, alongside the red ✗:
 
 - **Retry** button: sets `isUploading`, clears `uploadResult`, re-runs the
   same `finalizeRecording` + 120 s timeout race. Success → existing success
   path (green ✓, auto-close after 1.5 s). Failure → back to the failed state.
-- **Dismiss** (✕) button: calls `discard_pending_audio(id)` (best-effort),
-  broadcasts `closed`, closes the window. This is an explicit discard.
+- **Dismiss** (✕) button: calls `discard_pending_audio(createdAt)`
+  (best-effort), broadcasts `closed`, closes the window. This is an explicit
+  discard.
 
 The `RecorderPhase` union and the strip's rendering of `failed` are unchanged;
 the retry attempt re-broadcasts `uploading` → `success`/`failed` through the
@@ -104,15 +108,21 @@ New Tauri command `fetch_meeting_audio(meeting_id: String)`:
 
 Frontend:
 
+- New `Backend.getMeetingAudio(item): Promise<ArrayBuffer | null>` method
+  (`null` = no audio). `ArisoBackend` calls `fetch_meeting_audio` and maps a
+  404 error to `null`; `LocalBackend` reads `recording.mp3` via the existing
+  `read_recording_audio` command when `item.files.hasAudio`, else `null`.
+  Routing through the backend keeps detail-pane operations pinned to the
+  backend that loaded the detail (see commit 02b1ccc).
 - Generalize `src/views/RecordingAudioPlayer.vue`: replace the hardcoded
   `local.readRecordingAudio(props.id)` call with a required
-  `load: () => Promise<ArrayBuffer>` prop. Existing local usage passes
-  `() => local.readRecordingAudio(id)`; behavior is otherwise identical
-  (lazy fetch on Play, Blob URL, native `<audio controls>`).
+  `load: () => Promise<ArrayBuffer | null>` prop (a `null` result renders the
+  "No audio" state). The component is currently unused in production code
+  (orphaned by an earlier Library refactor), so no call sites change.
 - `MeetingDetailView.vue` renders the player for Ariso meetings (non-local
-  detail), passing `() => api.fetchMeetingAudio(meetingId)`. A `404` from the
-  load surfaces as the player's existing "No audio" state; other errors show
-  "Failed".
+  detail) below the meta band, keyed by meeting id so selection changes
+  remount it, passing a loader pinned to `detailBackend.getMeetingAudio`.
+  `null` surfaces as "No audio"; errors show "Failed".
 
 ### Error handling summary
 
