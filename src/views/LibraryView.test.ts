@@ -132,6 +132,26 @@ describe('LibraryView', () => {
     expect(btn.classes()).toContain('selected');
   });
 
+  it('clicking a meeting item selects it (aria-pressed becomes true)', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'a', title: 'Standup' }),
+      item({ id: 'b', title: 'Planning' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    const rows = wrapper.findAll('.meeting-item');
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].attributes('aria-pressed')).toBe('false');
+
+    await rows[1].trigger('click');
+    await flushPromises();
+
+    expect(rows[0].attributes('aria-pressed')).toBe('false');
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].classes()).toContain('selected');
+  });
+
   it('shows the meeting title and time subtitle in each row', async () => {
     listMeetings.mockResolvedValue([
       item({ id: 'a', title: 'Morning Sync', durationSeconds: 300 }),
