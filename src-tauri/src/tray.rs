@@ -14,15 +14,48 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
     let menu = if is_recording {
         build_recording_menu(app, is_paused)
     } else {
-        build_idle_menu(app)
+        let featured = app
+            .state::<crate::tray_meeting::FeaturedMeetingState>()
+            .0
+            .lock()
+            .unwrap()
+            .clone();
+        build_idle_menu(app, featured.as_ref())
     };
     if let Ok(menu) = menu {
         let _ = tray.set_menu(Some(menu));
     }
+    refresh_tray_title(app);
+}
+
+/// Render or clear the menu-bar text next to the tray icon. Shows the
+/// featured meeting's countdown only when idle; recording (or no upcoming
+/// meeting / Local backend / signed out) clears it. macOS-only effect —
+/// `set_title` is a no-op elsewhere.
+pub fn refresh_tray_title(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    let recording = app
+        .state::<crate::recording_state::RecordingState>()
+        .is_active();
+    let featured = app
+        .state::<crate::tray_meeting::FeaturedMeetingState>()
+        .0
+        .lock()
+        .unwrap()
+        .clone();
+    let title = match featured {
+        Some(f) if !recording => Some(crate::tray_meeting::format_title_bar(
+            f.title.as_deref(),
+            f.start_at,
+            chrono::Utc::now(),
+        )),
+        _ => None,
+    };
+    let _ = tray.set_title(title);
 }
 
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
-    let menu = build_idle_menu(app)?;
+    let menu = build_idle_menu(app, None)?;
 
     TrayIconBuilder::with_id("main")
         .icon(Image::from_bytes(TRAY_ICON_BYTES)?)
@@ -69,6 +102,37 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                 return;
                             }
                             let _ = crate::commands::open_meeting_picker_window(&app_main);
+                        });
+                    });
+                }
+                "record_featured" => {
+                    let app_async = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let meeting_id = app_async
+                            .state::<crate::tray_meeting::FeaturedMeetingState>()
+                            .0
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .map(|f| f.id);
+                        let Some(meeting_id) = meeting_id else { return };
+
+                        let valid = crate::commands::is_session_valid(&app_async).await;
+                        let app_main = app_async.clone();
+                        let _ = app_async.run_on_main_thread(move || {
+                            if !valid {
+                                if let Some(win) = app_main.get_webview_window("settings") {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
+                                return;
+                            }
+                            let _ = crate::commands::open_waveform_window(
+                                &app_main,
+                                Some(meeting_id),
+                                false,
+                            );
                         });
                     });
                 }
@@ -145,14 +209,39 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+pub fn build_idle_menu(
+    app: &AppHandle,
+    featured: Option<&crate::tray_meeting::FeaturedMeeting>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let mut builder = MenuBuilder::new(app);
+
+    // Featured next meeting: a clickable full-title row that records that
+    // meeting, over a disabled (gray) time row. muda has no per-item font
+    // control, so a disabled item is the closest native "subtitle".
+    if let Some(f) = featured {
+        let title = f
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "Untitled meeting".to_string());
+        let record_featured = MenuItemBuilder::with_id("record_featured", title).build(app)?;
+        let time_label = crate::tray_meeting::format_time_range(
+            f.start_at.with_timezone(&chrono::Local),
+            f.end_at.map(|e| e.with_timezone(&chrono::Local)),
+        );
+        let time_row = MenuItemBuilder::with_id("featured_time", time_label)
+            .enabled(false)
+            .build(app)?;
+        builder = builder.item(&record_featured).item(&time_row).separator();
+    }
+
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
     let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
 
-    MenuBuilder::new(app)
+    builder
         .item(&start)
         .separator()
         .item(&settings)

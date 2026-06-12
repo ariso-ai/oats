@@ -6,10 +6,16 @@
 //! process for the same reason as `meeting_notifications`: macOS suspends
 //! hidden webviews, so a webview timer would freeze in the background.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, SecondsFormat, Utc};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
+use tauri::{AppHandle, Manager};
+
+use crate::commands::{api_base_url, clear_session_token, get_session_token, http_client};
 
 /// A meeting from `GET /meetings` (list payload carries no end time).
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +56,231 @@ impl FeaturedMeetingState {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// Per-HTTP-request cap covering `.send()` and body decode (the shared
+/// `http_client` has no request timeout — same convention as
+/// `meeting_notifications`).
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Countdown redraw cadence.
+const TICK: Duration = Duration::from_secs(60);
+
+/// Full server re-fetch happens every N ticks (5 minutes).
+const FETCH_EVERY_TICKS: u32 = 5;
+
+/// `Auth` means the server rejected the stored session (401/403) — the
+/// orchestrator tears down instead of retrying (mirrors meeting_notifications).
+enum FetchError {
+    Auth,
+    Other(String),
+}
+
+/// Start the orchestrator iff the active backend is Ariso and a session token
+/// is present; otherwise stop it. Safe to call repeatedly (sign-in/out,
+/// backend change). The Local backend has no scheduled meetings, so it gets
+/// no tray title and the unchanged idle menu.
+pub fn sync(app: &AppHandle) {
+    let desired =
+        crate::commands::active_backend(app) == "ariso" && get_session_token(app).is_some();
+    if !desired {
+        stop(app);
+        return;
+    }
+    let mgr = app.state::<TrayMeetingManager>();
+    let mut guard = mgr.handle.lock().unwrap();
+    if guard.is_some() {
+        return;
+    }
+    let app = app.clone();
+    *guard = Some(tauri::async_runtime::spawn(async move {
+        run_loop(app).await;
+    }));
+}
+
+/// Stop the orchestrator, clear the featured meeting, and redraw the tray
+/// (title cleared, idle menu without meeting rows).
+pub fn stop(app: &AppHandle) {
+    let mgr = app.state::<TrayMeetingManager>();
+    let mut guard = mgr.handle.lock().unwrap();
+    if let Some(handle) = guard.take() {
+        handle.abort();
+    }
+    drop(guard);
+    *app.state::<FeaturedMeetingState>().0.lock().unwrap() = None;
+    refresh_tray(app, true);
+}
+
+/// Redraw the tray on the main thread (muda menus are main-thread on macOS).
+/// While recording, the recording menu owns the tray — only the title is
+/// refreshed (which clears it). `rebuild_menu` skips a full idle-menu rebuild
+/// on countdown-only ticks so an open tray menu isn't yanked shut.
+fn refresh_tray(app: &AppHandle, rebuild_menu: bool) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let recording = app
+            .state::<crate::recording_state::RecordingState>()
+            .is_active();
+        if rebuild_menu && !recording {
+            crate::tray::set_menu(&app, false, false);
+        } else {
+            crate::tray::refresh_tray_title(&app);
+        }
+    });
+}
+
+/// Fetch → pick → resolve end_at → render, then tick every 60s (countdown
+/// redraw + promote-on-start) and re-fetch every 5min. Exits only on an auth
+/// rejection; transient errors keep the last known state and retry.
+async fn run_loop(app: AppHandle) {
+    let mut meetings: Vec<ScheduledMeeting> = Vec::new();
+    let mut end_cache: HashMap<i64, Option<DateTime<Utc>>> = HashMap::new();
+    let mut ticks_until_fetch = 0u32;
+    let mut interval = tokio::time::interval(TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+
+        if ticks_until_fetch == 0 {
+            ticks_until_fetch = FETCH_EVERY_TICKS;
+            match fetch_today_meetings(&app).await {
+                Ok(list) => meetings = list,
+                Err(FetchError::Auth) => break,
+                Err(FetchError::Other(e)) => {
+                    eprintln!("tray-meeting: list fetch failed: {e}");
+                }
+            }
+        }
+        ticks_until_fetch -= 1;
+
+        let now = Utc::now();
+        let featured = match pick_next_upcoming(&meetings, now) {
+            Some(m) => {
+                let end_at = match end_cache.get(&m.id) {
+                    Some(cached) => *cached,
+                    None => {
+                        let end = match fetch_end_at(&app, m.id).await {
+                            Ok(end) => end,
+                            Err(FetchError::Auth) => break,
+                            Err(FetchError::Other(e)) => {
+                                eprintln!(
+                                    "tray-meeting: end_at fetch failed (start-only display): {e}"
+                                );
+                                None
+                            }
+                        };
+                        end_cache.insert(m.id, end);
+                        end
+                    }
+                };
+                Some(FeaturedMeeting {
+                    id: m.id,
+                    title: m.title.clone(),
+                    start_at: m.start_at,
+                    end_at,
+                })
+            }
+            None => None,
+        };
+
+        let menu_changed = {
+            let state = app.state::<FeaturedMeetingState>();
+            let mut guard = state.0.lock().unwrap();
+            let changed = *guard != featured;
+            *guard = featured;
+            changed
+        };
+        refresh_tray(&app, menu_changed);
+    }
+
+    eprintln!("tray-meeting: session invalid; clearing token and stopping orchestrator");
+    let _ = clear_session_token(&app);
+    {
+        let mgr = app.state::<TrayMeetingManager>();
+        *mgr.handle.lock().unwrap() = None;
+    }
+    *app.state::<FeaturedMeetingState>().0.lock().unwrap() = None;
+    refresh_tray(&app, true);
+}
+
+/// GET /meetings?startDate&endDate (local-day bounds) → parsed list.
+async fn fetch_today_meetings(app: &AppHandle) -> Result<Vec<ScheduledMeeting>, FetchError> {
+    let token = get_session_token(app).ok_or(FetchError::Auth)?;
+    let (start, end) = day_bounds(Local::now());
+    let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .query(&[
+                ("startDate", start.to_rfc3339_opts(SecondsFormat::Millis, true)),
+                ("endDate", end.to_rfc3339_opts(SecondsFormat::Millis, true)),
+            ])
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| FetchError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(FetchError::Auth);
+        }
+        if !status.is_success() {
+            return Err(FetchError::Other(format!(
+                "/meetings returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| FetchError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| FetchError::Other("/meetings timed out".into()))??;
+    Ok(parse_meetings(&v))
+}
+
+/// GET /meeting-notes/:id → optional end_at.
+async fn fetch_end_at(
+    app: &AppHandle,
+    meeting_id: i64,
+) -> Result<Option<DateTime<Utc>>, FetchError> {
+    let token = get_session_token(app).ok_or(FetchError::Auth)?;
+    let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .get(format!("{}/meeting-notes/{meeting_id}", api_base_url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| FetchError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(FetchError::Auth);
+        }
+        if !status.is_success() {
+            return Err(FetchError::Other(format!(
+                "/meeting-notes/{meeting_id} returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| FetchError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| FetchError::Other(format!("/meeting-notes/{meeting_id} timed out")))??;
+    Ok(parse_end_at(&v))
+}
+
+/// Re-evaluate the orchestrator's desired state. Invoked by the bootstrap
+/// window on launch and on every SYNC_EVENT broadcast (sign-in/out, backend
+/// change) — same pattern as `sync_meeting_notifications`.
+#[tauri::command]
+pub async fn sync_tray_meeting(app: AppHandle) -> Result<(), String> {
+    sync(&app);
+    Ok(())
 }
 
 /// Max characters of the meeting title shown in the menu-bar (tray) title.
