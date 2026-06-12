@@ -127,7 +127,7 @@ onUnmounted(() => {
    detail card (the positioning context is .detail-wrap). */
 .strip {
   position: absolute;
-  bottom: 0;
+  bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10;

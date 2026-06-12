@@ -52,8 +52,8 @@
             @click="selectMeeting(m)"
           >
             <span class="mi-head">
-              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span class="mi-title">{{ m.title }}</span>
+              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
@@ -430,7 +430,10 @@ onUnmounted(() => {
   border-color: #1c1c1c;
   box-shadow: 3px 3px 0 #e7e5e2;
 }
-.mi-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+/* Title hugs the left, rel-label pushed right; the recording dot (when
+   present) sits right after the title's end. */
+.mi-head { display: flex; align-items: baseline; gap: 8px; }
+.mi-rel { margin-left: auto; }
 .mi-rec-dot {
   flex-shrink: 0;
   width: 7px;
