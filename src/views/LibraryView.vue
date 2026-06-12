@@ -52,6 +52,7 @@
             @click="selectMeeting(m)"
           >
             <span class="mi-head">
+              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span class="mi-title">{{ m.title }}</span>
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
@@ -94,7 +95,10 @@
           <p>Select a meeting to view its notes.</p>
         </div>
       </div>
-      <RecorderStrip :meeting-id="selectedItem?.id ?? null" />
+      <RecorderStrip
+        :meeting-id="selectedItem?.id ?? null"
+        @recording-change="recordingMeetingId = $event"
+      />
     </section>
   </div>
 </template>
@@ -121,6 +125,8 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+// Meeting currently being recorded (reported by the strip) — red dot in the list.
+const recordingMeetingId = ref<string | null>(null);
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
 // split stay fresh while the window sits open.
@@ -425,6 +431,19 @@ onUnmounted(() => {
   box-shadow: 3px 3px 0 #e7e5e2;
 }
 .mi-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mi-rec-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e0443e;
+  align-self: center;
+  animation: rec-pulse 1s infinite;
+}
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 .mi-title {
   font-size: 15px;
   font-weight: 500;
