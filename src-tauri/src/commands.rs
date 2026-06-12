@@ -673,6 +673,22 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     crate::storage::list_recordings(&root)
 }
 
+/// Buffer a stopped Ariso recording's mp3 on disk before the upload attempt,
+/// keyed by its ISO start timestamp. Returns the sanitized id.
+#[tauri::command]
+pub fn buffer_pending_audio(audio: Vec<u8>, created_at: String) -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::write_pending_audio(&root, &created_at, &audio)
+}
+
+/// Remove the buffered mp3 for `created_at` (idempotent). Called after a
+/// confirmed upload and on explicit dismiss of a failed one.
+#[tauri::command]
+pub fn discard_pending_audio(created_at: String) -> Result<(), String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::discard_pending_audio(&root, &created_at)
+}
+
 /// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.

@@ -222,6 +222,20 @@ export const local = {
   },
 };
 
+/** Disk buffer for Ariso uploads: audio is persisted before the upload
+ *  attempt and removed once the server confirms (or the user dismisses).
+ *  Both commands are keyed by the recording's ISO start timestamp; Rust
+ *  derives the on-disk id. */
+export const pending = {
+  bufferAudio(audio: number[], createdAt: string): Promise<string> {
+    return invoke<string>('buffer_pending_audio', { audio, createdAt });
+  },
+  /** Idempotent — a missing buffer file is not an error. */
+  discardAudio(createdAt: string): Promise<void> {
+    return invoke('discard_pending_audio', { createdAt });
+  },
+};
+
 export async function getBackendSetting(): Promise<'ariso' | 'local'> {
   const store = await load('settings.json', { autoSave: true });
   const v = await store.get<string>('backend');

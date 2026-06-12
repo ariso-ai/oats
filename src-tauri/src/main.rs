@@ -42,6 +42,8 @@ fn main() {
             commands::write_recording_note,
             commands::open_recording_file,
             commands::rename_local_recording,
+            commands::buffer_pending_audio,
+            commands::discard_pending_audio,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
             model_manager::download_local_stt,
