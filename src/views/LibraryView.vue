@@ -87,8 +87,9 @@
       <div class="detail-card">
         <MeetingDetailView
           v-if="selectedItem"
+          ref="detailView"
           :item="selectedItem"
-          @close="selectedItem = null"
+          @close="clearSelection"
           @title-updated="onTitleUpdated"
         />
         <div v-else class="empty-card">
@@ -125,6 +126,10 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
+  saveNotesNow?: () => Promise<void>;
+};
+const detailView = ref<MeetingDetailViewExposed | null>(null);
 // Meeting currently being recorded (reported by the strip) — red dot in the list.
 const recordingMeetingId = ref<string | null>(null);
 
@@ -183,8 +188,23 @@ function itemSub(m: MeetingListItem): string {
   return time;
 }
 
-function selectMeeting(m: MeetingListItem): void {
+// Selection changes ask the detail pane to flush editable notes first, so a
+// slow autosave from the previous meeting cannot land after the row changed.
+let selectionReqId = 0;
+
+async function selectMeeting(m: MeetingListItem): Promise<void> {
+  if (selectedItem.value?.id === m.id) return;
+  const my = ++selectionReqId;
+  await detailView.value?.saveNotesNow?.();
+  if (my !== selectionReqId) return;
   selectedItem.value = m;
+}
+
+async function clearSelection(): Promise<void> {
+  const my = ++selectionReqId;
+  await detailView.value?.saveNotesNow?.();
+  if (my !== selectionReqId) return;
+  selectedItem.value = null;
 }
 
 // Keep the sidebar (and the selected reference) in sync after an inline rename
@@ -234,6 +254,12 @@ async function loadMeetings(): Promise<void> {
     const next = await (await getActiveBackend()).listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
+    if (!selectedItem.value && meetings.value.length > 0) {
+      await selectMeeting(meetings.value[0]);
+    } else if (selectedItem.value) {
+      selectedItem.value =
+        meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
+    }
   } catch (e) {
     if (requestId !== loadMeetingsRequest) return;
     console.error('Failed to list meetings', e);
@@ -253,10 +279,26 @@ async function refreshRecordingState(): Promise<void> {
   }
 }
 
+// Ariso list rows carry ids as strings for shared rendering, while the recorder
+// command accepts the backend's numeric meeting id.
+function numericMeetingId(item: MeetingListItem | null): number | undefined {
+  if (!item || !/^\d+$/.test(item.id)) return undefined;
+  const id = Number(item.id);
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
 // Open the floating recorder pill (its own always-on-top window).
 async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
+    // Ariso scheduled meetings use numeric backend ids; pass that id into the
+    // recorder so the eventual upload attaches to the selected meeting.
+    const meetingId = backend.id === 'ariso' ? numericMeetingId(selectedItem.value) : undefined;
+    if (meetingId != null) {
+      await invoke('start_recording_window', { meetingId });
+      setRecording(true);
+      return;
+    }
     if (backend.usesMeetingPicker) {
       // Picker-using backends (Ariso) choose a meeting first; the picker then
       // starts the recorder itself.
@@ -291,7 +333,7 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
     await loadMeetings();
     m = meetings.value.find((x) => x.id === idStr);
   }
-  if (m) selectedItem.value = m;
+  if (m) await selectMeeting(m);
 }
 
 function onWindowFocus(): void {

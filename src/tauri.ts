@@ -189,6 +189,13 @@ export const local = {
   readRecordingAudio(id: string): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('read_recording_audio', { id });
   },
+  /** Reads the local `user-note.md` artifact the Library editor autosaves. */
+  readRecordingNote(id: string): Promise<string> {
+    return invoke<string>('read_recording_note', { id });
+  },
+  writeRecordingNote(id: string, markdown: string): Promise<void> {
+    return invoke('write_recording_note', { id, markdown });
+  },
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
   },

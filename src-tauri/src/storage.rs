@@ -60,7 +60,7 @@ pub struct RecordingSummary {
     pub status: RecordingStatus,
     /// Whether `recording.mp3` exists in the recording's directory.
     pub has_audio: bool,
-    /// Whether `note.md` exists in the recording's directory.
+    /// Whether `ari-note.md` exists in the recording's directory.
     pub has_note: bool,
     /// Whether `transcript.md` exists in the recording's directory.
     pub has_transcript: bool,
@@ -187,9 +187,9 @@ pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("transcript.md"), markdown.as_bytes())
 }
 
-/// Write the generated meeting notes atomically.
+/// Write the generated meeting overview atomically.
 pub fn write_notes(dir: &Path, markdown: &str) -> Result<(), String> {
-    write_atomic(&dir.join("note.md"), markdown.as_bytes())
+    write_atomic(&dir.join("ari-note.md"), markdown.as_bytes())
 }
 
 /// List all recordings, newest-first by `created_at`. Folders without a
@@ -215,7 +215,7 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     duration_seconds: m.duration_seconds,
                     status: m.status,
                     has_audio: recording_dir.join("recording.mp3").is_file(),
-                    has_note: recording_dir.join("note.md").is_file(),
+                    has_note: recording_dir.join("ari-note.md").is_file(),
                     has_transcript: recording_dir.join("transcript.md").is_file(),
                 });
             }
@@ -305,7 +305,7 @@ mod tests {
         let dir_full = create_recording_dir(root, id_full).unwrap();
         write_meta(&dir_full, &meta_with(id_full, "2026-06-03T10:00:00Z")).unwrap();
         std::fs::write(dir_full.join("recording.mp3"), b"audio").unwrap();
-        std::fs::write(dir_full.join("note.md"), b"notes").unwrap();
+        std::fs::write(dir_full.join("ari-note.md"), b"notes").unwrap();
         std::fs::write(dir_full.join("transcript.md"), b"transcript").unwrap();
 
         // Recording with no artifact files.
@@ -377,11 +377,11 @@ mod tests {
     }
 
     #[test]
-    fn write_notes_creates_note_md() {
+    fn write_notes_creates_ari_note_md() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         write_notes(dir, "# Notes\n- point").unwrap();
-        let body = std::fs::read_to_string(dir.join("note.md")).unwrap();
+        let body = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert_eq!(body, "# Notes\n- point");
     }
 

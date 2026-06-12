@@ -38,6 +38,8 @@ fn main() {
             commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
             commands::read_recording_file,
+            commands::read_recording_note,
+            commands::write_recording_note,
             commands::open_recording_file,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
