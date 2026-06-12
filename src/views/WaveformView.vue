@@ -11,10 +11,21 @@
     >
       <img class="logo" src="../assets/ariso-logo-w.svg" alt="" />
 
-      <template v-if="uploadResult">
-        <span class="status-icon" :class="uploadResult === 'success' ? 'ok' : 'err'">
-          {{ uploadResult === 'success' ? '✓' : '✗' }}
-        </span>
+      <template v-if="uploadResult === 'failed'">
+        <span class="status-icon err">✗</span>
+        <button
+          class="ctrl-btn retry-btn"
+          aria-label="Retry upload"
+          @click.stop.prevent="runFinalize"
+        >↻</button>
+        <button
+          class="ctrl-btn dismiss-btn"
+          aria-label="Dismiss recording"
+          @click.stop.prevent="dismissFailed"
+        >✕</button>
+      </template>
+      <template v-else-if="uploadResult === 'success'">
+        <span class="status-icon ok">✓</span>
       </template>
       <template v-else-if="isUploading">
         <span class="spinner" />
@@ -92,7 +103,8 @@ import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
-import { getActiveBackend, type Backend } from '../composables/useBackend';
+import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
+import { pending } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
 import { centerWeightedBars } from './waveformBars';
@@ -108,6 +120,11 @@ const backend = ref<Backend | null>(null);
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
 const isExpanded = ref(false);
+
+// Held after stop so a failed upload can be retried without re-recording.
+// Cleared on success/dismiss; the meta also keys the on-disk pending buffer.
+const stoppedBlob = ref<Blob | null>(null);
+const stoppedMeta = ref<RecordingMeta | null>(null);
 
 // Voice energy lives in the low FFT bins; the upper bins are near-silent and
 // would leave the higher bars dead. Bucket only the low part of the spectrum,
@@ -337,39 +354,65 @@ async function handleStop() {
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
 
   if (mp3Blob.size > 0 && backend.value) {
-    // This only bounds the UI wait. A timed-out local transcription keeps
-    // running natively and still writes its final status to meta.json, so the
-    // Library (source of truth) may show 'done'/'failed' even if the window
-    // showed a timeout. Audio is persisted before transcription, so nothing is lost.
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Operation timed out')), 120_000)
-    );
-    try {
-      await Promise.race([
-        backend.value.finalizeRecording(mp3Blob, {
-          startAt,
-          endAt,
-          durationSeconds: recorder.durationSeconds.value,
-          meetingId: effectiveMeetingId.value ?? undefined,
-        }),
-        timeout,
-      ]);
-      uploadResult.value = 'success';
-      // Brief confirmation, then auto-close.
-      closeTimer = setTimeout(() => { closeTimer = null; void closeWindow(); }, SUCCESS_CLOSE_MS);
-    } catch (err) {
-      console.error('Finalize failed:', err);
-      // Stay open on failure so the user can drag away / dismiss via the tray.
-      uploadResult.value = 'failed';
-    }
+    stoppedBlob.value = mp3Blob;
+    stoppedMeta.value = {
+      startAt,
+      endAt,
+      durationSeconds: recorder.durationSeconds.value,
+      meetingId: effectiveMeetingId.value ?? undefined,
+    };
+    await runFinalize();
   } else {
     if (mp3Blob.size > 0 && !backend.value) {
       console.error('handleStop: backend not initialized; discarding recording');
     }
     await closeWindow();
   }
+}
 
+// Upload the stopped recording. Shared by the stop flow and the failed pill's
+// Retry button — blob and meta stay in refs so retry needs no re-record.
+async function runFinalize() {
+  if (!stoppedBlob.value || !stoppedMeta.value || !backend.value) return;
+  isUploading.value = true;
+  uploadResult.value = null;
+  // This only bounds the UI wait. A timed-out local transcription keeps
+  // running natively and still writes its final status to meta.json, so the
+  // Library (source of truth) may show 'done'/'failed' even if the window
+  // showed a timeout. Audio is persisted before transcription/upload, so
+  // nothing is lost.
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('Operation timed out')), 120_000)
+  );
+  try {
+    await Promise.race([
+      backend.value.finalizeRecording(stoppedBlob.value, stoppedMeta.value),
+      timeout,
+    ]);
+    uploadResult.value = 'success';
+    stoppedBlob.value = null;
+    // Brief confirmation, then auto-close.
+    closeTimer = setTimeout(() => { closeTimer = null; void closeWindow(); }, SUCCESS_CLOSE_MS);
+  } catch (err) {
+    console.error('Finalize failed:', err);
+    // Stay open on failure so the user can retry or dismiss.
+    uploadResult.value = 'failed';
+  }
   isUploading.value = false;
+}
+
+// Explicit discard of a failed upload: delete the on-disk buffer and close.
+async function dismissFailed() {
+  const meta = stoppedMeta.value;
+  stoppedBlob.value = null;
+  if (meta) {
+    try {
+      await pending.discardAudio(meta.startAt ?? meta.endAt);
+    } catch (e) {
+      console.error('Failed to discard buffered audio', e);
+    }
+  }
+  await closeWindow();
 }
 
 async function closeWindow() {
@@ -605,6 +648,19 @@ html, body {
 
 .status-icon.ok { color: #34d399; }
 .status-icon.err { color: #f87171; }
+
+.retry-btn {
+  margin-top: 8px;
+  color: #818cf8;
+  font-size: 15px;
+  font-weight: 700;
+}
+.dismiss-btn {
+  margin-top: 6px;
+  color: #f87171;
+  font-size: 13px;
+  font-weight: 700;
+}
 
 .spinner {
   margin-top: 8px;

@@ -63,6 +63,11 @@ vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
 }));
 
+const discardPendingAudio = vi.fn(() => Promise.resolve());
+vi.mock('../tauri', () => ({
+  pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
+}));
+
 import WaveformView from './WaveformView.vue';
 
 beforeEach(() => {
@@ -236,5 +241,85 @@ describe('WaveformView vertical pill', () => {
     expect(stopRecording).toHaveBeenCalled();
     routeQuery = {};
     wrapper.unmount();
+  });
+
+  it('failed upload shows Retry and Dismiss controls', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(wrapper.find('.retry-btn').exists()).toBe(true);
+    expect(wrapper.find('.dismiss-btn').exists()).toBe(true);
+  });
+
+  it('Retry re-runs finalize with the same blob and meta, then succeeds', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+    expect(wrapper.find('.retry-btn').exists()).toBe(true);
+
+    await wrapper.find('.retry-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(finalizeRecording).toHaveBeenCalledTimes(2);
+    // Same blob and meta on both attempts — retry must not re-derive anything.
+    expect(finalizeRecording.mock.calls[1][0]).toBe(finalizeRecording.mock.calls[0][0]);
+    expect(finalizeRecording.mock.calls[1][1]).toEqual(finalizeRecording.mock.calls[0][1]);
+    expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(closeWin).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('retry broadcasts uploading then success phases', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+    emitEvent.mockClear();
+
+    await wrapper.find('.retry-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    const phases = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, p]) => (p as { phase: string }).phase);
+    expect(phases).toContain('uploading');
+    expect(phases).toContain('success');
+    vi.useRealTimers();
+  });
+
+  it('Dismiss discards the buffered audio and closes the window', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    await wrapper.find('.dismiss-btn').trigger('click');
+    await flushPromises();
+
+    // Keyed by the recording's start timestamp (mocked recorder.startedAt).
+    expect(discardPendingAudio).toHaveBeenCalledWith('2026-06-09T10:00:00Z');
+    expect(closeWin).toHaveBeenCalled();
+    const last = emitEvent.mock.calls.filter(([n]) => n === 'recorder://state').at(-1);
+    expect((last?.[1] as { phase: string }).phase).toBe('closed');
   });
 });
