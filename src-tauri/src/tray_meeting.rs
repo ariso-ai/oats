@@ -70,6 +70,19 @@ pub(crate) fn truncate_title(title: Option<&str>) -> String {
     out
 }
 
+/// Relative countdown to a future start time: `in 12min`, or `in <1min`
+/// under a minute. Callers only pass strictly-upcoming meetings; a stale
+/// (already-started) one reads `in <1min` until the next tick drops it.
+pub(crate) fn format_countdown(start: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    // num_minutes truncates toward zero == floor for positive durations.
+    let mins = (start - now).num_minutes();
+    if mins >= 1 {
+        format!("in {mins}min")
+    } else {
+        "in <1min".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +112,42 @@ mod tests {
     #[test]
     fn truncate_title_counts_unicode_scalars_not_bytes() {
         assert_eq!(truncate_title(Some("héllo wörld plus")), "héllo wörl…");
+    }
+
+    /// Parse an RFC 3339 timestamp into UTC for test fixtures.
+    fn t(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn countdown_whole_minutes() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T10:12:00Z"), t("2026-06-11T10:00:00Z")),
+            "in 12min"
+        );
+    }
+
+    #[test]
+    fn countdown_floors_partial_minutes() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T10:12:30Z"), t("2026-06-11T10:00:00Z")),
+            "in 12min"
+        );
+    }
+
+    #[test]
+    fn countdown_exactly_one_minute() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T10:01:00Z"), t("2026-06-11T10:00:00Z")),
+            "in 1min"
+        );
+    }
+
+    #[test]
+    fn countdown_under_a_minute() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T10:00:59Z"), t("2026-06-11T10:00:00Z")),
+            "in <1min"
+        );
     }
 }
