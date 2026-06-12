@@ -145,6 +145,20 @@ describe('MeetingDetailView inline title editing', () => {
     expect(wrapper.find('.head-title').text()).toBe('Old title');
   });
 
+  it('commits a valid draft on blur', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, note: 'hi' }));
+    await wrapper.find('.head-title').trigger('click');
+    const input = wrapper.find('input.head-title--input');
+
+    await input.setValue('Blur saved');
+    await input.trigger('blur');
+    await flushPromises();
+
+    expect(renameMeeting).toHaveBeenCalledWith('7', 'Blur saved');
+    expect(wrapper.emitted('titleUpdated')?.[0]).toEqual([{ id: '7', title: 'Blur saved' }]);
+    expect(wrapper.find('.head-title').text()).toBe('Blur saved');
+  });
+
   it('does not length-limit ariso titles (server is the authority)', async () => {
     const wrapper = await mountWith(detail());
     await wrapper.find('.head-title').trigger('click');
