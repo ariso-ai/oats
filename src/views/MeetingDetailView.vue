@@ -20,7 +20,7 @@
             aria-label="Meeting title"
             @keydown.enter.prevent="commitTitle"
             @keydown.esc.prevent="cancelTitleEdit"
-            @blur="commitTitle"
+            @blur="onTitleBlur"
           />
           <h1
             v-else
@@ -32,6 +32,9 @@
             @click="startTitleEdit"
             @keydown.enter="startTitleEdit"
           >{{ detail.title }}</h1>
+          <p v-if="editingTitle && titleError" class="head-title-error" role="alert">
+            ⚠ {{ titleError }} ({{ titleDraft.trim().length }}/{{ TITLE_MAX_CHARS }})
+          </p>
           <p class="head-sub">{{ subtitle }}</p>
         </div>
         <div class="head-actions">
@@ -197,10 +200,11 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
 import { renderMarkdown } from '../utils/markdown';
-import { useMeetingApi, type TranscriptChunk } from '../composables/useMeetingApi';
+import type { TranscriptChunk } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
 import {
   getActiveBackend,
+  type Backend,
   type MeetingListItem,
   type MeetingDetail,
   type MeetingActionItem,
@@ -220,13 +224,21 @@ const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
 const activeTab = ref<'note' | 'transcript' | 'mynote'>('note');
 
-// Inline title editing. Only Ariso meetings have a server-side rename endpoint
-// (PATCH /meeting-notes/{id}); local recordings render a plain title.
+// Inline title editing. Both backends rename through Backend.renameMeeting
+// (ariso PATCHes the server; local rewrites meta.json). Local titles are
+// capped at TITLE_MAX_CHARS with an inline warning that blocks saving.
+const TITLE_MAX_CHARS = 40;
 const editingTitle = ref(false);
 const titleDraft = ref('');
 const savingTitle = ref(false);
 const titleInput = ref<HTMLInputElement | null>(null);
-const canEditTitle = computed(() => !!detail.value && !detail.value.isLocal);
+const canEditTitle = computed(() => !!detail.value);
+const titleError = computed<string | null>(() => {
+  if (!detail.value?.isLocal) return null;
+  return titleDraft.value.trim().length > TITLE_MAX_CHARS
+    ? `Title must be ${TITLE_MAX_CHARS} characters or fewer`
+    : null;
+});
 
 // Transcript is loaded lazily when the Transcript tab is opened (Ariso fetches
 // /meeting-notes/{id}/transcript as chunks; local reads transcript.md markdown).
@@ -253,12 +265,18 @@ const notesPlaceholder = computed(() =>
   notesCanEdit.value ? 'Start typing notes.' : 'Notes are read-only for this meeting.'
 );
 
+// The backend instance that loaded `detail`. Renames and lazy loads reuse it
+// so a backend flip in Settings mid-view can't route a save or fetch through
+// the other backend.
+let detailBackend: Backend | null = null;
+
 async function load(item: MeetingListItem | null): Promise<void> {
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
   const my = ++reqId;
   loading.value = false;
   detail.value = null;
+  detailBackend = null;
   error.value = null;
   showFullNotes.value = false;
   activeTab.value = 'note';
@@ -287,6 +305,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     const d = await backend.getMeetingDetail(item);
     if (my !== reqId) return;
     detail.value = d;
+    detailBackend = backend;
     activeTab.value = firstTabFor(d, item); // default to the first available tab
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
@@ -330,13 +349,16 @@ function cancelTitleEdit(): void {
   savingTitle.value = false;
 }
 
-// Persist the edited title. Blur and Enter both route here; the savingTitle /
-// editingTitle guards make the second call (Enter then blur) a no-op. A no-op
-// or whitespace-only edit just closes the editor without hitting the API.
+// Persist the edited title. Enter routes here directly; blur routes through
+// onTitleBlur. The savingTitle / editingTitle guards make the second call
+// (Enter then blur) a no-op. A no-op or whitespace-only edit just closes the
+// editor without persisting; an invalid draft blocks here (warning visible).
 async function commitTitle(): Promise<void> {
   if (!editingTitle.value || savingTitle.value) return;
+  if (titleError.value) return;
   const d = detail.value;
-  if (!d) {
+  const backend = detailBackend;
+  if (!d || !backend) {
     editingTitle.value = false;
     return;
   }
@@ -348,8 +370,7 @@ async function commitTitle(): Promise<void> {
   savingTitle.value = true;
   const my = reqId;
   try {
-    const { updateMeetingNotesTitle } = useMeetingApi();
-    await updateMeetingNotesTitle(d.id, next);
+    await backend.renameMeeting(d.id, next);
     if (my !== reqId) return; // selection changed mid-save — drop the stale result
     d.title = next;
     emit('titleUpdated', { id: d.id, title: next });
@@ -360,6 +381,16 @@ async function commitTitle(): Promise<void> {
   } finally {
     if (my === reqId) savingTitle.value = false;
   }
+}
+
+// Blur on an invalid draft can't save and the user has moved on — revert
+// (same semantics as Escape). A valid draft commits as before.
+function onTitleBlur(): void {
+  if (titleError.value) {
+    cancelTitleEdit();
+    return;
+  }
+  void commitTitle();
 }
 
 // Local recordings carry their transcript as markdown on the detail; Ariso
@@ -418,11 +449,11 @@ const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: s
 // already have their content, so they skip the round trip.
 async function loadTranscript(): Promise<void> {
   const d = detail.value;
-  if (!props.item || !d || d.isLocal || transcriptLoaded.value || loadingTranscript.value) return;
+  const backend = detailBackend;
+  if (!props.item || !d || !backend || d.isLocal || transcriptLoaded.value || loadingTranscript.value) return;
   const my = reqId;
   loadingTranscript.value = true;
   try {
-    const backend = await getActiveBackend();
     const t = await backend.getMeetingTranscript(props.item);
     if (my !== reqId) return;
     transcript.value = t;
@@ -654,6 +685,7 @@ const durationLabel = computed<string | null>(() => {
   border: none; background: transparent; outline: none; appearance: none;
 }
 .head-title--input:disabled { opacity: 0.6; }
+.head-title-error { margin: 4px 0 0; font-size: 12px; color: #dc2626; }
 .head-sub { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .btn-share {

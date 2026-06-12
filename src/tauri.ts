@@ -204,6 +204,10 @@ export const local = {
   readRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<string | null> {
     return invoke<string | null>('read_recording_file', { id, kind });
   },
+  /** Update a local recording's title in its meta.json (folder id unchanged). */
+  renameRecording(id: string, title: string): Promise<void> {
+    return invoke('rename_local_recording', { id, title });
+  },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
   },

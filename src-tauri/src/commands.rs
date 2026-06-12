@@ -766,6 +766,27 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Maximum local recording title length, in characters. Mirrors the frontend
+/// limit (the UI validates first; this is defense in depth).
+const MAX_TITLE_CHARS: usize = 40;
+
+/// Rename a local recording by updating `title` in its `meta.json`. The folder
+/// id stays immutable; serde_json escapes quotes/special characters natively.
+#[tauri::command]
+pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("title must not be empty".to_string());
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("title must be {MAX_TITLE_CHARS} characters or fewer"));
+    }
+    let dir = recording_dir(&id)?;
+    let mut meta = crate::storage::read_meta(&dir)?;
+    meta.title = title.to_string();
+    crate::storage::write_meta(&dir, &meta)
+}
+
 /// Read the user-authored local note artifact used by the Library editor.
 /// Missing notes return an empty string so a fresh recording can autosave into
 /// `user-note.md` without affecting generated Overview content.
@@ -872,6 +893,78 @@ mod tests {
         let id = "2026-06-02T14-30-05Z";
         let dir = recording_dir(id).unwrap();
         assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    fn test_meta(id: &str) -> crate::storage::RecordingMeta {
+        crate::storage::RecordingMeta {
+            id: id.into(),
+            title: "Old".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 1,
+            status: crate::storage::RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+        }
+    }
+
+    #[test]
+    fn rename_local_recording_updates_title_in_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // Quotes round-trip through meta.json (serde escapes them); whitespace
+        // is trimmed before saving. Only `title` changes.
+        rename_local_recording(id.to_string(), "  Team sync \"Q2\"  ".to_string()).unwrap();
+
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Team sync \"Q2\"");
+        assert_eq!(meta.created_at, "2026-06-02T14:30:05Z");
+        assert_eq!(meta.status, crate::storage::RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_empty_title() {
+        // Validation runs before any filesystem access, so no ARISO_ROOT needed.
+        assert!(rename_local_recording("any-id".to_string(), "".to_string()).is_err());
+        assert!(rename_local_recording("any-id".to_string(), "   ".to_string()).is_err());
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_over_limit_title_but_allows_40() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // 41 characters is rejected without touching the file.
+        assert!(rename_local_recording(id.to_string(), "x".repeat(41)).is_err());
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "Old");
+
+        // Exactly 40 characters saves.
+        rename_local_recording(id.to_string(), "x".repeat(40)).unwrap();
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "x".repeat(40));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_missing_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
+        assert!(res.is_err());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

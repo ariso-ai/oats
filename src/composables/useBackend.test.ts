@@ -9,12 +9,15 @@ const checkSession = vi.fn();
 const modelStatus = vi.fn();
 const getBackendSetting = vi.fn();
 const uploadAudio = vi.fn();
+const renameRecording = vi.fn();
+const updateMeetingNotesTitle = vi.fn();
 
 vi.mock('../tauri', () => ({
   local: {
     finalizeRecording: (...a: unknown[]) => localFinalize(...a),
     modelStatus: () => modelStatus(),
     listRecordings: () => listRecordings(),
+    renameRecording: (...a: unknown[]) => renameRecording(...a),
   },
   auth: { checkSession: () => checkSession() },
   api: {
@@ -28,6 +31,7 @@ vi.mock('./useMeetingApi', () => ({
   useMeetingApi: () => ({
     uploadAudio: (...a: unknown[]) => uploadAudio(...a),
     listMeetingsInWindow: (...a: unknown[]) => listMeetingsInWindow(...a),
+    updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
   }),
 }));
 
@@ -71,6 +75,12 @@ describe('LocalBackend', () => {
     // timezone-specific value).
     expect(titleArg).toMatch(/^Recording \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
+
+  it('renameMeeting forwards to the rename_local_recording bridge', async () => {
+    renameRecording.mockResolvedValue(undefined);
+    await new LocalBackend().renameMeeting('2026-06-02T14-30-05Z', 'New title');
+    expect(renameRecording).toHaveBeenCalledWith('2026-06-02T14-30-05Z', 'New title');
+  });
 });
 
 describe('ArisoBackend', () => {
@@ -104,6 +114,12 @@ describe('ArisoBackend', () => {
       endAt: '2026-06-02T15:10:00.000Z',
       meetingId: 7,
     });
+  });
+
+  it('renameMeeting forwards to the meeting-notes PATCH endpoint', async () => {
+    updateMeetingNotesTitle.mockResolvedValue(undefined);
+    await new ArisoBackend().renameMeeting('7', 'New title');
+    expect(updateMeetingNotesTitle).toHaveBeenCalledWith('7', 'New title');
   });
 });
 
