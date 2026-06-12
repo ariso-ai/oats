@@ -14,11 +14,6 @@ permissions:
   contents: read
   pull-requests: read
 
-env:
-  # Keep transient cache restore slowness from consuming the self-hosted validate
-  # runner window before the actual frontend and Cargo build steps can run.
-  SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   # Don't cancel in-flight release builds — they may be signing/notarizing.
