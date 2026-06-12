@@ -171,6 +171,29 @@ fn parse_datetime(v: Option<&Value>) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+/// The fetch window for "today": [00:00:00.000, 23:59:59.999] in `now`'s
+/// timezone, returned in UTC for the API query. Generic over the timezone so
+/// tests can pin a `FixedOffset` (production passes `chrono::Local::now()`).
+fn day_bounds<Tz: chrono::TimeZone>(now: DateTime<Tz>) -> (DateTime<Utc>, DateTime<Utc>) {
+    let tz = now.timezone();
+    let date = now.date_naive();
+    let start_naive = date.and_hms_opt(0, 0, 0).expect("midnight is valid");
+    let end_naive = date
+        .and_hms_milli_opt(23, 59, 59, 999)
+        .expect("end of day is valid");
+    // earliest/latest resolve DST folds; fall back to `now` on the
+    // pathological edge where the local wall-clock instant doesn't exist.
+    let start = tz
+        .from_local_datetime(&start_naive)
+        .earliest()
+        .unwrap_or_else(|| now.clone());
+    let end = tz
+        .from_local_datetime(&end_naive)
+        .latest()
+        .unwrap_or_else(|| now.clone());
+    (start.with_timezone(&Utc), end.with_timezone(&Utc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +373,14 @@ mod tests {
         assert_eq!(parse_end_at(&v), Some(t("2026-06-11T14:30:00Z")));
         assert_eq!(parse_end_at(&serde_json::json!({ "id": 7 })), None);
         assert_eq!(parse_end_at(&serde_json::json!({ "end_at": "garbage" })), None);
+    }
+
+    #[test]
+    fn day_bounds_cover_the_local_day_in_utc() {
+        // 13:45 local in UTC-4 → local day is [04:00:00Z, next-day 03:59:59.999Z].
+        let now = tz().with_ymd_and_hms(2026, 6, 11, 13, 45, 0).unwrap();
+        let (start, end) = day_bounds(now);
+        assert_eq!(start, t("2026-06-11T04:00:00Z"));
+        assert_eq!(end, t("2026-06-12T03:59:59.999Z"));
     }
 }
