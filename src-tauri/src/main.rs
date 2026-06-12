@@ -11,6 +11,7 @@ mod transcribe;
 mod model_manager;
 mod recording_state;
 mod tray;
+mod tray_meeting;
 mod update_manager;
 
 fn main() {
