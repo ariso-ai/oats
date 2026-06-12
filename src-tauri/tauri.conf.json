@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/main/tauri.schema.json",
-  "productName": "Ariso",
+  "productName": "oats",
   "version": "0.3.4",
   "identifier": "ai.ariso.desktop",
   "build": {

@@ -186,7 +186,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         "settings",
                         tauri::WebviewUrl::App("/#/settings".into()),
                     )
-                    .title("Ariso Settings")
+                    .title("oats Settings")
                     .inner_size(450.0, 800.0)
                     .resizable(false)
                     .center()
@@ -261,7 +261,7 @@ pub fn build_idle_menu(
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
     let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit oats").build(app)?;
 
     builder
         .item(&start)

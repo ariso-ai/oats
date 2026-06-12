@@ -1,6 +1,6 @@
-# @ariso-ai/desktop
+# @ariso-ai/oats
 
-Tauri v2 desktop app for Ariso. Built with [Tauri](https://v2.tauri.app/), [Vite](https://vite.dev/), and [Vue 3](https://vuejs.org/).
+oats — Tauri v2 desktop app for Ariso. Built with [Tauri](https://v2.tauri.app/), [Vite](https://vite.dev/), and [Vue 3](https://vuejs.org/).
 
 This workspace is excluded from the monorepo's Turbo `build`/`lint`/`test` pipeline.
 
@@ -158,7 +158,7 @@ npx @tauri-apps/cli signer generate
    | `R2_ENDPOINT`                        | `https://<account-id>.r2.cloudflarestorage.com` |
    | `R2_BUCKET`                          | Bucket backing `pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev` |
 
-   The release job publishes artifacts to the stable keys `desktop/latest.json`, `desktop/Ariso.app.tar.gz`, and `desktop/Ariso.dmg` (overwritten each release, served with `no-cache`). The updater endpoint in `tauri.conf.json` points at `desktop/latest.json`.
+   The release job publishes artifacts to the stable keys `desktop/latest.json`, `desktop/oats.app.tar.gz`, and `desktop/oats.dmg` (overwritten each release, served with `no-cache`). The updater endpoint in `tauri.conf.json` points at `desktop/latest.json`.
 
 ### Cutting a release
 

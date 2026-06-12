@@ -1,8 +1,8 @@
 <template>
   <div class="onboarding">
     <template v-if="step === 'signin'">
-      <img class="logo" src="../assets/ariso-logo.png" alt="Ariso" />
-      <h1 class="heading">Welcome to Ariso</h1>
+      <img class="logo" src="../assets/ariso-logo.png" alt="oats" />
+      <h1 class="heading">Welcome to oats</h1>
       <p class="subheading">Sign in to sync your meetings and notes across devices.</p>
 
       <button

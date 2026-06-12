@@ -472,7 +472,7 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     }
 
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/#/settings".into()))
-        .title("Ariso Settings")
+        .title("oats Settings")
         .inner_size(450.0, 800.0)
         .resizable(false)
         .center()
@@ -496,7 +496,7 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
     }
 
     WebviewWindowBuilder::new(&app, "onboarding", WebviewUrl::App("/#/onboarding".into()))
-        .title("Welcome to Ariso")
+        .title("Welcome to oats")
         .inner_size(450.0, 600.0)
         .resizable(false)
         .center()

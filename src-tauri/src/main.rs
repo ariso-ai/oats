@@ -110,7 +110,7 @@ fn main() {
             // Intercept close requests so the window hides instead of being
             // destroyed; otherwise re-opening from the tray would do nothing.
             let settings = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/#/settings".into()))
-                .title("Ariso Settings")
+                .title("oats Settings")
                 .inner_size(450.0, 800.0)
                 .resizable(false)
                 .center()
@@ -163,7 +163,7 @@ fn main() {
             };
             if dir_ready {
                 builder = builder.plugin(tauri_plugin_mcp::init_with_config(
-                    tauri_plugin_mcp::PluginConfig::new("Ariso".to_string())
+                    tauri_plugin_mcp::PluginConfig::new("oats".to_string())
                         .start_socket_server(true)
                         .socket_path(socket_path),
                 ));
