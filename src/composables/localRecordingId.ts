@@ -4,13 +4,13 @@
  *  recording — red dot, selection, the embedded recorder strip — while the
  *  capture is still running, and have that identity survive finalize. */
 
-/** TS mirror of Rust `sanitize_iso_to_id`: drop a `+HH:MM` offset and
- *  sub-second precision, replace `:` with `-`, and re-append `Z`.
- *  `2026-06-02T14:30:05.123Z` → `2026-06-02T14-30-05Z`. */
+/** TS mirror of Rust `sanitize_iso_to_id`: drop a trailing `Z` or
+ *  `±HH:MM` offset and sub-second precision, replace `:` with `-`, and
+ *  re-append `Z`. `2026-06-02T14:30:05.123Z` → `2026-06-02T14-30-05Z`. */
 export function localRecordingIdFromStart(iso: string): string {
-  const noOffset = iso.split('+')[0];
+  const noOffset = iso.replace(/([+-]\d{2}:\d{2}|Z)$/, '');
   const dot = noOffset.indexOf('.');
-  const head = dot >= 0 ? noOffset.slice(0, dot) : noOffset.replace(/Z$/, '');
+  const head = dot >= 0 ? noOffset.slice(0, dot) : noOffset;
   return `${head.replaceAll(':', '-')}Z`;
 }
 
