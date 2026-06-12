@@ -198,6 +198,7 @@ import { renderMarkdown } from '../utils/markdown';
 import type { TranscriptChunk } from '../composables/useMeetingApi';
 import {
   getActiveBackend,
+  type Backend,
   type MeetingListItem,
   type MeetingDetail,
   type MeetingActionItem,
@@ -245,12 +246,18 @@ const loadingIndividualNote = ref(false);
 
 let reqId = 0;
 
+// The backend instance that loaded `detail`. Renames and lazy loads reuse it
+// so a backend flip in Settings mid-view can't route a save or fetch through
+// the other backend.
+let detailBackend: Backend | null = null;
+
 async function load(item: MeetingListItem | null): Promise<void> {
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
   const my = ++reqId;
   loading.value = false;
   detail.value = null;
+  detailBackend = null;
   error.value = null;
   showFullNotes.value = false;
   activeTab.value = 'note';
@@ -269,6 +276,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     const d = await backend.getMeetingDetail(item);
     if (my !== reqId) return;
     detail.value = d;
+    detailBackend = backend;
     activeTab.value = firstTabFor(d); // default to the first available tab
   } catch (e) {
     if (my !== reqId) return;
@@ -315,7 +323,8 @@ async function commitTitle(): Promise<void> {
   if (!editingTitle.value || savingTitle.value) return;
   if (titleError.value) return;
   const d = detail.value;
-  if (!d) {
+  const backend = detailBackend;
+  if (!d || !backend) {
     editingTitle.value = false;
     return;
   }
@@ -327,7 +336,6 @@ async function commitTitle(): Promise<void> {
   savingTitle.value = true;
   const my = reqId;
   try {
-    const backend = await getActiveBackend();
     await backend.renameMeeting(d.id, next);
     if (my !== reqId) return; // selection changed mid-save — drop the stale result
     d.title = next;
@@ -403,11 +411,11 @@ const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: s
 // already have their content, so they skip the round trip.
 async function loadTranscript(): Promise<void> {
   const d = detail.value;
-  if (!props.item || !d || d.isLocal || transcriptLoaded.value || loadingTranscript.value) return;
+  const backend = detailBackend;
+  if (!props.item || !d || !backend || d.isLocal || transcriptLoaded.value || loadingTranscript.value) return;
   const my = reqId;
   loadingTranscript.value = true;
   try {
-    const backend = await getActiveBackend();
     const t = await backend.getMeetingTranscript(props.item);
     if (my !== reqId) return;
     transcript.value = t;
@@ -424,11 +432,11 @@ async function loadTranscript(): Promise<void> {
 
 // Fetch the requester's individual note the first time the My-note tab opens.
 async function loadIndividualNote(): Promise<void> {
-  if (!props.item || individualNoteLoaded.value || loadingIndividualNote.value) return;
+  const backend = detailBackend;
+  if (!props.item || !backend || individualNoteLoaded.value || loadingIndividualNote.value) return;
   const my = reqId;
   loadingIndividualNote.value = true;
   try {
-    const backend = await getActiveBackend();
     const n = await backend.getIndividualNote(props.item);
     if (my !== reqId) return;
     individualNote.value = n;

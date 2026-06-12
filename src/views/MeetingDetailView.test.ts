@@ -6,14 +6,10 @@ import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
+const activeBackend = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () =>
-    Promise.resolve({
-      getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
-      getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
-      renameMeeting: (...a: unknown[]) => renameMeeting(...a),
-    }),
+  getActiveBackend: () => activeBackend(),
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
@@ -43,6 +39,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   renameMeeting.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
+  activeBackend.mockResolvedValue({
+    getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
+    getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
+    renameMeeting: (...a: unknown[]) => renameMeeting(...a),
+  });
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -143,6 +144,33 @@ describe('MeetingDetailView inline title editing', () => {
     expect(renameMeeting).not.toHaveBeenCalled();
     expect(wrapper.find('input.head-title--input').exists()).toBe(false);
     expect(wrapper.find('.head-title').text()).toBe('Old title');
+  });
+
+  it('renames through the backend that loaded the detail, not the current setting', async () => {
+    // Backend A serves the load; flipping Settings makes later resolutions
+    // return backend B. The rename must stay on A.
+    const renameA = vi.fn().mockResolvedValue(undefined);
+    const renameB = vi.fn().mockResolvedValue(undefined);
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true, note: 'hi' }));
+    const backendWith = (rename: typeof renameA) => ({
+      getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
+      getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
+      renameMeeting: rename,
+    });
+    activeBackend.mockResolvedValueOnce(backendWith(renameA));
+    activeBackend.mockResolvedValue(backendWith(renameB));
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    await wrapper.find('.head-title').trigger('click');
+    const input = wrapper.find('input.head-title--input');
+    await input.setValue('Renamed after flip');
+    await input.trigger('keydown', { key: 'Enter' });
+    await flushPromises();
+
+    expect(renameA).toHaveBeenCalledWith('7', 'Renamed after flip');
+    expect(renameB).not.toHaveBeenCalled();
   });
 
   it('commits a valid draft on blur', async () => {
