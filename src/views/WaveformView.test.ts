@@ -27,9 +27,10 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 }));
 let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
+const recorderIsRecording = { value: true };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
-    isRecording: { value: true },
+    isRecording: recorderIsRecording,
     isPaused: { value: false },
     durationSeconds: { value: 5 },
     frameLevels: { value: new Array(32).fill(0.5) },
@@ -68,6 +69,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const k in eventHandlers) delete eventHandlers[k];
   routeQuery = {};
+  recorderIsRecording.value = true;
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -166,6 +168,20 @@ describe('WaveformView vertical pill', () => {
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
+  });
+
+  it('does not broadcast a recording phase before capture has started', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    // getUserMedia still pending: the recorder reports not-recording.
+    recorderIsRecording.value = false;
+    mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    emitEvent.mockClear();
+    await vi.advanceTimersByTimeAsync(2_100); // heartbeats fire
+    const states = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state');
+    expect(states).toHaveLength(0);
+    vi.useRealTimers();
   });
 
   it('broadcasts recorder://state through the stop flow, ending with closed', async () => {
