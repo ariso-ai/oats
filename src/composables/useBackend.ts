@@ -1,4 +1,4 @@
-import { local, auth, getBackendSetting, type RecordingSummary } from '../tauri';
+import { local, auth, pending, api, getBackendSetting, type RecordingSummary } from '../tauri';
 import { useMeetingApi, type ScheduledMeeting, type TranscriptChunk } from './useMeetingApi';
 
 export type BackendId = 'ariso' | 'local';
@@ -105,6 +105,8 @@ export interface Backend {
   /** Rename a meeting. Ariso PATCHes the meeting-notes endpoint; local
    *  rewrites the title in the recording's meta.json. */
   renameMeeting(id: string, title: string): Promise<void>;
+  /** Fetch the meeting's recorded audio bytes; null when none exists. */
+  getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null>;
 }
 
 interface RawMeetingSummary {
@@ -179,12 +181,25 @@ export class ArisoBackend implements Backend {
   }
 
   async finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult> {
+    const createdAt = meta.startAt ?? meta.endAt;
+    // Crash-safety net: persist the mp3 before the upload attempt. A buffer
+    // failure must not block the upload — the in-memory blob is still valid.
+    try {
+      await pending.bufferAudio(await blobToBytes(blob), createdAt);
+    } catch (e) {
+      console.error('Failed to buffer audio locally; uploading anyway', e);
+    }
     const { uploadAudio } = useMeetingApi();
     const { meetingId } = await uploadAudio(blob, {
       startAt: meta.startAt,
       endAt: meta.endAt,
       meetingId: meta.meetingId,
     });
+    try {
+      await pending.discardAudio(createdAt);
+    } catch (e) {
+      console.error('Failed to remove buffered audio after upload', e);
+    }
     return { backend: 'ariso', meetingId };
   }
 
@@ -247,6 +262,17 @@ export class ArisoBackend implements Backend {
   async renameMeeting(id: string, title: string): Promise<void> {
     const { updateMeetingNotesTitle } = useMeetingApi();
     await updateMeetingNotesTitle(id, title);
+  }
+
+  async getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null> {
+    try {
+      return await api.fetchMeetingAudio(item.id);
+    } catch (e) {
+      // fetch_meeting_audio prefixes errors with the HTTP status; 404 means
+      // the meeting simply has no recorded audio.
+      if (String(e).startsWith('404')) return null;
+      throw e;
+    }
   }
 }
 
@@ -329,6 +355,11 @@ export class LocalBackend implements Backend {
 
   async renameMeeting(id: string, title: string): Promise<void> {
     await local.renameRecording(id, title);
+  }
+
+  async getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null> {
+    if (!item.files?.hasAudio) return null;
+    return local.readRecordingAudio(item.id);
   }
 }
 
