@@ -221,16 +221,25 @@ function setRecording(next: boolean): void {
   recording.value = next;
 }
 
+// Bump per call so an older in-flight `listMeetings()` can't clobber a newer
+// reload (e.g. the recording://started fallback firing while the initial
+// onMounted load is still pending).
+let loadMeetingsRequest = 0;
+
 async function loadMeetings(): Promise<void> {
+  const requestId = ++loadMeetingsRequest;
   loading.value = true;
   error.value = null;
   try {
-    meetings.value = await (await getActiveBackend()).listMeetings();
+    const next = await (await getActiveBackend()).listMeetings();
+    if (requestId !== loadMeetingsRequest) return;
+    meetings.value = next;
   } catch (e) {
+    if (requestId !== loadMeetingsRequest) return;
     console.error('Failed to list meetings', e);
     error.value = 'Could not load meetings.';
   } finally {
-    loading.value = false;
+    if (requestId === loadMeetingsRequest) loading.value = false;
   }
 }
 
@@ -266,7 +275,13 @@ async function startRecording(): Promise<void> {
 // the picked meeting into the detail panel so the user sees what's recording.
 async function onRecordingStarted(event: { payload: { meetingId: number | null } }): Promise<void> {
   setRecording(true);
-  const id = event.payload?.meetingId;
+  await selectRecordingMeeting(event.payload?.meetingId);
+}
+
+// Shared resolver for "the recording is attached to meeting X, surface it in
+// the detail panel". Used by both the live `recording://started` event and the
+// mount-time backend query that recovers state after the library was closed.
+async function selectRecordingMeeting(id: number | null | undefined): Promise<void> {
   if (id == null) return;
   const idStr = String(id);
   let m = meetings.value.find((x) => x.id === idStr);
@@ -288,8 +303,22 @@ function onWindowFocus(): void {
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 
+// Recover the attached meeting for a recording that started before this
+// library window existed. The `recording://started` event is one-shot, so a
+// window opened mid-recording would otherwise never see the selection.
+async function recoverActiveRecording(): Promise<void> {
+  try {
+    const id = await invoke<number | null>('get_active_recording_meeting_id');
+    if (id != null && selectedItem.value == null) {
+      await selectRecordingMeeting(id);
+    }
+  } catch (e) {
+    console.error('Failed to query active recording', e);
+  }
+}
+
 onMounted(() => {
-  void loadMeetings();
+  void loadMeetings().then(() => recoverActiveRecording());
   void refreshRecordingState();
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;

@@ -557,7 +557,8 @@ pub(crate) fn open_waveform_window(
     } else {
         crate::recording_state::RecordingSource::Manual
     };
-    app.state::<crate::recording_state::RecordingState>().set(source);
+    app.state::<crate::recording_state::RecordingState>()
+        .set(source, meeting_id);
     let _ = app.emit("recording://state", true);
 
     // If the window is destroyed without a clean stop (crash / force-close),
@@ -763,6 +764,16 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
     app.opener()
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// Return the meeting id the active recording is attached to, if any. The
+/// library window queries this on mount so it can re-select the attached
+/// meeting after being closed/reopened mid-recording — the `recording://started`
+/// event is one-shot and the new window would otherwise miss it.
+#[tauri::command]
+pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i64> {
+    app.state::<crate::recording_state::RecordingState>()
+        .active_meeting_id()
 }
 
 #[tauri::command]
