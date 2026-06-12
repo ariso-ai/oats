@@ -4,6 +4,7 @@ import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const listMeetings = vi.fn();
 const getMeetingDetail = vi.fn();
+const backendId = vi.fn(() => 'local');
 const usesMeetingPicker = vi.fn(() => false);
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
@@ -40,7 +41,7 @@ function emitEvent(name: string, payload: unknown): void {
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () =>
     Promise.resolve({
-      id: 'local',
+      id: backendId(),
       usesMeetingPicker: usesMeetingPicker(),
       listMeetings: () => listMeetings(),
       getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
@@ -93,6 +94,7 @@ beforeEach(() => {
   invoke.mockResolvedValue(undefined);
   readRecordingNote.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
+  backendId.mockReturnValue('local');
   usesMeetingPicker.mockReturnValue(false);
 });
 afterEach(() => {
@@ -242,6 +244,7 @@ describe('LibraryView', () => {
   });
 
   it('start-recording button opens the meeting picker for picker backends', async () => {
+    backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
@@ -249,6 +252,39 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('starts recording against the selected scheduled meeting id', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan', files: undefined }),
+      item({ id: '7', title: 'Other Sync', files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+    expect(invoke).not.toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('falls back to the meeting picker when the selected scheduled meeting id is not numeric', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'local-draft', title: 'Draft', files: undefined })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', {
+      meetingId: expect.any(Number),
+    });
   });
 
   it('marks the recording meeting with a red dot in the sidebar list', async () => {

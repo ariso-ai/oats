@@ -273,14 +273,21 @@ async function refreshRecordingState(): Promise<void> {
   }
 }
 
+// Ariso list rows carry ids as strings for shared rendering, while the recorder
+// command accepts the backend's numeric meeting id.
+function numericMeetingId(item: MeetingListItem | null): number | undefined {
+  if (!item || !/^\d+$/.test(item.id)) return undefined;
+  const id = Number(item.id);
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
 // Open the floating recorder pill (its own always-on-top window).
 async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
-    const meetingId =
-      selectedItem.value && !selectedItem.value.files && /^\d+$/.test(selectedItem.value.id)
-        ? Number(selectedItem.value.id)
-        : undefined;
+    // Ariso scheduled meetings use numeric backend ids; pass that id into the
+    // recorder so the eventual upload attaches to the selected meeting.
+    const meetingId = backend.id === 'ariso' ? numericMeetingId(selectedItem.value) : undefined;
     if (meetingId != null) {
       await invoke('start_recording_window', { meetingId });
       setRecording(true);
