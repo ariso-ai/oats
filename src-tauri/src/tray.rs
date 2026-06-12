@@ -18,7 +18,10 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
             .state::<crate::tray_meeting::FeaturedMeetingState>()
             .0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| {
+                eprintln!("tray: FeaturedMeetingState mutex poisoned; recovering");
+                poisoned.into_inner()
+            })
             .clone();
         build_idle_menu(app, featured.as_ref())
     };
@@ -41,7 +44,10 @@ pub fn refresh_tray_title(app: &AppHandle) {
         .state::<crate::tray_meeting::FeaturedMeetingState>()
         .0
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| {
+            eprintln!("tray: FeaturedMeetingState mutex poisoned; recovering");
+            poisoned.into_inner()
+        })
         .clone();
     let title = match featured {
         Some(f) if !recording => crate::tray_meeting::format_title_bar(
@@ -114,7 +120,12 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                             .state::<crate::tray_meeting::FeaturedMeetingState>()
                             .0
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| {
+                                eprintln!(
+                                    "tray: FeaturedMeetingState mutex poisoned; recovering"
+                                );
+                                poisoned.into_inner()
+                            })
                             .as_ref()
                             .map(|f| f.id);
                         let Some(meeting_id) = meeting_id else { return };
