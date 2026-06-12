@@ -112,12 +112,36 @@ describe('RecorderStrip', () => {
     expect(wrapper.find('.strip').exists()).toBe(false);
   });
 
-  it('shows regardless of selection when the recording has no meeting', async () => {
+  it('shows regardless of selection when the recording has no id at all', async () => {
     const wrapper = mount(RecorderStrip, { props: { meetingId: '7' } });
     await flushPromises();
-    sendState(recording({ meetingId: null }));
+    sendState(recording({ meetingId: null, localRecordingId: null }));
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
+  });
+
+  it('pins a local recording to its (future) recording row', async () => {
+    const id = '2026-06-02T14-30-05Z';
+    const wrapper = mount(RecorderStrip, { props: { meetingId: id } });
+    await flushPromises();
+    sendState(recording({ meetingId: null, localRecordingId: id }));
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    await wrapper.setProps({ meetingId: '7' });
+    expect(wrapper.find('.strip').exists()).toBe(false);
+
+    await wrapper.setProps({ meetingId: null });
+    expect(wrapper.find('.strip').exists()).toBe(false);
+  });
+
+  it('reports the local recording id to its parent', async () => {
+    const id = '2026-06-02T14-30-05Z';
+    const wrapper = mount(RecorderStrip, { props: { meetingId: null } });
+    await flushPromises();
+    sendState(recording({ meetingId: null, localRecordingId: id }));
+    await flushPromises();
+    expect(wrapper.emitted('recording-change')?.at(-1)).toEqual([id]);
   });
 
   it('reports the recorded meeting id to its parent, and null when over', async () => {

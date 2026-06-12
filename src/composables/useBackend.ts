@@ -156,7 +156,7 @@ async function blobToBytes(blob: Blob): Promise<number[]> {
   return [...new Uint8Array(await blob.arrayBuffer())];
 }
 
-function timestampTitle(iso: string): string {
+export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
   // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same

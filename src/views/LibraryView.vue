@@ -51,9 +51,9 @@
             :aria-pressed="selectedItem?.id === m.id"
             @click="selectMeeting(m)"
           >
+            <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
               <span class="mi-title">{{ m.title }}</span>
-              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
@@ -105,11 +105,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, type MeetingListItem } from '../composables/useBackend';
+import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
   groupTodaysMeetings,
@@ -141,11 +142,31 @@ const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'l
 
 const activeView = ref<'today' | 'meetings'>('meetings');
 
+// An in-progress local recording has no list row yet (the entry is created on
+// finalize). Synthesize one under the id the finalized recording will use, so
+// the red dot, selection, and the recorder strip have a home that survives the
+// post-recording reload.
+const displayMeetings = computed<MeetingListItem[]>(() => {
+  const id = recordingMeetingId.value;
+  if (!id || meetings.value.some((m) => m.id === id)) return meetings.value;
+  const timestamp = timestampFromLocalRecordingId(id);
+  if (!timestamp) return meetings.value; // an Ariso meeting outside the loaded window
+  return [
+    {
+      id,
+      title: timestampTitle(timestamp),
+      timestamp,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    },
+    ...meetings.value,
+  ];
+});
+
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
-    return groupTodaysMeetings(meetings.value, now.value);
+    return groupTodaysMeetings(displayMeetings.value, now.value);
   }
-  return groupMeetingsByDate(meetings.value, now.value);
+  return groupMeetingsByDate(displayMeetings.value, now.value);
 });
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
@@ -336,6 +357,23 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
   if (m) await selectMeeting(m);
 }
 
+// Keep the detail panel on the recorded meeting: surface its row when the
+// strip reports a recording (the synthetic row for local, the scheduled row
+// for Ariso), and reload when it ends so the finalized local recording
+// replaces the synthetic row under the same id.
+watch(recordingMeetingId, async (id, prevId) => {
+  if (id) {
+    const m = displayMeetings.value.find((x) => x.id === id);
+    if (m && selectedItem.value?.id !== id) await selectMeeting(m);
+    return;
+  }
+  await loadMeetings();
+  if (prevId && selectedItem.value?.id === prevId && !meetings.value.some((m) => m.id === prevId)) {
+    // Discarded/crashed recording — its synthetic row is gone; fall back.
+    selectedItem.value = meetings.value[0] ?? null;
+  }
+});
+
 function onWindowFocus(): void {
   now.value = new Date();
   void loadMeetings();
@@ -483,6 +521,7 @@ onUnmounted(() => {
 }
 
 .meeting-item {
+  position: relative; /* anchors the recording dot to the row's corner */
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -501,17 +540,19 @@ onUnmounted(() => {
   border-color: #1c1c1c;
   box-shadow: 3px 3px 0 #e7e5e2;
 }
-/* Title hugs the left, rel-label pushed right; the recording dot (when
-   present) sits right after the title's end. */
+/* Title hugs the left, rel-label pushed right. */
 .mi-head { display: flex; align-items: baseline; gap: 8px; }
 .mi-rel { margin-left: auto; }
+/* Recording dot pinned to the row's top-right corner, out of the text flow so
+   the title/rel-label layout is unaffected. */
 .mi-rec-dot {
-  flex-shrink: 0;
+  position: absolute;
+  top: 8px;
+  right: 8px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: #e0443e;
-  align-self: center;
   animation: rec-pulse 1s infinite;
 }
 @keyframes rec-pulse {

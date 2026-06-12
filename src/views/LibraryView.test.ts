@@ -38,15 +38,19 @@ vi.mock('@tauri-apps/api/event', () => ({
 function emitEvent(name: string, payload: unknown): void {
   for (const cb of [...(eventHandlers.get(name) ?? [])]) cb({ payload });
 }
-vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () =>
-    Promise.resolve({
-      id: backendId(),
-      usesMeetingPicker: usesMeetingPicker(),
-      listMeetings: () => listMeetings(),
-      getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
-    }),
-}));
+vi.mock('../composables/useBackend', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../composables/useBackend')>();
+  return {
+    ...actual,
+    getActiveBackend: () =>
+      Promise.resolve({
+        id: backendId(),
+        usesMeetingPicker: usesMeetingPicker(),
+        listMeetings: () => listMeetings(),
+        getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
+      }),
+  };
+});
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
 vi.mock('../tauri', () => ({
@@ -381,6 +385,102 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(listMeetings).toHaveBeenCalledTimes(2);
     expect(wrapper.find('.empty-card').exists()).toBe(false);
+  });
+
+  // A local recording has no list row until finalize; the library synthesizes
+  // one under the recording's deterministic id so the red dot, selection, and
+  // the embedded strip have a home.
+  function localRecorderState(over: Record<string, unknown> = {}) {
+    return {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: null,
+      localRecordingId: '2026-06-02T14-30-05Z',
+      phase: 'recording',
+      ...over,
+    };
+  }
+
+  it('synthesizes a red-dot row for an in-progress local recording and selects it', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(1);
+
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+
+    const rows = wrapper.findAll('.meeting-item');
+    expect(rows).toHaveLength(2);
+    // Synthetic row (14:30) sorts above Standup (10:00) on the same date.
+    expect(rows[0].text()).toContain('Recording 2026-06-02');
+    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    // The embedded strip shows for the recorded meeting…
+    expect(wrapper.find('.strip').exists()).toBe(true);
+  });
+
+  it('hides the recorder strip when another meeting is selected, keeping the red dot', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    const rows = wrapper.findAll('.meeting-item');
+    await rows[1].trigger('click');
+    await flushPromises();
+
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+  });
+
+  it('reloads when the recording closes so the finalized row replaces the synthetic one', async () => {
+    listMeetings
+      .mockResolvedValueOnce([item({ id: 'a', title: 'Standup' })])
+      .mockResolvedValue([
+        item({
+          id: '2026-06-02T14-30-05Z',
+          title: 'Recording 2026-06-02 14:30',
+          timestamp: '2026-06-02T14:30:05Z',
+          files: { hasAudio: true, hasNote: false, hasTranscript: true },
+        }),
+        item({ id: 'a', title: 'Standup' }),
+      ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    expect(listMeetings).toHaveBeenCalledTimes(1);
+
+    emitEvent('recorder://state', localRecorderState({ phase: 'closed' }));
+    await flushPromises();
+
+    expect(listMeetings).toHaveBeenCalledTimes(2);
+    const rows = wrapper.findAll('.meeting-item');
+    expect(rows).toHaveLength(2);
+    // The finalized recording keeps the selection under the same id.
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    expect(rows[0].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
+  it('falls back to the first meeting when a discarded recording leaves no row', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].attributes('aria-pressed')).toBe('true');
+
+    emitEvent('recorder://state', localRecorderState({ phase: 'closed' }));
+    await flushPromises();
+
+    const rows = wrapper.findAll('.meeting-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
   });
 
   it('start-recording button opens the recorder directly for local backend', async () => {
