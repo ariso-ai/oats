@@ -116,6 +116,20 @@ where
     }
 }
 
+/// The soonest meeting with `start_at` strictly after `now`. Computes the min
+/// explicitly so it is order-independent (mirrors the TS `pickDefaultMeeting`
+/// `next` arm; the "current meeting" arm is intentionally absent — only
+/// strictly-upcoming meetings are featured in the tray).
+pub(crate) fn pick_next_upcoming(
+    meetings: &[ScheduledMeeting],
+    now: DateTime<Utc>,
+) -> Option<&ScheduledMeeting> {
+    meetings
+        .iter()
+        .filter(|m| m.start_at > now)
+        .min_by_key(|m| m.start_at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +242,36 @@ mod tests {
     #[test]
     fn time_range_start_only() {
         assert_eq!(format_time_range(at(10, 0), None), "10:00 AM");
+    }
+
+    fn meeting(id: i64, start: &str) -> ScheduledMeeting {
+        ScheduledMeeting { id, title: None, start_at: t(start) }
+    }
+
+    #[test]
+    fn pick_empty_list_is_none() {
+        assert!(pick_next_upcoming(&[], t("2026-06-11T10:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn pick_all_past_is_none() {
+        let ms = [meeting(1, "2026-06-11T08:00:00Z"), meeting(2, "2026-06-11T09:00:00Z")];
+        assert!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn pick_soonest_strictly_future_order_independent() {
+        let ms = [
+            meeting(1, "2026-06-11T15:00:00Z"),
+            meeting(2, "2026-06-11T11:00:00Z"),
+            meeting(3, "2026-06-11T08:00:00Z"),
+        ];
+        assert_eq!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).unwrap().id, 2);
+    }
+
+    #[test]
+    fn pick_excludes_meeting_starting_exactly_now() {
+        let ms = [meeting(1, "2026-06-11T10:00:00Z"), meeting(2, "2026-06-11T11:00:00Z")];
+        assert_eq!(pick_next_upcoming(&ms, t("2026-06-11T10:00:00Z")).unwrap().id, 2);
     }
 }
