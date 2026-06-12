@@ -50,3 +50,54 @@ impl FeaturedMeetingState {
         Self::default()
     }
 }
+
+/// Max characters of the meeting title shown in the menu-bar (tray) title.
+const TITLE_MAX_CHARS: usize = 10;
+
+/// Truncate a meeting title for the tray title bar. `None`/blank titles
+/// become "Untitled meeting"; titles longer than 10 Unicode scalar values
+/// are cut to 10 + `…`.
+pub(crate) fn truncate_title(title: Option<&str>) -> String {
+    let Some(s) = title.filter(|s| !s.trim().is_empty()) else {
+        return "Untitled meeting".to_string();
+    };
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= TITLE_MAX_CHARS {
+        return s.to_string();
+    }
+    let mut out: String = chars[..TITLE_MAX_CHARS].iter().collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_title_none_is_untitled() {
+        assert_eq!(truncate_title(None), "Untitled meeting");
+    }
+
+    #[test]
+    fn truncate_title_blank_is_untitled() {
+        assert_eq!(truncate_title(Some("")), "Untitled meeting");
+        assert_eq!(truncate_title(Some("   ")), "Untitled meeting");
+    }
+
+    #[test]
+    fn truncate_title_short_unchanged() {
+        assert_eq!(truncate_title(Some("Standup")), "Standup");
+        assert_eq!(truncate_title(Some("Exactly10!")), "Exactly10!");
+    }
+
+    #[test]
+    fn truncate_title_long_truncated_to_10_plus_ellipsis() {
+        assert_eq!(truncate_title(Some("Weekly Engineering Sync")), "Weekly Eng…");
+    }
+
+    #[test]
+    fn truncate_title_counts_unicode_scalars_not_bytes() {
+        assert_eq!(truncate_title(Some("héllo wörld plus")), "héllo wörl…");
+    }
+}
