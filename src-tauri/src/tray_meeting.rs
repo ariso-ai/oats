@@ -83,6 +83,15 @@ pub(crate) fn format_countdown(start: DateTime<Utc>, now: DateTime<Utc>) -> Stri
     }
 }
 
+/// The full menu-bar string next to the tray icon, e.g. `Weekly Eng… in 12min`.
+pub(crate) fn format_title_bar(
+    title: Option<&str>,
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> String {
+    format!("{} {}", truncate_title(title), format_countdown(start, now))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +157,26 @@ mod tests {
         assert_eq!(
             format_countdown(t("2026-06-11T10:00:59Z"), t("2026-06-11T10:00:00Z")),
             "in <1min"
+        );
+    }
+
+    #[test]
+    fn title_bar_composes_truncated_title_and_countdown() {
+        assert_eq!(
+            format_title_bar(
+                Some("Weekly Engineering Sync"),
+                t("2026-06-11T10:12:00Z"),
+                t("2026-06-11T10:00:00Z")
+            ),
+            "Weekly Eng… in 12min"
+        );
+    }
+
+    #[test]
+    fn title_bar_untitled_meeting() {
+        assert_eq!(
+            format_title_bar(None, t("2026-06-11T10:00:30Z"), t("2026-06-11T10:00:00Z")),
+            "Untitled meeting in <1min"
         );
     }
 }
