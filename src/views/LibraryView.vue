@@ -51,9 +51,9 @@
             :aria-pressed="selectedItem?.id === m.id"
             @click="selectMeeting(m)"
           >
+            <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
               <span class="mi-title">{{ m.title }}</span>
-              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
@@ -87,8 +87,9 @@
       <div class="detail-card">
         <MeetingDetailView
           v-if="selectedItem"
+          ref="detailView"
           :item="selectedItem"
-          @close="selectedItem = null"
+          @close="clearSelection"
           @title-updated="onTitleUpdated"
         />
         <div v-else class="empty-card">
@@ -104,11 +105,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, type MeetingListItem } from '../composables/useBackend';
+import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
   groupTodaysMeetings,
@@ -126,6 +128,10 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
+  saveNotesNow?: () => Promise<void>;
+};
+const detailView = ref<MeetingDetailViewExposed | null>(null);
 // Meeting currently being recorded (reported by the strip) — red dot in the list.
 const recordingMeetingId = ref<string | null>(null);
 
@@ -137,11 +143,31 @@ const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'l
 
 const activeView = ref<'today' | 'meetings'>('meetings');
 
+// An in-progress local recording has no list row yet (the entry is created on
+// finalize). Synthesize one under the id the finalized recording will use, so
+// the red dot, selection, and the recorder strip have a home that survives the
+// post-recording reload.
+const displayMeetings = computed<MeetingListItem[]>(() => {
+  const id = recordingMeetingId.value;
+  if (!id || meetings.value.some((m) => m.id === id)) return meetings.value;
+  const timestamp = timestampFromLocalRecordingId(id);
+  if (!timestamp) return meetings.value; // an Ariso meeting outside the loaded window
+  return [
+    {
+      id,
+      title: timestampTitle(timestamp),
+      timestamp,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    },
+    ...meetings.value,
+  ];
+});
+
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
-    return groupTodaysMeetings(meetings.value, now.value);
+    return groupTodaysMeetings(displayMeetings.value, now.value);
   }
-  return groupMeetingsByDate(meetings.value, now.value);
+  return groupMeetingsByDate(displayMeetings.value, now.value);
 });
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
@@ -184,8 +210,23 @@ function itemSub(m: MeetingListItem): string {
   return time;
 }
 
-function selectMeeting(m: MeetingListItem): void {
+// Selection changes ask the detail pane to flush editable notes first, so a
+// slow autosave from the previous meeting cannot land after the row changed.
+let selectionReqId = 0;
+
+async function selectMeeting(m: MeetingListItem): Promise<void> {
+  if (selectedItem.value?.id === m.id) return;
+  const my = ++selectionReqId;
+  await detailView.value?.saveNotesNow?.();
+  if (my !== selectionReqId) return;
   selectedItem.value = m;
+}
+
+async function clearSelection(): Promise<void> {
+  const my = ++selectionReqId;
+  await detailView.value?.saveNotesNow?.();
+  if (my !== selectionReqId) return;
+  selectedItem.value = null;
 }
 
 // Keep the sidebar (and the selected reference) in sync after an inline rename
@@ -240,6 +281,12 @@ async function loadMeetings(): Promise<void> {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
+    if (!selectedItem.value && meetings.value.length > 0) {
+      await selectMeeting(meetings.value[0]);
+    } else if (selectedItem.value) {
+      selectedItem.value =
+        meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
+    }
   } catch (e) {
     if (requestId !== loadMeetingsRequest) return;
     console.error('Failed to list meetings', e);
@@ -259,10 +306,26 @@ async function refreshRecordingState(): Promise<void> {
   }
 }
 
+// Ariso list rows carry ids as strings for shared rendering, while the recorder
+// command accepts the backend's numeric meeting id.
+function numericMeetingId(item: MeetingListItem | null): number | undefined {
+  if (!item || !/^\d+$/.test(item.id)) return undefined;
+  const id = Number(item.id);
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
 // Open the floating recorder pill (its own always-on-top window).
 async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
+    // Ariso scheduled meetings use numeric backend ids; pass that id into the
+    // recorder so the eventual upload attaches to the selected meeting.
+    const meetingId = backend.id === 'ariso' ? numericMeetingId(selectedItem.value) : undefined;
+    if (meetingId != null) {
+      await invoke('start_recording_window', { meetingId });
+      setRecording(true);
+      return;
+    }
     if (backend.usesMeetingPicker) {
       // Picker-using backends (Ariso) choose a meeting first; the picker then
       // starts the recorder itself.
@@ -297,8 +360,25 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
     await loadMeetings();
     m = meetings.value.find((x) => x.id === idStr);
   }
-  if (m) selectedItem.value = m;
+  if (m) await selectMeeting(m);
 }
+
+// Keep the detail panel on the recorded meeting: surface its row when the
+// strip reports a recording (the synthetic row for local, the scheduled row
+// for Ariso), and reload when it ends so the finalized local recording
+// replaces the synthetic row under the same id.
+watch(recordingMeetingId, async (id, prevId) => {
+  if (id) {
+    const m = displayMeetings.value.find((x) => x.id === id);
+    if (m && selectedItem.value?.id !== id) await selectMeeting(m);
+    return;
+  }
+  await loadMeetings();
+  if (prevId && selectedItem.value?.id === prevId && !meetings.value.some((m) => m.id === prevId)) {
+    // Discarded/crashed recording — its synthetic row is gone; fall back.
+    selectedItem.value = meetings.value[0] ?? null;
+  }
+});
 
 function onWindowFocus(): void {
   now.value = new Date();
@@ -447,6 +527,7 @@ onUnmounted(() => {
 }
 
 .meeting-item {
+  position: relative; /* anchors the recording dot to the row's corner */
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -465,17 +546,19 @@ onUnmounted(() => {
   border-color: #1c1c1c;
   box-shadow: 3px 3px 0 #e7e5e2;
 }
-/* Title hugs the left, rel-label pushed right; the recording dot (when
-   present) sits right after the title's end. */
+/* Title hugs the left, rel-label pushed right. */
 .mi-head { display: flex; align-items: baseline; gap: 8px; }
 .mi-rel { margin-left: auto; }
+/* Recording dot pinned to the row's top-right corner, out of the text flow so
+   the title/rel-label layout is unaffected. */
 .mi-rec-dot {
-  flex-shrink: 0;
+  position: absolute;
+  top: 8px;
+  right: 8px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: #e0443e;
-  align-self: center;
   animation: rec-pulse 1s infinite;
 }
 @keyframes rec-pulse {

@@ -189,6 +189,13 @@ export const local = {
   readRecordingAudio(id: string): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('read_recording_audio', { id });
   },
+  /** Reads the local `user-note.md` artifact the Library editor autosaves. */
+  readRecordingNote(id: string): Promise<string> {
+    return invoke<string>('read_recording_note', { id });
+  },
+  writeRecordingNote(id: string, markdown: string): Promise<void> {
+    return invoke('write_recording_note', { id, markdown });
+  },
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
   },
@@ -196,6 +203,10 @@ export const local = {
    *  Resolves to null when the file hasn't been generated yet. */
   readRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<string | null> {
     return invoke<string | null>('read_recording_file', { id, kind });
+  },
+  /** Update a local recording's title in its meta.json (folder id unchanged). */
+  renameRecording(id: string, title: string): Promise<void> {
+    return invoke('rename_local_recording', { id, title });
   },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');

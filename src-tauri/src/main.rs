@@ -39,7 +39,10 @@ fn main() {
             commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
             commands::read_recording_file,
+            commands::read_recording_note,
+            commands::write_recording_note,
             commands::open_recording_file,
+            commands::rename_local_recording,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
             model_manager::download_local_stt,
@@ -173,6 +176,17 @@ fn main() {
     }
 
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon re-activates the app (Reopen).
+            // Surface the meetings window — every other window is a hidden
+            // utility (bootstrap, settings) or transient (recorder pill).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Err(e) = commands::open_library_window(_app) {
+                    eprintln!("Failed to open meetings window on dock reopen: {e}");
+                }
+            }
+        });
 }

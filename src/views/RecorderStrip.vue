@@ -59,6 +59,8 @@ interface RecorderState {
   durationSeconds: number;
   isPaused: boolean;
   meetingId: number | null;
+  /** Deterministic id of an in-progress local recording (null for Ariso). */
+  localRecordingId?: string | null;
   phase: 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 }
 
@@ -77,17 +79,26 @@ const state = ref<RecorderState | null>(null);
 let unlistenState: UnlistenFn | null = null;
 let staleTimer: ReturnType<typeof setTimeout> | null = null;
 
+// The sidebar id of the row being recorded: the Ariso meeting id when one is
+// attached, otherwise the local recording's deterministic id.
+function recordedMeetingId(s: RecorderState): string | null {
+  if (s.meetingId != null) return String(s.meetingId);
+  return s.localRecordingId ?? null;
+}
+
 // The strip belongs to the recorded meeting: render it only while the detail
-// panel shows that meeting. Meeting-less recordings have no home section, so
-// they show wherever the user is.
+// panel shows that meeting. Recordings with no id at all (e.g. an Ariso
+// auto-recording awaiting confirmation) have no home row, so they show
+// wherever the user is.
 const visible = computed(() => {
   if (!state.value) return false;
-  if (state.value.meetingId == null) return true;
-  return String(state.value.meetingId) === props.meetingId;
+  const id = recordedMeetingId(state.value);
+  if (id == null) return true;
+  return id === props.meetingId;
 });
 
 watch(state, (s) => {
-  emitToParent('recording-change', s && s.meetingId != null ? String(s.meetingId) : null);
+  emitToParent('recording-change', s ? recordedMeetingId(s) : null);
 });
 
 const formattedDuration = computed(() => {
