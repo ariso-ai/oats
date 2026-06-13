@@ -117,12 +117,19 @@ Both directories are git-ignored.
 
 ## CI: Validation and Signed Releases
 
-The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`). It has two jobs:
+Two workflows run on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`):
 
-| Trigger                                | Job        | What it does                                                                  |
-| -------------------------------------- | ---------- | ----------------------------------------------------------------------------- |
-| PR to `main`, push to `main`           | `validate` | `vite build` + `cargo check`. No signing secrets exposed.                     |
-| Publishing a GitHub Release (tag `v*`) | `release`  | Runs after `validate`. Signs + notarizes with `--features prod-api`, publishes the signed DMG, updater tarball, and `latest.json` to Cloudflare R2 (`/desktop/...`), and appends an R2 download link to the GitHub Release. Gated by the `release` GitHub Environment (required reviewer + tag-scoped policy + scoped secrets). |
+- **`Desktop App`** — CI validation. Its single `validate` job runs on PRs to `main` and pushes to `main`: `vite build` + `cargo build --locked`. No signing secrets exposed.
+- **`release`** — the full release pipeline, all on push to `main` (see [Cutting a release](#cutting-a-release)).
+
+| Job             | Runs when                          | What it does                                                                  |
+| --------------- | ---------------------------------- | ----------------------------------------------------------------------------- |
+| `release-please`| every push to `main`               | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`. |
+| `sync-lock`     | a Release PR was created/updated   | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch. |
+| `release`       | a GitHub Release was just cut       | Signs + notarizes with `--features prod-api` and uploads the bundle. Gated by the `release` GitHub Environment (required reviewer + scoped secrets). |
+| `publish`       | after `release`                     | Publishes the signed DMG, updater tarball, and `latest.json` to Cloudflare R2 (`/desktop/...`) and appends an R2 download link to the GitHub Release. Also gated by the `release` Environment. |
+
+Because the build runs as downstream jobs in the same `release` run (gated on release-please having cut a release), no cross-workflow trigger is needed — so the default `GITHUB_TOKEN` suffices throughout and no PAT is required.
 
 ### One-time setup on the runner Mac
 
@@ -162,14 +169,19 @@ npx @tauri-apps/cli signer generate
 
 ### Cutting a release
 
-Releases are driven by the **GitHub Release** feature — tag pushes alone do not trigger signing.
+Releases are automated by [release-please](https://github.com/googleapis/release-please) (the `release` workflow). On every push to `main` it parses conventional commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major) and maintains a **Release PR** that bumps the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, updates `CHANGELOG.md`, and (via the `sync-lock` job) keeps `package-lock.json` and `Cargo.lock` in sync.
 
-1. **Create a release** on GitHub: **Releases → Draft a new release**, set the tag to `v0.2.1` (target `main`), fill in notes, click **Publish release**. The tag will be created if it doesn't exist.
-2. Alternatively from the CLI: `gh release create v0.2.1 --target main --generate-notes`.
+1. **Merge feature/fix PRs to `main`** with conventional-commit messages. release-please keeps the Release PR up to date.
+2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so the `release` workflow runs again: release-please creates the `vX.Y.Z` tag and GitHub Release, and the same run continues into the `release` and `publish` jobs.
+3. **Approve the `release` environment gate** when the workflow pauses (per the required-reviewer rule). It then builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
 
-Publishing the release runs `validate`, then pauses `release` for your approval (per the environment's required-reviewer rule). After you approve, it builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
+> **Note:** The signing/publish jobs run from the `release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`).
 
-> **Note:** The `release` environment is restricted to tags matching `v*`. Publishing a release with a non-matching tag will fail the environment gate.
+> **Note:** The `release` environment's deployment policy allows the `main` branch and tags matching `v*`. The `release`/`publish` jobs run on `main` (the release-please run that cut the release), so `main` must remain in the policy.
+
+#### release-please setup
+
+No PAT is required: the `release` workflow uses the default `GITHUB_TOKEN` (with `contents: write` + `pull-requests: write` granted at the job level). This works because the signing pipeline runs as downstream jobs in the same run rather than relying on the published Release to trigger a separate workflow — the one thing the default token can't do.
 
 ## Troubleshooting
 
