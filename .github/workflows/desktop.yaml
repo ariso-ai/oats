@@ -197,6 +197,8 @@ jobs:
     # The R2 credentials live in the `release` environment alongside the Apple
     # signing secrets (see README → Signing & Notarization).
     environment: release
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
