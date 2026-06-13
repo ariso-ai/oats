@@ -71,12 +71,12 @@ build).
    - Set up Node 24 + stable Rust.
    - `npm install --package-lock-only --ignore-scripts`.
    - `cargo update --workspace` in `src-tauri`.
-   - **Validate in-job** (the chosen approach): build the `ariso-stt` sidecar
-     (reusing the shared sidecar cache key), `npm ci`, `npm run vite:build`,
-     then `cargo build --locked` in `src-tauri`. This proves the synced lockfiles
-     actually build *before* anything is pushed.
-   - Only if validation passes: commit `package-lock.json` + `src-tauri/Cargo.lock`
-     (if changed) and push with `GITHUB_TOKEN`.
+   - Commit `package-lock.json` + `src-tauri/Cargo.lock` (if changed) and push
+     with `GITHUB_TOKEN`. **No in-job validation** (the chosen approach): the
+     job stays lean and compiles nothing, exactly as today. The push will not
+     re-trigger the PR's `validate` check, which is acceptable since `main` has
+     no required checks; correctness of the synced lockfiles is caught by the
+     `release` job's `cargo build --locked` after the PR merges.
    - `permissions: contents: write`.
 
 3. **`release`** (moved from `desktop.yaml`) — gated on
@@ -106,7 +106,7 @@ build).
 ## Run-flow walkthrough
 
 - **Feature commit lands on `main`:** release-please opens/updates the release PR
-  (`prs_created=true`) → `sync-lock` runs (syncs + validates + pushes lockfiles).
+  (`prs_created=true`) → `sync-lock` runs (syncs + pushes lockfiles).
   `release`/`publish` skipped.
 - **Release PR merged to `main`:** the merge is a push to `main` → release-please
   detects the merged PR and creates the GitHub Release + tag
@@ -118,8 +118,9 @@ build).
 - Creating the GitHub Release: `GITHUB_TOKEN` with `contents: write` can do this.
 - Triggering the build: no longer relies on an event — the build is a downstream
   job in the same run, gated on `releases_created`.
-- The lockfile push: `GITHUB_TOKEN` push is fine; correctness is guaranteed by
-  the in-job validation, and `main` has no required checks to keep green.
+- The lockfile push: `GITHUB_TOKEN` push is fine; `main` has no required checks
+  to keep green, and the synced lockfiles are exercised by the `release` job's
+  `cargo build --locked` after merge.
 
 ## Out of scope / non-goals
 
@@ -131,11 +132,12 @@ build).
 
 ## Risks
 
-- **Heavier `sync-lock`:** it now builds (sidecar + cargo) instead of only
-  rewriting lockfiles. Mitigated by sharing the sidecar cache key with the
-  `validate` job (`hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**')`),
-  so it usually restores instantly; only a cache miss incurs the ~25-min sidecar
-  build.
+- **Unvalidated lockfile on the PR:** `sync-lock` pushes without building, and
+  the push does not re-trigger the PR's `validate` check, so the release PR's
+  checks reflect the pre-sync commit. A broken lockfile would therefore only
+  surface in the `release` job's `cargo build --locked` after the PR is merged.
+  Accepted trade-off: `cargo update --workspace` for a version-only bump is
+  deterministic and low-risk.
 - **release-please output coverage:** confirm v4 exposes `tag_name` and
   `releases_created` as top-level outputs (single package, `include-component-in-tag:
   false`). The `body`/`name` are fetched via `gh release view` rather than
