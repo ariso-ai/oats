@@ -6,8 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 # Queue runs instead of overlapping: two concurrent release-please runs can
 # race on the release PR, and cancelling a sync-lock mid-push could leave the
@@ -19,6 +18,9 @@ concurrency:
 jobs:
   release-please:
     runs-on: [self-hosted, macOS, ARM64]
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       prs_created: ${{ steps.release.outputs.prs_created }}
       prs: ${{ steps.release.outputs.prs }}

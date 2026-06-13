@@ -168,7 +168,7 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 2. **Merge the Release PR** when ready to ship. release-please creates the `vX.Y.Z` tag and publishes the GitHub Release, which triggers the `Desktop App` workflow's signing pipeline.
 3. **Approve the `release` environment gate** when the workflow pauses (per the required-reviewer rule). It then builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
 
-Manual fallback: `gh release create v0.2.1 --target main --generate-notes` still works (bump the three version files and lockfiles yourself first), but prefer the Release PR.
+Manual fallback: `gh release create vX.Y.Z --target main --generate-notes` still works (bump the three version files and lockfiles yourself first), but prefer the Release PR.
 
 > **Note:** The `release` environment is restricted to tags matching `v*`. Publishing a release with a non-matching tag will fail the environment gate.
 
