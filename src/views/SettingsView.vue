@@ -263,7 +263,7 @@
       <h2 class="section-title">About</h2>
       <div class="card">
         <div class="about-header">
-          <span class="version-text">Ariso {{ appVersion }}</span>
+          <span class="version-text">oats {{ appVersion }}</span>
           <span class="status-line" :class="statusClass">
             {{ statusText }}
           </span>

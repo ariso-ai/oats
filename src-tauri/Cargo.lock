@@ -57,33 +57,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ariso-desktop"
-version = "0.3.4"
-dependencies = [
- "block2",
- "chrono",
- "futures-util",
- "objc2",
- "objc2-foundation",
- "objc2-user-notifications",
- "reqwest 0.12.28",
- "screencapturekit",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-mcp",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-store",
- "tauri-plugin-updater",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "url",
-]
-
-[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2646,6 +2619,33 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "oats"
+version = "0.3.4"
+dependencies = [
+ "block2",
+ "chrono",
+ "futures-util",
+ "objc2",
+ "objc2-foundation",
+ "objc2-user-notifications",
+ "reqwest 0.12.28",
+ "screencapturekit",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-mcp",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-store",
+ "tauri-plugin-updater",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]

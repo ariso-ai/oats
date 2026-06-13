@@ -14,6 +14,80 @@ mod tray;
 mod tray_meeting;
 mod update_manager;
 
+/// Build the macOS application menu. Mirrors Tauri's default menu (so the
+/// standard Edit/Window/View items and their shortcuts still work) but injects
+/// the oats logo into the "About oats" panel — without it, the panel falls back
+/// to a generic icon in dev builds where no bundle icon is present.
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::image::Image;
+    use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
+    let pkg = app.package_info();
+    let config = app.config();
+
+    let icon = Image::from_bytes(include_bytes!("../../src/assets/oats-light.png")).ok();
+    let about = AboutMetadata {
+        name: Some("oats".into()),
+        version: Some(pkg.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        icon,
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        app,
+        "oats",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(app, None)?],
+    )?;
+
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])
+}
+
 fn main() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
@@ -21,6 +95,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .menu(build_menu)
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
             commands::check_session,
@@ -101,16 +176,30 @@ fn main() {
             });
 
             // Hidden bootstrap window — runs JS event listeners
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/#/".into()))
+            let main_window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/#/".into()))
                 .visible(false)
                 .skip_taskbar(true)
                 .build()?;
+
+            // Appearance-aware tray icon. The tray is created before any window
+            // exists, so set the correct initial icon now and keep it in sync
+            // with the system light/dark menu-bar appearance.
+            tray::apply_theme(
+                app.handle(),
+                main_window.theme().unwrap_or(tauri::Theme::Light),
+            );
+            let theme_handle = app.handle().clone();
+            main_window.on_window_event(move |event| {
+                if let tauri::WindowEvent::ThemeChanged(theme) = event {
+                    tray::apply_theme(&theme_handle, *theme);
+                }
+            });
 
             // Pre-create settings window (hidden) — shown on demand from tray.
             // Intercept close requests so the window hides instead of being
             // destroyed; otherwise re-opening from the tray would do nothing.
             let settings = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/#/settings".into()))
-                .title("Ariso Settings")
+                .title("Oats Settings")
                 .inner_size(450.0, 800.0)
                 .resizable(false)
                 .center()
@@ -146,7 +235,7 @@ fn main() {
         let home_dir = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"));
         if let Some(home_dir) = home_dir {
-            let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/sage-mcp.sock");
+            let socket_path = std::path::PathBuf::from(home_dir).join(".ariso/run/oats-mcp.sock");
             let dir_ready = match socket_path.parent() {
                 Some(dir) => match std::fs::create_dir_all(dir) {
                     Ok(()) => true,
@@ -163,7 +252,7 @@ fn main() {
             };
             if dir_ready {
                 builder = builder.plugin(tauri_plugin_mcp::init_with_config(
-                    tauri_plugin_mcp::PluginConfig::new("Ariso".to_string())
+                    tauri_plugin_mcp::PluginConfig::new("oats".to_string())
                         .start_socket_server(true)
                         .socket_path(socket_path),
                 ));
