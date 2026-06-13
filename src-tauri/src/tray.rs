@@ -5,10 +5,29 @@ use tauri::{
     AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
 
-// Monochrome (black + alpha) logo rendered as a template image: macOS
-// recolors it per menu bar appearance. The previous white icon with
-// icon_as_template(false) was invisible on a light-mode menu bar.
-const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../src/assets/ariso-logo-b.png");
+// Appearance-aware, full-color tray icons (NOT template images, so the brand
+// yellow shows). The light-mode mark has a dark outline (visible on a light
+// menu bar); the dark-mode mark has a yellow outline (visible on a dark menu
+// bar). `apply_theme` swaps between them on system-appearance changes.
+const TRAY_ICON_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
+const TRAY_ICON_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
+
+fn tray_icon_bytes(theme: tauri::Theme) -> &'static [u8] {
+    match theme {
+        tauri::Theme::Dark => TRAY_ICON_DARK,
+        _ => TRAY_ICON_LIGHT,
+    }
+}
+
+/// Swap the tray icon to match the current menu-bar appearance. Called once
+/// after the main window exists (to set the correct initial icon) and again on
+/// every `ThemeChanged` event.
+pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    if let Ok(icon) = Image::from_bytes(tray_icon_bytes(theme)) {
+        let _ = tray.set_icon(Some(icon));
+    }
+}
 
 /// Rebuild the tray menu in-place. Called from tray events (main thread)
 /// and from the `set_tray_recording` command.
@@ -73,8 +92,10 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_idle_menu(app, None)?;
 
     TrayIconBuilder::with_id("main")
-        .icon(Image::from_bytes(TRAY_ICON_BYTES)?)
-        .icon_as_template(true)
+        // Default to the light-mode icon; main.rs corrects this to the actual
+        // system appearance once the main window exists, then keeps it in sync.
+        .icon(Image::from_bytes(TRAY_ICON_LIGHT)?)
+        .icon_as_template(false)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {

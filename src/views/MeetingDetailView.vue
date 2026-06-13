@@ -323,7 +323,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
 }
 
 // Watch stable detail fields only. User-note autosaves must not reload the
-// whole pane or change Ari's Notes tab visibility while the user switches tabs.
+// whole pane or change AI Notes tab visibility while the user switches tabs.
 watch(
   () => [
     props.item?.id,
@@ -431,13 +431,13 @@ function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcr
   return 'note';
 }
 
-// Tabs appear only when their content exists: Ari's Notes (generated/shared
+// Tabs appear only when their content exists: AI Notes (generated/shared
 // meeting notes), Transcript, then My Notes (the user's editable note).
 const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
   const d = detail.value;
   if (!d) return [];
   const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: "Ari's Notes" });
+  if (notesPresent(d)) out.push({ key: 'note', label: "AI Notes" });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });

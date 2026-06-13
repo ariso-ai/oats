@@ -472,7 +472,7 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     }
 
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/#/settings".into()))
-        .title("oats Settings")
+        .title("Oats Settings")
         .inner_size(450.0, 800.0)
         .resizable(false)
         .center()
