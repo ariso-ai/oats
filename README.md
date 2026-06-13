@@ -162,14 +162,19 @@ npx @tauri-apps/cli signer generate
 
 ### Cutting a release
 
-Releases are driven by the **GitHub Release** feature — tag pushes alone do not trigger signing.
+Releases are automated by [release-please](https://github.com/googleapis/release-please) (the `release` workflow). On every push to `main` it parses conventional commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major) and maintains a **Release PR** that bumps the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, updates `CHANGELOG.md`, and (via the `sync-lock` job) keeps `package-lock.json` and `Cargo.lock` in sync.
 
-1. **Create a release** on GitHub: **Releases → Draft a new release**, set the tag to `v0.2.1` (target `main`), fill in notes, click **Publish release**. The tag will be created if it doesn't exist.
-2. Alternatively from the CLI: `gh release create v0.2.1 --target main --generate-notes`.
+1. **Merge feature/fix PRs to `main`** with conventional-commit messages. release-please keeps the Release PR up to date.
+2. **Merge the Release PR** when ready to ship. release-please creates the `vX.Y.Z` tag and publishes the GitHub Release, which triggers the `Desktop App` workflow's signing pipeline.
+3. **Approve the `release` environment gate** when the workflow pauses (per the required-reviewer rule). It then builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
 
-Publishing the release runs `validate`, then pauses `release` for your approval (per the environment's required-reviewer rule). After you approve, it builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
+Manual fallback: `gh release create vX.Y.Z --target main --generate-notes` still works (bump the three version files and lockfiles yourself first), but prefer the Release PR.
 
 > **Note:** The `release` environment is restricted to tags matching `v*`. Publishing a release with a non-matching tag will fail the environment gate.
+
+#### release-please setup
+
+The workflow requires a **repo-level secret `RELEASE_PLEASE_TOKEN`** holding a PAT (or GitHub App token) with `contents: write` and `pull-requests: write` on this repo. The default `GITHUB_TOKEN` cannot be used: events it authors never trigger other workflows, so the GitHub Release it publishes would silently skip the `Desktop App` signing pipeline, and its lockfile pushes would leave the Release PR without `validate` checks.
 
 ## Troubleshooting
 
