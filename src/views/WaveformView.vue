@@ -9,7 +9,7 @@
       @mouseleave="collapse"
       @click="showMeetings"
     >
-      <img class="logo" src="../assets/ariso-logo-w.svg" alt="" />
+      <img class="logo" src="../assets/oats-dark.svg" alt="" />
 
       <template v-if="uploadResult === 'failed'">
         <span class="status-icon err">✗</span>
@@ -109,6 +109,7 @@ import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { deriveRecordingMode } from './recordingSettings';
 import { centerWeightedBars } from './waveformBars';
 import { shouldAutoStop } from '../composables/silenceWatch';
+import { localRecordingIdFromStart } from '../composables/localRecordingId';
 import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
 
@@ -180,6 +181,13 @@ function broadcastState(phase: RecorderPhase = currentPhase()): void {
     durationSeconds: recorder.durationSeconds.value,
     isPaused: recorder.isPaused.value,
     meetingId: effectiveMeetingId.value,
+    // Local recordings have no meeting id, but their finalized recording id is
+    // deterministic from the start time — broadcast it so the library can pin
+    // the strip / red dot to the row the recording will land on.
+    localRecordingId:
+      backend.value?.id === 'local' && recorder.startedAt.value
+        ? localRecordingIdFromStart(recorder.startedAt.value)
+        : null,
     phase,
   }).catch(() => { /* no listeners / shutting down */ });
 }

@@ -263,7 +263,7 @@
       <h2 class="section-title">About</h2>
       <div class="card">
         <div class="about-header">
-          <span class="version-text">Ariso {{ appVersion }}</span>
+          <span class="version-text">oats {{ appVersion }}</span>
           <span class="status-line" :class="statusClass">
             {{ statusText }}
           </span>
@@ -450,6 +450,11 @@ async function selectBackend(next: 'ariso' | 'local') {
   if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
+  // Native orchestrators (tray next-meeting, notifications) re-evaluate
+  // their backend/session gates via the bootstrap window's SYNC listener.
+  void emitNotificationsSync().catch((err) => {
+    console.warn('Failed to broadcast sync after backend change', err);
+  });
   if (next === 'local') {
     await refreshModelStatus();
     // Auto-start the STT download (needed to record). The LLM is opt-in via its button.

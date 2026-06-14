@@ -214,6 +214,22 @@ describe('WaveformView vertical pill', () => {
     vi.useRealTimers();
   });
 
+  it('broadcasts the deterministic local recording id for the local backend', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await vi.advanceTimersByTimeAsync(1_100); // heartbeat
+
+    const state = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => payload as { localRecordingId: string | null })
+      .at(-1);
+    // Mirrors Rust sanitize_iso_to_id over the mocked startedAt.
+    expect(state?.localRecordingId).toBe('2026-06-09T10-00-00Z');
+    vi.useRealTimers();
+  });
+
   it('auto mode with no calendar match shows the confirm overlay', async () => {
     routeQuery = { auto: '1' };
     listScheduledMeetings.mockResolvedValue([]);
