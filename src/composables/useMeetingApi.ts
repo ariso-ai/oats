@@ -43,6 +43,7 @@ interface ScheduledMeeting {
 }
 
 interface MeetingNotesParticipant {
+  id?: number;
   name?: string;
   email?: string;
   role?: string;
@@ -60,6 +61,9 @@ interface MeetingNotes {
   status?: string;
   visibility?: string;
   external?: boolean;
+  short_code?: string;
+  public_share_expires_at?: string | null;
+  shareMeetingNotesToPublic?: 'attendee_and_host' | 'host_only' | 'off';
   summary?: string | Record<string, unknown> | null;
   participants?: MeetingNotesParticipant[];
   hasTranscript?: boolean;
@@ -89,6 +93,15 @@ function parseTranscriptChunks(raw: unknown): TranscriptChunk[] | null {
 
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
   if (res.status !== expected) {
+    const data = res.data as { error?: string } | null;
+    throw new Error(data?.error || `Failed to ${action} (${res.status})`);
+  }
+}
+
+// Like assertOk but accepts any 2xx status — for endpoints whose exact success
+// code we don't pin (mirrors the web app's axios any-2xx behavior).
+function assertOk2xx(res: { status: number; data: unknown }, action: string): void {
+  if (res.status < 200 || res.status >= 300) {
     const data = res.data as { error?: string } | null;
     throw new Error(data?.error || `Failed to ${action} (${res.status})`);
   }
@@ -352,6 +365,63 @@ export function useMeetingApi() {
     );
   }
 
+  async function shareMeeting(
+    meetingId: number | string,
+    visibility: 'private' | 'workspace' | 'public',
+    expiresInDays?: number
+  ): Promise<{ shareUrl: string; shortCode?: string; publicShareExpiresAt: string | null }> {
+    const encoded = encodeURIComponent(String(meetingId));
+    const body: { visibility: string; expiresInDays?: number } = { visibility };
+    if (visibility === 'public' && typeof expiresInDays === 'number') {
+      body.expiresInDays = expiresInDays;
+    }
+    const res = await api.request('POST', `/meeting-notes/${encoded}/share`, body);
+    assertOk(res, 200, 'share meeting');
+    const data = res.data as
+      | { shareUrl?: string; shortCode?: string; publicShareExpiresAt?: string | null }
+      | null;
+    return {
+      shareUrl: data?.shareUrl ?? '',
+      shortCode: data?.shortCode,
+      publicShareExpiresAt: data?.publicShareExpiresAt ?? null,
+    };
+  }
+
+  // Errors collapse to [] — this is a passive, non-critical lookup.
+  async function listShareEmails(meetingId: number | string): Promise<string[]> {
+    const encoded = encodeURIComponent(String(meetingId));
+    try {
+      const res = await api.request('GET', `/meeting-notes/${encoded}/share-emails`);
+      if (res.status !== 200) return [];
+      const data = res.data as { items?: Array<{ email?: string }> } | null;
+      return (data?.items ?? [])
+        .map((s) => (typeof s.email === 'string' ? s.email : ''))
+        .filter((e) => e.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  async function sendShareEmail(
+    meetingId: number | string,
+    email: string
+  ): Promise<{ alreadyShared: boolean }> {
+    const encoded = encodeURIComponent(String(meetingId));
+    const res = await api.request('POST', `/meeting-notes/${encoded}/share-email`, { email });
+    assertOk2xx(res, 'send email');
+    const data = res.data as { already_shared?: boolean } | null;
+    return { alreadyShared: data?.already_shared === true };
+  }
+
+  async function unshareEmail(meetingId: number | string, email: string): Promise<void> {
+    const encoded = encodeURIComponent(String(meetingId));
+    const res = await api.request(
+      'DELETE',
+      `/meeting-notes/${encoded}/share-email?email=${encodeURIComponent(email)}`
+    );
+    assertOk2xx(res, 'unshare');
+  }
+
   async function uploadAudio(
     audioBlob: Blob,
     options?: {
@@ -417,6 +487,10 @@ export function useMeetingApi() {
     updateParticipantNames,
     generateMeetingNotes,
     uploadAudio,
+    shareMeeting,
+    listShareEmails,
+    sendShareEmail,
+    unshareEmail,
   };
 }
 
