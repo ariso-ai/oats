@@ -288,6 +288,19 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.dismiss-btn').exists()).toBe(true);
   });
 
+  it('failed upload shows Retry, Resume, and Discard controls', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(wrapper.find('.retry-btn').exists()).toBe(true);
+    expect(wrapper.find('.resume-btn').exists()).toBe(true);
+    expect(wrapper.find('.dismiss-btn').exists()).toBe(true);
+  });
+
   it('Retry re-runs finalize with the same blob and meta, then succeeds', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

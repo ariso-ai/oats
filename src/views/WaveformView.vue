@@ -19,8 +19,13 @@
           @click.stop.prevent="runFinalize"
         >↻</button>
         <button
+          class="ctrl-btn resume-btn"
+          aria-label="Resume recording"
+          @click.stop.prevent="resumeFailed"
+        >●</button>
+        <button
           class="ctrl-btn dismiss-btn"
-          aria-label="Dismiss recording"
+          aria-label="Discard recording"
           @click.stop.prevent="dismissFailed"
         >✕</button>
       </template>
@@ -438,6 +443,10 @@ async function dismissFailed() {
   await closeWindow();
 }
 
+async function resumeFailed() {
+  // implemented in a later task
+}
+
 async function closeWindow() {
   broadcastState('closed');
   try {
@@ -676,6 +685,12 @@ html, body {
   margin-top: 8px;
   color: #818cf8;
   font-size: 15px;
+  font-weight: 700;
+}
+.resume-btn {
+  margin-top: 6px;
+  color: #f87171;
+  font-size: 13px;
   font-weight: 700;
 }
 .dismiss-btn {
