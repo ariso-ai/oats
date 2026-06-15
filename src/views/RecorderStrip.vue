@@ -67,9 +67,15 @@ interface RecorderState {
 /** The meeting currently shown in the detail panel (null when none). */
 const props = defineProps<{ meetingId: string | null }>();
 
-/** Tells the parent which meeting is being recorded (null when none) —
- *  drives the red dot on the sidebar list. */
-const emitToParent = defineEmits<{ 'recording-change': [string | null] }>();
+/** `recording-change` tells the parent which meeting the session belongs to
+ *  (null when none) so it can select/pin the row; it persists through the
+ *  upload/failed phases. `recording-active` is true only while audio is
+ *  actually being captured — it drives the pulsing red dot, which must stop
+ *  the moment recording ends even if the failed pill keeps heartbeating. */
+const emitToParent = defineEmits<{
+  'recording-change': [string | null];
+  'recording-active': [boolean];
+}>();
 
 // The recorder heartbeats state about every second; a longer silence means it
 // died without broadcasting `closed` (crash / force-close) — clear the strip.
@@ -99,6 +105,7 @@ const visible = computed(() => {
 
 watch(state, (s) => {
   emitToParent('recording-change', s ? recordedMeetingId(s) : null);
+  emitToParent('recording-active', s?.phase === 'recording');
 });
 
 const formattedDuration = computed(() => {

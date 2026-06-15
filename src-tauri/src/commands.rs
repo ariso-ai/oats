@@ -606,6 +606,26 @@ pub(crate) fn open_waveform_window(
     Ok(())
 }
 
+/// Gate recording on a valid session for the Ariso backend. The Local backend
+/// needs no auth and always passes. When the Ariso user is signed out, surface
+/// the (pre-created) Settings window and emit `tray://show-sign-in-prompt` so its
+/// sign-in banner appears, then report `false` so the caller aborts. Mirrors the
+/// tray's session gate so every recording entry point behaves identically.
+async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
+    if active_backend(app) != "ariso" {
+        return true;
+    }
+    if is_session_valid(app).await {
+        return true;
+    }
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit("tray://show-sign-in-prompt", ());
+    false
+}
+
 /// Open the waveform recording window, optionally attaching to an existing
 /// meeting id. Closes the meeting-picker window if present and flips the
 /// tray menu to the recording state.
@@ -614,6 +634,9 @@ pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
 ) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
     open_waveform_window(&app, meeting_id, false)
 }
 
@@ -643,6 +666,9 @@ pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), S
 /// start-recording button for picker-using backends.
 #[tauri::command]
 pub async fn open_meeting_picker(app: tauri::AppHandle) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
     open_meeting_picker_window(&app)
 }
 
@@ -689,6 +715,43 @@ pub fn get_desktop_config() -> DesktopConfig {
 pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
     let root = crate::storage::ariso_root()?;
     crate::storage::list_recordings(&root)
+}
+
+/// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
+/// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
+#[tauri::command]
+pub fn buffer_pending_audio(
+    audio: Vec<u8>,
+    meta: crate::storage::PendingUploadMeta,
+) -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::write_pending_audio(&root, &meta, &audio)
+}
+
+/// Remove the buffered mp3 for `created_at` (idempotent). Called after a
+/// confirmed upload and on explicit dismiss of a failed one.
+#[tauri::command]
+pub fn discard_pending_audio(created_at: String) -> Result<(), String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::discard_pending_audio(&root, &created_at)
+}
+
+/// List buffered pending uploads (oldest-first) for the Library's resume UI.
+#[tauri::command]
+pub fn list_pending_uploads() -> Result<Vec<crate::storage::PendingUploadMeta>, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::list_pending_uploads(&root)
+}
+
+/// Concatenate the given pending uploads (chronological key order) into a
+/// single mp3, returned as raw bytes for re-upload. Bounded by MAX_AUDIO_BYTES.
+#[tauri::command]
+pub fn combine_pending_audio(
+    created_at_keys: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let root = crate::storage::ariso_root()?;
+    let bytes = crate::storage::combine_pending_audio(&root, &created_at_keys, MAX_AUDIO_BYTES)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
@@ -741,6 +804,61 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Meeting ids are numeric on the Ariso backend; rejecting anything else also
+/// keeps the id from smuggling path segments into the URL below.
+fn validate_meeting_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("invalid meeting id: {id}"));
+    }
+    Ok(())
+}
+
+/// Fetch a meeting's recorded audio from the Ariso API as raw bytes (the
+/// endpoint streams the file directly). Non-200 responses become an error
+/// whose message is prefixed with the HTTP status so the frontend can map
+/// 404 to a "no audio" state.
+#[tauri::command]
+pub async fn fetch_meeting_audio(
+    app: tauri::AppHandle,
+    meeting_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    validate_meeting_id(&meeting_id)?;
+    let token = get_session_token(&app).unwrap_or_default();
+    let client = http_client();
+    let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
+
+    // Bound the request so a stalled upstream/TCP connection can't hang the
+    // command indefinitely; reqwest's builder has no default timeout.
+    let mut response = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("{status}: audio fetch failed"));
+    }
+    if let Some(len) = response.content_length() {
+        if len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {len} bytes"));
+        }
+    }
+    // Stream the body and enforce MAX_AUDIO_BYTES as we go — buffering the
+    // whole response first can blow memory if content_length is absent or wrong.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {next_len} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Upper bound on a note/transcript markdown file we'll read into memory for
 /// in-app rendering. These are plain text; 16 MB is far above any real note or
 /// transcript and just guards against a pathological/corrupt file.
@@ -782,6 +900,13 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
     app.opener()
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
+/// `view_height` is the content view's height in points; `y`/`height` are the
+/// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
+fn flip_y(view_height: f64, y: f64, height: f64) -> f64 {
+    view_height - (y + height)
 }
 
 /// Maximum local recording title length, in characters. Mirrors the frontend
@@ -871,6 +996,79 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ShareAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Open the native macOS share sheet over `text`, anchored to the button rect
+/// (`anchor`, in CSS points relative to the window's content view).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn share_text_native(
+    window: tauri::WebviewWindow,
+    text: String,
+    anchor: ShareAnchor,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("nothing to share".to_string());
+    }
+    let window_for_main = window.clone();
+
+    window
+        .run_on_main_thread(move || {
+            use objc2::rc::Retained;
+            use objc2::runtime::AnyObject;
+            use objc2::AnyThread;
+            use objc2_app_kit::{NSSharingServicePicker, NSWindow};
+            use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+
+            // SAFETY: ns_window() is fetched on the main thread immediately
+            // before use, so the NSWindow* is valid for this closure's lifetime.
+            // AppKit requires this to run on the main thread.
+            unsafe {
+                let ns_window_ptr = match window_for_main.ns_window() {
+                    Ok(ptr) => ptr as *const NSWindow,
+                    Err(_) => return,
+                };
+                let ns_window = &*ns_window_ptr;
+                let Some(content_view) = ns_window.contentView() else {
+                    return;
+                };
+                let view_height = content_view.bounds().size.height;
+
+                let ns_text = NSString::from_str(&text);
+                let item: Retained<AnyObject> = Retained::into_super(ns_text).into();
+                let items = NSArray::from_retained_slice(&[item]);
+                let picker = NSSharingServicePicker::initWithItems(
+                    NSSharingServicePicker::alloc(),
+                    &items,
+                );
+
+                let appkit_y = flip_y(view_height, anchor.y, anchor.height);
+                let rect = NSRect::new(
+                    NSPoint::new(anchor.x, appkit_y),
+                    NSSize::new(anchor.width.max(1.0), anchor.height.max(1.0)),
+                );
+                picker.showRelativeToRect_ofView_preferredEdge(
+                    rect,
+                    &content_view,
+                    NSRectEdge::MinY,
+                );
+            }
+        })
+        .map_err(|e| format!("run_on_main_thread: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), String> {
+    Err("native share is only supported on macOS".to_string())
 }
 
 #[cfg(test)]
@@ -1006,6 +1204,15 @@ mod tests {
     }
 
     #[test]
+    fn meeting_id_must_be_digits_only() {
+        assert!(validate_meeting_id("123").is_ok());
+        assert!(validate_meeting_id("").is_err());
+        assert!(validate_meeting_id("12/audio").is_err());
+        assert!(validate_meeting_id("abc").is_err());
+        assert!(validate_meeting_id("12 ").is_err());
+    }
+
+    #[test]
     fn recording_note_roundtrips_markdown() {
         let tmp = tempfile::tempdir().unwrap();
         // Note commands resolve through ARISO_ROOT, so this test follows the
@@ -1025,5 +1232,15 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::flip_y;
+    #[test]
+    fn flips_web_top_left_to_appkit_bottom_left() {
+        // view 600 tall, button at css-y=40 height=32 -> appkit-y = 600-(40+32)=528
+        assert_eq!(flip_y(600.0, 40.0, 32.0), 528.0);
     }
 }

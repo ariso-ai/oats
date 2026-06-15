@@ -6,10 +6,12 @@ import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
+const getMeetingAudio = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
 const saveNote = vi.fn();
+const shareTextNative = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -21,6 +23,11 @@ vi.mock('../composables/useMeetingNotesPersistence', () => ({
     load: (meeting: MeetingListItem) => loadNote(meeting),
     save: (meeting: MeetingListItem, markdown: string) => saveNote(meeting, markdown),
   }),
+}));
+vi.mock('../tauri', () => ({
+  shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
+  getDesktopConfig: () =>
+    Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
@@ -50,10 +57,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   renameMeeting.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
+  getMeetingAudio.mockResolvedValue(null);
   activeBackend.mockResolvedValue({
     getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
     getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
+    getMeetingAudio: (i: MeetingListItem) => getMeetingAudio(i),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue('');
@@ -348,5 +357,83 @@ describe('MeetingDetailView inline title editing', () => {
     expect(saveNote).toHaveBeenCalledWith(first, 'note a');
     expect(wrapper.text()).toContain('Second');
     expect(wrapper.text()).not.toContain('First');
+  });
+
+  it('shows the Share button for an Ariso host and opens the popover', async () => {
+    getMeetingDetail.mockResolvedValue(
+      detail({ isLocal: false, participants: [{ role: 'host', self: true }] })
+    );
+    const wrapper = mount(MeetingDetailView, {
+      props: { item },
+      global: { stubs: { ShareMeetingPopover: true } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(true);
+    expect(wrapper.findComponent({ name: 'ShareMeetingPopover' }).exists()).toBe(false);
+
+    await wrapper.find('.btn-share').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: 'ShareMeetingPopover' }).exists()).toBe(true);
+  });
+
+  it('shows the Share button for local recordings and shares natively', async () => {
+    loadNote.mockResolvedValue('');
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true, note: 'AI body' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(true);
+
+    await wrapper.find('.btn-share').trigger('click');
+    await flushPromises();
+
+    expect(shareTextNative).toHaveBeenCalled();
+  });
+
+  it('hides the Share button for an Ariso non-participant', async () => {
+    getMeetingDetail.mockResolvedValue(
+      detail({ isLocal: false, participants: [{ role: 'host', self: false }] })
+    );
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(false);
+  });
+});
+
+describe('MeetingDetailView audio player', () => {
+  beforeEach(() => {
+    URL.createObjectURL = vi.fn(() => 'blob:test');
+    URL.revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  });
+
+  it('shows the audio player for an Ariso meeting', async () => {
+    const wrapper = await mountWith(detail());
+    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+  });
+
+  it('does not show the audio player for a local recording', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, note: 'hi' }));
+    expect(wrapper.find('.card-audio').exists()).toBe(false);
+  });
+
+  it('clicking Play fetches audio through the backend that loaded the detail', async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = await mountWith(detail());
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+    expect(getMeetingAudio).toHaveBeenCalledWith(item);
+    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
+  });
+
+  it('shows No audio when the meeting has no recording', async () => {
+    getMeetingAudio.mockResolvedValue(null);
+    const wrapper = await mountWith(detail());
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.card-audio .play-btn').text()).toContain('No audio');
   });
 });

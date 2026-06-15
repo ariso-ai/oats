@@ -325,7 +325,6 @@ import {
   setSystemAudioEnabled,
   ensureMicPermission,
   ensureSystemAudioPermission,
-  checkSystemAudioPermission,
   openMicSettings,
   openSystemAudioSettings,
 } from '../composables/useRecordingPermissions';
@@ -763,12 +762,10 @@ onMounted(async () => {
     systemAudioEnabled.value = enabled.systemAudio;
     autoRecordSupported.value = await isAutoRecordSupported();
     autoRecordEnabled.value = await isAutoRecordEnabled();
-    // Reflect the current Screen Recording status without prompting. (Mic status
-    // is intentionally left blank on load — there's no silent mic preflight as
-    // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
-    if (enabled.systemAudio) {
-      systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
-    }
+    // Both mic and system-audio status are left blank on load: there's no
+    // silent preflight for either (getUserMedia prompts; the system-audio
+    // probe creates a process tap, which trips the TCC dialog on first use).
+    // The status fills in when the user toggles the row.
   } catch (e) {
     console.warn('Failed to initialize recording settings', e);
   }
@@ -1171,8 +1168,10 @@ async function handleSignOut() {
   color: #ffffff;
 }
 
-.backend-option--active:hover {
+.backend-option--active:hover,
+.backend-option--active:focus-visible {
   background: #1c1c1c;
+  color: #ffffff;
 }
 
 .about-header {
