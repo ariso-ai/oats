@@ -10,6 +10,7 @@ const waveformStop = vi.fn();
 const finalizeRecording = vi.fn();
 const loadRecordingEnabled = vi.fn();
 const closeWin = vi.fn(() => Promise.resolve());
+const showWin = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
@@ -23,7 +24,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: (...a: unknown[]) => emitEvent(...a),
 }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
-  getCurrentWebviewWindow: () => ({ close: closeWin }),
+  getCurrentWebviewWindow: () => ({ close: closeWin, show: showWin }),
 }));
 let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
@@ -90,6 +91,40 @@ describe('WaveformView vertical pill', () => {
     expect(startRecording).toHaveBeenCalledWith('mic');
     expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.findAll('.dot')).toHaveLength(6);
+  });
+
+  it('shows the recorder window before starting capture so getUserMedia can resolve', async () => {
+    // WebKit never resolves getUserMedia for a window that isn't actually
+    // visible. The pill is hidden behind the library's embedded strip, so it
+    // must be shown before capture starts (the watcher re-hides it after).
+    mount(WaveformView);
+    await flushPromises();
+    expect(showWin).toHaveBeenCalled();
+    expect(showWin.mock.invocationCallOrder[0]).toBeLessThan(
+      startRecording.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('Resume shows the (hidden) recorder window before restarting capture', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+
+    showWin.mockClear();
+    startRecording.mockClear();
+    await wrapper.find('.resume-btn').trigger('click');
+    await flushPromises();
+
+    // The pill was hidden during the failed state; resuming must re-show it
+    // before getUserMedia, or capture hangs and the strip/dot never appear.
+    expect(showWin).toHaveBeenCalled();
+    expect(showWin.mock.invocationCallOrder[0]).toBeLessThan(
+      startRecording.mock.invocationCallOrder[0],
+    );
   });
 
   it('reveals timer/controls on hover (open class) while keeping the drag handle', async () => {

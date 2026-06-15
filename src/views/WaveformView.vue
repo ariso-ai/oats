@@ -259,6 +259,17 @@ async function startRecording() {
     return;
   }
 
+  // WebKit never resolves getUserMedia for a window that isn't actually on
+  // screen. The pill is hidden whenever the library's embedded strip is the
+  // visible recording UI — including across a failed-upload → Resume, where it
+  // stays hidden from the prior stop. Show it before capture so getUserMedia
+  // can resolve; the native pill watcher re-hides it once capture is active.
+  try {
+    await getCurrentWebviewWindow().show();
+  } catch {
+    /* best-effort: a closed/denied window just proceeds */
+  }
+
   try {
     await recorder.startRecording(mode);
   } catch {
