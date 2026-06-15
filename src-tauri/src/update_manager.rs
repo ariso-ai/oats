@@ -320,7 +320,7 @@ fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
     )
     .title("")
     .title_bar_style(TitleBarStyle::Overlay)
-    .inner_size(520.0, 600.0)
+    .inner_size(450.0, 600.0)
     .resizable(false)
     .center()
     .skip_taskbar(true)
