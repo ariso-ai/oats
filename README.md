@@ -133,18 +133,19 @@ Because the build runs as downstream jobs in the same `release` run (gated on re
 
 ### Install with Homebrew
 
-The repository is also a Homebrew tap for the desktop app. The cask is named
-`oats` while the signed macOS bundle currently installs as `Ariso.app`:
+The repository is also a Homebrew tap for the desktop app. Because the repo is
+named `oats` rather than `homebrew-oats`, use the explicit tap URL:
 
 ```bash
-brew tap ariso-ai/sage
+brew tap ariso-ai/oats https://github.com/ariso-ai/oats
 brew install --cask oats
 ```
 
 The cask downloads the same signed DMG published to the stable R2 path by the
-release workflow. Because that object is replaced on each release, the cask uses
-`version :latest` and `sha256 :no_check`; after first install, the app's Tauri
-updater handles versioned update checks from `desktop/latest.json`.
+release workflow at `desktop/oats.dmg`. Because that object is replaced on each
+release, the cask uses `version :latest` and `sha256 :no_check`; after first
+install, the app's Tauri updater handles versioned update checks from
+`desktop/latest.json`.
 
 ### One-time setup on the runner Mac
 

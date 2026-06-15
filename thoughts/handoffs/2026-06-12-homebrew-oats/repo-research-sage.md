@@ -2,14 +2,14 @@
 date: 2026-06-12T16:20:00-04:00
 type: repo-research
 status: complete
-repository: /Users/michaelgeiger/.codex/worktrees/2f14/sage
+repository: ariso-ai/oats
 ---
 
-# Repository Research: Sage Desktop
+# Repository Research: Oats Desktop
 
 ## Overview
 
-Sage is a Tauri v2 desktop app for Ariso/Oats, built with Vue 3, Vite, Rust,
+Oats is a Tauri v2 desktop app, built with Vue 3, Vite, Rust,
 and a Swift sidecar for local transcription and notes generation.
 
 ## Architecture & Structure
@@ -18,7 +18,8 @@ and a Swift sidecar for local transcription and notes generation.
 
 - `src/` - Vue frontend views, composables, assets, and Tauri API wrapper.
 - `src-tauri/` - Rust Tauri app, bundle configuration, icons, entitlements, and the Swift `ariso-stt` sidecar.
-- `.github/workflows/desktop.yaml` - macOS validation, signed release, and R2 publish workflow.
+- `.github/workflows/desktop.yaml` - macOS validation workflow.
+- `.github/workflows/release.yaml` - Release Please, signed release, and R2 publish workflow.
 - `.github/scripts/release-publish.sh` - Generates `latest.json` and publishes the DMG/updater artifacts to Cloudflare R2.
 - `docs/superpowers/specs/` - Design specs for release/update behavior and desktop features.
 
@@ -33,8 +34,8 @@ and a Swift sidecar for local transcription and notes generation.
 
 - `README.md` - Canonical setup, local backend, release, signing, and distribution documentation.
 - `src-tauri/tauri.conf.json` - Product name, version, bundle targets, macOS resources, and Tauri updater endpoint.
-- `.github/scripts/release-publish.sh` - Stable R2 object keys: `desktop/latest.json`, `desktop/Ariso.app.tar.gz`, `desktop/Ariso.dmg`.
-- `Casks/oats.rb` - Homebrew cask added for `brew tap ariso-ai/sage && brew install --cask oats`.
+- `.github/scripts/release-publish.sh` - Stable R2 object keys: `desktop/latest.json`, `desktop/oats.app.tar.gz`, `desktop/oats.dmg`.
+- `Casks/oats.rb` - Homebrew cask added for `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew install --cask oats`.
 
 ## Conventions & Patterns
 
@@ -47,7 +48,7 @@ and a Swift sidecar for local transcription and notes generation.
 ### Implementation Patterns
 
 - Release artifacts are intentionally stable paths on R2, with `no-cache` headers and payloads uploaded before `latest.json`.
-- The app bundle name is currently `Ariso.app`; the Homebrew token can be `oats` without renaming the signed bundle.
+- The app bundle name is currently `oats.app`; the Homebrew token is also `oats`.
 
 ## Contribution Guidelines
 
