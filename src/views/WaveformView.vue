@@ -444,7 +444,16 @@ async function dismissFailed() {
 }
 
 async function resumeFailed() {
-  // implemented in a later task
+  // Keep the failed recording's audio and resume capturing into a fresh buffer.
+  // The next stop concatenates the held blob with the new segment (see handleStop).
+  if (!stoppedBlob.value) return;
+  if (closeTimer) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+  uploadResult.value = null;
+  isStopping.value = false;
+  await startRecording();
 }
 
 async function closeWindow() {

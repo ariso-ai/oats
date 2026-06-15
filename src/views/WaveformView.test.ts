@@ -289,6 +289,27 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.dismiss-btn').exists()).toBe(true);
   });
 
+  it('Resume clears the failed state, restarts recording, and keeps the blob', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+
+    startRecording.mockClear();
+    await wrapper.find('.resume-btn').trigger('click');
+    await flushPromises();
+
+    // Back in the live recording view, mic restarted, nothing discarded/closed.
+    expect(startRecording).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('.status-icon.err').exists()).toBe(false);
+    expect(wrapper.find('.bars').exists()).toBe(true);
+    expect(discardPendingAudio).not.toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
+  });
+
   it('Retry re-runs finalize with the same blob and meta, then succeeds', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
