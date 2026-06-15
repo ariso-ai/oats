@@ -79,6 +79,22 @@ describe('PendingUploads', () => {
     expect(wrapper.find('.pending').exists()).toBe(false);
   });
 
+  it('cancels a pending discard confirmation when the pointer leaves', async () => {
+    list.mockResolvedValue(items);
+    discardAll.mockResolvedValue(undefined);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.find('.discard').trigger('click'); // arm confirm
+    expect(wrapper.find('.discard').text()).toContain('Confirm');
+    await wrapper.find('.pending-actions').trigger('mouseleave'); // move away
+    expect(wrapper.find('.discard').text()).toContain('Discard all');
+
+    // A subsequent click only re-arms — it must not discard.
+    await wrapper.find('.discard').trigger('click');
+    expect(discardAll).not.toHaveBeenCalled();
+  });
+
   it('exposes refresh() to reload the list', async () => {
     list.mockResolvedValueOnce([]).mockResolvedValueOnce(items);
     const wrapper = mount(PendingUploads);

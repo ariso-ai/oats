@@ -6,7 +6,9 @@
       <span class="pi-dur">{{ durationFor(it) }}</span>
     </div>
     <p v-if="error" class="pending-error">Upload failed — try again.</p>
-    <div class="pending-actions">
+    <!-- Leaving the actions row cancels a pending discard confirmation so the
+         destructive second click can't linger armed after the user moves away. -->
+    <div class="pending-actions" @mouseleave="confirmingDiscard = false">
       <button class="pending-btn upload" :disabled="busy" @click="onUpload">
         <span v-if="busy" class="spinner" />
         <span v-else>Upload ({{ items.length }})</span>
