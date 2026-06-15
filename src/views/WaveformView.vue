@@ -443,14 +443,17 @@ async function dismissFailed() {
   await closeWindow();
 }
 
+// Keep the failed recording's audio and resume capturing into a fresh buffer.
+// The next stop concatenates the held blob with the new segment (see handleStop).
 async function resumeFailed() {
-  // Keep the failed recording's audio and resume capturing into a fresh buffer.
-  // The next stop concatenates the held blob with the new segment (see handleStop).
   if (!stoppedBlob.value) return;
   if (closeTimer) {
     clearTimeout(closeTimer);
     closeTimer = null;
   }
+  // Abandon any timed-out-but-still-flying finalize so the next stop's upload
+  // isn't dropped by runFinalize's in-flight guard. The held blob survives.
+  inFlightFinalize = null;
   uploadResult.value = null;
   isStopping.value = false;
   await startRecording();

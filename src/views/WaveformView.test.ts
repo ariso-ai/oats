@@ -308,6 +308,15 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.bars').exists()).toBe(true);
     expect(discardPendingAudio).not.toHaveBeenCalled();
     expect(closeWin).not.toHaveBeenCalled();
+
+    // After resume, isStopping was reset and the timed-out finalize abandoned,
+    // so a subsequent stop is accepted and uploads again.
+    stopRecording.mockResolvedValue(new Blob(['y'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockReset();
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(finalizeRecording).toHaveBeenCalled();
   });
 
   it('Retry re-runs finalize with the same blob and meta, then succeeds', async () => {
