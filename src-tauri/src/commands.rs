@@ -506,6 +506,26 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
+/// Build the waveform window's route, appending the optional `auto` and
+/// `pillHidden` query flags. Kept pure so the flag wiring is unit-testable.
+fn waveform_url(meeting_id: Option<i64>, auto: bool, pill_hidden: bool) -> String {
+    let mut url = match meeting_id {
+        Some(id) => format!("/#/waveform?meetingId={id}"),
+        None => "/#/waveform".to_string(),
+    };
+    let mut push = |flag: &str| {
+        url.push_str(if url.contains('?') { "&" } else { "?" });
+        url.push_str(flag);
+    };
+    if auto {
+        push("auto=1");
+    }
+    if pill_hidden {
+        push("pillHidden=1");
+    }
+    url
+}
+
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
@@ -524,13 +544,11 @@ pub(crate) fn open_waveform_window(
         let _ = existing.set_focus();
         return Ok(());
     }
-    let mut url = match meeting_id {
-        Some(id) => format!("/#/waveform?meetingId={id}"),
-        None => "/#/waveform".to_string(),
-    };
-    if auto {
-        url.push_str(if url.contains('?') { "&auto=1" } else { "?auto=1" });
-    }
+    // Born hidden (painted-empty) when the meetings window already owns the
+    // recorder UI, so the pill never flashes over it. The window is still
+    // created visible for getUserMedia; only its painting is suppressed.
+    let pill_hidden = !crate::recorder_pill::should_show_now(app);
+    let url = waveform_url(meeting_id, auto, pill_hidden);
     let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
@@ -1056,6 +1074,19 @@ pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waveform_url_appends_flags_with_correct_separators() {
+        assert_eq!(waveform_url(None, false, false), "/#/waveform");
+        assert_eq!(waveform_url(Some(42), false, false), "/#/waveform?meetingId=42");
+        // First flag uses `?`, the second uses `&`.
+        assert_eq!(waveform_url(None, true, true), "/#/waveform?auto=1&pillHidden=1");
+        assert_eq!(waveform_url(None, false, true), "/#/waveform?pillHidden=1");
+        assert_eq!(
+            waveform_url(Some(7), true, true),
+            "/#/waveform?meetingId=7&auto=1&pillHidden=1"
+        );
+    }
 
     #[test]
     fn note_or_transcript_filename_maps_known_kinds() {

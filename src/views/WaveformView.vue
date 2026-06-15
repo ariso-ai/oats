@@ -2,7 +2,11 @@
   <!-- The window is a fixed size (room for the expanded pill + its shadow); the
        pill is anchored to the bottom and grows UPWARD via a CSS transition. -->
   <div class="stage">
+    <!-- While the meetings window owns the recorder UI (its embedded strip), the
+         window stays born-visible for getUserMedia but paints nothing — no flash.
+         pillHidden flips to false if the meetings window is minimized/closed. -->
     <div
+      v-if="!pillHidden"
       class="pill"
       :class="{ expanded: isExpanded, paused: recorder.isPaused.value }"
       @mouseenter="expand"
@@ -145,6 +149,12 @@ const effectiveMeetingId = ref<number | null>(
     : null,
 );
 const isAuto = route.query.auto === '1';
+// Born hidden when the meetings window is the visible UI: the window must still
+// exist (and stay visible to WebKit so getUserMedia resolves), but the pill
+// paints nothing so it never flashes over the meetings window. The Rust
+// visibility watcher pushes recorder://pill-visible to flip this when the
+// meetings window is minimized or closed mid-recording.
+const pillHidden = ref(route.query.pillHidden === '1');
 const confirmVisible = ref(false);
 const isStopping = ref(false);
 let confirmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -227,6 +237,16 @@ async function showMeetings() {
   }
 }
 
+// Keep the empty transparent window from intercepting clicks meant for the
+// window underneath it while the pill isn't painted.
+async function applyPillVisibility(hidden: boolean) {
+  pillHidden.value = hidden;
+  try {
+    await getCurrentWebviewWindow().setIgnoreCursorEvents(hidden);
+  } catch { /* permission denied / shutting down */ }
+}
+
+let unlistenPillVisible: UnlistenFn | null = null;
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
@@ -506,6 +526,12 @@ onMounted(async () => {
 
   backend.value = await getActiveBackend();
 
+  // Match the window's click behavior to its initial (param-driven) paint state.
+  await applyPillVisibility(pillHidden.value);
+  unlistenPillVisible = await listen<boolean>('recorder://pill-visible', (e) => {
+    void applyPillVisibility(!e.payload);
+  });
+
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);
   unlistenStop = await listen('tray://stop-recording', handleStop);
@@ -535,6 +561,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
+  unlistenPillVisible?.();
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();
