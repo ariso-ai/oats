@@ -27,7 +27,14 @@ export async function combineAndUpload(items: PendingUploadMeta[]): Promise<void
   const buf = await pending.combine(keys);
   const blob = new Blob([buf], { type: 'audio/mpeg' });
   await useMeetingApi().uploadAudio(blob, mergedMeta(items));
-  await Promise.all(keys.map((k) => pending.discardAudio(k)));
+  // Upload succeeded; a buffer discard failure must not bubble up — otherwise
+  // the caller would retry and double-upload. Match the per-recording path in
+  // useBackend.ts/finalizeRecording.
+  const cleanup = await Promise.allSettled(keys.map((k) => pending.discardAudio(k)));
+  const failed = cleanup.filter((r) => r.status === 'rejected').length;
+  if (failed > 0) {
+    console.error(`Uploaded combined audio, but failed to discard ${failed} buffered item(s)`);
+  }
 }
 
 /** Discard every pending upload (the "Discard all" action). */
