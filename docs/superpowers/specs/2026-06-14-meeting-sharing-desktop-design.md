@@ -5,18 +5,23 @@
 
 ## Goal
 
-Make the **Share** button in `MeetingDetailView.vue`'s header fully functional for
-the **Ariso backend**, porting the meeting-sharing feature from the web app's
-`apps/web-ui/src/Pages/MeetingNotesDetail.vue` (reference) into the desktop app
-(`oats`). Full feature parity with the reference's share dropdown, adapted to the
-desktop's environment and visual language.
+Make the **Share** button in `MeetingDetailView.vue`'s header fully functional,
+with backend-specific behaviour:
 
-Local recordings (`LocalBackend`) have no sharing concept; the Share button is
-hidden for them.
+- **Ariso backend:** port the full meeting-sharing feature from the web app's
+  `apps/web-ui/src/Pages/MeetingNotesDetail.vue` (reference) — the share dropdown
+  (visibility levels, public-link expiry, copy link, email invites, shared-
+  participant avatars), adapted to the desktop's environment and visual language.
+- **Local backend:** open the **native macOS share sheet**
+  (`NSSharingServicePicker`) over the recording's notes, giving Copy / AirDrop /
+  Mail / Messages / Notes / etc.
+
+The Share button is shown for **both** backends; its click handler branches on
+`detail.isLocal`.
 
 ## Scope
 
-**In scope (full parity with the reference share dropdown):**
+**Ariso backend — in scope (full parity with the reference share dropdown):**
 
 - Visibility levels: `private` / `workspace` / `public`, chosen via a sub-menu.
 - Public-link expiry picker: free text 1–365 days with presets (7/14/30/60/90),
@@ -29,15 +34,27 @@ hidden for them.
   in the participant list) render as their own tiles.
 - Permission gating that matches the web exactly.
 
+**Local backend — in scope (native macOS share):**
+
+- Clicking Share composes a single markdown document (meeting title + date heading,
+  then an **AI Notes** section, then a **My Notes** / personal-note section) and
+  opens the native macOS share sheet anchored to the button. Empty sections are
+  omitted.
+
 **Out of scope (not requested):** Google-Docs / markdown export, delete-meeting,
-attendees-edit modal, coaching drawer, transcript export.
+attendees-edit modal, coaching drawer, transcript export. Native sharing is
+macOS-only (the app is macOS-only).
 
 ## Decisions (confirmed with user)
 
-1. **Full parity** for the share feature.
+1. **Full parity** for the Ariso share feature.
 2. **Remove** the existing standalone header copy-link icon button; copy-link lives
-   inside the share dropdown (matching the reference).
-3. **Match the web's permission gating exactly.**
+   inside the Ariso share dropdown (matching the reference).
+3. **Match the web's permission gating exactly** (Ariso).
+4. **Local share content:** both notes (AI + personal) under a title/date heading,
+   as one markdown/text document.
+5. **Local share UI:** native macOS share sheet (`NSSharingServicePicker`) over
+   text, anchored to the Share button.
 
 ## Architecture (Approach B: dedicated popover component)
 
@@ -48,12 +65,18 @@ The codebase already has two clean seams:
 - `useMeetingApi.ts` — the **HTTP layer** (`api.request(method, path, body)` →
   `{ status, data }`; no axios interceptors, no `params`/`suppressGlobalError`).
 
-Sharing is an Ariso-only, server-side feature with **no local-recording
-equivalent**, so its write/HTTP calls live in `useMeetingApi` and are called
-directly by the popover (not threaded through the `Backend` interface, which would
-force `LocalBackend` to stub Ariso-only methods). The *read* path for gating fields
-still flows through `Backend.getMeetingDetail` so the detail panel has one load
-path.
+The two share modes are distinct features sharing one button, not one feature with
+two backends:
+
+- **Ariso link/email sharing** is server-side with no local equivalent, so its
+  write/HTTP calls live in `useMeetingApi` and are called directly by the popover
+  (not threaded through the `Backend` interface, which would force `LocalBackend`
+  to stub Ariso-only methods). The *read* path for gating fields still flows
+  through `Backend.getMeetingDetail` so the detail panel has one load path.
+- **Local native sharing** is an OS feature with no server equivalent, handled by a
+  Rust command + a pure text-composition helper, invoked directly from the view.
+
+Neither belongs on the `Backend` interface; the view branches on `detail.isLocal`.
 
 ### Components / units
 
@@ -105,12 +128,41 @@ path.
      parent sees the change, so reopening the popover shows fresh state.)
    - Emits `close` so the parent can dismiss it.
 
-4. **`MeetingDetailView.vue` — wiring:**
+4. **`src/views/meetingShareText.ts` — new pure module (local share).**
+   `composeLocalShareText(detail, personalNote)` builds the markdown document:
+   `# {title}` / formatted date / `## AI Notes` + `detail.note` / `## My Notes` +
+   personal note. Empty sections omitted; returns `''` when nothing to share.
+   Pure and unit-testable (mirrors the existing `waveformBars.ts` /
+   `recordingSettings.ts` split-from-view pattern).
+
+5. **Rust — `commands::share_text_native` (macOS) + `tauri.ts` binding.**
+   - Signature: `share_text_native(text: String, anchor: { x, y, width, height })`.
+   - Uses `objc2` + a new `objc2-app-kit` dependency to build an
+     `NSSharingServicePicker` with the text as an `NSString` item and call
+     `showRelativeToRect:ofView:preferredEdge:` on the focused window's content
+     view (main thread). The `anchor` rect (CSS px from the button's
+     `getBoundingClientRect()`) is converted to the content view's coordinate
+     system (flip Y: `appkitY = viewHeight - (y + height)`); CSS px ≈ AppKit
+     points, so no DPR scaling.
+   - Registered in `main.rs`'s `generate_handler!`. Custom app commands need no
+     capability entry (confirmed: existing `commands::*` aren't in
+     `capabilities/default.json`). Non-macOS build: compile-time `cfg` no-op that
+     returns an "unsupported" error.
+   - `tauri.ts` exposes `shareTextNative(text, anchor)` calling
+     `invoke('share_text_native', …)`.
+
+6. **`MeetingDetailView.vue` — wiring:**
    - Remove the stub Share button's no-op and the standalone copy-link icon button.
-   - Render a Share button only when `!detail.isLocal && (isHost || isAttendee)`
-     (host/attendee derived as above). Toggles `showShare`.
-   - Render `<ShareMeetingPopover :detail="detail" :meeting-id="detail.id"
-     @close="showShare = false" />` anchored under the header when `showShare`.
+   - Render the Share button for **both** backends:
+     - Local recordings: always show (it shares note content).
+     - Ariso: show only when `isHost || isAttendee`.
+   - Click handler branches on `detail.isLocal`:
+     - **Ariso** → toggle `showShare`, rendering `<ShareMeetingPopover
+       :detail="detail" :meeting-id="detail.id" @close="showShare = false" />`
+       anchored under the header.
+     - **Local** → load the personal note (`notesPersistence.load(item)`), call
+       `composeLocalShareText`, then `shareTextNative(text, buttonRect)`. No-op
+       (or inline message) when the composed text is empty.
    - Keep the Close button.
 
 ## Desktop adaptations (where the web can't be ported verbatim)
@@ -132,6 +184,8 @@ path.
 
 ## Data flow
 
+**Ariso:**
+
 1. User opens a meeting → `MeetingDetailView.load` → `Backend.getMeetingDetail` →
    `getMeetingNotes` (now also returns share-gating fields) → `detail`.
 2. User clicks **Share** → `showShare = true` → popover mounts → fetches
@@ -143,6 +197,15 @@ path.
    the expiry Save) → update `detail` + local `shareUrl`.
 6. **Copy link:** builds URL from `webAppBaseUrl` + `shortCode` + `visibility`,
    writes to clipboard, shows "Copied!".
+
+**Local:**
+
+1. User opens a local recording → `detail.note` loaded (AI note); personal note
+   is loaded lazily.
+2. User clicks **Share** → capture button `getBoundingClientRect()` →
+   `notesPersistence.load(item)` for the personal note →
+   `composeLocalShareText(detail, personalNote)` → `shareTextNative(text, rect)` →
+   native macOS share sheet opens anchored to the button.
 
 ## Error handling
 
@@ -161,8 +224,14 @@ path.
   `shareMeetingNotesToPublic` value × role), copy-link URL construction for
   public vs workspace, email send/unshare flows incl. inline confirm, expiry
   validation (1–365), `isHost`/`isAttendee` derivation.
-- **`MeetingDetailView`**: Share button visibility (hidden for local / non-
-  host-attendee), popover toggle, removal of the stub copy-link button.
+- **`composeLocalShareText`**: both sections present; AI-only; personal-only;
+  neither (→ `''`); heading formatting.
+- **`MeetingDetailView`**: Share button visibility (shown for local; for Ariso only
+  host/attendee), branch routing (local → `shareTextNative` with composed text;
+  Ariso → popover toggle), removal of the stub copy-link button.
+- **Rust `share_text_native`**: objc2 UI can't be unit-tested meaningfully; verify
+  manually (sheet opens, anchors to the button, Copy/AirDrop/Mail populated). The
+  Y-flip coordinate conversion can be a small pure helper with a unit test.
 
 ## Risks / open questions
 
@@ -171,5 +240,10 @@ path.
 - Confirm the live server response field names (`already_shared`,
   `publicShareExpiresAt`, `items[].email`, `shareMeetingNotesToPublic`) match the
   reference's usage — they are the same endpoints the web app consumes today.
+- `NSSharingServicePicker` must run on the main thread and needs the focused
+  window's content `NSView`; confirm the Tauri window handle → `NSView` bridge
+  (via `objc2-app-kit` / the window's `ns_window()`) during implementation.
+- `objc2-app-kit` version must align with the existing `objc2` 0.6 / `objc2-
+  foundation` 0.3 in `Cargo.toml`.
 </content>
 </invoke>
