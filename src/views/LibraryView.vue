@@ -51,9 +51,9 @@
             :aria-pressed="selectedItem?.id === m.id"
             @click="selectMeeting(m)"
           >
+            <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
               <span class="mi-title">{{ m.title }}</span>
-              <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
@@ -105,11 +105,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, type MeetingListItem } from '../composables/useBackend';
+import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
   groupTodaysMeetings,
@@ -119,6 +120,7 @@ import {
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 import RecorderStrip from './RecorderStrip.vue';
+import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -132,6 +134,12 @@ type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
 const detailView = ref<MeetingDetailViewExposed | null>(null);
 // Meeting currently being recorded (reported by the strip) — red dot in the list.
 const recordingMeetingId = ref<string | null>(null);
+// Ad-hoc meetings we recorded this session that the backend list doesn't surface
+// yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
+// isn't a calendar-scheduled meeting and never appears in listMeetings()). We
+// fetch their metadata and keep them in the sidebar during AND after recording,
+// until a reload naturally includes them. Keyed by id.
+const pinnedMeetings = ref<Map<string, MeetingListItem>>(new Map());
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
 // split stay fresh while the window sits open.
@@ -141,11 +149,38 @@ const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'l
 
 const activeView = ref<'today' | 'meetings'>('meetings');
 
+// An in-progress local recording has no list row yet (the entry is created on
+// finalize). Synthesize one under the id the finalized recording will use, so
+// the red dot, selection, and the recorder strip have a home that survives the
+// post-recording reload.
+const displayMeetings = computed<MeetingListItem[]>(() => {
+  // Layer pinned ad-hoc meetings the backend list hasn't caught up to on top of
+  // the loaded list (deduped by id), so they survive the post-recording reload.
+  const pinned = [...pinnedMeetings.value.values()].filter(
+    (p) => !meetings.value.some((m) => m.id === p.id)
+  );
+  const base = pinned.length ? [...pinned, ...meetings.value] : meetings.value;
+
+  const id = recordingMeetingId.value;
+  if (!id || base.some((m) => m.id === id)) return base;
+  const timestamp = timestampFromLocalRecordingId(id);
+  if (!timestamp) return base; // an Ariso meeting outside the loaded window
+  return [
+    {
+      id,
+      title: timestampTitle(timestamp),
+      timestamp,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    },
+    ...base,
+  ];
+});
+
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
-    return groupTodaysMeetings(meetings.value, now.value);
+    return groupTodaysMeetings(displayMeetings.value, now.value);
   }
-  return groupMeetingsByDate(meetings.value, now.value);
+  return groupMeetingsByDate(displayMeetings.value, now.value);
 });
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
@@ -254,6 +289,19 @@ async function loadMeetings(): Promise<void> {
     const next = await (await getActiveBackend()).listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
+    // Drop any pinned ad-hoc meeting the backend list now surfaces on its own.
+    if (pinnedMeetings.value.size) {
+      const pruned = new Map(pinnedMeetings.value);
+      for (const id of [...pruned.keys()]) {
+        if (next.some((m) => m.id === id)) pruned.delete(id);
+      }
+      if (pruned.size !== pinnedMeetings.value.size) pinnedMeetings.value = pruned;
+    }
+    // The native tray owns its own meeting cache. When this visible list gets
+    // fresh data, nudge Rust to re-fetch so the menu-bar title updates now.
+    void emitNotificationsSync().catch((err) => {
+      console.warn('Failed to sync tray after meeting list refresh', err);
+    });
     if (!selectedItem.value && meetings.value.length > 0) {
       await selectMeeting(meetings.value[0]);
     } else if (selectedItem.value) {
@@ -320,21 +368,64 @@ async function onRecordingStarted(event: { payload: { meetingId: number | null }
   await selectRecordingMeeting(event.payload?.meetingId);
 }
 
+// Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
+// reload includes it. Local recordings (timestamp-encoded ids) already get a
+// synthetic row from displayMeetings, so only numeric Ariso ids are pinned.
+async function pinRecordedMeeting(id: string): Promise<void> {
+  if (!/^\d+$/.test(id)) return;
+  if (meetings.value.some((m) => m.id === id) || pinnedMeetings.value.has(id)) return;
+  try {
+    const backend = await getActiveBackend();
+    if (backend.id !== 'ariso') return;
+    const detail = await backend.getMeetingDetail({ id, title: '', timestamp: new Date().toISOString() });
+    pinnedMeetings.value = new Map(pinnedMeetings.value).set(id, {
+      id,
+      title: detail.title,
+      timestamp: detail.startAt,
+      endTimestamp: detail.endAt,
+    });
+  } catch (e) {
+    console.error('Failed to pin recorded meeting', id, e);
+  }
+}
+
 // Shared resolver for "the recording is attached to meeting X, surface it in
 // the detail panel". Used by both the live `recording://started` event and the
 // mount-time backend query that recovers state after the library was closed.
 async function selectRecordingMeeting(id: number | null | undefined): Promise<void> {
   if (id == null) return;
   const idStr = String(id);
-  let m = meetings.value.find((x) => x.id === idStr);
+  let m = displayMeetings.value.find((x) => x.id === idStr);
   if (!m) {
-    // The picker can start a meeting the library hasn't loaded yet (e.g. it
-    // appeared on the calendar after our last refresh) — reload once.
+    // The picker can start a meeting the library hasn't loaded yet — reload, and
+    // pin it if it's an ad-hoc meeting the list still won't surface.
     await loadMeetings();
-    m = meetings.value.find((x) => x.id === idStr);
+    await pinRecordedMeeting(idStr);
+    m = displayMeetings.value.find((x) => x.id === idStr);
   }
   if (m) await selectMeeting(m);
 }
+
+// Keep the detail panel on the recorded meeting: surface its row when the
+// strip reports a recording (the synthetic row for local, the scheduled row
+// for Ariso), and reload when it ends so the finalized local recording
+// replaces the synthetic row under the same id.
+watch(recordingMeetingId, async (id, prevId) => {
+  if (id) {
+    // Ensure the recorded meeting has a sidebar row even when it's an ad-hoc
+    // Ariso meeting the calendar list doesn't carry.
+    await pinRecordedMeeting(id);
+    const m = displayMeetings.value.find((x) => x.id === id);
+    if (m && selectedItem.value?.id !== id) await selectMeeting(m);
+    return;
+  }
+  await loadMeetings();
+  if (prevId && selectedItem.value?.id === prevId && !displayMeetings.value.some((m) => m.id === prevId)) {
+    // Discarded/crashed recording — its row is gone (and nothing pinned it);
+    // fall back to the first available meeting.
+    selectedItem.value = displayMeetings.value[0] ?? null;
+  }
+});
 
 function onWindowFocus(): void {
   now.value = new Date();
@@ -483,6 +574,7 @@ onUnmounted(() => {
 }
 
 .meeting-item {
+  position: relative; /* anchors the recording dot to the row's corner */
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -501,17 +593,19 @@ onUnmounted(() => {
   border-color: #1c1c1c;
   box-shadow: 3px 3px 0 #e7e5e2;
 }
-/* Title hugs the left, rel-label pushed right; the recording dot (when
-   present) sits right after the title's end. */
+/* Title hugs the left, rel-label pushed right. */
 .mi-head { display: flex; align-items: baseline; gap: 8px; }
 .mi-rel { margin-left: auto; }
+/* Recording dot pinned to the row's top-right corner, out of the text flow so
+   the title/rel-label layout is unaffected. */
 .mi-rec-dot {
-  flex-shrink: 0;
+  position: absolute;
+  top: 8px;
+  right: 8px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: #e0443e;
-  align-self: center;
   animation: rec-pulse 1s infinite;
 }
 @keyframes rec-pulse {

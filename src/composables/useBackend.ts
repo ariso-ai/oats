@@ -48,6 +48,7 @@ export interface MeetingCoaching {
 }
 
 export interface MeetingParticipantInfo {
+  id?: number;
   name?: string;
   email?: string;
   role?: string;
@@ -65,6 +66,9 @@ export interface MeetingDetail {
   endAt?: string;
   visibility?: string;
   external?: boolean;
+  shortCode?: string;
+  publicShareExpiresAt?: string | null;
+  shareMeetingNotesToPublic?: 'attendee_and_host' | 'host_only' | 'off';
   participants: MeetingParticipantInfo[];
   // Ariso rich fields (markdown where noted)
   digest?: string;
@@ -156,7 +160,7 @@ async function blobToBytes(blob: Blob): Promise<number[]> {
   return [...new Uint8Array(await blob.arrayBuffer())];
 }
 
-function timestampTitle(iso: string): string {
+export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
   // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same
@@ -211,7 +215,11 @@ export class ArisoBackend implements Backend {
       endAt: data.end_at,
       visibility: data.visibility,
       external: data.external,
+      shortCode: data.short_code,
+      publicShareExpiresAt: data.public_share_expires_at ?? null,
+      shareMeetingNotesToPublic: data.shareMeetingNotesToPublic,
       participants: (data.participants ?? []).map((p) => ({
+        id: p.id,
         name: p.name,
         email: p.email,
         role: p.role,

@@ -10,6 +10,7 @@ const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
 const saveNote = vi.fn();
+const shareTextNative = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -21,6 +22,11 @@ vi.mock('../composables/useMeetingNotesPersistence', () => ({
     load: (meeting: MeetingListItem) => loadNote(meeting),
     save: (meeting: MeetingListItem, markdown: string) => saveNote(meeting, markdown),
   }),
+}));
+vi.mock('../tauri', () => ({
+  shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
+  getDesktopConfig: () =>
+    Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
@@ -348,5 +354,48 @@ describe('MeetingDetailView inline title editing', () => {
     expect(saveNote).toHaveBeenCalledWith(first, 'note a');
     expect(wrapper.text()).toContain('Second');
     expect(wrapper.text()).not.toContain('First');
+  });
+
+  it('shows the Share button for an Ariso host and opens the popover', async () => {
+    getMeetingDetail.mockResolvedValue(
+      detail({ isLocal: false, participants: [{ role: 'host', self: true }] })
+    );
+    const wrapper = mount(MeetingDetailView, {
+      props: { item },
+      global: { stubs: { ShareMeetingPopover: true } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(true);
+    expect(wrapper.findComponent({ name: 'ShareMeetingPopover' }).exists()).toBe(false);
+
+    await wrapper.find('.btn-share').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: 'ShareMeetingPopover' }).exists()).toBe(true);
+  });
+
+  it('shows the Share button for local recordings and shares natively', async () => {
+    loadNote.mockResolvedValue('');
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true, note: 'AI body' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(true);
+
+    await wrapper.find('.btn-share').trigger('click');
+    await flushPromises();
+
+    expect(shareTextNative).toHaveBeenCalled();
+  });
+
+  it('hides the Share button for an Ariso non-participant', async () => {
+    getMeetingDetail.mockResolvedValue(
+      detail({ isLocal: false, participants: [{ role: 'host', self: false }] })
+    );
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(false);
   });
 });

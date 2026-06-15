@@ -18,6 +18,7 @@ onMounted(async () => {
   // future sign-in/out and settings-toggle broadcasts from being seen.
   const off = await listen(SYNC_EVENT, () => {
     void invoke('sync_meeting_notifications');
+    void invoke('sync_tray_meeting');
   });
   // onUnmounted can fire before this await resolves; if it did, detach now
   // so the listener doesn't outlive the component.
@@ -27,6 +28,7 @@ onMounted(async () => {
   }
   unlisten = off;
   void invoke('sync_meeting_notifications');
+  void invoke('sync_tray_meeting');
 
   const offAuto = await listen(AUTO_RECORD_SYNC_EVENT, () => {
     void invoke('sync_auto_record');

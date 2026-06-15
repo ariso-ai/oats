@@ -38,18 +38,30 @@
           <p class="head-sub">{{ subtitle }}</p>
         </div>
         <div class="head-actions">
-          <button class="btn-share" type="button" title="Share">
+          <button
+            v-if="canShare"
+            ref="shareBtn"
+            class="btn-share"
+            type="button"
+            title="Share"
+            @click="onShareClick"
+          >
             <svg viewBox="0 0 24 24" class="ic"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" /><path d="M16 6l-4-4-4 4" /><path d="M12 2v13" /></svg>
             Share
-          </button>
-          <button class="btn-icon" type="button" aria-label="Copy link" title="Copy link">
-            <svg viewBox="0 0 24 24" class="ic"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" /></svg>
           </button>
           <button class="btn-icon btn-close" type="button" aria-label="Close" title="Close" @click="emit('close')">
             <svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>
       </header>
+
+      <ShareMeetingPopover
+        v-if="showShare && detail && !detail.isLocal"
+        :detail="detail"
+        :meeting-id="detail.id"
+        :anchor="shareAnchor"
+        @close="showShare = false"
+      />
 
       <!-- Meta band: duration · attendees · category -->
       <div v-if="hasMeta" class="card-meta">
@@ -211,6 +223,9 @@ import {
   type MeetingCoaching,
 } from '../composables/useBackend';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
+import ShareMeetingPopover from './ShareMeetingPopover.vue';
+import { composeLocalShareText } from './meetingShareText';
+import { shareTextNative } from '../tauri';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
 const emit = defineEmits<{
@@ -239,6 +254,59 @@ const titleError = computed<string | null>(() => {
     ? `Title must be ${TITLE_MAX_CHARS} characters or fewer`
     : null;
 });
+
+const showShare = ref(false);
+const shareBtn = ref<HTMLButtonElement | null>(null);
+const shareAnchor = ref<{ bottom: number; right: number } | null>(null);
+
+const isHost = computed(() =>
+  (detail.value?.participants ?? []).some((p) => p.role === 'host' && p.self)
+);
+const isAttendee = computed(() =>
+  (detail.value?.participants ?? []).some((p) => p.role !== 'host' && p.self)
+);
+// Local recordings always get the native share; Ariso meetings only for
+// participants (host/attendee), matching the web.
+const canShare = computed(() => {
+  const d = detail.value;
+  if (!d) return false;
+  return d.isLocal || isHost.value || isAttendee.value;
+});
+
+async function onShareClick(): Promise<void> {
+  const d = detail.value;
+  if (!d) return;
+  if (d.isLocal) {
+    await shareLocal(d);
+    return;
+  }
+  const rect = shareBtn.value?.getBoundingClientRect();
+  shareAnchor.value = rect ? { bottom: rect.bottom, right: rect.right } : null;
+  showShare.value = !showShare.value;
+}
+
+async function shareLocal(d: MeetingDetail): Promise<void> {
+  if (!props.item) return;
+  const rect = shareBtn.value?.getBoundingClientRect();
+  let personalNote = '';
+  try {
+    personalNote = (await notesPersistence.load(props.item)) ?? '';
+  } catch {
+    personalNote = '';
+  }
+  const text = composeLocalShareText(d, personalNote);
+  if (!text) return;
+  try {
+    await shareTextNative(text, {
+      x: rect?.left ?? 0,
+      y: rect?.top ?? 0,
+      width: rect?.width ?? 0,
+      height: rect?.height ?? 0,
+    });
+  } catch (e) {
+    console.error('Native share failed', e);
+  }
+}
 
 // Transcript is loaded lazily when the Transcript tab is opened (Ariso fetches
 // /meeting-notes/{id}/transcript as chunks; local reads transcript.md markdown).
@@ -282,6 +350,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   activeTab.value = 'note';
   editingTitle.value = false;
   savingTitle.value = false;
+  showShare.value = false;
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
@@ -323,7 +392,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
 }
 
 // Watch stable detail fields only. User-note autosaves must not reload the
-// whole pane or change Ari's Notes tab visibility while the user switches tabs.
+// whole pane or change AI Notes tab visibility while the user switches tabs.
 watch(
   () => [
     props.item?.id,
@@ -431,13 +500,13 @@ function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcr
   return 'note';
 }
 
-// Tabs appear only when their content exists: Ari's Notes (generated/shared
+// Tabs appear only when their content exists: AI Notes (generated/shared
 // meeting notes), Transcript, then My Notes (the user's editable note).
 const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
   const d = detail.value;
   if (!d) return [];
   const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: "Ari's Notes" });
+  if (notesPresent(d)) out.push({ key: 'note', label: "AI Notes" });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });

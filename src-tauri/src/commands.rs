@@ -447,16 +447,16 @@ pub async fn upload_file(
 
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
-    crate::tray::set_menu(&app, is_recording, is_paused);
     let state = app.state::<crate::recording_state::RecordingState>();
     if is_recording {
-        // The recorder window reports this right after capture starts; the
-        // pill visibility watcher waits for it before hiding the window.
+        // Mark capture before redrawing the tray so the title refresh sees the
+        // active recording and clears the countdown text in the menu bar.
         state.mark_capture_active();
     } else {
         state.clear();
         let _ = app.emit("recording://state", false);
     }
+    crate::tray::set_menu(&app, is_recording, is_paused);
     Ok(())
 }
 
@@ -472,7 +472,7 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     }
 
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/#/settings".into()))
-        .title("Ariso Settings")
+        .title("Oats Settings")
         .inner_size(450.0, 800.0)
         .resizable(false)
         .center()
@@ -496,7 +496,7 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
     }
 
     WebviewWindowBuilder::new(&app, "onboarding", WebviewUrl::App("/#/onboarding".into()))
-        .title("Welcome to Ariso")
+        .title("Welcome to oats")
         .inner_size(450.0, 600.0)
         .resizable(false)
         .center()
@@ -766,6 +766,13 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
+/// `view_height` is the content view's height in points; `y`/`height` are the
+/// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
+fn flip_y(view_height: f64, y: f64, height: f64) -> f64 {
+    view_height - (y + height)
+}
+
 /// Maximum local recording title length, in characters. Mirrors the frontend
 /// limit (the UI validates first; this is defense in depth).
 const MAX_TITLE_CHARS: usize = 40;
@@ -833,7 +840,13 @@ pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i6
 
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+    open_library_window(&app)
+}
+
+/// Open (or focus) the meetings library window. Shared by the
+/// `create_library_window` command and the macOS dock-icon Reopen handler.
+pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
@@ -847,7 +860,7 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
     // the same row, just to the right of them.
-    WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
+    WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
         .title("Meetings")
         .title_bar_style(TitleBarStyle::Overlay)
         .hidden_title(true)
@@ -858,6 +871,79 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ShareAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Open the native macOS share sheet over `text`, anchored to the button rect
+/// (`anchor`, in CSS points relative to the window's content view).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn share_text_native(
+    window: tauri::WebviewWindow,
+    text: String,
+    anchor: ShareAnchor,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("nothing to share".to_string());
+    }
+    let window_for_main = window.clone();
+
+    window
+        .run_on_main_thread(move || {
+            use objc2::rc::Retained;
+            use objc2::runtime::AnyObject;
+            use objc2::AnyThread;
+            use objc2_app_kit::{NSSharingServicePicker, NSWindow};
+            use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+
+            // SAFETY: ns_window() is fetched on the main thread immediately
+            // before use, so the NSWindow* is valid for this closure's lifetime.
+            // AppKit requires this to run on the main thread.
+            unsafe {
+                let ns_window_ptr = match window_for_main.ns_window() {
+                    Ok(ptr) => ptr as *const NSWindow,
+                    Err(_) => return,
+                };
+                let ns_window = &*ns_window_ptr;
+                let Some(content_view) = ns_window.contentView() else {
+                    return;
+                };
+                let view_height = content_view.bounds().size.height;
+
+                let ns_text = NSString::from_str(&text);
+                let item: Retained<AnyObject> = Retained::into_super(ns_text).into();
+                let items = NSArray::from_retained_slice(&[item]);
+                let picker = NSSharingServicePicker::initWithItems(
+                    NSSharingServicePicker::alloc(),
+                    &items,
+                );
+
+                let appkit_y = flip_y(view_height, anchor.y, anchor.height);
+                let rect = NSRect::new(
+                    NSPoint::new(anchor.x, appkit_y),
+                    NSSize::new(anchor.width.max(1.0), anchor.height.max(1.0)),
+                );
+                picker.showRelativeToRect_ofView_preferredEdge(
+                    rect,
+                    &content_view,
+                    NSRectEdge::MinY,
+                );
+            }
+        })
+        .map_err(|e| format!("run_on_main_thread: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), String> {
+    Err("native share is only supported on macOS".to_string())
 }
 
 #[cfg(test)]
@@ -1042,5 +1128,15 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::flip_y;
+    #[test]
+    fn flips_web_top_left_to_appkit_bottom_left() {
+        // view 600 tall, button at css-y=40 height=32 -> appkit-y = 600-(40+32)=528
+        assert_eq!(flip_y(600.0, 40.0, 32.0), 528.0);
     }
 }

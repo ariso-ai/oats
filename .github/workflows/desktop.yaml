@@ -7,17 +7,15 @@ on:
   push:
     branches:
       - main
-  release:
-    types: [published]
 
 permissions:
   contents: read
-  pull-requests: read
 
+# Signing, notarization, and publishing live in release.yaml; this workflow is
+# CI validation only, so superseded runs are safe to cancel.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Don't cancel in-flight release builds — they may be signing/notarizing.
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -93,140 +91,3 @@ jobs:
       - name: Build Rust
         working-directory: src-tauri
         run: cargo build --locked
-
-  release:
-    name: Sign, notarize, and bundle
-    needs: validate
-    if: github.event_name == 'release'
-    runs-on: [self-hosted, macOS, ARM64]
-    # `release` environment holds the Apple signing/notarization secrets and
-    # the required-reviewer protection rule (see README → Signing & Notarization).
-    environment: release
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          cache: 'npm'
-          node-version: '24'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            rust-aarch64-apple-darwin-
-
-      - name: Install dependencies
-        run: npm ci --prefer-offline
-
-      # Same as the validate job: the sidecar is a gitignored build artifact
-      # that `tauri:build` (via externalBin) needs present before bundling.
-      # The artifact cache (keyed on Package.resolved + Sources/) is shared with
-      # the validate job, so this usually restores instantly. On a miss, a single
-      # xcodebuild emits both the executable and the MLX metallib bundle
-      # (mlx-swift_Cmlx.bundle): without the bundle the notes (LLM) backend fails
-      # at runtime with "Failed to load the default metallib", and bundle.resources
-      # ships it into the .app. `swift build` is redundant (it can't compile MLX's
-      # Metal shaders), so build once with xcodebuild and copy both products out.
-      - name: Cache ariso-stt sidecar artifacts
-        id: sidecar-cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
-            src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
-
-      - name: Build ariso-stt sidecar
-        if: steps.sidecar-cache.outputs.cache-hit != 'true'
-        working-directory: src-tauri/ariso-stt
-        run: |
-          mkdir -p ../binaries
-          xcodebuild build -scheme ariso-stt -configuration Release \
-            -destination 'generic/platform=macOS' \
-            -derivedDataPath .xcode -skipMacroValidation
-          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
-          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
-
-      - name: Build, sign, and notarize
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- -- --features prod-api
-
-      # Hand the bundler outputs to the publish job. Paths share the common
-      # ancestor bundle/, so the artifact preserves the macos/ and dmg/
-      # subdirectories that release-publish.sh expects. The DMG and tarball are
-      # already compressed, so skip recompression.
-      - name: Upload release bundle
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-bundle
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-          path: |
-            src-tauri/target/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-            src-tauri/target/release/bundle/dmg/*.dmg
-
-  publish:
-    name: Generate manifest and publish artifacts to R2
-    needs: release
-    runs-on: [self-hosted, macOS, ARM64]
-    # The R2 credentials live in the `release` environment alongside the Apple
-    # signing secrets (see README → Signing & Notarization).
-    environment: release
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - name: Download release bundle
-        uses: actions/download-artifact@v8
-        with:
-          name: release-bundle
-          path: src-tauri/target/release/bundle
-
-      - name: Generate manifest and publish artifacts to R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_BODY: ${{ github.event.release.body }}
-          RELEASE_NAME: ${{ github.event.release.name }}
-        run: .github/scripts/release-publish.sh
-
-      - name: Add R2 download link to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          append_body: true
-          body: |
-
-            ---
-            **Download:** https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.dmg

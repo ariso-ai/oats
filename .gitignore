@@ -9,3 +9,4 @@ src-tauri/ariso-stt/.swiftpm/
 .superpowers/
 docs/superpowers/plans/
 .DS_Store
+.env
