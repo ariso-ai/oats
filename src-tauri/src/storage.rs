@@ -66,6 +66,22 @@ pub struct RecordingSummary {
     pub has_transcript: bool,
 }
 
+/// Metadata persisted next to a buffered pending upload (`<id>.json`), so a
+/// failed Ariso upload can be resumed after the recorder window closes or the
+/// app restarts. Keyed on disk by `sanitize_iso_to_id(created_at)`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUploadMeta {
+    /// Raw ISO timestamp used as the buffer key (`startAt ?? endAt`).
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<String>,
+    pub end_at: String,
+    pub duration_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_id: Option<u64>,
+}
+
 /// Resolve the `~/.ariso` root. `ARISO_ROOT` overrides (used by tests/dev);
 /// otherwise `$HOME/.ariso`. Errors if neither is available.
 pub fn ariso_root() -> Result<PathBuf, String> {
@@ -114,26 +130,55 @@ fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> 
     Ok(pending_uploads_dir(root).join(format!("{id}.mp3")))
 }
 
-/// Buffer a stopped recording's mp3 under `pending-uploads/<id>.mp3`, where
-/// the id is the sanitized `created_at` timestamp. Returns the id. Writing
-/// the same timestamp again overwrites (the retry path re-buffers).
-pub fn write_pending_audio(root: &Path, created_at: &str, bytes: &[u8]) -> Result<String, String> {
-    let path = pending_audio_path(root, created_at)?;
-    fs::create_dir_all(pending_uploads_dir(root))
-        .map_err(|e| format!("create pending-uploads dir: {e}"))?;
-    write_atomic(&path, bytes)?;
-    Ok(sanitize_iso_to_id(created_at))
+fn pending_meta_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
+    let id = sanitize_iso_to_id(created_at);
+    validate_pending_id(&id)?;
+    Ok(pending_uploads_dir(root).join(format!("{id}.json")))
 }
 
-/// Delete the buffered mp3 for `created_at`. Missing file is not an error —
-/// the success path and an explicit dismiss both call this unconditionally.
-pub fn discard_pending_audio(root: &Path, created_at: &str) -> Result<(), String> {
-    let path = pending_audio_path(root, created_at)?;
-    match fs::remove_file(&path) {
+/// Delete a file, treating "already gone" as success.
+fn remove_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("discard pending audio: {e}")),
+        Err(e) => Err(format!("discard pending file: {e}")),
     }
+}
+
+/// Buffer a stopped recording's mp3 under `pending-uploads/<id>.mp3` and its
+/// metadata under `pending-uploads/<id>.json`, where the id is the sanitized
+/// `meta.created_at`. Audio is written first so a sidecar is never observed
+/// without its audio. Returns the id. Re-buffering the same timestamp
+/// overwrites both files (the retry path).
+pub fn write_pending_audio(
+    root: &Path,
+    meta: &PendingUploadMeta,
+    bytes: &[u8],
+) -> Result<String, String> {
+    let audio_path = pending_audio_path(root, &meta.created_at)?;
+    let meta_path = pending_meta_path(root, &meta.created_at)?;
+    fs::create_dir_all(pending_uploads_dir(root))
+        .map_err(|e| format!("create pending-uploads dir: {e}"))?;
+    write_atomic(&audio_path, bytes)?;
+    let json = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+    write_atomic(&meta_path, &json)?;
+    Ok(sanitize_iso_to_id(&meta.created_at))
+}
+
+/// Delete the buffered mp3 and its sidecar for `created_at`. Missing files are
+/// not an error — the success path and an explicit dismiss both call this
+/// unconditionally.
+pub fn discard_pending_audio(root: &Path, created_at: &str) -> Result<(), String> {
+    remove_if_exists(&pending_audio_path(root, created_at)?)?;
+    remove_if_exists(&pending_meta_path(root, created_at)?)?;
+    Ok(())
+}
+
+/// Read a buffered pending upload's mp3 bytes (used to combine for resume).
+#[allow(dead_code)]
+fn read_pending_audio_bytes(root: &Path, created_at: &str) -> Result<Vec<u8>, String> {
+    let path = pending_audio_path(root, created_at)?;
+    fs::read(&path).map_err(|e| format!("read pending audio: {e}"))
 }
 
 /// Turn a UTC ISO-8601 instant into a filesystem-safe, sortable folder id.
@@ -281,6 +326,16 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pmeta(created_at: &str) -> PendingUploadMeta {
+        PendingUploadMeta {
+            created_at: created_at.into(),
+            start_at: Some(created_at.into()),
+            end_at: created_at.into(),
+            duration_seconds: 1,
+            meeting_id: None,
+        }
+    }
 
     #[test]
     fn dirs_derive_from_root() {
@@ -439,22 +494,24 @@ mod tests {
     fn pending_audio_write_and_discard_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let id = write_pending_audio(root, "2026-06-12T10:00:00.000Z", b"mp3bytes").unwrap();
+        let id = write_pending_audio(root, &pmeta("2026-06-12T10:00:00.000Z"), b"mp3bytes").unwrap();
         assert_eq!(id, "2026-06-12T10-00-00Z");
-        let path = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
-        assert_eq!(std::fs::read(&path).unwrap(), b"mp3bytes");
+        let audio = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
+        let sidecar = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.json");
+        assert_eq!(std::fs::read(&audio).unwrap(), b"mp3bytes");
+        assert!(sidecar.is_file());
 
         discard_pending_audio(root, "2026-06-12T10:00:00.000Z").unwrap();
-        assert!(!path.exists());
+        assert!(!audio.exists());
+        assert!(!sidecar.exists());
     }
 
     #[test]
     fn pending_audio_overwrite_is_allowed() {
-        // Retry buffers again under the same timestamp; last write wins.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        write_pending_audio(root, "2026-06-12T10:00:00Z", b"first").unwrap();
-        write_pending_audio(root, "2026-06-12T10:00:00Z", b"second").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00Z"), b"first").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00Z"), b"second").unwrap();
         let path = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
     }
@@ -469,9 +526,8 @@ mod tests {
     #[test]
     fn pending_audio_rejects_traversal_ids() {
         let tmp = tempfile::tempdir().unwrap();
-        // sanitize_iso_to_id passes '/' and '\\' through; the guard must catch them.
-        assert!(write_pending_audio(tmp.path(), "a/b", b"x").is_err());
-        assert!(write_pending_audio(tmp.path(), "\\evil", b"x").is_err());
+        assert!(write_pending_audio(tmp.path(), &pmeta("a/b"), b"x").is_err());
+        assert!(write_pending_audio(tmp.path(), &pmeta("\\evil"), b"x").is_err());
         assert!(discard_pending_audio(tmp.path(), "a/b").is_err());
     }
 

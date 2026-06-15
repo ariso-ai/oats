@@ -673,12 +673,15 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     crate::storage::list_recordings(&root)
 }
 
-/// Buffer a stopped Ariso recording's mp3 on disk before the upload attempt,
-/// keyed by its ISO start timestamp. Returns the sanitized id.
+/// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
+/// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
 #[tauri::command]
-pub fn buffer_pending_audio(audio: Vec<u8>, created_at: String) -> Result<String, String> {
+pub fn buffer_pending_audio(
+    audio: Vec<u8>,
+    meta: crate::storage::PendingUploadMeta,
+) -> Result<String, String> {
     let root = crate::storage::ariso_root()?;
-    crate::storage::write_pending_audio(&root, &created_at, &audio)
+    crate::storage::write_pending_audio(&root, &meta, &audio)
 }
 
 /// Remove the buffered mp3 for `created_at` (idempotent). Called after a
