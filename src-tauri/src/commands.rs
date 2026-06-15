@@ -858,6 +858,13 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
+/// `view_height` is the content view's height in points; `y`/`height` are the
+/// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
+fn flip_y(view_height: f64, y: f64, height: f64) -> f64 {
+    view_height - (y + height)
+}
+
 /// Maximum local recording title length, in characters. Mirrors the frontend
 /// limit (the UI validates first; this is defense in depth).
 const MAX_TITLE_CHARS: usize = 40;
@@ -945,6 +952,79 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ShareAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Open the native macOS share sheet over `text`, anchored to the button rect
+/// (`anchor`, in CSS points relative to the window's content view).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn share_text_native(
+    window: tauri::WebviewWindow,
+    text: String,
+    anchor: ShareAnchor,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("nothing to share".to_string());
+    }
+    let window_for_main = window.clone();
+
+    window
+        .run_on_main_thread(move || {
+            use objc2::rc::Retained;
+            use objc2::runtime::AnyObject;
+            use objc2::AnyThread;
+            use objc2_app_kit::{NSSharingServicePicker, NSWindow};
+            use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+
+            // SAFETY: ns_window() is fetched on the main thread immediately
+            // before use, so the NSWindow* is valid for this closure's lifetime.
+            // AppKit requires this to run on the main thread.
+            unsafe {
+                let ns_window_ptr = match window_for_main.ns_window() {
+                    Ok(ptr) => ptr as *const NSWindow,
+                    Err(_) => return,
+                };
+                let ns_window = &*ns_window_ptr;
+                let Some(content_view) = ns_window.contentView() else {
+                    return;
+                };
+                let view_height = content_view.bounds().size.height;
+
+                let ns_text = NSString::from_str(&text);
+                let item: Retained<AnyObject> = Retained::into_super(ns_text).into();
+                let items = NSArray::from_retained_slice(&[item]);
+                let picker = NSSharingServicePicker::initWithItems(
+                    NSSharingServicePicker::alloc(),
+                    &items,
+                );
+
+                let appkit_y = flip_y(view_height, anchor.y, anchor.height);
+                let rect = NSRect::new(
+                    NSPoint::new(anchor.x, appkit_y),
+                    NSSize::new(anchor.width.max(1.0), anchor.height.max(1.0)),
+                );
+                picker.showRelativeToRect_ofView_preferredEdge(
+                    rect,
+                    &content_view,
+                    NSRectEdge::MinY,
+                );
+            }
+        })
+        .map_err(|e| format!("run_on_main_thread: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), String> {
+    Err("native share is only supported on macOS".to_string())
 }
 
 #[cfg(test)]
@@ -1095,5 +1175,15 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::flip_y;
+    #[test]
+    fn flips_web_top_left_to_appkit_bottom_left() {
+        // view 600 tall, button at css-y=40 height=32 -> appkit-y = 600-(40+32)=528
+        assert_eq!(flip_y(600.0, 40.0, 32.0), 528.0);
     }
 }

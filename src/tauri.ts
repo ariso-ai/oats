@@ -96,6 +96,19 @@ export async function getDesktopConfig(): Promise<DesktopConfig> {
   return invoke<DesktopConfig>('get_desktop_config');
 }
 
+export interface ShareAnchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Open the native macOS share sheet over `text`, anchored to `anchor`
+ *  (the Share button's getBoundingClientRect in CSS px). macOS only. */
+export function shareTextNative(text: string, anchor: ShareAnchor): Promise<void> {
+  return invoke('share_text_native', { text, anchor });
+}
+
 export interface PusherAuthResponse {
   auth: string;
   channel_data?: string;

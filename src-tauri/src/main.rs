@@ -123,6 +123,7 @@ fn main() {
             commands::list_pending_uploads,
             commands::combine_pending_audio,
             commands::fetch_meeting_audio,
+            commands::share_text_native,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
             model_manager::download_local_stt,
