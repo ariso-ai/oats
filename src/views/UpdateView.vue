@@ -1,6 +1,6 @@
 <template>
   <div class="update-window">
-    <img class="app-icon" src="../assets/ariso-logo-b.png" alt="" />
+    <img class="app-icon" src="../assets/oats-light.png" alt="" />
 
     <h1 class="title">Update Available</h1>
 

@@ -7,17 +7,15 @@ on:
   push:
     branches:
       - main
-  release:
-    types: [published]
 
 permissions:
   contents: read
-  pull-requests: read
 
+# Signing, notarization, and publishing live in release.yaml; this workflow is
+# CI validation only, so superseded runs are safe to cancel.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Don't cancel in-flight release builds — they may be signing/notarizing.
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  cancel-in-progress: true
 
 jobs:
   validate:

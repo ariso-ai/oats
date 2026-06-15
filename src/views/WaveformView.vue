@@ -9,7 +9,7 @@
       @mouseleave="collapse"
       @click="showMeetings"
     >
-      <img class="logo" src="../assets/ariso-logo-w.svg" alt="" />
+      <img class="logo" src="../assets/oats-dark.svg" alt="" />
 
       <template v-if="uploadResult">
         <span class="status-icon" :class="uploadResult === 'success' ? 'ok' : 'err'">
