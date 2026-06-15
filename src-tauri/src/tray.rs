@@ -5,11 +5,11 @@ use tauri::{
     AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
 
-// Appearance-aware, full-color tray icons (NOT template images, so the brand
-// yellow shows). The light-mode mark has a dark outline (visible on a light
-// menu bar); the dark-mode mark has a yellow outline (visible on a dark menu
-// bar). `apply_theme` swaps between them on system-appearance changes.
-const TRAY_ICON_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
+// Appearance-aware tray icons (NOT template images, so the fill color shows).
+// Both are 128x128 so the icon renders at the same size in either appearance.
+// The dark-mode mark has a yellow outline (visible on a dark menu bar).
+// `apply_theme` swaps between them on system-appearance changes.
+const TRAY_ICON_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
 const TRAY_ICON_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
 
 fn tray_icon_bytes(theme: tauri::Theme) -> &'static [u8] {
