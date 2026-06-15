@@ -10,6 +10,7 @@ const waveformStop = vi.fn();
 const finalizeRecording = vi.fn();
 const loadRecordingEnabled = vi.fn();
 const closeWin = vi.fn(() => Promise.resolve());
+const setIgnoreCursorEvents = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
@@ -23,7 +24,10 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: (...a: unknown[]) => emitEvent(...a),
 }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
-  getCurrentWebviewWindow: () => ({ close: closeWin }),
+  getCurrentWebviewWindow: () => ({
+    close: closeWin,
+    setIgnoreCursorEvents: (...a: unknown[]) => setIgnoreCursorEvents(...a),
+  }),
 }));
 let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
@@ -81,6 +85,30 @@ describe('WaveformView vertical pill', () => {
     expect(startRecording).toHaveBeenCalledWith('mic');
     expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.findAll('.dot')).toHaveLength(6);
+  });
+
+  it('does not paint the pill when launched with pillHidden=1, but still records', async () => {
+    routeQuery = { pillHidden: '1' };
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    // Recording must start regardless — the window is born visible for getUserMedia.
+    expect(startRecording).toHaveBeenCalledWith('mic');
+    // Nothing painted: no flash while the meetings window owns the UI.
+    expect(wrapper.find('.pill').exists()).toBe(false);
+    // The empty transparent window must not swallow clicks underneath it.
+    expect(setIgnoreCursorEvents).toHaveBeenCalledWith(true);
+  });
+
+  it('paints the pill when a pill-visible event reveals it (library minimized)', async () => {
+    routeQuery = { pillHidden: '1' };
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    expect(wrapper.find('.pill').exists()).toBe(false);
+
+    await eventHandlers['recorder://pill-visible']?.({ payload: true });
+    await flushPromises();
+    expect(wrapper.find('.pill').exists()).toBe(true);
+    expect(setIgnoreCursorEvents).toHaveBeenLastCalledWith(false);
   });
 
   it('reveals timer/controls on hover (open class) while keeping the drag handle', async () => {
