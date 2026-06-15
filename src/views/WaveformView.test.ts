@@ -161,6 +161,23 @@ describe('WaveformView vertical pill', () => {
     expect(closeWin).not.toHaveBeenCalled();
   });
 
+  it('never broadcasts a success phase when finalize fails', async () => {
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('offline'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    const phases = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => (payload as { phase: string }).phase);
+    expect(phases).toContain('failed');
+    expect(phases).not.toContain('success');
+    // And the pill shows the error state, not a "saved" ✓.
+    expect(wrapper.find('.status-icon.ok').exists()).toBe(false);
+  });
+
   it('auto-stops after the silence timeout elapses', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(16 * 60_000); // now well past lastSoundAt (0) + 15min
