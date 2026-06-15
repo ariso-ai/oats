@@ -175,10 +175,29 @@ pub fn discard_pending_audio(root: &Path, created_at: &str) -> Result<(), String
 }
 
 /// Read a buffered pending upload's mp3 bytes (used to combine for resume).
-#[allow(dead_code)]
 fn read_pending_audio_bytes(root: &Path, created_at: &str) -> Result<Vec<u8>, String> {
     let path = pending_audio_path(root, created_at)?;
     fs::read(&path).map_err(|e| format!("read pending audio: {e}"))
+}
+
+/// Concatenate the mp3 bytes for `created_at_keys` in the order given (the
+/// caller passes them chronologically). Errors if any key has no buffered
+/// audio, or if the running total would exceed `max_bytes`. All clips come
+/// from the same in-app encoder, so byte concatenation decodes cleanly.
+pub fn combine_pending_audio(
+    root: &Path,
+    created_at_keys: &[String],
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let mut combined: Vec<u8> = Vec::new();
+    for key in created_at_keys {
+        let bytes = read_pending_audio_bytes(root, key)?;
+        if combined.len() as u64 + bytes.len() as u64 > max_bytes {
+            return Err(format!("combined pending audio exceeds {max_bytes} bytes"));
+        }
+        combined.extend_from_slice(&bytes);
+    }
+    Ok(combined)
 }
 
 /// List buffered pending uploads, chronological (oldest-first). A sidecar is
@@ -581,6 +600,37 @@ mod tests {
     fn lists_pending_uploads_empty_when_no_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(list_pending_uploads(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn combines_pending_audio_in_key_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"AAA").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T11:00:00Z"), b"BB").unwrap();
+
+        let keys = vec![
+            "2026-06-12T09:00:00Z".to_string(),
+            "2026-06-12T11:00:00Z".to_string(),
+        ];
+        let combined = combine_pending_audio(root, &keys, 1024).unwrap();
+        assert_eq!(combined, b"AAABB");
+    }
+
+    #[test]
+    fn combine_pending_audio_errors_on_missing_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = vec!["2026-06-12T09:00:00Z".to_string()];
+        assert!(combine_pending_audio(tmp.path(), &keys, 1024).is_err());
+    }
+
+    #[test]
+    fn combine_pending_audio_rejects_over_max() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"toolong").unwrap();
+        let keys = vec!["2026-06-12T09:00:00Z".to_string()];
+        assert!(combine_pending_audio(root, &keys, 3).is_err());
     }
 
     #[test]
