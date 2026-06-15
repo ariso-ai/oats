@@ -357,11 +357,30 @@ mod imp {
     pub fn stop() -> Result<(), String> {
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
         if let Some(state) = guard.take() {
+            let mut errors: Vec<String> = Vec::new();
             unsafe {
-                AudioDeviceStop(state.aggregate_id, state.proc_id);
-                AudioDeviceDestroyIOProcID(state.aggregate_id, state.proc_id);
-                AudioHardwareDestroyAggregateDevice(state.aggregate_id);
-                AudioHardwareDestroyProcessTap(state.tap_id);
+                // Tear down in reverse creation order. Attempt every step even
+                // if an earlier one fails, so a single failure doesn't leak the
+                // remaining resources; collect statuses and report at the end.
+                let status = AudioDeviceStop(state.aggregate_id, state.proc_id);
+                if status != 0 {
+                    errors.push(format!("AudioDeviceStop failed: {status}"));
+                }
+                let status = AudioDeviceDestroyIOProcID(state.aggregate_id, state.proc_id);
+                if status != 0 {
+                    errors.push(format!("AudioDeviceDestroyIOProcID failed: {status}"));
+                }
+                let status = AudioHardwareDestroyAggregateDevice(state.aggregate_id);
+                if status != 0 {
+                    errors.push(format!("AudioHardwareDestroyAggregateDevice failed: {status}"));
+                }
+                let status = AudioHardwareDestroyProcessTap(state.tap_id);
+                if status != 0 {
+                    errors.push(format!("AudioHardwareDestroyProcessTap failed: {status}"));
+                }
+            }
+            if !errors.is_empty() {
+                return Err(errors.join("; "));
             }
         }
         Ok(())
