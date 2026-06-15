@@ -588,6 +588,26 @@ pub(crate) fn open_waveform_window(
     Ok(())
 }
 
+/// Gate recording on a valid session for the Ariso backend. The Local backend
+/// needs no auth and always passes. When the Ariso user is signed out, surface
+/// the (pre-created) Settings window and emit `tray://show-sign-in-prompt` so its
+/// sign-in banner appears, then report `false` so the caller aborts. Mirrors the
+/// tray's session gate so every recording entry point behaves identically.
+async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
+    if active_backend(app) != "ariso" {
+        return true;
+    }
+    if is_session_valid(app).await {
+        return true;
+    }
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit("tray://show-sign-in-prompt", ());
+    false
+}
+
 /// Open the waveform recording window, optionally attaching to an existing
 /// meeting id. Closes the meeting-picker window if present and flips the
 /// tray menu to the recording state.
@@ -596,6 +616,9 @@ pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
 ) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
     open_waveform_window(&app, meeting_id, false)
 }
 
@@ -625,6 +648,9 @@ pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), S
 /// start-recording button for picker-using backends.
 #[tauri::command]
 pub async fn open_meeting_picker(app: tauri::AppHandle) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
     open_meeting_picker_window(&app)
 }
 
