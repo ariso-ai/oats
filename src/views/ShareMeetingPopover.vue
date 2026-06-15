@@ -72,15 +72,15 @@
           >{{ linkCopied ? 'Copied!' : 'Copy link' }}</button>
         </div>
         <div v-if="showSharingOptions" class="vis-menu">
-          <button class="vis-item" type="button" :disabled="!canSharePublic" @click="canSharePublic && selectSharingOption('public')">
+          <button class="vis-item" type="button" :disabled="sharing || !canSharePublic" @click="canSharePublic && !sharing && selectSharingOption('public')">
             <span>Anyone with the link</span>
             <svg v-if="sharingOption === 'public'" viewBox="0 0 24 24" class="ic check"><path d="M5 13l4 4L19 7" /></svg>
           </button>
-          <button class="vis-item" type="button" @click="selectSharingOption('workspace')">
+          <button class="vis-item" type="button" :disabled="sharing" @click="!sharing && selectSharingOption('workspace')">
             <span>Everyone at org with the link</span>
             <svg v-if="sharingOption === 'workspace'" viewBox="0 0 24 24" class="ic check"><path d="M5 13l4 4L19 7" /></svg>
           </button>
-          <button class="vis-item" type="button" @click="selectSharingOption('private')">
+          <button class="vis-item" type="button" :disabled="sharing" @click="!sharing && selectSharingOption('private')">
             <span>Only people invited</span>
             <svg v-if="sharingOption === 'private'" viewBox="0 0 24 24" class="ic check"><path d="M5 13l4 4L19 7" /></svg>
           </button>
@@ -245,6 +245,7 @@ function onDayBlur(): void {
 }
 
 async function selectSharingOption(option: Visibility): Promise<void> {
+  if (sharing.value) return;
   sharingOption.value = option;
   showSharingOptions.value = false;
   if (option === 'public') {

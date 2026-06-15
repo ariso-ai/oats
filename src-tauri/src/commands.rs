@@ -882,7 +882,7 @@ pub fn share_text_native(
     if text.trim().is_empty() {
         return Err("nothing to share".to_string());
     }
-    let ns_window_ptr = window.ns_window().map_err(|e| format!("ns_window: {e}"))? as usize;
+    let window_for_main = window.clone();
 
     window
         .run_on_main_thread(move || {
@@ -892,10 +892,15 @@ pub fn share_text_native(
             use objc2_app_kit::{NSSharingServicePicker, NSWindow};
             use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
 
-            // SAFETY: ns_window_ptr is a live NSWindow* for this window; this
-            // runs on the main thread as AppKit requires.
+            // SAFETY: ns_window() is fetched on the main thread immediately
+            // before use, so the NSWindow* is valid for this closure's lifetime.
+            // AppKit requires this to run on the main thread.
             unsafe {
-                let ns_window = &*(ns_window_ptr as *const NSWindow);
+                let ns_window_ptr = match window_for_main.ns_window() {
+                    Ok(ptr) => ptr as *const NSWindow,
+                    Err(_) => return,
+                };
+                let ns_window = &*ns_window_ptr;
                 let Some(content_view) = ns_window.contentView() else {
                     return;
                 };
