@@ -1122,8 +1122,10 @@ async function handleSignOut() {
   color: #ffffff;
 }
 
-.backend-option--active:hover {
+.backend-option--active:hover,
+.backend-option--active:focus-visible {
   background: #1c1c1c;
+  color: #ffffff;
 }
 
 .about-header {
