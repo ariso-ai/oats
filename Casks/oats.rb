@@ -1,6 +1,6 @@
-# This cask intentionally follows the desktop release pipeline's stable R2 DMG
-# URL: the object is replaced on each signed release, and the in-app updater owns
-# versioned update checks after the first Homebrew install.
+# release-publish.sh uploads each signed release to this stable R2 DMG key.
+# Homebrew uses that first-install artifact; Tauri's in-app updater owns
+# versioned updates after install via desktop/latest.json.
 cask "oats" do
   version :latest
   sha256 :no_check
