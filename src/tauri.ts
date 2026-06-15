@@ -228,17 +228,34 @@ export const local = {
   },
 };
 
-/** Disk buffer for Ariso uploads: audio is persisted before the upload
- *  attempt and removed once the server confirms (or the user dismisses).
- *  Both commands are keyed by the recording's ISO start timestamp; Rust
- *  derives the on-disk id. */
+/** Metadata persisted next to a buffered Ariso upload, mirrors the Rust
+ *  `PendingUploadMeta`. Lets the Library resume a failed upload after restart. */
+export interface PendingUploadMeta {
+  createdAt: string;
+  startAt: string | null;
+  endAt: string;
+  durationSeconds: number;
+  meetingId?: number;
+}
+
+/** Disk buffer for Ariso uploads: audio + metadata are persisted before the
+ *  upload attempt and removed once the server confirms (or the user
+ *  dismisses). Keyed by the recording's ISO `createdAt`; Rust derives the id. */
 export const pending = {
-  bufferAudio(audio: number[], createdAt: string): Promise<string> {
-    return invoke<string>('buffer_pending_audio', { audio, createdAt });
+  bufferAudio(audio: number[], meta: PendingUploadMeta): Promise<string> {
+    return invoke<string>('buffer_pending_audio', { audio, meta });
   },
-  /** Idempotent — a missing buffer file is not an error. */
+  /** Idempotent — missing buffer files are not an error. */
   discardAudio(createdAt: string): Promise<void> {
     return invoke('discard_pending_audio', { createdAt });
+  },
+  /** Buffered uploads awaiting resume, oldest-first. */
+  list(): Promise<PendingUploadMeta[]> {
+    return invoke<PendingUploadMeta[]>('list_pending_uploads');
+  },
+  /** Concatenate the given buffers (chronological keys) into one mp3's bytes. */
+  combine(createdAtKeys: string[]): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('combine_pending_audio', { createdAtKeys });
   },
 };
 
