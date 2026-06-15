@@ -134,6 +134,12 @@ type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
 const detailView = ref<MeetingDetailViewExposed | null>(null);
 // Meeting currently being recorded (reported by the strip) — red dot in the list.
 const recordingMeetingId = ref<string | null>(null);
+// Ad-hoc meetings we recorded this session that the backend list doesn't surface
+// yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
+// isn't a calendar-scheduled meeting and never appears in listMeetings()). We
+// fetch their metadata and keep them in the sidebar during AND after recording,
+// until a reload naturally includes them. Keyed by id.
+const pinnedMeetings = ref<Map<string, MeetingListItem>>(new Map());
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
 // split stay fresh while the window sits open.
@@ -148,10 +154,17 @@ const activeView = ref<'today' | 'meetings'>('meetings');
 // the red dot, selection, and the recorder strip have a home that survives the
 // post-recording reload.
 const displayMeetings = computed<MeetingListItem[]>(() => {
+  // Layer pinned ad-hoc meetings the backend list hasn't caught up to on top of
+  // the loaded list (deduped by id), so they survive the post-recording reload.
+  const pinned = [...pinnedMeetings.value.values()].filter(
+    (p) => !meetings.value.some((m) => m.id === p.id)
+  );
+  const base = pinned.length ? [...pinned, ...meetings.value] : meetings.value;
+
   const id = recordingMeetingId.value;
-  if (!id || meetings.value.some((m) => m.id === id)) return meetings.value;
+  if (!id || base.some((m) => m.id === id)) return base;
   const timestamp = timestampFromLocalRecordingId(id);
-  if (!timestamp) return meetings.value; // an Ariso meeting outside the loaded window
+  if (!timestamp) return base; // an Ariso meeting outside the loaded window
   return [
     {
       id,
@@ -159,7 +172,7 @@ const displayMeetings = computed<MeetingListItem[]>(() => {
       timestamp,
       files: { hasAudio: false, hasNote: false, hasTranscript: false },
     },
-    ...meetings.value,
+    ...base,
   ];
 });
 
@@ -276,6 +289,14 @@ async function loadMeetings(): Promise<void> {
     const next = await (await getActiveBackend()).listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
+    // Drop any pinned ad-hoc meeting the backend list now surfaces on its own.
+    if (pinnedMeetings.value.size) {
+      const pruned = new Map(pinnedMeetings.value);
+      for (const id of [...pruned.keys()]) {
+        if (next.some((m) => m.id === id)) pruned.delete(id);
+      }
+      if (pruned.size !== pinnedMeetings.value.size) pinnedMeetings.value = pruned;
+    }
     // The native tray owns its own meeting cache. When this visible list gets
     // fresh data, nudge Rust to re-fetch so the menu-bar title updates now.
     void emitNotificationsSync().catch((err) => {
@@ -347,18 +368,40 @@ async function onRecordingStarted(event: { payload: { meetingId: number | null }
   await selectRecordingMeeting(event.payload?.meetingId);
 }
 
+// Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
+// reload includes it. Local recordings (timestamp-encoded ids) already get a
+// synthetic row from displayMeetings, so only numeric Ariso ids are pinned.
+async function pinRecordedMeeting(id: string): Promise<void> {
+  if (!/^\d+$/.test(id)) return;
+  if (meetings.value.some((m) => m.id === id) || pinnedMeetings.value.has(id)) return;
+  try {
+    const backend = await getActiveBackend();
+    if (backend.id !== 'ariso') return;
+    const detail = await backend.getMeetingDetail({ id, title: '', timestamp: new Date().toISOString() });
+    pinnedMeetings.value = new Map(pinnedMeetings.value).set(id, {
+      id,
+      title: detail.title,
+      timestamp: detail.startAt,
+      endTimestamp: detail.endAt,
+    });
+  } catch (e) {
+    console.error('Failed to pin recorded meeting', id, e);
+  }
+}
+
 // Shared resolver for "the recording is attached to meeting X, surface it in
 // the detail panel". Used by both the live `recording://started` event and the
 // mount-time backend query that recovers state after the library was closed.
 async function selectRecordingMeeting(id: number | null | undefined): Promise<void> {
   if (id == null) return;
   const idStr = String(id);
-  let m = meetings.value.find((x) => x.id === idStr);
+  let m = displayMeetings.value.find((x) => x.id === idStr);
   if (!m) {
-    // The picker can start a meeting the library hasn't loaded yet (e.g. it
-    // appeared on the calendar after our last refresh) — reload once.
+    // The picker can start a meeting the library hasn't loaded yet — reload, and
+    // pin it if it's an ad-hoc meeting the list still won't surface.
     await loadMeetings();
-    m = meetings.value.find((x) => x.id === idStr);
+    await pinRecordedMeeting(idStr);
+    m = displayMeetings.value.find((x) => x.id === idStr);
   }
   if (m) await selectMeeting(m);
 }
@@ -369,14 +412,18 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
 // replaces the synthetic row under the same id.
 watch(recordingMeetingId, async (id, prevId) => {
   if (id) {
+    // Ensure the recorded meeting has a sidebar row even when it's an ad-hoc
+    // Ariso meeting the calendar list doesn't carry.
+    await pinRecordedMeeting(id);
     const m = displayMeetings.value.find((x) => x.id === id);
     if (m && selectedItem.value?.id !== id) await selectMeeting(m);
     return;
   }
   await loadMeetings();
-  if (prevId && selectedItem.value?.id === prevId && !meetings.value.some((m) => m.id === prevId)) {
-    // Discarded/crashed recording — its synthetic row is gone; fall back.
-    selectedItem.value = meetings.value[0] ?? null;
+  if (prevId && selectedItem.value?.id === prevId && !displayMeetings.value.some((m) => m.id === prevId)) {
+    // Discarded/crashed recording — its row is gone (and nothing pinned it);
+    // fall back to the first available meeting.
+    selectedItem.value = displayMeetings.value[0] ?? null;
   }
 });
 

@@ -494,6 +494,98 @@ describe('LibraryView', () => {
     expect(rows[0].attributes('aria-pressed')).toBe('true');
   });
 
+  // An ad-hoc Ariso meeting (created via "Record a new meeting") isn't a
+  // calendar-scheduled meeting, so listMeetings() never returns it. The library
+  // pins it (fetching its metadata) so it stays in the sidebar after the
+  // recording stops instead of vanishing on the post-recording reload.
+  it('keeps an ad-hoc Ariso meeting in the list after its recording stops', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    // The calendar list never carries the ad-hoc meeting (id 77).
+    listMeetings.mockResolvedValue([item({ id: '5', title: 'Calendar Sync', files: undefined })]);
+    getMeetingDetail.mockImplementation((m) =>
+      Promise.resolve({
+        id: m.id,
+        title: m.id === '77' ? 'My ad-hoc meeting' : m.title,
+        startAt: '2026-06-02T14:30:00Z',
+        participants: [],
+        actionItems: [],
+        isLocal: false,
+      })
+    );
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('My ad-hoc meeting');
+
+    // Recording starts against the freshly created meeting 77.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 77,
+      phase: 'recording',
+    });
+    await flushPromises();
+
+    let adhoc = wrapper.findAll('.meeting-item').find((r) => r.text().includes('My ad-hoc meeting'));
+    expect(adhoc).toBeTruthy();
+    expect(adhoc!.find('.mi-rec-dot').exists()).toBe(true);
+
+    // Recording stops — the strip clears, the library reloads (still no 77 from
+    // the calendar), but the pinned row must remain.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 77,
+      phase: 'closed',
+    });
+    await flushPromises();
+
+    adhoc = wrapper.findAll('.meeting-item').find((r) => r.text().includes('My ad-hoc meeting'));
+    expect(adhoc).toBeTruthy();
+    expect(adhoc!.find('.mi-rec-dot').exists()).toBe(false);
+  });
+
+  it('unpins an ad-hoc meeting once the backend list starts returning it', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    // After the recording, a reload finally surfaces meeting 77 from the backend.
+    listMeetings
+      .mockResolvedValueOnce([item({ id: '5', title: 'Calendar Sync', files: undefined })])
+      .mockResolvedValue([
+        item({ id: '77', title: 'My ad-hoc meeting', timestamp: '2026-06-02T14:30:00Z', files: undefined }),
+        item({ id: '5', title: 'Calendar Sync', files: undefined }),
+      ]);
+    getMeetingDetail.mockImplementation((m) =>
+      Promise.resolve({
+        id: m.id,
+        title: m.id === '77' ? 'My ad-hoc meeting' : m.title,
+        startAt: '2026-06-02T14:30:00Z',
+        participants: [],
+        actionItems: [],
+        isLocal: false,
+      })
+    );
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0], durationSeconds: 1, isPaused: false, meetingId: 77, phase: 'recording',
+    });
+    await flushPromises();
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0], durationSeconds: 1, isPaused: false, meetingId: 77, phase: 'closed',
+    });
+    await flushPromises();
+
+    // Exactly one row for 77 (the backend's), not a pinned duplicate.
+    const adhocRows = wrapper.findAll('.meeting-item').filter((r) => r.text().includes('My ad-hoc meeting'));
+    expect(adhocRows).toHaveLength(1);
+  });
+
   it('start-recording button opens the recorder directly for local backend', async () => {
     usesMeetingPicker.mockReturnValue(false);
     listMeetings.mockResolvedValue([]);
