@@ -363,20 +363,30 @@ async function handleStop() {
   waveform.stop();
   const endAt = new Date().toISOString();
   const startAt = recorder.startedAt.value;
-  const mp3Blob = await recorder.stopRecording();
+  const newBlob = await recorder.stopRecording();
   await invoke('set_tray_recording', { isRecording: false, isPaused: false });
 
-  if (mp3Blob.size > 0 && backend.value) {
-    stoppedBlob.value = mp3Blob;
+  // A held blob means we're resuming a failed recording: concatenate the new
+  // segment onto it and upload the whole thing as one recording. Keep the
+  // ORIGINAL startAt so finalize re-keys the same on-disk buffer / Library row.
+  const prevBlob = stoppedBlob.value;
+  const prevMeta = stoppedMeta.value;
+  const combinedBlob = prevBlob
+    ? new Blob([prevBlob, newBlob], { type: 'audio/mpeg' })
+    : newBlob;
+
+  if (combinedBlob.size > 0 && backend.value) {
+    stoppedBlob.value = combinedBlob;
     stoppedMeta.value = {
-      startAt,
+      startAt: prevMeta?.startAt ?? startAt,
       endAt,
-      durationSeconds: recorder.durationSeconds.value,
-      meetingId: effectiveMeetingId.value ?? undefined,
+      durationSeconds:
+        (prevMeta?.durationSeconds ?? 0) + recorder.durationSeconds.value,
+      meetingId: prevMeta?.meetingId ?? effectiveMeetingId.value ?? undefined,
     };
     await runFinalize();
   } else {
-    if (mp3Blob.size > 0 && !backend.value) {
+    if (combinedBlob.size > 0 && !backend.value) {
       console.error('handleStop: backend not initialized; discarding recording');
     }
     await closeWindow();

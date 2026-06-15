@@ -28,14 +28,16 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
 const recorderIsRecording = { value: true };
+const recorderDuration = { value: 5 };
+const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: recorderIsRecording,
     isPaused: { value: false },
-    durationSeconds: { value: 5 },
+    durationSeconds: recorderDuration,
     frameLevels: { value: new Array(32).fill(0.5) },
     lastSoundAt: { value: 0 },
-    startedAt: { value: '2026-06-09T10:00:00Z' },
+    startedAt: recorderStartedAt,
     getAnalyser,
     startRecording: (...a: unknown[]) => startRecording(...a),
     stopRecording: () => stopRecording(),
@@ -75,6 +77,8 @@ beforeEach(() => {
   for (const k in eventHandlers) delete eventHandlers[k];
   routeQuery = {};
   recorderIsRecording.value = true;
+  recorderDuration.value = 5;
+  recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -317,6 +321,47 @@ describe('WaveformView vertical pill', () => {
     await wrapper.find('.stop-btn').trigger('click');
     await flushPromises();
     expect(finalizeRecording).toHaveBeenCalled();
+  });
+
+  it('stop after resume uploads the combined blob with original startAt and summed duration', async () => {
+    finalizeRecording
+      .mockRejectedValueOnce(new Error('boom'))   // first stop fails
+      .mockResolvedValue({ backend: 'local' });    // combined upload succeeds
+    // First segment: 3 bytes, 5s (defaults).
+    stopRecording.mockResolvedValueOnce(
+      new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }),
+    );
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    const firstMeta = finalizeRecording.mock.calls[0][1] as {
+      startAt: string | null;
+      durationSeconds: number;
+    };
+    expect(firstMeta.durationSeconds).toBe(5);
+
+    // Resume; second segment: 2 bytes, 7s.
+    await wrapper.find('.resume-btn').trigger('click');
+    await flushPromises();
+    recorderDuration.value = 7;
+    stopRecording.mockResolvedValueOnce(
+      new Blob([new Uint8Array([9, 9])], { type: 'audio/mpeg' }),
+    );
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(finalizeRecording).toHaveBeenCalledTimes(2);
+    const combinedBlob = finalizeRecording.mock.calls[1][0] as Blob;
+    const combinedMeta = finalizeRecording.mock.calls[1][1] as {
+      startAt: string | null;
+      durationSeconds: number;
+    };
+    expect(combinedBlob.size).toBe(5);               // 3 + 2 bytes concatenated
+    expect(combinedMeta.startAt).toBe('2026-06-09T10:00:00Z'); // original start kept
+    expect(combinedMeta.durationSeconds).toBe(12);   // 5 + 7 summed
+    expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
   });
 
   it('Retry re-runs finalize with the same blob and meta, then succeeds', async () => {
