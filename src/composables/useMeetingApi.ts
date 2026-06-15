@@ -43,6 +43,7 @@ interface ScheduledMeeting {
 }
 
 interface MeetingNotesParticipant {
+  id?: number;
   name?: string;
   email?: string;
   role?: string;
@@ -60,6 +61,9 @@ interface MeetingNotes {
   status?: string;
   visibility?: string;
   external?: boolean;
+  short_code?: string;
+  public_share_expires_at?: string | null;
+  shareMeetingNotesToPublic?: 'attendee_and_host' | 'host_only' | 'off';
   summary?: string | Record<string, unknown> | null;
   participants?: MeetingNotesParticipant[];
   hasTranscript?: boolean;

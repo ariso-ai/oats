@@ -11,6 +11,7 @@ const getBackendSetting = vi.fn();
 const uploadAudio = vi.fn();
 const renameRecording = vi.fn();
 const updateMeetingNotesTitle = vi.fn();
+const getMeetingNotes = vi.fn();
 
 vi.mock('../tauri', () => ({
   local: {
@@ -32,6 +33,7 @@ vi.mock('./useMeetingApi', () => ({
     uploadAudio: (...a: unknown[]) => uploadAudio(...a),
     listMeetingsInWindow: (...a: unknown[]) => listMeetingsInWindow(...a),
     updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
+    getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
   }),
 }));
 
@@ -39,6 +41,7 @@ import { ArisoBackend, LocalBackend, getActiveBackend, arisoMeetingWindow } from
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getMeetingNotes.mockReset();
 });
 
 describe('LocalBackend', () => {
@@ -120,6 +123,28 @@ describe('ArisoBackend', () => {
     updateMeetingNotesTitle.mockResolvedValue(undefined);
     await new ArisoBackend().renameMeeting('7', 'New title');
     expect(updateMeetingNotesTitle).toHaveBeenCalledWith('7', 'New title');
+  });
+
+  it('maps share-gating fields and participant ids from getMeetingNotes', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Sync',
+      start_at: '2026-06-01T10:00:00Z',
+      visibility: 'workspace',
+      short_code: 'abc123',
+      public_share_expires_at: '2026-07-01T10:00:00Z',
+      shareMeetingNotesToPublic: 'host_only',
+      participants: [
+        { id: 11, name: 'Ana', email: 'ana@x.com', role: 'host', self: true, avatar_url: 'u' },
+      ],
+      summary: '{}',
+    });
+    const backend = new ArisoBackend();
+    const d = await backend.getMeetingDetail({ id: '7', title: 'Sync', timestamp: '2026-06-01T10:00:00Z' });
+    expect(d.shortCode).toBe('abc123');
+    expect(d.publicShareExpiresAt).toBe('2026-07-01T10:00:00Z');
+    expect(d.shareMeetingNotesToPublic).toBe('host_only');
+    expect(d.participants[0].id).toBe(11);
   });
 });
 
