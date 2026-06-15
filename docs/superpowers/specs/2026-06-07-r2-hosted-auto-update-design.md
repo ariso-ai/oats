@@ -16,7 +16,7 @@ attachments.
 - The Tauri v2 updater currently checks
   `https://github.com/ariso-ai/conflux/releases/latest/download/latest.json`
   (`src-tauri/tauri.conf.json` → `plugins.updater.endpoints`).
-- The release job in `.github/workflows/release.yaml` signs + notarizes, builds
+- The release job in `.github/workflows/desktop.yaml` signs + notarizes, builds
   `latest.json` (with `url` pointing at GitHub release-asset download URLs), and
   attaches the DMG + `.app.tar.gz` + `.sig` + `latest.json` to the GitHub
   Release via `softprops/action-gh-release`.
@@ -44,16 +44,16 @@ Stable object keys, overwritten on every release:
 
 ```
 desktop/latest.json        → updater manifest (endpoint target)
-desktop/oats.app.tar.gz    → updater payload (referenced by latest.json `url`)
-desktop/oats.dmg           → permanent human download link
+desktop/Ariso.app.tar.gz   → updater payload (referenced by latest.json `url`)
+desktop/Ariso.dmg          → permanent human download link
 ```
 
 Public URLs:
 
 ```
 https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/latest.json
-https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz
-https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg
+https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.app.tar.gz
+https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.dmg
 ```
 
 The `.app.tar.gz.sig` file is **not** uploaded. The Tauri updater reads the
@@ -97,26 +97,26 @@ const LLM_CDN_BASE: &str =
 > Implementation may choose whichever is cleanest; this is a light touch and not
 > the core of the change.
 
-### 3. `.github/workflows/release.yaml` — release job
+### 3. `.github/workflows/desktop.yaml` — release job
 
 **a. `latest.json` generation** — point the `url` at the stable R2 tarball path
 instead of the GitHub asset URL. Keep version / notes / `pub_date` / `mandatory`
 / `signature` logic exactly as-is.
 
 ```bash
-ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz"
+ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.app.tar.gz"
 ```
 
 **b. New step "Publish to R2"** — upload via AWS CLI to R2's S3 endpoint, to the
 stable keys, with correct content types and cache headers:
 
 ```bash
-aws s3 cp "$TARBALL" "s3://$R2_BUCKET/desktop/oats.app.tar.gz" \
+aws s3 cp "$TARBALL" "s3://$R2_BUCKET/desktop/Ariso.app.tar.gz" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/gzip \
   --cache-control "no-cache, max-age=0, must-revalidate"
 
-aws s3 cp "$DMG" "s3://$R2_BUCKET/desktop/oats.dmg" \
+aws s3 cp "$DMG" "s3://$R2_BUCKET/desktop/Ariso.dmg" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/x-apple-diskimage \
   --cache-control "no-cache, max-age=0, must-revalidate"
@@ -143,7 +143,7 @@ that reads the new manifest never points at a not-yet-uploaded payload.
     body: |
 
       ---
-      **Download:** https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg
+      **Download:** https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.dmg
 ```
 
 No `files:` / `fail_on_unmatched_files:` — nothing is attached.

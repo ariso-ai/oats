@@ -4,11 +4,6 @@
 **Date:** 2026-05-25
 **Owner:** Ariso desktop
 
-> Historical note: this pre-dates the Oats rename and the R2-hosted release
-> pipeline. Current release artifact names and install instructions live in
-> `README.md`, `.github/workflows/release.yaml`, `.github/scripts/release-publish.sh`,
-> and `docs/superpowers/specs/2026-06-07-r2-hosted-auto-update-design.md`.
-
 ## Goal
 
 Add a Sparkle-style in-app update experience to the Ariso Mac app: silent background checks, a polished "Update Available" dialog with release notes, and one-click install + relaunch. The app should behave like any other professionally-built Mac app (1Password, Bear, Things) when a new version ships.

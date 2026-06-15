@@ -1,7 +1,7 @@
 # Meeting Push Notifications (Pusher) — Design
 
 **Date:** 2026-05-29
-**App:** `@ariso-ai/oats` (`ariso-ai/oats`) — Tauri v2 + Vue 3
+**App:** `@ariso-ai/desktop` (`ariso-ai/sage`) — Tauri v2 + Vue 3
 **Status:** Approved for planning
 
 ## Summary
@@ -15,7 +15,7 @@ notification opens the corresponding prep page in the user's web app
 (best-effort).
 
 This **replaces an earlier polling design** (push via Pusher, not polling).
-Scope is the **desktop side only** (`ariso-ai/oats`).
+Scope is the **desktop side only** (`ariso-ai/sage`).
 
 **Meeting notes are intentionally out of scope for this iteration** (see
 Deferred). Only meeting prep is implemented.
