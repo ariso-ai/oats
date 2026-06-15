@@ -363,6 +363,37 @@ describe('LibraryView', () => {
     expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
   });
 
+  it('hides the red dot once the recording stops, even if the failed pill lingers', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan' }),
+      item({ id: '7', title: 'Other Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'recording',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(true);
+
+    // Upload failed: the pill stays open and keeps heartbeating 'failed', but the
+    // recording has stopped — the row must no longer pulse.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'failed',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
   it('selects the picked meeting in the detail panel when a recording starts', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);
