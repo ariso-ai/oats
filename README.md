@@ -8,7 +8,7 @@
 
 [![Desktop App](https://github.com/ariso-ai/oats/actions/workflows/desktop.yaml/badge.svg)](https://github.com/ariso-ai/oats/actions/workflows/desktop.yaml)
 [![Release](https://github.com/ariso-ai/oats/actions/workflows/release.yaml/badge.svg)](https://github.com/ariso-ai/oats/actions/workflows/release.yaml)
-[![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&logo=apple&color=000000)](https://github.com/ariso-ai/oats/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&logo=apple&color=000000)](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](https://github.com/ariso-ai/oats/releases/latest)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
