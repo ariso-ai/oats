@@ -1,17 +1,21 @@
 <template>
   <div class="update-window">
-    <img class="app-icon" src="../assets/oats-light.png" alt="" />
+    <header class="update-hero">
+      <img class="app-icon" src="../assets/oats-light.png" alt="Ariso" />
 
-    <h1 class="title">Update Available</h1>
-
-    <div class="subtitle">
-      <span class="version-chip">{{ info.version }}</span>
-      <span class="dot">·</span>
-      <span>You have {{ currentVersion }}</span>
-    </div>
+      <div class="hero-copy">
+        <p class="eyebrow">Ariso for Mac</p>
+        <h1 class="title">Update Available</h1>
+        <div class="subtitle">
+          <span class="version-chip">{{ info.version }}</span>
+          <span class="dot">·</span>
+          <span>You have {{ currentVersion }}</span>
+        </div>
+      </div>
+    </header>
 
     <div class="notes-card">
-      <div class="notes-title">What's New</div>
+      <div class="notes-title">What's new</div>
       <div class="notes-body" v-html="renderedNotes"></div>
     </div>
 
@@ -65,11 +69,11 @@ const progressPct = computed(() => {
   return Math.min(100, Math.floor((downloaded.value / total.value) * 100));
 });
 
-// Render Markdown-ish release notes. We deliberately do not pull in a
-// full Markdown parser — GitHub release bodies are bullet-list-heavy
-// and a tiny renderer covers 99% of cases without the dependency cost.
+// Render Markdown-ish release notes for the compact updater window. GitHub
+// release bodies are bullet-list-heavy, so this keeps the window fast and
+// predictable without bringing a full Markdown parser into the desktop shell.
 const renderedNotes = computed(() => {
-  const text = info.value.notes || '_No release notes provided._';
+  const text = info.value.notes || 'No release notes provided.';
   return text
     .split('\n')
     .map((line) => {
@@ -168,81 +172,127 @@ async function onLater() {
 
 <style scoped>
 .update-window {
-  background: white;
-  padding: 22px 22px 18px;
-  font-family: -apple-system, system-ui, sans-serif;
+  background: #f5f5f7;
+  padding: 24px 28px 20px;
+  box-sizing: border-box;
+  width: 100vw;
+  font-family: Polymath, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   min-height: 100vh;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
+  color: #1d1d1f;
+  overflow: hidden;
+}
+
+.update-hero {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 6px 0 18px;
 }
 
 .app-icon {
-  width: 64px;
-  height: 64px;
-  border-radius: 14px;
-  align-self: center;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
-  margin-bottom: 12px;
+  width: 68px;
+  height: 68px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.hero-copy {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
 }
 
 .title {
-  font-size: 16px;
+  font-size: 24px;
+  line-height: 1.08;
   font-weight: 700;
-  color: #1d1d1f;
-  text-align: center;
-  margin: 0 0 4px 0;
+  color: #202124;
+  margin: 0 0 7px 0;
+  letter-spacing: 0;
 }
 
 .subtitle {
-  font-size: 12px;
-  color: #86868b;
-  text-align: center;
-  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: #6f7785;
 }
 
 .version-chip {
-  background: #eef2ff;
-  color: #4f46e5;
-  padding: 1px 7px;
-  border-radius: 4px;
+  background: #ffcb14;
+  color: #111113;
+  padding: 2px 8px 3px;
+  border-radius: 999px;
   font-weight: 600;
+  line-height: 1;
 }
 
 .dot {
-  margin: 0 5px;
+  color: #9ca3af;
 }
 
 .notes-card {
-  background: #f5f5f7;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid #e2e5ea;
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 13px 15px;
+  width: min(100%, calc(100vw - 56px));
+  max-width: 364px;
+  box-sizing: border-box;
+  align-self: flex-start;
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #1d1d1f;
-  max-height: 140px;
+  overflow-x: hidden;
+  font-size: 13px;
+  line-height: 1.48;
+  color: #2d3138;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
+  scrollbar-width: thin;
+  scrollbar-color: #c9ced8 transparent;
 }
 
 .notes-title {
-  font-weight: 600;
-  margin-bottom: 6px;
-  font-size: 12px;
+  position: sticky;
+  top: -13px;
+  z-index: 1;
+  margin: -13px -15px 10px;
+  padding: 11px 15px 8px;
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid #eceff3;
+  font-weight: 700;
+  font-size: 13px;
+  color: #202124;
 }
 
-.notes-body .bullet { padding-left: 4px; }
-.notes-body .h2    { font-weight: 700; margin: 6px 0 2px; }
-.notes-body .h3    { font-weight: 600; margin: 4px 0 2px; }
+.notes-body {
+  overflow-wrap: anywhere;
+}
+
+.notes-body .bullet { padding-left: 2px; }
+.notes-body .h2    { font-weight: 700; margin: 8px 0 3px; color: #202124; }
+.notes-body .h3    { font-weight: 600; margin: 6px 0 2px; color: #202124; }
 
 .error-line {
-  margin-top: 10px;
+  margin-top: 9px;
   font-size: 12px;
-  color: #dc2626;
+  color: #b42318;
   text-align: center;
+  font-weight: 500;
 }
 
 .progress-row {
-  margin-top: 16px;
+  margin-top: 14px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -250,40 +300,49 @@ async function onLater() {
 
 .progress-track {
   flex: 1;
-  height: 6px;
-  background: #e5e7eb;
-  border-radius: 3px;
+  height: 7px;
+  background: #e1e5ec;
+  border-radius: 999px;
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(to right, #6366f1, #4f46e5);
+  background: #ffcb14;
   transition: width 0.2s;
 }
 
 .progress-label {
   font-size: 11px;
-  color: #6b7280;
+  color: #6f7785;
   width: 32px;
   text-align: right;
+  font-weight: 600;
 }
 
 .actions {
-  margin-top: 16px;
+  margin-top: 14px;
+  width: min(100%, calc(100vw - 56px));
+  max-width: 364px;
+  box-sizing: border-box;
+  align-self: flex-start;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
 }
 
 .left-actions {
+  flex: 1 1 auto;
   display: flex;
-  gap: 14px;
+  gap: 16px;
 }
 
 .link-action {
-  font-size: 12px;
-  color: #86868b;
+  font-size: 13px;
+  font-weight: 600;
+  color: #737987;
   text-decoration: none;
   cursor: pointer;
 }
@@ -293,17 +352,22 @@ async function onLater() {
 }
 
 .install-btn {
+  flex: 0 0 auto;
+  width: 128px;
+  box-sizing: border-box;
   font-size: 13px;
-  padding: 6px 18px;
-  border-radius: 6px;
-  border: none;
-  background: linear-gradient(to bottom, #6366f1, #4f46e5);
-  color: white;
-  font-weight: 600;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid #111113;
+  background: #111113;
+  color: #fffbeb;
+  font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
+  box-shadow: 0 1px 1px rgba(17, 24, 39, 0.16);
 }
 
 .install-btn:hover {
-  filter: brightness(1.05);
+  background: #2b2d31;
 }
 </style>
