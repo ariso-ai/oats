@@ -692,6 +692,24 @@ pub fn discard_pending_audio(created_at: String) -> Result<(), String> {
     crate::storage::discard_pending_audio(&root, &created_at)
 }
 
+/// List buffered pending uploads (oldest-first) for the Library's resume UI.
+#[tauri::command]
+pub fn list_pending_uploads() -> Result<Vec<crate::storage::PendingUploadMeta>, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::list_pending_uploads(&root)
+}
+
+/// Concatenate the given pending uploads (chronological key order) into a
+/// single mp3, returned as raw bytes for re-upload. Bounded by MAX_AUDIO_BYTES.
+#[tauri::command]
+pub fn combine_pending_audio(
+    created_at_keys: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let root = crate::storage::ariso_root()?;
+    let bytes = crate::storage::combine_pending_audio(&root, &created_at_keys, MAX_AUDIO_BYTES)?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
