@@ -57,12 +57,16 @@ vi.mock('../composables/useMeetingNotifications', () => ({
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
+// pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
 vi.mock('../tauri', () => ({
   local: {
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
     readRecordingNote: (id: string) => readRecordingNote(id),
     writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
+  },
+  pending: {
+    list: () => Promise.resolve([]),
   },
 }));
 
@@ -359,6 +363,37 @@ describe('LibraryView', () => {
     expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
   });
 
+  it('hides the red dot once the recording stops, even if the failed pill lingers', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan' }),
+      item({ id: '7', title: 'Other Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'recording',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(true);
+
+    // Upload failed: the pill stays open and keeps heartbeating 'failed', but the
+    // recording has stopped — the row must no longer pulse.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'failed',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
   it('selects the picked meeting in the detail panel when a recording starts', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);
@@ -594,5 +629,18 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('renders the PendingUploads section inside the sidebar', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.pending-stub').exists()).toBe(true);
   });
 });

@@ -78,6 +78,12 @@ export const api = {
   ): Promise<number> {
     return invoke<number>('put_presigned', { url, data, contentType });
   },
+
+  /** Raw audio bytes for an Ariso meeting. Rejects with a message prefixed
+   *  by the HTTP status (e.g. "404: …") when the server has no audio. */
+  async fetchMeetingAudio(meetingId: string | number): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('fetch_meeting_audio', { meetingId: String(meetingId) });
+  },
 };
 
 export interface DesktopConfig {
@@ -232,6 +238,37 @@ export const local = {
   },
   openLibraryWindow(): Promise<void> {
     return invoke('create_library_window');
+  },
+};
+
+/** Metadata persisted next to a buffered Ariso upload, mirrors the Rust
+ *  `PendingUploadMeta`. Lets the Library resume a failed upload after restart. */
+export interface PendingUploadMeta {
+  createdAt: string;
+  startAt: string | null;
+  endAt: string;
+  durationSeconds: number;
+  meetingId?: number;
+}
+
+/** Disk buffer for Ariso uploads: audio + metadata are persisted before the
+ *  upload attempt and removed once the server confirms (or the user
+ *  dismisses). Keyed by the recording's ISO `createdAt`; Rust derives the id. */
+export const pending = {
+  bufferAudio(audio: number[], meta: PendingUploadMeta): Promise<string> {
+    return invoke<string>('buffer_pending_audio', { audio, meta });
+  },
+  /** Idempotent — missing buffer files are not an error. */
+  discardAudio(createdAt: string): Promise<void> {
+    return invoke('discard_pending_audio', { createdAt });
+  },
+  /** Buffered uploads awaiting resume, oldest-first. */
+  list(): Promise<PendingUploadMeta[]> {
+    return invoke<PendingUploadMeta[]>('list_pending_uploads');
+  },
+  /** Concatenate the given buffers (chronological keys) into one mp3's bytes. */
+  combine(createdAtKeys: string[]): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('combine_pending_audio', { createdAtKeys });
   },
 };
 

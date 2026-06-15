@@ -699,6 +699,43 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     crate::storage::list_recordings(&root)
 }
 
+/// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
+/// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
+#[tauri::command]
+pub fn buffer_pending_audio(
+    audio: Vec<u8>,
+    meta: crate::storage::PendingUploadMeta,
+) -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::write_pending_audio(&root, &meta, &audio)
+}
+
+/// Remove the buffered mp3 for `created_at` (idempotent). Called after a
+/// confirmed upload and on explicit dismiss of a failed one.
+#[tauri::command]
+pub fn discard_pending_audio(created_at: String) -> Result<(), String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::discard_pending_audio(&root, &created_at)
+}
+
+/// List buffered pending uploads (oldest-first) for the Library's resume UI.
+#[tauri::command]
+pub fn list_pending_uploads() -> Result<Vec<crate::storage::PendingUploadMeta>, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::list_pending_uploads(&root)
+}
+
+/// Concatenate the given pending uploads (chronological key order) into a
+/// single mp3, returned as raw bytes for re-upload. Bounded by MAX_AUDIO_BYTES.
+#[tauri::command]
+pub fn combine_pending_audio(
+    created_at_keys: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let root = crate::storage::ariso_root()?;
+    let bytes = crate::storage::combine_pending_audio(&root, &created_at_keys, MAX_AUDIO_BYTES)?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
@@ -746,6 +783,61 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
         return Err(format!("recording audio too large to play: {size} bytes"));
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Meeting ids are numeric on the Ariso backend; rejecting anything else also
+/// keeps the id from smuggling path segments into the URL below.
+fn validate_meeting_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("invalid meeting id: {id}"));
+    }
+    Ok(())
+}
+
+/// Fetch a meeting's recorded audio from the Ariso API as raw bytes (the
+/// endpoint streams the file directly). Non-200 responses become an error
+/// whose message is prefixed with the HTTP status so the frontend can map
+/// 404 to a "no audio" state.
+#[tauri::command]
+pub async fn fetch_meeting_audio(
+    app: tauri::AppHandle,
+    meeting_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    validate_meeting_id(&meeting_id)?;
+    let token = get_session_token(&app).unwrap_or_default();
+    let client = http_client();
+    let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
+
+    // Bound the request so a stalled upstream/TCP connection can't hang the
+    // command indefinitely; reqwest's builder has no default timeout.
+    let mut response = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("{status}: audio fetch failed"));
+    }
+    if let Some(len) = response.content_length() {
+        if len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {len} bytes"));
+        }
+    }
+    // Stream the body and enforce MAX_AUDIO_BYTES as we go — buffering the
+    // whole response first can blow memory if content_length is absent or wrong.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {next_len} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -1078,6 +1170,15 @@ mod tests {
         let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
         assert!(res.is_err());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn meeting_id_must_be_digits_only() {
+        assert!(validate_meeting_id("123").is_ok());
+        assert!(validate_meeting_id("").is_err());
+        assert!(validate_meeting_id("12/audio").is_err());
+        assert!(validate_meeting_id("abc").is_err());
+        assert!(validate_meeting_id("12 ").is_err());
     }
 
     #[test]
