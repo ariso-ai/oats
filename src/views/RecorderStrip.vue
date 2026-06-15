@@ -34,7 +34,7 @@
             <rect x="8.5" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
           </svg>
           <svg v-else width="14" height="14" viewBox="0 0 14 14">
-            <path d="M3 1.8v10.4c0 .7.8 1.2 1.4.8l8.1-5.2c.6-.4.6-1.2 0-1.6L4.4 1c-.6-.4-1.4.1-1.4.8z" fill="currentColor" />
+            <circle cx="7" cy="7" r="5.5" fill="currentColor" />
           </svg>
         </button>
         <button class="ctrl-btn stop-btn" aria-label="Stop recording" @click.stop.prevent="control('tray://stop-recording')">

@@ -107,6 +107,28 @@ function assertOk2xx(res: { status: number; data: unknown }, action: string): vo
   }
 }
 
+// The POST /meeting-notes/audio response shape isn't strictly pinned, so pull
+// the new meeting id from the handful of shapes the API uses elsewhere: a bare
+// `{ id }` / `{ meetingId }`, or a nested meeting / meeting-note object.
+function extractMeetingId(data: unknown): number | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const nested = (key: string): unknown =>
+    (d[key] as Record<string, unknown> | undefined)?.id;
+  const candidates: unknown[] = [
+    d.id,
+    d.meetingId,
+    nested('meeting'),
+    nested('meetingNote'),
+    nested('meeting_note'),
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'number' && Number.isSafeInteger(c)) return c;
+    if (typeof c === 'string' && /^\d+$/.test(c)) return Number(c);
+  }
+  return null;
+}
+
 export function useMeetingApi() {
   async function getDeepgramToken(): Promise<string> {
     const res = await api.request('POST', '/desktop/deepgram-token');
@@ -124,6 +146,30 @@ export function useMeetingApi() {
     const res = await api.request('POST', '/desktop/meetings', { title });
     assertOk(res, 201, 'create meeting');
     return res.data as { meeting: Meeting };
+  }
+
+  // Create an ad-hoc meeting to record straight into. The backend seeds it with
+  // the current user as the sole participant; we only supply an optional title
+  // and the start time. Returns the new meeting's id so the recorder can attach
+  // its upload to it.
+  async function createAudioMeeting(
+    title?: string
+  ): Promise<{ meetingId: number }> {
+    const trimmed = title?.trim();
+    const body: { startAt: string; title?: string } = {
+      startAt: new Date().toISOString(),
+    };
+    if (trimmed) body.title = trimmed;
+    const res = await api.request('POST', '/meeting-notes/audio', body);
+    if (res.status !== 200 && res.status !== 201) {
+      const data = res.data as { error?: string } | null;
+      throw new Error(data?.error || `Failed to create meeting (${res.status})`);
+    }
+    const meetingId = extractMeetingId(res.data);
+    if (meetingId == null) {
+      throw new Error('Server did not return a meeting id');
+    }
+    return { meetingId };
   }
 
   async function listMeetings(
@@ -426,6 +472,7 @@ export function useMeetingApi() {
   return {
     getDeepgramToken,
     createMeeting,
+    createAudioMeeting,
     listMeetings,
     listScheduledMeetings,
     listMeetingsInWindow,
