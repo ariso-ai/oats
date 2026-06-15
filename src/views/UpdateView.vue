@@ -243,15 +243,6 @@ function isBrowserPreviewError(error: unknown): boolean {
 </script>
 
 <style scoped>
-:global(html),
-:global(body),
-:global(#app) {
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  overflow: hidden;
-}
-
 .update-window {
   /* Keep the update dialog on the same type and color tokens as Settings. */
   background: #f7f6f4;
@@ -259,6 +250,7 @@ function isBrowserPreviewError(error: unknown): boolean {
   padding: 0;
   box-sizing: border-box;
   width: 100%;
+  height: 100vh;
   font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   min-height: 100vh;
   max-height: 100vh;
