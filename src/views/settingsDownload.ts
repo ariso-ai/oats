@@ -3,12 +3,17 @@ import type { ModelStatus } from '../tauri';
 /** Per-model install/download UI state, independent of the backend status. */
 export type Busy = 'idle' | 'downloading' | 'error';
 
-/** Whether switching to `backend` with the given STT state should auto-start the STT download. */
-export function shouldAutoDownload(
+/**
+ * Whether switching to `backend` should open the first-time "download models"
+ * confirm dialog. Only for Local, only when the user has not been prompted
+ * before, and only when the models are not already ready / unsupported / mid-download.
+ */
+export function shouldPromptDownload(
   backend: 'ariso' | 'local',
+  alreadyPrompted: boolean,
   state: ModelStatus['state'],
 ): boolean {
-  if (backend !== 'local') return false;
+  if (backend !== 'local' || alreadyPrompted) return false;
   return state !== 'ready' && state !== 'downloading' && state !== 'unsupported';
 }
 
