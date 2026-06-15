@@ -160,6 +160,7 @@ async function startNewMeeting(): Promise<void> {
     console.error('Failed to start a new meeting:', err);
     createError.value =
       err instanceof Error ? err.message : 'Could not start the meeting.';
+  } finally {
     isChoosing.value = false;
   }
 }
