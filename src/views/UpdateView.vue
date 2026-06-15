@@ -1,5 +1,9 @@
 <template>
   <div class="update-window" :class="{ 'is-current': !hasUpdate }">
+    <!-- Mirrors the native overlay titlebar as an invisible drag target so the
+         blended chrome still behaves like a normal movable macOS window. -->
+    <div class="window-drag-region" data-tauri-drag-region></div>
+
     <header class="update-hero">
       <img class="app-icon" src="../assets/oats-light.svg" alt="Ariso" />
 
@@ -57,10 +61,13 @@
     </div>
 
     <div v-if="downloadState === 'downloading'" class="progress-row">
-      <div class="progress-track">
+      <div class="progress-copy">
+        <span>Downloading update</span>
+        <span>{{ progressLabel }}</span>
+      </div>
+      <div class="progress-track" aria-hidden="true">
         <div class="progress-fill" :style="{ width: progressPct + '%' }"></div>
       </div>
-      <div class="progress-label">{{ progressPct }}%</div>
     </div>
 
     <footer v-if="downloadState === 'idle'" class="actions">
@@ -109,6 +116,12 @@ const progressPct = computed(() => {
   return Math.min(100, Math.floor((downloaded.value / total.value) * 100));
 });
 
+// Mirrors the real updater progress event while keeping unknown totals readable
+// during the short "starting download" phase.
+const progressLabel = computed(() =>
+  total.value ? `${progressPct.value}%` : 'Starting…'
+);
+
 const hasUpdate = computed(() => {
   const version = updateInfo.value?.version.trim();
   return Boolean(version && version !== currentVersion);
@@ -125,6 +138,7 @@ const releaseNotesHtml = computed(() =>
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenAvailable: UnlistenFn | null = null;
 let unlistenNone: UnlistenFn | null = null;
+let unlistenDebugDownload: UnlistenFn | null = null;
 
 onMounted(async () => {
   // Initial state (covers the case where the window is opened from
@@ -156,12 +170,27 @@ onMounted(async () => {
       total.value = e.payload.total;
     }
   );
+
+  if (import.meta.env.DEV) {
+    // Dev-only visual seam for the native update dialog. It lets us seed the
+    // in-progress download state without depending on a real signed updater.
+    unlistenDebugDownload = await listen<{
+      downloaded?: number;
+      total?: number | null;
+    }>('update://debug-download-progress', (e) => {
+      downloadError.value = '';
+      downloadState.value = 'downloading';
+      downloaded.value = e.payload.downloaded ?? 0;
+      total.value = e.payload.total ?? null;
+    });
+  }
 });
 
 onUnmounted(() => {
   unlistenProgress?.();
   unlistenAvailable?.();
   unlistenNone?.();
+  unlistenDebugDownload?.();
 });
 
 async function onInstall() {
@@ -226,6 +255,7 @@ function isBrowserPreviewError(error: unknown): boolean {
 .update-window {
   /* Keep the update dialog on the same type and color tokens as Settings. */
   background: #f7f6f4;
+  position: relative;
   padding: 0;
   box-sizing: border-box;
   width: 100%;
@@ -236,6 +266,15 @@ function isBrowserPreviewError(error: unknown): boolean {
   flex-direction: column;
   color: #1c1c1c;
   overflow: hidden;
+}
+
+.window-drag-region {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 70px;
+  z-index: 10;
+  background: transparent;
+  -webkit-app-region: drag;
 }
 
 .update-hero {
@@ -473,16 +512,36 @@ function isBrowserPreviewError(error: unknown): boolean {
 }
 
 .progress-row {
-  margin-top: 14px;
+  width: 100%;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  min-height: 78px;
+  padding: 16px 36px 17px;
+  background: rgba(247, 246, 244, 0.96);
+  border-top: 1px solid #d6d6d6;
   display: flex;
+  flex-direction: column;
+  justify-content: center;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
+}
+
+.progress-copy {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 600;
+  color: #1c1c1c;
 }
 
 .progress-track {
-  flex: 1;
-  height: 7px;
-  background: #e1e5ec;
+  width: 100%;
+  height: 8px;
+  background: #e4e0da;
   border-radius: 999px;
   overflow: hidden;
 }
@@ -491,14 +550,6 @@ function isBrowserPreviewError(error: unknown): boolean {
   height: 100%;
   background: #ffcb14;
   transition: width 0.2s;
-}
-
-.progress-label {
-  font-size: 11px;
-  color: #6f7785;
-  width: 32px;
-  text-align: right;
-  font-weight: 600;
 }
 
 .actions {

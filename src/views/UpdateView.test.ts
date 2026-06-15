@@ -108,4 +108,27 @@ describe('UpdateView', () => {
     expect(wrapper.text()).not.toContain('Install Update');
     expect(wrapper.text()).not.toContain('Should not show as pending');
   });
+
+  it('can seed the dev download state for native visual review', async () => {
+    mocks.state = {
+      ...mocks.defaultState,
+      latest_known: {
+        version: '0.4.1',
+        mandatory: false,
+        notes: '### Features\n\n- Release-note powered highlights',
+      },
+    };
+
+    const wrapper = mount(UpdateView);
+    await flushPromises();
+
+    mocks.listeners.get('update://debug-download-progress')?.({
+      payload: { downloaded: 42, total: 100 },
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain('Downloading update');
+    expect(wrapper.text()).toContain('42%');
+    expect(wrapper.text()).not.toContain('Install Update');
+  });
 });
