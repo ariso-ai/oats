@@ -35,6 +35,8 @@
         </button>
       </header>
 
+      <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
+
       <p v-if="loading" class="hint">Loading…</p>
       <p v-else-if="error" class="hint">{{ error }}</p>
       <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
@@ -51,7 +53,7 @@
             :aria-pressed="selectedItem?.id === m.id"
             @click="selectMeeting(m)"
           >
-            <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
+            <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
               <span class="mi-title">{{ m.title }}</span>
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
@@ -99,6 +101,7 @@
       <RecorderStrip
         :meeting-id="selectedItem?.id ?? null"
         @recording-change="recordingMeetingId = $event"
+        @recording-active="recordingActive = $event"
       />
     </section>
   </div>
@@ -120,6 +123,7 @@ import {
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 import RecorderStrip from './RecorderStrip.vue';
+import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -132,8 +136,13 @@ type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
 };
 const detailView = ref<MeetingDetailViewExposed | null>(null);
-// Meeting currently being recorded (reported by the strip) — red dot in the list.
+const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
+// Meeting the recording session belongs to (reported by the strip). Persists
+// through the upload/failed phases so the row stays selected/pinned.
 const recordingMeetingId = ref<string | null>(null);
+// True only while audio is actively being captured — gates the red dot so it
+// stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
+const recordingActive = ref(false);
 // Ad-hoc meetings we recorded this session that the backend list doesn't surface
 // yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
 // isn't a calendar-scheduled meeting and never appears in listMeetings()). We
@@ -317,6 +326,10 @@ async function loadMeetings(): Promise<void> {
   }
 }
 
+async function onPendingUploaded(): Promise<void> {
+  await loadMeetings();
+}
+
 // Recording runs in the separate "waveform" window; its presence is our signal.
 async function refreshRecordingState(): Promise<void> {
   try {
@@ -420,6 +433,7 @@ watch(recordingMeetingId, async (id, prevId) => {
     return;
   }
   await loadMeetings();
+  await pendingUploads.value?.refresh();
   if (prevId && selectedItem.value?.id === prevId && !displayMeetings.value.some((m) => m.id === prevId)) {
     // Discarded/crashed recording — its row is gone (and nothing pinned it);
     // fall back to the first available meeting.
@@ -430,6 +444,7 @@ watch(recordingMeetingId, async (id, prevId) => {
 function onWindowFocus(): void {
   now.value = new Date();
   void loadMeetings();
+  void pendingUploads.value?.refresh();
   void refreshRecordingState();
 }
 

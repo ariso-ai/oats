@@ -156,6 +156,26 @@ describe('RecorderStrip', () => {
     expect(wrapper.emitted('recording-change')?.at(-1)).toEqual([null]);
   });
 
+  it('reports active recording to its parent, and inactive once not recording', async () => {
+    const wrapper = mount(RecorderStrip, { props: { meetingId: null } });
+    await flushPromises();
+
+    sendState(recording({ meetingId: 42 }));
+    await flushPromises();
+    expect(wrapper.emitted('recording-active')?.at(-1)).toEqual([true]);
+
+    // Stopped but the failed pill keeps heartbeating — the row must no longer
+    // read as actively recording (no lingering red dot).
+    sendState(recording({ meetingId: 42, phase: 'failed' }));
+    await flushPromises();
+    expect(wrapper.emitted('recording-active')?.at(-1)).toEqual([false]);
+
+    // Uploading and success are likewise not "recording".
+    sendState(recording({ meetingId: 42, phase: 'uploading' }));
+    await flushPromises();
+    expect(wrapper.emitted('recording-active')?.at(-1)).toEqual([false]);
+  });
+
   it('clears itself when state broadcasts stop (recorder died without closing)', async () => {
     vi.useFakeTimers();
     const wrapper = mount(RecorderStrip, { props: { meetingId: null } });

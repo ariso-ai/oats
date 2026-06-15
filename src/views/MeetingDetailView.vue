@@ -89,6 +89,14 @@
 
       <div v-else class="divider" />
 
+      <!-- Ariso audio playback. Local recordings keep audio on disk and are
+           not surfaced here (out of scope); keyed by meeting id so switching
+           selection remounts the player instead of leaking the previous
+           meeting's blob URL. -->
+      <div v-if="!detail.isLocal" class="card-audio">
+        <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+      </div>
+
       <!-- Tabs + Chat -->
       <div v-if="availableTabs.length" class="card-tabs">
         <div class="segment">
@@ -223,6 +231,7 @@ import {
   type MeetingCoaching,
 } from '../composables/useBackend';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative } from '../tauri';
@@ -337,6 +346,15 @@ const notesPlaceholder = computed(() =>
 // so a backend flip in Settings mid-view can't route a save or fetch through
 // the other backend.
 let detailBackend: Backend | null = null;
+
+// Lazy audio loader pinned to the backend that loaded the detail (a Settings
+// backend flip mid-view must not route the fetch through the other backend).
+function loadAudio(): Promise<ArrayBuffer | null> {
+  const i = props.item;
+  const backend = detailBackend;
+  if (!i || !backend) return Promise.resolve(null);
+  return backend.getMeetingAudio(i);
+}
 
 async function load(item: MeetingListItem | null): Promise<void> {
   // Bump the token first so any in-flight load for the previous selection
@@ -775,6 +793,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
+.card-audio { display: flex; padding: 12px 24px 0; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }

@@ -13,6 +13,7 @@
     "core:webview:allow-webview-close",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-ignore-cursor-events",
     "store:default",
     "opener:default",
     {
