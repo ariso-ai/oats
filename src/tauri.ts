@@ -256,6 +256,17 @@ export async function setOnboarded(value: boolean): Promise<void> {
   await store.set('onboarded', value);
 }
 
+/** Whether the first-time "download local models?" dialog has been confirmed. */
+export async function hasPromptedLocalModels(): Promise<boolean> {
+  const store = await load('settings.json', { autoSave: true });
+  return (await store.get<boolean>('localModelsPrompted')) === true;
+}
+
+export async function setPromptedLocalModels(value: boolean): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('localModelsPrompted', value);
+}
+
 /** Open (or focus) the first-run onboarding window. */
 export async function openOnboardingWindow(): Promise<void> {
   await invoke('create_onboarding_window');
