@@ -881,7 +881,12 @@ async function handleSignOut() {
   font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   background: #f7f6f4;
   color: #1c1c1c;
-  min-height: 100vh;
+  /* Own the full window height and scroll internally so a tall settings stack
+     (Local models + Account + Recording + Notifications + About) is reachable
+     on short windows instead of being clipped. */
+  height: 100vh;
+  box-sizing: border-box;
+  overflow-y: auto;
 }
 
 .title {
