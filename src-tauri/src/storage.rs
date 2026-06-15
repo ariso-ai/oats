@@ -68,7 +68,9 @@ pub struct RecordingSummary {
 
 /// Metadata persisted next to a buffered pending upload (`<id>.json`), so a
 /// failed Ariso upload can be resumed after the recorder window closes or the
-/// app restarts. Keyed on disk by `sanitize_iso_to_id(created_at)`.
+/// app restarts. Keyed on disk by `sanitize_iso_to_pending_id(created_at)`,
+/// which preserves sub-second precision so distinct recordings stopped in the
+/// same second do not collide.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingUploadMeta {
@@ -110,8 +112,8 @@ pub fn pending_uploads_dir(root: &Path) -> PathBuf {
 }
 
 /// Reject ids that could escape the pending-uploads dir. Mirrors the guard in
-/// `commands::recording_dir`; `sanitize_iso_to_id` strips `:` but passes `/`
-/// and `\` through, so a hostile timestamp must be caught here.
+/// `commands::recording_dir`; the sanitizer strips `:` but passes `/` and `\`
+/// through, so a hostile timestamp must be caught here.
 fn validate_pending_id(id: &str) -> Result<(), String> {
     if id.is_empty()
         || id.contains('/')
@@ -125,13 +127,13 @@ fn validate_pending_id(id: &str) -> Result<(), String> {
 }
 
 fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
-    let id = sanitize_iso_to_id(created_at);
+    let id = sanitize_iso_to_pending_id(created_at);
     validate_pending_id(&id)?;
     Ok(pending_uploads_dir(root).join(format!("{id}.mp3")))
 }
 
 fn pending_meta_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
-    let id = sanitize_iso_to_id(created_at);
+    let id = sanitize_iso_to_pending_id(created_at);
     validate_pending_id(&id)?;
     Ok(pending_uploads_dir(root).join(format!("{id}.json")))
 }
@@ -162,7 +164,7 @@ pub fn write_pending_audio(
     write_atomic(&audio_path, bytes)?;
     let json = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
     write_atomic(&meta_path, &json)?;
-    Ok(sanitize_iso_to_id(&meta.created_at))
+    Ok(sanitize_iso_to_pending_id(&meta.created_at))
 }
 
 /// Delete the buffered mp3 and its sidecar for `created_at`. Missing files are
@@ -240,6 +242,18 @@ pub fn sanitize_iso_to_id(iso: &str) -> String {
         None => iso.trim_end_matches('Z'),
     };
     format!("{}Z", head.replace(':', "-"))
+}
+
+/// Filesystem-safe id for buffered pending uploads. Differs from
+/// `sanitize_iso_to_id` by preserving sub-second precision so two recordings
+/// stopped within the same second produce distinct keys, while a retry of the
+/// same recording (same `created_at`) stays deterministic.
+/// "2026-06-02T14:30:05.123Z" -> "2026-06-02T14-30-05.123Z"
+/// "2026-06-02T14:30:05Z"     -> "2026-06-02T14-30-05Z"
+pub fn sanitize_iso_to_pending_id(iso: &str) -> String {
+    let iso = iso.split('+').next().unwrap_or(iso);
+    let trimmed = iso.trim_end_matches('Z');
+    format!("{}Z", trimmed.replace(':', "-"))
 }
 
 /// Format seconds as HH:MM:SS.
@@ -541,15 +555,29 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let id = write_pending_audio(root, &pmeta("2026-06-12T10:00:00.000Z"), b"mp3bytes").unwrap();
-        assert_eq!(id, "2026-06-12T10-00-00Z");
-        let audio = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
-        let sidecar = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.json");
+        assert_eq!(id, "2026-06-12T10-00-00.000Z");
+        let audio = pending_uploads_dir(root).join("2026-06-12T10-00-00.000Z.mp3");
+        let sidecar = pending_uploads_dir(root).join("2026-06-12T10-00-00.000Z.json");
         assert_eq!(std::fs::read(&audio).unwrap(), b"mp3bytes");
         assert!(sidecar.is_file());
 
         discard_pending_audio(root, "2026-06-12T10:00:00.000Z").unwrap();
         assert!(!audio.exists());
         assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn pending_audio_distinct_subsecond_keys_do_not_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Two distinct recordings within the same wall-clock second must not
+        // overwrite each other.
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00.123Z"), b"first").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00.456Z"), b"second").unwrap();
+        let a = pending_uploads_dir(root).join("2026-06-12T10-00-00.123Z.mp3");
+        let b = pending_uploads_dir(root).join("2026-06-12T10-00-00.456Z.mp3");
+        assert_eq!(std::fs::read(&a).unwrap(), b"first");
+        assert_eq!(std::fs::read(&b).unwrap(), b"second");
     }
 
     #[test]
