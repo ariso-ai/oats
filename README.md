@@ -124,6 +124,21 @@ The `Desktop App` workflow runs on a self-hosted Mac runner (`[self-hosted, macO
 | PR to `main`, push to `main`           | `validate` | `vite build` + `cargo check`. No signing secrets exposed.                     |
 | Publishing a GitHub Release (tag `v*`) | `release`  | Runs after `validate`. Signs + notarizes with `--features prod-api`, publishes the signed DMG, updater tarball, and `latest.json` to Cloudflare R2 (`/desktop/...`), and appends an R2 download link to the GitHub Release. Gated by the `release` GitHub Environment (required reviewer + tag-scoped policy + scoped secrets). |
 
+### Install with Homebrew
+
+The repository is also a Homebrew tap for the desktop app. The cask is named
+`oats` while the signed macOS bundle currently installs as `Ariso.app`:
+
+```bash
+brew tap ariso-ai/sage
+brew install --cask oats
+```
+
+The cask downloads the same signed DMG published to the stable R2 path by the
+release workflow. Because that object is replaced on each release, the cask uses
+`version :latest` and `sha256 :no_check`; after first install, the app's Tauri
+updater handles versioned update checks from `desktop/latest.json`.
+
 ### One-time setup on the runner Mac
 
 1. **Install the Developer ID Application certificate** into the login keychain:

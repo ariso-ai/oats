@@ -230,3 +230,5 @@ jobs:
 
             ---
             **Download:** https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.dmg
+
+            **Homebrew:** `brew tap ariso-ai/sage && brew install --cask oats`
