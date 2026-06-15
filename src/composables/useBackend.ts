@@ -182,10 +182,17 @@ export class ArisoBackend implements Backend {
 
   async finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult> {
     const createdAt = meta.startAt ?? meta.endAt;
-    // Crash-safety net: persist the mp3 before the upload attempt. A buffer
-    // failure must not block the upload — the in-memory blob is still valid.
+    // Crash-safety net: persist the mp3 + metadata before the upload attempt.
+    // A buffering failure must not block the upload — the in-memory blob is
+    // still valid.
     try {
-      await pending.bufferAudio(await blobToBytes(blob), createdAt);
+      await pending.bufferAudio(await blobToBytes(blob), {
+        createdAt,
+        startAt: meta.startAt,
+        endAt: meta.endAt,
+        durationSeconds: meta.durationSeconds,
+        meetingId: meta.meetingId,
+      });
     } catch (e) {
       console.error('Failed to buffer audio locally; uploading anyway', e);
     }

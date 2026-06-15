@@ -161,7 +161,13 @@ describe('ArisoBackend', () => {
       endAt: '2026-06-02T15:10:00.000Z',
       durationSeconds: 2400,
     });
-    expect(bufferPendingAudio).toHaveBeenCalledWith([9], '2026-06-02T14:30:05.000Z');
+    expect(bufferPendingAudio).toHaveBeenCalledWith([9], {
+      createdAt: '2026-06-02T14:30:05.000Z',
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 2400,
+      meetingId: undefined,
+    });
     expect(bufferPendingAudio.mock.invocationCallOrder[0]).toBeLessThan(
       uploadAudio.mock.invocationCallOrder[0]
     );
@@ -180,7 +186,11 @@ describe('ArisoBackend', () => {
       endAt: '2026-06-02T15:10:00.000Z',
       durationSeconds: 10,
     });
-    expect(bufferPendingAudio.mock.calls[0][1]).toBe('2026-06-02T15:10:00.000Z');
+    expect(bufferPendingAudio.mock.calls[0][1]).toMatchObject({
+      createdAt: '2026-06-02T15:10:00.000Z',
+      startAt: null,
+      endAt: '2026-06-02T15:10:00.000Z',
+    });
     expect(discardPendingAudio).toHaveBeenCalledWith('2026-06-02T15:10:00.000Z');
   });
 
