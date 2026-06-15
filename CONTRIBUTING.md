@@ -1,6 +1,6 @@
 # Contributing to oats
 
-Thanks for your interest in contributing to **oats**! 🌾 This guide covers everything you need to develop, build, test, and release the app.
+Thanks for your interest in contributing to **oats**! <img src="src/assets/oats-dark.png" alt="oats icon" width="16" height="16" valign="middle" /> This guide covers everything you need to develop, build, test, and release the app.
 
 oats is a [Tauri v2](https://v2.tauri.app/) desktop app built with [Vite](https://vite.dev/) and [Vue 3](https://vuejs.org/) on the frontend and Rust on the backend. It is part of the Ariso monorepo and is excluded from the monorepo's Turbo `build`/`lint`/`test` pipeline.
 

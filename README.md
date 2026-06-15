@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🌾 oats
+<img src="src/assets/oats-dark.png" alt="oats logo" width="96" height="96" />
+
+# oats
 
 **Record, transcribe, and summarize your meetings on macOS — for free in the cloud, or 100% offline on your own device.**
 
@@ -42,7 +44,7 @@ You choose how it works:
 
 1. Download the latest `oats.dmg` from the [**Releases page**](https://github.com/ariso-ai/oats/releases/latest).
 2. Open the DMG and drag **oats** into your Applications folder.
-3. Launch it from Applications. oats lives in your menu bar — look for the 🌾 icon.
+3. Launch it from Applications. oats lives in your menu bar — look for the <img src="src/assets/oats-dark.png" alt="oats icon" width="16" height="16" valign="middle" /> icon.
 
 The app is **code-signed and notarized by Apple**, and updates itself automatically as new versions ship.
 
