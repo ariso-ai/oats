@@ -158,7 +158,6 @@ const showSharingOptions = ref(false);
 const sharingOption = ref<Visibility>((props.detail.visibility as Visibility) || 'private');
 const sharing = ref(false);
 const shareError = ref('');
-const shareUrl = ref<string | null>(null);
 const linkCopied = ref(false);
 const publicShareExpiresInDays = ref<number>(DEFAULT_PUBLIC_SHARE_DAYS);
 const showDayOptions = ref(false);
@@ -264,7 +263,6 @@ async function doShare(visibility: Visibility, expiresInDays?: number): Promise<
     if (r.shortCode) props.detail.shortCode = r.shortCode;
     props.detail.visibility = visibility;
     props.detail.publicShareExpiresAt = r.publicShareExpiresAt;
-    shareUrl.value = r.shareUrl;
   } catch (e) {
     shareError.value = e instanceof Error ? e.message : 'Failed to share meeting notes';
   } finally {

@@ -152,4 +152,36 @@ describe('ShareMeetingPopover', () => {
     await flushPromises();
     expect(unshareEmail).toHaveBeenCalledWith('5', 'ana@x.com');
   });
+
+  it('public save flow calls shareMeeting with public and 30 days', async () => {
+    shareMeeting.mockResolvedValue({ shareUrl: 'https://app.test/shared/meeting-notes/abc', shortCode: 'abc', publicShareExpiresAt: '2026-07-15T00:00:00Z' });
+    const detail = makeDetail({
+      shareMeetingNotesToPublic: 'host_only',
+      participants: [{ id: 1, name: 'Ana', email: 'ana@x.com', role: 'host', self: true }],
+    });
+    wrapper = mountPop(detail);
+    await flushPromises();
+    q('.vis-toggle').click();
+    await flushPromises();
+    qAll('.vis-item')[0].click(); // public option
+    await flushPromises();
+    const saveBtn = document.querySelector('.expiry .btn-secondary') as HTMLElement;
+    saveBtn.click();
+    await flushPromises();
+    expect(shareMeeting).toHaveBeenCalledWith('5', 'public', 30);
+  });
+
+  it('shows already-shared error when sendShareEmail returns alreadyShared', async () => {
+    sendShareEmail.mockResolvedValue({ alreadyShared: true });
+    wrapper = mountPop(makeDetail());
+    await flushPromises();
+    const input = q('.email-input') as HTMLInputElement;
+    input.value = 'bob@x.com';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+    q('.email-row .btn-secondary').click();
+    await flushPromises();
+    const err = document.querySelector('.err');
+    expect(err?.textContent).toContain('Already shared');
+  });
 });
