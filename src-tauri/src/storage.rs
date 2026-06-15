@@ -181,6 +181,33 @@ fn read_pending_audio_bytes(root: &Path, created_at: &str) -> Result<Vec<u8>, St
     fs::read(&path).map_err(|e| format!("read pending audio: {e}"))
 }
 
+/// List buffered pending uploads, chronological (oldest-first). A sidecar is
+/// included only when its sibling `.mp3` still exists; unpaired or unparseable
+/// files are skipped (an orphan left by a crash stays for manual recovery).
+pub fn list_pending_uploads(root: &Path) -> Result<Vec<PendingUploadMeta>, String> {
+    let dir = pending_uploads_dir(root);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read pending-uploads dir: {e}"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(meta) = serde_json::from_slice::<PendingUploadMeta>(&bytes) else { continue };
+        let has_audio = pending_audio_path(root, &meta.created_at)
+            .map(|p| p.is_file())
+            .unwrap_or(false);
+        if has_audio {
+            out.push(meta);
+        }
+    }
+    out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(out)
+}
+
 /// Turn a UTC ISO-8601 instant into a filesystem-safe, sortable folder id.
 /// "2026-06-02T14:30:05.123Z" -> "2026-06-02T14-30-05Z"
 ///
@@ -529,6 +556,31 @@ mod tests {
         assert!(write_pending_audio(tmp.path(), &pmeta("a/b"), b"x").is_err());
         assert!(write_pending_audio(tmp.path(), &pmeta("\\evil"), b"x").is_err());
         assert!(discard_pending_audio(tmp.path(), "a/b").is_err());
+    }
+
+    #[test]
+    fn lists_pending_uploads_paired_sorted_and_skips_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Two well-formed pending uploads (written out of order).
+        write_pending_audio(root, &pmeta("2026-06-12T11:00:00Z"), b"b").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"a").unwrap();
+        // Orphan mp3 with no sidecar — must be skipped.
+        std::fs::write(pending_uploads_dir(root).join("2026-06-12T08-00-00Z.mp3"), b"x").unwrap();
+        // Orphan sidecar with no mp3 — must be skipped.
+        std::fs::write(pending_uploads_dir(root).join("2026-06-12T07-00-00Z.json"), b"{}").unwrap();
+
+        let list = list_pending_uploads(root).unwrap();
+        assert_eq!(list.len(), 2);
+        // Chronological ascending.
+        assert_eq!(list[0].created_at, "2026-06-12T09:00:00Z");
+        assert_eq!(list[1].created_at, "2026-06-12T11:00:00Z");
+    }
+
+    #[test]
+    fn lists_pending_uploads_empty_when_no_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(list_pending_uploads(tmp.path()).unwrap().is_empty());
     }
 
     #[test]
