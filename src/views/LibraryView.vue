@@ -35,6 +35,8 @@
         </button>
       </header>
 
+      <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
+
       <p v-if="loading" class="hint">Loading…</p>
       <p v-else-if="error" class="hint">{{ error }}</p>
       <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
@@ -120,6 +122,7 @@ import {
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 import RecorderStrip from './RecorderStrip.vue';
+import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -132,6 +135,7 @@ type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
 };
 const detailView = ref<MeetingDetailViewExposed | null>(null);
+const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
 // Meeting currently being recorded (reported by the strip) — red dot in the list.
 const recordingMeetingId = ref<string | null>(null);
 
@@ -296,6 +300,10 @@ async function loadMeetings(): Promise<void> {
   }
 }
 
+async function onPendingUploaded(): Promise<void> {
+  await loadMeetings();
+}
+
 // Recording runs in the separate "waveform" window; its presence is our signal.
 async function refreshRecordingState(): Promise<void> {
   try {
@@ -374,6 +382,7 @@ watch(recordingMeetingId, async (id, prevId) => {
     return;
   }
   await loadMeetings();
+  await pendingUploads.value?.refresh();
   if (prevId && selectedItem.value?.id === prevId && !meetings.value.some((m) => m.id === prevId)) {
     // Discarded/crashed recording — its synthetic row is gone; fall back.
     selectedItem.value = meetings.value[0] ?? null;
@@ -383,6 +392,7 @@ watch(recordingMeetingId, async (id, prevId) => {
 function onWindowFocus(): void {
   now.value = new Date();
   void loadMeetings();
+  void pendingUploads.value?.refresh();
   void refreshRecordingState();
 }
 

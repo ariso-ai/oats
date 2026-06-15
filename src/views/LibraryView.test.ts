@@ -57,12 +57,16 @@ vi.mock('../composables/useMeetingNotifications', () => ({
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
+// pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
 vi.mock('../tauri', () => ({
   local: {
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
     readRecordingNote: (id: string) => readRecordingNote(id),
     writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
+  },
+  pending: {
+    list: () => Promise.resolve([]),
   },
 }));
 
@@ -502,5 +506,18 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('renders the PendingUploads section inside the sidebar', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.pending-stub').exists()).toBe(true);
   });
 });
