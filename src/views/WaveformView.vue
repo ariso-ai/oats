@@ -20,7 +20,7 @@
         >↻</button>
         <button
           class="ctrl-btn resume-btn"
-          aria-label="Resume recording"
+          aria-label="Continue recording"
           @click.stop.prevent="resumeFailed"
         >●</button>
         <button
