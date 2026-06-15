@@ -4,6 +4,8 @@ Thanks for your interest in contributing to **oats**! <img src="src/assets/oats-
 
 oats is a [Tauri v2](https://v2.tauri.app/) desktop app built with [Vite](https://vite.dev/) and [Vue 3](https://vuejs.org/) on the frontend and Rust on the backend. It is part of the Ariso monorepo and is excluded from the monorepo's Turbo `build`/`lint`/`test` pipeline.
 
+Much of oats was built with [Claude Code](https://claude.com/claude-code) and the [Superpowers](https://github.com/obra/superpowers) plugin, and we lean on the same tooling day to day — contributions developed with it are very welcome.
+
 ## Table of contents
 
 - [Code of conduct](#code-of-conduct)
@@ -19,7 +21,6 @@ oats is a [Tauri v2](https://v2.tauri.app/) desktop app built with [Vite](https:
 - [CI: validation and signed releases](#ci-validation-and-signed-releases)
 - [Cutting a release](#cutting-a-release)
 - [Troubleshooting](#troubleshooting)
-- [Architecture: WebSocket streaming](#architecture-websocket-streaming)
 
 ## Code of conduct
 
@@ -256,35 +257,3 @@ ln -s ../vite/bin/vite.js node_modules/.bin/vite
 ```
 
 If `npm install` keeps re-copying instead of symlinking, `npm rebuild vite` should restore the symlink as well.
-
-## Architecture: WebSocket streaming
-
-### Phase 1 — Direct Deepgram connection
-
-```
-┌─────────────┐                       ┌──────────┐
-│   Client    │── Audio (WebSocket) ─>│ Deepgram │
-│             │<─ Transcripts (WS) ───│          │
-└──────┬──────┘                       └──────────┘
-       │
-       │── HTTP (REST) ──> ┌──────────┐
-       │                   │ web-api  │──Store──> Database
-       └───────────────────└──────────┘
-```
-
-The client connects directly to Deepgram for real-time audio streaming. Meeting lifecycle (start, list, pause, terminate) is managed via HTTP API calls to `web-api`, which persists meeting metadata and transcripts.
-
-### Phase 2 — Ariso relay
-
-```
-┌─────────────┐                       ┌───────────────┐
-│   Client    │── Audio (WebSocket) ─>│ Ariso Relay   │
-│             │<─ Results (WebSocket)─│               │
-└─────────────┘                       └──────┬────────┘
-                                            │
-                                            ├──WebSocket──> Deepgram
-                                            │
-                                            └──Store──> Database
-```
-
-Introduces the Ariso Relay as a WebSocket proxy between the client and Deepgram. The relay persists transcripts to the database and streams results back over the same WebSocket connection.

@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="src/assets/oats-light.png">
-  <img src="src/assets/oats-dark.png" width="140" alt="oats">
+  <source media="(prefers-color-scheme: dark)" srcset="src/assets/oats-dark.svg">
+  <img src="src/assets/oats-light.svg" width="280" alt="oats">
 </picture>
 
 # oats
