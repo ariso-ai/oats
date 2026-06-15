@@ -1,5 +1,10 @@
 import { local, auth, getBackendSetting, type RecordingSummary } from '../tauri';
-import { useMeetingApi, type ScheduledMeeting, type TranscriptChunk } from './useMeetingApi';
+import {
+  useMeetingApi,
+  type ScheduledMeeting,
+  type MeetingSearchResult,
+  type TranscriptChunk,
+} from './useMeetingApi';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -33,6 +38,10 @@ export interface MeetingListItem {
   status?: RecordingSummary['status'];
   /** Local recordings only — drives the row's audio/note/transcript controls. */
   files?: { hasAudio: boolean; hasNote: boolean; hasTranscript: boolean };
+  /** Remote search only: a short backend-provided match preview when available. */
+  snippet?: string | null;
+  /** Remote search only: the exact matched text, when the backend returns it. */
+  matchedText?: string | null;
 }
 
 export interface MeetingActionItem {
@@ -92,9 +101,15 @@ export interface Backend {
   id: BackendId;
   needsAuth: boolean;
   usesMeetingPicker: boolean;
+  /** Whether this backend can perform real note search. Local is false until it
+   *  has an indexed local search path instead of fake title filtering. */
+  supportsSearch: boolean;
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
   listMeetings(): Promise<MeetingListItem[]>;
+  /** Search the backend's meeting-note corpus and return rows the Library can
+   *  select like normal meetings. */
+  searchMeetings(query: string): Promise<MeetingListItem[]>;
   /** Load the detail for a single row (from the list item the user clicked). */
   getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
   /** Lazily load the meeting's transcript (null when none). Ariso meetings
@@ -156,6 +171,20 @@ async function blobToBytes(blob: Blob): Promise<number[]> {
   return [...new Uint8Array(await blob.arrayBuffer())];
 }
 
+// The remote list/search endpoints return nearly the same meeting shape. Keep
+// the mapping in one place so search rows stay selectable like regular rows.
+function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): MeetingListItem {
+  const item: MeetingListItem = {
+    id: String(m.id),
+    title: m.title || 'Untitled meeting',
+    timestamp: m.start_at,
+    endTimestamp: m.end_at,
+  };
+  if ('snippet' in m && m.snippet) item.snippet = m.snippet;
+  if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
+  return item;
+}
+
 export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
@@ -172,6 +201,7 @@ export class ArisoBackend implements Backend {
   id: BackendId = 'ariso';
   needsAuth = true;
   usesMeetingPicker = true;
+  supportsSearch = true;
 
   async isReady(): Promise<Readiness> {
     const session = await auth.checkSession();
@@ -192,12 +222,13 @@ export class ArisoBackend implements Backend {
     const { listMeetingsInWindow } = useMeetingApi();
     const { startDate, endDate } = arisoMeetingWindow(new Date());
     const meetings: ScheduledMeeting[] = await listMeetingsInWindow(startDate, endDate);
-    return meetings.map((m) => ({
-      id: String(m.id),
-      title: m.title || 'Untitled meeting',
-      timestamp: m.start_at,
-      endTimestamp: m.end_at,
-    }));
+    return meetings.map(meetingSummaryToListItem);
+  }
+
+  async searchMeetings(query: string): Promise<MeetingListItem[]> {
+    const { searchMeetings } = useMeetingApi();
+    const meetings = await searchMeetings(query);
+    return meetings.map(meetingSummaryToListItem);
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
@@ -254,6 +285,7 @@ export class LocalBackend implements Backend {
   id: BackendId = 'local';
   needsAuth = false;
   usesMeetingPicker = false;
+  supportsSearch = false;
 
   async isReady(): Promise<Readiness> {
     const status = await local.modelStatus();
@@ -290,6 +322,12 @@ export class LocalBackend implements Backend {
         hasTranscript: r.hasTranscript,
       },
     }));
+  }
+
+  // Local search is intentionally disabled until the local backend owns a real
+  // index/search path. Returning [] keeps the UI simple and avoids fake results.
+  async searchMeetings(): Promise<MeetingListItem[]> {
+    return [];
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {

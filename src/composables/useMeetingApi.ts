@@ -42,6 +42,14 @@ interface ScheduledMeeting {
   end_at?: string;
 }
 
+// Search currently returns the same meeting shape as `/meetings`, with optional
+// match context left open for a backend that can provide Granola-style snippets.
+interface MeetingSearchResult extends ScheduledMeeting {
+  snippet?: string | null;
+  matched_text?: string | null;
+  highlights?: string[] | null;
+}
+
 interface MeetingNotesParticipant {
   name?: string;
   email?: string;
@@ -154,6 +162,27 @@ export function useMeetingApi() {
     assertOk(res, 200, 'list meetings in window');
     const data = res.data as ScheduledMeetingsResponse | null;
     // Descending: soonest / most-recent meetings sit at the top of the list.
+    return [...(data?.meetings ?? [])].sort(
+      (a, b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime()
+    );
+  }
+
+  // Remote library search uses the shared `/meetings?q=...` endpoint. That
+  // endpoint owns auth, visibility, and keyword matching; the desktop only
+  // normalizes ordering and passes optional match context through.
+  async function searchMeetings(
+    query: string,
+    limit = 20
+  ): Promise<MeetingSearchResult[]> {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+    const params = new URLSearchParams({
+      q: trimmed,
+      limit: String(limit),
+    });
+    const res = await api.request('GET', `/meetings?${params.toString()}`);
+    assertOk(res, 200, 'search meetings');
+    const data = res.data as { meetings?: MeetingSearchResult[] } | null;
     return [...(data?.meetings ?? [])].sort(
       (a, b) => new Date(b.start_at).getTime() - new Date(a.start_at).getTime()
     );
@@ -359,6 +388,7 @@ export function useMeetingApi() {
     listMeetings,
     listScheduledMeetings,
     listMeetingsInWindow,
+    searchMeetings,
     getMeeting,
     getMeetingNotes,
     updateMeetingNotesTitle,
@@ -373,4 +403,11 @@ export function useMeetingApi() {
   };
 }
 
-export type { Meeting, PaginatedResponse, ScheduledMeeting, MeetingNotes, TranscriptChunk };
+export type {
+  Meeting,
+  PaginatedResponse,
+  ScheduledMeeting,
+  MeetingSearchResult,
+  MeetingNotes,
+  TranscriptChunk,
+};
