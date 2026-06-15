@@ -316,7 +316,7 @@ fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
         WebviewUrl::App("/#/update".into()),
     )
     .title("")
-    .inner_size(420.0, 360.0)
+    .inner_size(670.0, 910.0)
     .resizable(false)
     .center()
     .skip_taskbar(true)

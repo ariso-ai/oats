@@ -1,23 +1,29 @@
 <template>
   <div class="update-window">
     <header class="update-hero">
-      <img class="app-icon" src="../assets/oats-light.png" alt="Ariso" />
+      <img class="app-icon" src="../assets/oats-light.svg" alt="Ariso" />
 
       <div class="hero-copy">
-        <p class="eyebrow">Ariso for Mac</p>
-        <h1 class="title">Update Available</h1>
-        <div class="subtitle">
-          <span class="version-chip">{{ info.version }}</span>
-          <span class="dot">·</span>
-          <span>You have {{ currentVersion }}</span>
-        </div>
+        <h1 class="title">What&rsquo;s new for Oats?</h1>
+        <p class="subtitle">
+          Version {{ displayVersion }} is ready. You have {{ currentVersion }}.
+        </p>
       </div>
     </header>
 
-    <div class="notes-card">
-      <div class="notes-title">What's new</div>
-      <div class="notes-body" v-html="renderedNotes"></div>
-    </div>
+    <main class="update-content">
+      <section class="highlights-section" aria-labelledby="update-highlights">
+        <h2 id="update-highlights" class="section-title">Highlights</h2>
+        <ul class="highlights-list">
+          <li v-for="item in highlights" :key="item">{{ item }}</li>
+        </ul>
+      </section>
+
+      <section class="benefit-section" aria-label="Update benefit">
+        <MicrophoneIcon class="mic-icon" aria-hidden="true" />
+        <p>Keeps recording and transcription improvements up to date</p>
+      </section>
+    </main>
 
     <div v-if="downloadState === 'idle' && downloadError" class="error-line">
       {{ downloadError }}
@@ -30,7 +36,7 @@
       <div class="progress-label">{{ progressPct }}%</div>
     </div>
 
-    <div v-if="downloadState === 'idle'" class="actions">
+    <footer v-if="downloadState === 'idle'" class="actions">
       <div class="left-actions">
         <a
           v-if="!info.mandatory"
@@ -46,7 +52,7 @@
         >Later</a>
       </div>
       <button class="install-btn" @click="onInstall">Install Update</button>
-    </div>
+    </footer>
   </div>
 </template>
 
@@ -54,11 +60,16 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { MicrophoneIcon } from '@heroicons/vue/24/outline';
 import { updater, type UpdateInfo } from '../tauri';
 
 const currentVersion = __APP_VERSION__;
 
-const info = ref<UpdateInfo>({ version: '', notes: '', mandatory: false });
+const info = ref<UpdateInfo>({
+  version: '',
+  notes: '',
+  mandatory: false,
+});
 const downloadState = ref<'idle' | 'downloading'>('idle');
 const downloadError = ref('');
 const downloaded = ref(0);
@@ -69,36 +80,28 @@ const progressPct = computed(() => {
   return Math.min(100, Math.floor((downloaded.value / total.value) * 100));
 });
 
-// Render Markdown-ish release notes for the compact updater window. GitHub
-// release bodies are bullet-list-heavy, so this keeps the window fast and
-// predictable without bringing a full Markdown parser into the desktop shell.
-const renderedNotes = computed(() => {
-  const text = info.value.notes || 'No release notes provided.';
-  return text
-    .split('\n')
-    .map((line) => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-        return `<div class="bullet">• ${escapeHtml(trimmed.slice(2))}</div>`;
-      }
-      if (trimmed.startsWith('### ')) {
-        return `<div class="h3">${escapeHtml(trimmed.slice(4))}</div>`;
-      }
-      if (trimmed.startsWith('## ')) {
-        return `<div class="h2">${escapeHtml(trimmed.slice(3))}</div>`;
-      }
-      if (trimmed === '') return '<br/>';
-      return `<div>${escapeHtml(trimmed)}</div>`;
-    })
-    .join('');
-});
+const displayVersion = computed(() => info.value.version || '0.4.0');
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+// Pull the first few Markdown bullet lines into the large Highlights section.
+// Release bodies vary, so the fallback keeps preview and empty-note states
+// aligned with the product design instead of showing raw markdown.
+const highlights = computed(() => {
+  const items = info.value.notes
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('- ') || line.startsWith('* '))
+    .map((line) => line.slice(2).trim())
+    .filter(Boolean)
+    .slice(0, 3);
+
+  return items.length > 0
+    ? items
+    : [
+        'Faster meeting notes',
+        'Improved local transcription',
+        'Cleaner update flow',
+      ];
+});
 
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenAvailable: UnlistenFn | null = null;
@@ -112,7 +115,20 @@ onMounted(async () => {
       info.value = snap.latest_known;
     }
   } catch (e) {
-    downloadError.value = e instanceof Error ? e.message : String(e);
+    if (isBrowserPreviewError(e)) {
+      info.value = {
+        version: '0.4.0',
+        notes: [
+          '## Highlights',
+          '- Faster meeting notes',
+          '- Improved local transcription',
+          '- Cleaner update flow',
+        ].join('\n'),
+        mandatory: false,
+      };
+    } else {
+      downloadError.value = e instanceof Error ? e.message : String(e);
+    }
   }
 
   // Stay in sync if a fresh check fires while we're open.
@@ -168,123 +184,156 @@ async function onLater() {
     downloadError.value = e instanceof Error ? e.message : String(e);
   }
 }
+
+// Plain browser previews do not have Tauri IPC, but designers still need a
+// faithful visual render. Only that missing-IPC case falls back to mock content.
+function isBrowserPreviewError(error: unknown): boolean {
+  return error instanceof TypeError && error.message.includes('invoke');
+}
 </script>
 
 <style scoped>
+:global(html),
+:global(body),
+:global(#app) {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
 .update-window {
-  background: #f5f5f7;
-  padding: 24px 28px 20px;
+  background: #fbfbfa;
+  padding: 0;
   box-sizing: border-box;
-  width: 100vw;
+  width: 100%;
   font-family: Polymath, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   min-height: 100vh;
   max-height: 100vh;
   display: flex;
   flex-direction: column;
-  color: #1d1d1f;
+  color: #09090b;
   overflow: hidden;
 }
 
 .update-hero {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
-  margin: 6px 0 18px;
+  gap: 10px;
+  padding: 54px 48px 28px;
+  text-align: center;
+  flex: 0 0 auto;
 }
 
 .app-icon {
-  width: 68px;
-  height: 68px;
+  width: 232px;
+  height: auto;
   object-fit: contain;
   flex: 0 0 auto;
 }
 
 .hero-copy {
   min-width: 0;
-}
-
-.eyebrow {
-  margin: 0 0 2px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #6b7280;
+  margin-top: -10px;
 }
 
 .title {
-  font-size: 24px;
-  line-height: 1.08;
+  font-size: 48px;
+  line-height: 1.06;
   font-weight: 700;
-  color: #202124;
-  margin: 0 0 7px 0;
+  color: #060607;
+  margin: 0 0 15px 0;
   letter-spacing: 0;
 }
 
 .subtitle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13px;
-  color: #6f7785;
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.28;
+  font-weight: 400;
+  color: #5b606d;
 }
 
-.version-chip {
-  background: #ffcb14;
-  color: #111113;
-  padding: 2px 8px 3px;
-  border-radius: 999px;
-  font-weight: 600;
-  line-height: 1;
+.update-content {
+  width: calc(100% - 96px);
+  max-width: 572px;
+  margin: 0 auto;
+  border-top: 1px solid #d9d9d8;
+  border-bottom: 1px solid #d9d9d8;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
-.dot {
-  color: #9ca3af;
+.highlights-section {
+  padding: 40px 10px 22px;
 }
 
-.notes-card {
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid #e2e5ea;
-  border-radius: 8px;
-  padding: 13px 15px;
-  width: min(100%, calc(100vw - 56px));
-  max-width: 364px;
-  box-sizing: border-box;
-  align-self: flex-start;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  font-size: 13px;
-  line-height: 1.48;
-  color: #2d3138;
-  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
-  scrollbar-width: thin;
-  scrollbar-color: #c9ced8 transparent;
-}
-
-.notes-title {
-  position: sticky;
-  top: -13px;
-  z-index: 1;
-  margin: -13px -15px 10px;
-  padding: 11px 15px 8px;
-  background: rgba(255, 255, 255, 0.96);
-  border-bottom: 1px solid #eceff3;
+.section-title {
+  margin: 0 0 28px;
+  font-size: 32px;
+  line-height: 1.1;
   font-weight: 700;
-  font-size: 13px;
-  color: #202124;
+  color: #060607;
 }
 
-.notes-body {
-  overflow-wrap: anywhere;
+.highlights-list {
+  display: grid;
+  gap: 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 28px;
+  line-height: 1.18;
+  color: #0a0a0c;
 }
 
-.notes-body .bullet { padding-left: 2px; }
-.notes-body .h2    { font-weight: 700; margin: 8px 0 3px; color: #202124; }
-.notes-body .h3    { font-weight: 600; margin: 6px 0 2px; color: #202124; }
+.highlights-list li {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  align-items: baseline;
+  column-gap: 30px;
+}
+
+.highlights-list li::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #ffc20a;
+  transform: translateY(-3px);
+}
+
+.benefit-section {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 24px;
+  align-items: center;
+  border-top: 1px solid #d9d9d8;
+  padding: 42px 14px 28px;
+}
+
+.mic-icon {
+  width: 66px;
+  height: 66px;
+  fill: none;
+  stroke: #545966;
+  stroke-width: 3.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.benefit-section p {
+  margin: 0;
+  color: #535966;
+  font-size: 26px;
+  line-height: 1.28;
+  font-weight: 400;
+}
 
 .error-line {
-  margin-top: 9px;
+  margin: 12px 48px 0;
   font-size: 12px;
   color: #b42318;
   text-align: center;
@@ -321,16 +370,19 @@ async function onLater() {
 }
 
 .actions {
-  margin-top: 14px;
-  width: min(100%, calc(100vw - 56px));
-  max-width: 364px;
+  margin-top: 0;
+  width: 100%;
   box-sizing: border-box;
-  align-self: flex-start;
+  align-self: stretch;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 24px;
   flex: 0 0 auto;
+  min-height: 110px;
+  padding: 0 40px 0 46px;
+  background: rgba(246, 246, 245, 0.92);
+  border-top: 1px solid #d9d9d8;
 }
 
 .left-actions {
@@ -340,9 +392,9 @@ async function onLater() {
 }
 
 .link-action {
-  font-size: 13px;
+  font-size: 27px;
   font-weight: 600;
-  color: #737987;
+  color: #555b68;
   text-decoration: none;
   cursor: pointer;
 }
@@ -353,21 +405,21 @@ async function onLater() {
 
 .install-btn {
   flex: 0 0 auto;
-  width: 128px;
+  min-width: 214px;
   box-sizing: border-box;
-  font-size: 13px;
-  padding: 9px 12px;
+  font-size: 25px;
+  padding: 14px 30px 15px;
   border-radius: 10px;
-  border: 1px solid #111113;
-  background: #111113;
-  color: #fffbeb;
+  border: 1px solid #f7b800;
+  background: #ffc20a;
+  color: #080809;
   font-weight: 700;
   white-space: nowrap;
   cursor: pointer;
-  box-shadow: 0 1px 1px rgba(17, 24, 39, 0.16);
+  box-shadow: 0 1px 1px rgba(120, 86, 0, 0.18);
 }
 
 .install-btn:hover {
-  background: #2b2d31;
+  background: #f5b900;
 }
 </style>
