@@ -887,6 +887,15 @@ async function handleSignOut() {
   height: 100vh;
   box-sizing: border-box;
   overflow-y: auto;
+  /* Keep scrolling functional but hide the scrollbar chrome so no persistent
+     bar shows at rest. */
+  scrollbar-width: none; /* Firefox */
+}
+
+/* WebKit (the Tauri webview on macOS): hide the scrollbar track/thumb. */
+.settings::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .title {
