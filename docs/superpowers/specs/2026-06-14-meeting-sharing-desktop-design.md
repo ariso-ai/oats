@@ -245,5 +245,3 @@ Neither belongs on the `Backend` interface; the view branches on `detail.isLocal
   (via `objc2-app-kit` / the window's `ns_window()`) during implementation.
 - `objc2-app-kit` version must align with the existing `objc2` 0.6 / `objc2-
   foundation` 0.3 in `Cargo.toml`.
-</content>
-</invoke>
