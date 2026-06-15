@@ -60,23 +60,15 @@ mod imp {
     type AudioObjectID = u32;
 
     /// Live capture resources, torn down in reverse creation order on stop.
+    /// All fields are plain integers; the IO block is owned by Core Audio
+    /// (retained via `Block_copy` inside `AudioDeviceCreateIOProcIDWithBlock`
+    /// and released by `AudioDeviceDestroyIOProcID`), so we don't need to
+    /// keep a !Send `RcBlock` in this cross-thread state.
     struct CaptureState {
         tap_id: AudioObjectID,
         aggregate_id: AudioObjectID,
         proc_id: AudioDeviceIOProcID,
-        // The IO block must outlive the running device; keep it pinned here.
-        _block: RcBlock<dyn Fn(
-            NonNull<AudioTimeStamp>,
-            NonNull<AudioBufferList>,
-            NonNull<AudioTimeStamp>,
-            NonNull<AudioBufferList>,
-            NonNull<AudioTimeStamp>,
-        )>,
     }
-
-    // The Core Audio object IDs are plain integers; the block is only ever
-    // touched on the IO thread before stop() joins it by destroying the proc.
-    unsafe impl Send for CaptureState {}
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
 
@@ -344,11 +336,17 @@ mod imp {
                 return Err(format!("AudioDeviceStart failed: {status}"));
             }
 
+            // Core Audio copied the block during AudioDeviceCreateIOProcIDWithBlock
+            // and will release that copy in AudioDeviceDestroyIOProcID. Our local
+            // RcBlock retain is no longer needed; let it drop at end of scope on
+            // this start() thread (it's !Send, so we can't carry it across threads
+            // in CAPTURE).
+            drop(block);
+
             *guard = Some(CaptureState {
                 tap_id,
                 aggregate_id,
                 proc_id,
-                _block: block,
             });
         }
         Ok(())
