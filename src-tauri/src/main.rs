@@ -118,6 +118,7 @@ fn main() {
             commands::write_recording_note,
             commands::open_recording_file,
             commands::rename_local_recording,
+            commands::share_text_native,
             transcribe::local_finalize_recording,
             model_manager::local_model_status,
             model_manager::download_local_stt,

@@ -35,6 +35,13 @@ objc2-user-notifications = { version = "0.3", features = [
     "UNError",
     "block2",
 ] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSSharingService",
+    "NSView",
+    "NSWindow",
+    "NSResponder",
+    "NSGraphics",
+] }
 block2 = "0.6"
 
 [build-dependencies]
