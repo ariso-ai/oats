@@ -783,9 +783,12 @@ pub async fn fetch_meeting_audio(
     let client = http_client();
     let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
 
-    let response = client
+    // Bound the request so a stalled upstream/TCP connection can't hang the
+    // command indefinitely; reqwest's builder has no default timeout.
+    let mut response = client
         .get(&url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
+        .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -799,11 +802,17 @@ pub async fn fetch_meeting_audio(
             return Err(format!("meeting audio too large to play: {len} bytes"));
         }
     }
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_AUDIO_BYTES {
-        return Err(format!("meeting audio too large to play: {} bytes", bytes.len()));
+    // Stream the body and enforce MAX_AUDIO_BYTES as we go — buffering the
+    // whole response first can blow memory if content_length is absent or wrong.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {next_len} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(tauri::ipc::Response::new(bytes.to_vec()))
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Upper bound on a note/transcript markdown file we'll read into memory for

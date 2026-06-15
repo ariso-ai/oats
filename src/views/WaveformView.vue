@@ -380,11 +380,12 @@ async function handleStop() {
 
 // Upload the stopped recording. Shared by the stop flow and the failed pill's
 // Retry button — blob and meta stay in refs so retry needs no re-record.
-let isFinalizing = false;
+// Tracks the underlying finalize promise (not the UI-timeout race) so that a
+// timed-out attempt whose work is still running won't be re-launched by Retry.
+let inFlightFinalize: Promise<unknown> | null = null;
 async function runFinalize() {
   if (!stoppedBlob.value || !stoppedMeta.value || !backend.value) return;
-  if (isFinalizing) return;
-  isFinalizing = true;
+  if (inFlightFinalize) return;
   isUploading.value = true;
   uploadResult.value = null;
   // This only bounds the UI wait. A timed-out local transcription keeps
@@ -392,15 +393,21 @@ async function runFinalize() {
   // Library (source of truth) may show 'done'/'failed' even if the window
   // showed a timeout. Audio is persisted before transcription/upload, so
   // nothing is lost.
+  const work = backend.value.finalizeRecording(stoppedBlob.value, stoppedMeta.value);
+  inFlightFinalize = work;
+  // Clear the in-flight guard only when the underlying promise truly settles;
+  // the UI timeout below races independently and must not release the guard.
+  void work
+    .catch(() => undefined)
+    .finally(() => {
+      if (inFlightFinalize === work) inFlightFinalize = null;
+    });
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => reject(new Error('Operation timed out')), 120_000);
   });
   try {
-    await Promise.race([
-      backend.value.finalizeRecording(stoppedBlob.value, stoppedMeta.value),
-      timeout,
-    ]);
+    await Promise.race([work, timeout]);
     uploadResult.value = 'success';
     stoppedBlob.value = null;
     stoppedMeta.value = null;
@@ -412,7 +419,6 @@ async function runFinalize() {
     uploadResult.value = 'failed';
   } finally {
     clearTimeout(timeoutId);
-    isFinalizing = false;
     isUploading.value = false;
   }
 }
