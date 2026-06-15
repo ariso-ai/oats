@@ -467,6 +467,7 @@ async function resumeFailed() {
   uploadResult.value = null;
   isStopping.value = false;
   await startRecording();
+  broadcastState();
 }
 
 async function closeWindow() {
@@ -711,7 +712,7 @@ html, body {
 }
 .resume-btn {
   margin-top: 6px;
-  color: #f87171;
+  color: #34d399;
   font-size: 13px;
   font-weight: 700;
 }

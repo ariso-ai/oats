@@ -323,6 +323,26 @@ describe('WaveformView vertical pill', () => {
     expect(finalizeRecording).toHaveBeenCalled();
   });
 
+  it('Resume re-broadcasts a recording phase so the strip leaves the failed state', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    emitEvent.mockClear();
+    await wrapper.find('.resume-btn').trigger('click');
+    await flushPromises();
+
+    const phases = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, p]) => (p as { phase: string }).phase);
+    expect(phases).toContain('recording');
+    expect(phases).not.toContain('failed');
+    wrapper.unmount();
+  });
+
   it('stop after resume uploads the combined blob with original startAt and summed duration', async () => {
     finalizeRecording
       .mockRejectedValueOnce(new Error('boom'))   // first stop fails
