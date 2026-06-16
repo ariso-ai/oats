@@ -109,18 +109,24 @@ export function useRecorder() {
     }
 
     try {
-      const debug =
-        import.meta.env.DEV && import.meta.env.VITE_DEBUG_AUDIO === 'true';
-
       audioContext = new AudioContext({ sampleRate: 44100 });
       analyserNode = audioContext.createAnalyser();
 
       if (useMic) {
+        // Capture the mic raw — no echo cancellation, noise suppression, or
+        // auto gain control. Enabling any of these routes the mic through
+        // macOS Voice-Processing I/O, whose AGC drives the *shared* physical
+        // input device gain down. A video-conference app reading the same
+        // microphone then captures a quieter signal, so the remote end hears
+        // the user's voice drop while Oats records. We capture system audio on
+        // a separate channel anyway, so we don't need echo cancellation to keep
+        // the other participants out of the mic channel.
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
-            echoCancellation: !debug,
-            noiseSuppression: !debug,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
             sampleRate: 44100,
           },
         });

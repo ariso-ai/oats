@@ -7,7 +7,7 @@
     "vite:dev": "vite dev --port 1420",
     "vite:build": "vite build",
     "tauri:dev": "tauri dev",
-    "tauri:dev:debug": "VITE_DEBUG_AUDIO=true tauri dev --features mcp",
+    "tauri:dev:debug": "tauri dev --features mcp",
     "tauri:build": "tauri build",
     "dmg:compose": "bash scripts/compose-dmg.sh",
     "tauri:clean": "cd src-tauri && cargo clean",
