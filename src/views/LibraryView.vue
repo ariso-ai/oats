@@ -352,7 +352,11 @@ function setRecording(next: boolean): void {
 // onMounted load is still pending).
 let loadMeetingsRequest = 0;
 
-async function loadMeetings(): Promise<void> {
+// `autoSelectFirst` is only set for the initial mount load: opening the window
+// lands on the most recent meeting. Refresh-driven reloads (window focus/move,
+// upload completion) pass false so they never yank the user off the Up Next
+// greeting/card view back into a meeting detail.
+async function loadMeetings(autoSelectFirst = false): Promise<void> {
   const requestId = ++loadMeetingsRequest;
   loading.value = true;
   error.value = null;
@@ -375,7 +379,7 @@ async function loadMeetings(): Promise<void> {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
-    if (!selectedItem.value && meetings.value.length > 0) {
+    if (autoSelectFirst && !selectedItem.value && meetings.value.length > 0) {
       await selectMeeting(meetings.value[0]);
     } else if (selectedItem.value) {
       selectedItem.value =
@@ -605,7 +609,7 @@ async function recoverActiveRecording(): Promise<void> {
 }
 
 onMounted(() => {
-  void loadMeetings().then(() => recoverActiveRecording());
+  void loadMeetings(true).then(() => recoverActiveRecording());
   void refreshRecordingState();
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;
