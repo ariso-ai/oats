@@ -244,6 +244,13 @@ watch(query, (next) => {
     activeIndex.value = 0;
     return;
   }
+  // A changed query means old rows are no longer trustworthy. Clear them
+  // before debounce/network work so Enter or click cannot open a stale meeting.
+  searchRequestId++;
+  loading.value = true;
+  error.value = null;
+  results.value = [];
+  activeIndex.value = 0;
   debounceTimer = window.setTimeout(() => {
     void runSearch(term);
   }, debounceMs);

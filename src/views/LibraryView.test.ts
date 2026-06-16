@@ -171,6 +171,24 @@ describe('LibraryView', () => {
     expect(wrapper.find('.search-trigger').exists()).toBe(false);
   });
 
+  it('opens search with Ctrl+K but not Alt+K on non-Mac platforms', async () => {
+    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+
+    mount(LibraryView);
+    await flushPromises();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', altKey: true }));
+    await flushPromises();
+    expect(document.body.querySelector('.palette-panel')).toBeNull();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }));
+    await flushPromises();
+    expect(document.body.querySelector('.palette-panel')).not.toBeNull();
+  });
+
   it('searches remotely from the palette and renders returned rows', async () => {
     vi.useFakeTimers();
     backendId.mockReturnValue('ariso');
@@ -204,6 +222,39 @@ describe('LibraryView', () => {
     expect(document.body.textContent).toContain('Jun 7');
     expect(document.body.textContent).toContain('1min');
     expect(document.body.textContent).toContain('Discussed note search');
+    vi.useRealTimers();
+  });
+
+  it('clears stale search rows as soon as the query changes', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings
+      .mockResolvedValueOnce([item({ id: 'alpha', title: 'Alpha Result', files: undefined })])
+      .mockResolvedValueOnce([item({ id: 'beta', title: 'Beta Result', files: undefined })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+
+    input.value = 'alpha';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).toContain('Alpha Result');
+
+    input.value = 'beta';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+
+    expect(document.body.textContent).not.toContain('Alpha Result');
+    expect(document.body.textContent).toContain('Searching');
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).toContain('Beta Result');
     vi.useRealTimers();
   });
 
@@ -258,7 +309,7 @@ describe('LibraryView', () => {
     await flushPromises();
 
     expect(document.body.querySelector('.palette-panel')).toBeNull();
-    expect(wrapper.text()).toContain('Select a meeting to view its notes.');
+    expect(wrapper.text()).toContain('Ready for the next meet?');
     vi.useRealTimers();
   });
 

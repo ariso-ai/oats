@@ -584,7 +584,7 @@ function onWindowFocus(): void {
 // Local users do not open a remote-only search surface.
 function onGlobalKeydown(event: KeyboardEvent): void {
   const key = event.key.toLowerCase();
-  const triggered = (isMac.value ? event.metaKey : event.ctrlKey || event.altKey) && key === 'k';
+  const triggered = (isMac.value ? event.metaKey : event.ctrlKey) && key === 'k';
   if (!triggered || !activeBackend.value?.supportsSearch) return;
   event.preventDefault();
   searchPaletteOpen.value = true;
