@@ -77,4 +77,13 @@ describe('remote note persistence', () => {
       title: 'Sync',
     });
   });
+
+  // The meeting id is interpolated into the request path, so it must be
+  // percent-encoded to stay valid for string ids containing reserved characters.
+  it('percent-encodes the meeting id in the request path', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { content: '', title: '' } });
+    const spacedMeeting = { id: 'remote 42' } as unknown as MeetingListItem;
+    await useMeetingNotesPersistence().load(spacedMeeting);
+    expect(apiRequest).toHaveBeenCalledWith('GET', '/meeting-notes/remote%2042/individual-note');
+  });
 });

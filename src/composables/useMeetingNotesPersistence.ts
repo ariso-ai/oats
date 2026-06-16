@@ -26,25 +26,25 @@ interface IndividualNoteResponse {
   title?: string | null;
 }
 
-const REMOTE_LIBRARY_NOTE_WRITES_ENABLED = true;
-
 // Local meetings are identified by recording files because they have a real
 // filesystem directory where `user-note.md` can be the durable artifact.
 function isLocalRecording(meeting: MeetingListItem): boolean {
   return Boolean(meeting.files);
 }
 
-// Centralizes the current persistence routing policy. Remote Library edits are
-// unsupported until the backend can save personal notes before summaries exist.
+// Centralizes the persistence routing policy so Library views never need to
+// know whether a selected meeting is backed by local files or Agents APIs.
 function modeForMeeting(meeting: MeetingListItem): NotesPersistenceMode {
   if (isLocalRecording(meeting)) return 'local';
-  return REMOTE_LIBRARY_NOTE_WRITES_ENABLED ? 'remote' : 'unsupported';
+  return 'remote';
 }
 
 // Reads from the backend path used by server-backed meeting notes. This stays
-// behind the adapter so enabling remote writes later is a one-file change.
+// behind the adapter so enabling remote writes later is a one-file change. The
+// encoded id keeps the seam valid if a future remote source uses string ids.
 async function loadRemoteNote(meeting: MeetingListItem): Promise<MeetingNote> {
-  const response = await api.request('GET', `/meeting-notes/${meeting.id}/individual-note`);
+  const id = encodeURIComponent(meeting.id);
+  const response = await api.request('GET', `/meeting-notes/${id}/individual-note`);
   if (response.status === 404) return { content: '', title: '' };
   if (response.status !== 200) {
     throw new Error(`Remote notes unavailable (${response.status})`);
@@ -53,11 +53,14 @@ async function loadRemoteNote(meeting: MeetingListItem): Promise<MeetingNote> {
   return { content: body.content ?? '', title: body.title ?? '' };
 }
 
-// Writes through the existing backend personal-note endpoint. The PUT carries
-// the title alongside content; the server already returns a title on GET, so it
-// owns whether the title is persisted.
+// Writes through the existing backend personal-note endpoint, which stores the
+// requester's note on the cloud meeting without creating hidden local drafts.
+// The PUT carries the title alongside content; the server already returns a
+// title on GET, so it owns whether the title is persisted. The encoded id keeps
+// the seam valid for string ids.
 async function saveRemoteNote(meeting: MeetingListItem, note: MeetingNote): Promise<void> {
-  const response = await api.request('PUT', `/meeting-notes/${meeting.id}/individual-note`, {
+  const id = encodeURIComponent(meeting.id);
+  const response = await api.request('PUT', `/meeting-notes/${id}/individual-note`, {
     content: note.content,
     title: note.title,
   });
@@ -70,9 +73,8 @@ async function saveRemoteNote(meeting: MeetingListItem, note: MeetingNote): Prom
 // intentionally a plain object rather than a provider or app-wide state system.
 export function useMeetingNotesPersistence(): MeetingNotesPersistence {
   return {
-    // Local recordings have a durable `user-note.md` beside the recording. Remote
-    // Library writes stay disabled until the backend accepts notes before a
-    // generated meeting summary exists, instead of creating hidden local drafts.
+    // Local recordings have a durable `user-note.md`; cloud meetings use the
+    // Agents personal-note API and never fall back to localStorage drafts.
     modeFor(meeting) {
       return modeForMeeting(meeting);
     },

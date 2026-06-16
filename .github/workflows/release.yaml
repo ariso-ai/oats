@@ -165,7 +165,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- -- --features prod-api
+        run: npm run tauri:build -- --bundles app -- --features prod-api
+
+      # Tauri does not expose Finder icon size for DMGs, so compose the DMG
+      # after the signed app bundle exists and persist the smaller bowl layout.
+      - name: Compose DMG layout
+        run: npm run dmg:compose
 
       # Hand the bundler outputs to the publish job. Paths share the common
       # ancestor bundle/, so the artifact preserves the macos/ and dmg/
@@ -240,3 +245,5 @@ jobs:
 
             ---
             **Download:** [oats.dmg](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
+
+            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew install --cask oats`
