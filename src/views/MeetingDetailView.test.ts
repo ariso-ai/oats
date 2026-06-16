@@ -21,7 +21,8 @@ vi.mock('../composables/useMeetingNotesPersistence', () => ({
     modeFor: () => 'local',
     canEdit: (meeting: MeetingListItem) => notesCanEdit(meeting),
     load: (meeting: MeetingListItem) => loadNote(meeting),
-    save: (meeting: MeetingListItem, markdown: string) => saveNote(meeting, markdown),
+    save: (meeting: MeetingListItem, note: { content: string; title: string }) =>
+      saveNote(meeting, note),
   }),
 }));
 vi.mock('../tauri', () => ({
@@ -65,7 +66,7 @@ beforeEach(() => {
     getMeetingAudio: (i: MeetingListItem) => getMeetingAudio(i),
   });
   notesCanEdit.mockReturnValue(false);
-  loadNote.mockResolvedValue('');
+  loadNote.mockResolvedValue({ content: '', title: '' });
   saveNote.mockResolvedValue(undefined);
 });
 
@@ -269,7 +270,7 @@ describe('MeetingDetailView inline title editing', () => {
   it('does not autosave an empty note before the selected note has loaded', async () => {
     vi.useFakeTimers();
     notesCanEdit.mockReturnValue(true);
-    loadNote.mockResolvedValue('Already saved');
+    loadNote.mockResolvedValue({ content: 'Already saved', title: '' });
     getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
 
     const localItem: MeetingListItem = {
@@ -280,9 +281,50 @@ describe('MeetingDetailView inline title editing', () => {
     await flushPromises();
 
     await vi.advanceTimersByTimeAsync(800);
-    expect(saveNote).not.toHaveBeenCalledWith(localItem, '');
+    expect(saveNote).not.toHaveBeenCalledWith(localItem, { content: '', title: '' });
 
     vi.useRealTimers();
+  });
+
+  it('edits the My-note title inline and autosaves it with the body', async () => {
+    vi.useFakeTimers();
+    notesCanEdit.mockReturnValue(true);
+    loadNote.mockResolvedValue({ content: 'Body', title: 'Old note title' });
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
+
+    const localItem: MeetingListItem = {
+      ...item,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    const wrapper = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+
+    expect(wrapper.find('.notes-title').text()).toBe('Old note title');
+    await wrapper.find('.notes-title').trigger('click');
+    const input = wrapper.find('input.notes-title--input');
+    expect(input.exists()).toBe(true);
+    await input.setValue('New note title');
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(saveNote).toHaveBeenCalledWith(localItem, { content: 'Body', title: 'New note title' });
+
+    vi.useRealTimers();
+  });
+
+  it('shows the Untitled note placeholder when a loaded note has no title', async () => {
+    notesCanEdit.mockReturnValue(true);
+    loadNote.mockResolvedValue({ content: 'Body', title: '' });
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
+
+    const localItem: MeetingListItem = {
+      ...item,
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    const wrapper = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+
+    expect(wrapper.find('.notes-title').text()).toBe('Untitled note');
+    expect(wrapper.find('.notes-title--placeholder').exists()).toBe(true);
   });
 
   it('loads My Notes when switching between meetings that keep My Notes selected', async () => {
@@ -290,7 +332,9 @@ describe('MeetingDetailView inline title editing', () => {
     getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
       Promise.resolve(detail({ id: meeting.id, title: meeting.title, isLocal: true }))
     );
-    loadNote.mockImplementation((meeting: MeetingListItem) => Promise.resolve(`note ${meeting.id}`));
+    loadNote.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve({ content: `note ${meeting.id}`, title: '' })
+    );
 
     const first: MeetingListItem = {
       id: 'a',
@@ -320,7 +364,9 @@ describe('MeetingDetailView inline title editing', () => {
     getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
       Promise.resolve(detail({ id: meeting.id, title: meeting.title, isLocal: true }))
     );
-    loadNote.mockImplementation((meeting: MeetingListItem) => Promise.resolve(`note ${meeting.id}`));
+    loadNote.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve({ content: `note ${meeting.id}`, title: '' })
+    );
 
     let resolveFirstSave: (() => void) | null = null;
     saveNote.mockImplementationOnce(
@@ -354,7 +400,7 @@ describe('MeetingDetailView inline title editing', () => {
     await save;
     await flushPromises();
 
-    expect(saveNote).toHaveBeenCalledWith(first, 'note a');
+    expect(saveNote).toHaveBeenCalledWith(first, { content: 'note a', title: '' });
     expect(wrapper.text()).toContain('Second');
     expect(wrapper.text()).not.toContain('First');
   });
@@ -379,7 +425,7 @@ describe('MeetingDetailView inline title editing', () => {
   });
 
   it('shows the Share button for local recordings and shares natively', async () => {
-    loadNote.mockResolvedValue('');
+    loadNote.mockResolvedValue({ content: '', title: '' });
     getMeetingDetail.mockResolvedValue(detail({ isLocal: true, note: 'AI body' }));
     const wrapper = mount(MeetingDetailView, { props: { item } });
     await flushPromises();

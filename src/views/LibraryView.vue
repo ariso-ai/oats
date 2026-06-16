@@ -54,6 +54,21 @@
         </button>
       </header>
 
+      <button
+        v-if="activeBackend?.supportsSearch"
+        class="search-trigger"
+        type="button"
+        aria-label="Search notes"
+        @click="openSearchPalette"
+      >
+        <svg class="search-trigger-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+          <path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <span>Search</span>
+        <kbd>{{ searchShortcutLabel }}</kbd>
+      </button>
+
       <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
 
       <p v-if="loading" class="hint">Loading…</p>
@@ -113,9 +128,14 @@
           @close="clearSelection"
           @title-updated="onTitleUpdated"
         />
-        <div v-else class="empty-card">
-          <p>Select a meeting to view its notes.</p>
-        </div>
+        <UpNextCard
+          v-else
+          :meetings="displayMeetings"
+          :now="now"
+          @select="selectMeeting"
+          @start="startRecordingFor"
+          @record="startRecording"
+        />
       </div>
       <RecorderStrip
         :meeting-id="selectedItem?.id ?? null"
@@ -123,6 +143,14 @@
         @recording-active="recordingActive = $event"
       />
     </section>
+
+    <LibrarySearchPalette
+      :open="searchPaletteOpen"
+      :search-meetings="searchMeetings"
+      @close="searchPaletteOpen = false"
+      @go-to-notes="goHomeFromSearch"
+      @select="onSearchResultSelected"
+    />
   </div>
 </template>
 
@@ -131,7 +159,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, timestampTitle, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
@@ -141,10 +169,13 @@ import {
   type MeetingSection,
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
+import UpNextCard from './UpNextCard.vue';
+import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import MeetingSearchDialog from './MeetingSearchDialog.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
+import { decideRecordingAction } from '../composables/decideRecordingAction';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -156,6 +187,8 @@ const selectedItem = ref<MeetingListItem | null>(null);
 // is only offered for local recordings.
 const backendId = ref<'ariso' | 'local'>('ariso');
 const searchOpen = ref(false);
+const activeBackend = ref<Backend | null>(null);
+const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
 };
@@ -181,6 +214,10 @@ const dayNum = computed(() => now.value.getDate());
 const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'long' }).toUpperCase());
 
 const activeView = ref<'today' | 'meetings'>('meetings');
+const isMac = computed(() =>
+  typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+);
+const searchShortcutLabel = computed(() => (isMac.value ? '⌘K' : 'Ctrl K'));
 
 // An in-progress local recording has no list row yet (the entry is created on
 // finalize). Synthesize one under the id the finalized recording will use, so
@@ -277,6 +314,32 @@ async function clearSelection(): Promise<void> {
   selectedItem.value = null;
 }
 
+function openSearchPalette(): void {
+  if (!activeBackend.value?.supportsSearch) return;
+  searchPaletteOpen.value = true;
+}
+
+// The palette asks the active backend to search, but still returns normal
+// Library rows so selection and detail loading stay on the existing path.
+async function searchMeetings(query: string): Promise<MeetingListItem[]> {
+  const backend = activeBackend.value ?? (await getActiveBackend());
+  activeBackend.value = backend;
+  if (!backend.supportsSearch) return [];
+  return backend.searchMeetings(query);
+}
+
+async function onSearchResultSelected(meeting: MeetingListItem): Promise<void> {
+  searchPaletteOpen.value = false;
+  await selectMeeting(meeting);
+}
+
+// The palette's Home command returns the Library to its neutral detail state:
+// close search, then clear the selected meeting after saving any edits.
+async function goHomeFromSearch(): Promise<void> {
+  searchPaletteOpen.value = false;
+  await clearSelection();
+}
+
 // Keep the sidebar (and the selected reference) in sync after an inline rename
 // in the detail panel, so the list label updates without a full reload.
 function onTitleUpdated(payload: { id: string; title: string }): void {
@@ -340,6 +403,7 @@ async function loadMeetings(): Promise<void> {
     const backend = await getActiveBackend();
     backendId.value = backend.id;
     if (backendId.value !== 'local') searchOpen.value = false;
+    activeBackend.value = backend;
     const next = await backend.listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
@@ -393,13 +457,14 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
   return Number.isSafeInteger(id) ? id : undefined;
 }
 
-// Open the floating recorder pill (its own always-on-top window).
-async function startRecording(): Promise<void> {
+// Open the floating recorder pill (its own always-on-top window) for a specific
+// meeting — the featured meeting behind "Start Meeting Early" on the Up Next card.
+async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
   try {
     const backend = await getActiveBackend();
     // Ariso scheduled meetings use numeric backend ids; pass that id into the
     // recorder so the eventual upload attaches to the selected meeting.
-    const meetingId = backend.id === 'ariso' ? numericMeetingId(selectedItem.value) : undefined;
+    const meetingId = backend.id === 'ariso' ? numericMeetingId(item) : undefined;
     if (meetingId != null) {
       await invoke('start_recording_window', { meetingId });
       setRecording(true);
@@ -411,6 +476,70 @@ async function startRecording(): Promise<void> {
       await invoke('open_meeting_picker', {});
       return;
     }
+    await invoke('start_recording_window', {});
+    setRecording(true);
+  } catch (e) {
+    console.error('Failed to start recording', e);
+  }
+}
+
+// True when a meeting's start falls on the current local day.
+function isTodayItem(m: MeetingListItem | null): boolean {
+  if (!m) return false;
+  const d = new Date(m.timestamp);
+  if (Number.isNaN(d.getTime())) return false;
+  const n = now.value;
+  return (
+    d.getFullYear() === n.getFullYear() &&
+    d.getMonth() === n.getMonth() &&
+    d.getDate() === n.getDate()
+  );
+}
+
+// The meeting currently in progress (the one the Today list flags with the green
+// "Now" chip): a today meeting with start <= now < end. Earliest start wins so it
+// matches the chip.
+function currentNowItem(): MeetingListItem | null {
+  const live = displayMeetings.value.filter(
+    (m) => isTodayItem(m) && isMeetingInProgress(m, now.value)
+  );
+  if (live.length === 0) return null;
+  live.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return live[0];
+}
+
+// Open the floating recorder pill (its own always-on-top window). The button's
+// behaviour follows the active nav view: Meetings always asks the picker; Today
+// records the in-progress meeting (or a deliberately selected today meeting),
+// falling back to the picker when neither applies. Non-picker (local) backends
+// just open the recorder with no meeting attached.
+async function startRecording(): Promise<void> {
+  try {
+    const backend = await getActiveBackend();
+    const usesPicker = backend.usesMeetingPicker;
+    const selectedTodayId =
+      usesPicker && activeView.value === 'today' && isTodayItem(selectedItem.value)
+        ? numericMeetingId(selectedItem.value)
+        : undefined;
+    const nowMeetingId = usesPicker ? numericMeetingId(currentNowItem()) : undefined;
+
+    const action = decideRecordingAction({
+      view: activeView.value,
+      usesPicker,
+      selectedTodayId: selectedTodayId ?? null,
+      nowMeetingId: nowMeetingId ?? null,
+    });
+
+    if (action.kind === 'picker') {
+      await invoke('open_meeting_picker', {});
+      return;
+    }
+    if (action.kind === 'record') {
+      await invoke('start_recording_window', { meetingId: action.meetingId });
+      setRecording(true);
+      return;
+    }
+    // record-adhoc: non-picker (local) backend with no meeting attached.
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {
@@ -493,6 +622,16 @@ function onWindowFocus(): void {
   void refreshRecordingState();
 }
 
+// Global keyboard entry mirrors the sidebar pill. It is scoped by backend so
+// Local users do not open a remote-only search surface.
+function onGlobalKeydown(event: KeyboardEvent): void {
+  const key = event.key.toLowerCase();
+  const triggered = (isMac.value ? event.metaKey : event.ctrlKey) && key === 'k';
+  if (!triggered || !activeBackend.value?.supportsSearch) return;
+  event.preventDefault();
+  searchPaletteOpen.value = true;
+}
+
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 
@@ -521,12 +660,14 @@ onMounted(() => {
   }, 30_000);
   window.addEventListener('focus', onWindowFocus);
   window.addEventListener('keydown', onKeydown);
+  window.addEventListener('keydown', onGlobalKeydown);
 });
 
 onUnmounted(() => {
   if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
   window.removeEventListener('keydown', onKeydown);
+  window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
 });
 </script>
@@ -608,6 +749,44 @@ onUnmounted(() => {
   transition: transform 0.1s, box-shadow 0.1s;
 }
 .add-btn:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: translate(1px, 1px); }
+
+.search-trigger {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: calc(100% - 12px);
+  min-height: 42px;
+  margin: 0 6px 10px;
+  padding: 0 12px;
+  border: 1px solid #d7d6d2;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  color: #76736e;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.search-trigger:hover {
+  border-color: #bdbbb6;
+  background: #ffffff;
+  color: #1c1c1c;
+}
+.search-trigger-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+.search-trigger kbd {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: #8f8c87;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
 
 .hint { font-size: 14px; color: #6f6f6f; padding: 0 6px; }
 
@@ -758,16 +937,5 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: flex;
-}
-.empty-card {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #ffffff;
-  border: 1px solid #e5e6e3;
-  border-radius: 16px;
-  color: #6f6f6f;
-  font-size: 14px;
 }
 </style>

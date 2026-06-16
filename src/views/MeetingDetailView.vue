@@ -203,7 +203,31 @@
 
         <div v-show="activeTab === 'mynote'" class="tab-pane tab-pane--editor">
           <div class="notes-head">
-            <h2 v-if="individualNote?.title" class="notes-title">{{ individualNote.title }}</h2>
+            <input
+              v-if="editingNoteTitle"
+              ref="noteTitleInput"
+              v-model="noteTitleDraft"
+              class="notes-title notes-title--input"
+              type="text"
+              placeholder="Untitled note"
+              aria-label="Note title"
+              @keydown.enter.prevent="commitNoteTitle"
+              @keydown.esc.prevent="commitNoteTitle"
+              @blur="commitNoteTitle"
+            />
+            <h2
+              v-else
+              class="notes-title"
+              :class="{
+                'notes-title--placeholder': !noteTitleDraft.trim(),
+                'notes-title--editable': notesCanEdit,
+              }"
+              :role="notesCanEdit ? 'button' : undefined"
+              :tabindex="notesCanEdit ? 0 : undefined"
+              :title="notesCanEdit ? 'Click to rename' : undefined"
+              @click="startEditNoteTitle"
+              @keydown.enter="startEditNoteTitle"
+            >{{ noteTitleDraft.trim() || 'Untitled note' }}</h2>
           </div>
           <div v-if="loadingIndividualNote" class="card-state"><span class="spinner" /><span>Loading note…</span></div>
           <MeetingNotesEditor
@@ -301,7 +325,7 @@ async function shareLocal(d: MeetingDetail): Promise<void> {
   const rect = shareBtn.value?.getBoundingClientRect();
   let personalNote = '';
   try {
-    personalNote = (await notesPersistence.load(props.item)) ?? '';
+    personalNote = (await notesPersistence.load(props.item))?.content ?? '';
   } catch {
     personalNote = '';
   }
@@ -326,10 +350,15 @@ const transcriptLoaded = ref(false);
 const loadingTranscript = ref(false);
 
 // Individual ("My note") — lazily loaded from /meeting-notes/{id}/individual-note.
-const individualNote = ref<{ content: string; title: string | null } | null>(null);
+const individualNote = ref<{ content: string; title: string } | null>(null);
 const individualNoteLoaded = ref(false);
 const loadingIndividualNote = ref(false);
 const notesMarkdown = ref('');
+// The My-note title is editable inline (like the meeting title) but autosaves on
+// the same debounce as the body rather than committing through renameMeeting.
+const noteTitleDraft = ref('');
+const editingNoteTitle = ref(false);
+const noteTitleInput = ref<HTMLInputElement | null>(null);
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 const notesPersistence = useMeetingNotesPersistence();
 
@@ -382,6 +411,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   // autosave suppressed until the selected note has loaded or the user types.
   suppressAutoSave = true;
   notesMarkdown.value = '';
+  noteTitleDraft.value = '';
+  editingNoteTitle.value = false;
   saveState.value = 'idle';
   if (saveTimer) {
     clearTimeout(saveTimer);
@@ -482,6 +513,23 @@ function onTitleBlur(): void {
   void commitTitle();
 }
 
+// Enter edit mode for the My-note title and select the text for quick replace.
+async function startEditNoteTitle(): Promise<void> {
+  if (!notesCanEdit.value || editingNoteTitle.value) return;
+  editingNoteTitle.value = true;
+  await nextTick();
+  noteTitleInput.value?.focus();
+  noteTitleInput.value?.select();
+}
+
+// Leave edit mode and flush the current draft now. Autosave already debounced the
+// change, but committing on Enter/Esc/blur makes the save feel immediate.
+function commitNoteTitle(): void {
+  if (!editingNoteTitle.value) return;
+  editingNoteTitle.value = false;
+  void saveNotesNow();
+}
+
 // Local recordings carry their transcript as markdown on the detail; Ariso
 // loads structured chunks lazily into `transcript`. The Transcript tab renders
 // whichever is present.
@@ -576,16 +624,20 @@ async function loadIndividualNote(): Promise<void> {
   suppressAutoSave = true;
   try {
     const item = props.item;
-    const content = await notesPersistence.load(item);
+    const note = await notesPersistence.load(item);
     if (my !== noteReqId || props.item?.id !== item.id) return;
-    notesMarkdown.value = content;
-    individualNote.value = { content, title: null };
+    notesMarkdown.value = note.content;
+    noteTitleDraft.value = note.title;
+    editingNoteTitle.value = false;
+    individualNote.value = { content: note.content, title: note.title };
     individualNoteLoaded.value = true;
   } catch (e) {
     if (my !== noteReqId) return;
     console.error('Failed to load individual note', e);
     individualNote.value = null;
     notesMarkdown.value = '';
+    noteTitleDraft.value = '';
+    editingNoteTitle.value = false;
     individualNoteLoaded.value = true;
     saveState.value = 'error';
   } finally {
@@ -603,18 +655,19 @@ async function saveNotesNow(): Promise<void> {
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   const my = ++saveReqId;
   const markdown = notesMarkdown.value;
+  const title = noteTitleDraft.value;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
   saveState.value = 'saving';
   try {
-    await notesPersistence.save(item, markdown);
+    await notesPersistence.save(item, { content: markdown, title });
     if (my !== saveReqId || props.item?.id !== item.id) return;
     if (detail.value) {
       detail.value.hasIndividualNote = markdown.trim().length > 0;
     }
-    individualNote.value = { content: markdown, title: individualNote.value?.title ?? null };
+    individualNote.value = { content: markdown, title };
     individualNoteLoaded.value = true;
     saveState.value = 'saved';
   } catch (e) {
@@ -631,7 +684,9 @@ watch(activeTab, (t) => {
   else if (t === 'mynote') void loadIndividualNote();
 });
 
-watch(notesMarkdown, () => {
+// Debounced autosave shared by the note body and its title so an edit to either
+// persists both together. Suppressed while a meeting switch resets the drafts.
+function scheduleNoteAutoSave(): void {
   if (
     suppressAutoSave ||
     loadingIndividualNote.value ||
@@ -643,7 +698,10 @@ watch(notesMarkdown, () => {
   saveTimer = setTimeout(() => {
     void saveNotesNow();
   }, 700);
-});
+}
+
+watch(notesMarkdown, scheduleNoteAutoSave);
+watch(noteTitleDraft, scheduleNoteAutoSave);
 
 onUnmounted(() => {
   if (saveTimer) clearTimeout(saveTimer);
@@ -847,7 +905,15 @@ const durationLabel = computed<string | null>(() => {
 .tab-pane { min-height: 100%; }
 .tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
-.notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; }
+.notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; line-height: 1.2; }
+.notes-title--editable { cursor: text; }
+.notes-title--placeholder { color: #9a9a9a; }
+.notes-title--input {
+  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
+  font-family: inherit; font-size: 20px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
+  border: none; background: transparent; outline: none; appearance: none;
+}
+.notes-title--input::placeholder { color: #9a9a9a; font-weight: 700; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
 
