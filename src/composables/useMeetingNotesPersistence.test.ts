@@ -1,82 +1,89 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { MeetingListItem } from './useBackend';
 
 const apiRequest = vi.fn();
 const readRecordingNote = vi.fn();
 const writeRecordingNote = vi.fn();
+const readRecordingNoteTitle = vi.fn();
+const writeRecordingNoteTitle = vi.fn();
 
 vi.mock('../tauri', () => ({
-  api: {
-    request: (...args: unknown[]) => apiRequest(...args),
-  },
+  api: { request: (...a: unknown[]) => apiRequest(...a) },
   local: {
-    readRecordingNote: (id: string) => readRecordingNote(id),
-    writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
+    readRecordingNote: (...a: unknown[]) => readRecordingNote(...a),
+    writeRecordingNote: (...a: unknown[]) => writeRecordingNote(...a),
+    readRecordingNoteTitle: (...a: unknown[]) => readRecordingNoteTitle(...a),
+    writeRecordingNoteTitle: (...a: unknown[]) => writeRecordingNoteTitle(...a),
   },
 }));
 
 import { useMeetingNotesPersistence } from './useMeetingNotesPersistence';
 
-const localMeeting: MeetingListItem = {
-  id: 'local-1',
-  title: 'Local recording',
-  timestamp: '2026-06-12T10:00:00Z',
-  files: { hasAudio: true, hasNote: false, hasTranscript: false },
-};
+// A local meeting is identified by the presence of recording `files`; remote
+// meetings have none.
+const localMeeting = { id: 'rec-1', files: { hasTranscript: true } } as unknown as MeetingListItem;
+const remoteMeeting = { id: '42' } as unknown as MeetingListItem;
 
-const remoteMeeting: MeetingListItem = {
-  id: 'remote 42',
-  title: 'Cloud meeting',
-  timestamp: '2026-06-12T10:00:00Z',
-};
+beforeEach(() => {
+  apiRequest.mockReset();
+  readRecordingNote.mockReset();
+  writeRecordingNote.mockReset();
+  readRecordingNoteTitle.mockReset();
+  writeRecordingNoteTitle.mockReset();
+});
 
-describe('useMeetingNotesPersistence', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    apiRequest.mockResolvedValue({ status: 200, data: { content: 'cloud note' } });
-    readRecordingNote.mockResolvedValue('local note');
+describe('local note persistence', () => {
+  it('load reads body and title sidecar', async () => {
+    readRecordingNote.mockResolvedValue('# Body');
+    readRecordingNoteTitle.mockResolvedValue('Kickoff');
+    const note = await useMeetingNotesPersistence().load(localMeeting);
+    expect(readRecordingNote).toHaveBeenCalledWith('rec-1');
+    expect(readRecordingNoteTitle).toHaveBeenCalledWith('rec-1');
+    expect(note).toEqual({ content: '# Body', title: 'Kickoff' });
+  });
+
+  it('save writes body and title sidecar', async () => {
     writeRecordingNote.mockResolvedValue(undefined);
+    writeRecordingNoteTitle.mockResolvedValue(undefined);
+    await useMeetingNotesPersistence().save(localMeeting, { content: '# Body', title: 'Kickoff' });
+    expect(writeRecordingNote).toHaveBeenCalledWith('rec-1', '# Body');
+    expect(writeRecordingNoteTitle).toHaveBeenCalledWith('rec-1', 'Kickoff');
+  });
+});
+
+describe('remote note persistence', () => {
+  it('load returns content and title from the GET payload', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { content: 'hi', title: 'Sync' } });
+    const note = await useMeetingNotesPersistence().load(remoteMeeting);
+    expect(apiRequest).toHaveBeenCalledWith('GET', '/meeting-notes/42/individual-note');
+    expect(note).toEqual({ content: 'hi', title: 'Sync' });
   });
 
-  it('uses local files for local recording notes', async () => {
-    const persistence = useMeetingNotesPersistence();
-
-    expect(persistence.modeFor(localMeeting)).toBe('local');
-    expect(await persistence.load(localMeeting)).toBe('local note');
-    await persistence.save(localMeeting, 'updated local');
-
-    expect(readRecordingNote).toHaveBeenCalledWith('local-1');
-    expect(writeRecordingNote).toHaveBeenCalledWith('local-1', 'updated local');
-    expect(apiRequest).not.toHaveBeenCalled();
+  it('load defaults a missing title to empty string', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { content: 'hi' } });
+    expect(await useMeetingNotesPersistence().load(remoteMeeting)).toEqual({ content: 'hi', title: '' });
   });
 
-  it('uses the backend personal-note endpoint for cloud meetings', async () => {
-    const persistence = useMeetingNotesPersistence();
-
-    expect(persistence.modeFor(remoteMeeting)).toBe('remote');
-    expect(persistence.canEdit(remoteMeeting)).toBe(true);
-    expect(await persistence.load(remoteMeeting)).toBe('cloud note');
-    await persistence.save(remoteMeeting, 'updated cloud');
-
-    expect(apiRequest).toHaveBeenNthCalledWith(
-      1,
-      'GET',
-      '/meeting-notes/remote%2042/individual-note'
-    );
-    expect(apiRequest).toHaveBeenNthCalledWith(
-      2,
-      'PUT',
-      '/meeting-notes/remote%2042/individual-note',
-      { content: 'updated cloud' }
-    );
-    expect(readRecordingNote).not.toHaveBeenCalled();
-    expect(writeRecordingNote).not.toHaveBeenCalled();
+  it('load returns empty note on 404', async () => {
+    apiRequest.mockResolvedValue({ status: 404, data: null });
+    expect(await useMeetingNotesPersistence().load(remoteMeeting)).toEqual({ content: '', title: '' });
   });
 
-  it('treats a missing cloud personal note as an empty editable note', async () => {
-    apiRequest.mockResolvedValueOnce({ status: 404, data: { error: 'not found' } });
-    const persistence = useMeetingNotesPersistence();
+  it('save PUTs content and title together', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: {} });
+    await useMeetingNotesPersistence().save(remoteMeeting, { content: 'hi', title: 'Sync' });
+    expect(apiRequest).toHaveBeenCalledWith('PUT', '/meeting-notes/42/individual-note', {
+      content: 'hi',
+      title: 'Sync',
+    });
+  });
 
-    await expect(persistence.load(remoteMeeting)).resolves.toBe('');
+  // The meeting id is interpolated into the request path, so it must be
+  // percent-encoded to stay valid for string ids containing reserved characters.
+  it('percent-encodes the meeting id in the request path', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { content: '', title: '' } });
+    const spacedMeeting = { id: 'remote 42' } as unknown as MeetingListItem;
+    await useMeetingNotesPersistence().load(spacedMeeting);
+    expect(apiRequest).toHaveBeenCalledWith('GET', '/meeting-notes/remote%2042/individual-note');
   });
 });

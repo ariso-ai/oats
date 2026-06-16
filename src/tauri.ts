@@ -215,6 +215,13 @@ export const local = {
   writeRecordingNote(id: string, markdown: string): Promise<void> {
     return invoke('write_recording_note', { id, markdown });
   },
+  /** Reads the local `user-note-title.txt` sidecar holding the My-note title. */
+  readRecordingNoteTitle(id: string): Promise<string> {
+    return invoke<string>('read_recording_note_title', { id });
+  },
+  writeRecordingNoteTitle(id: string, title: string): Promise<void> {
+    return invoke('write_recording_note_title', { id, title });
+  },
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
   },
