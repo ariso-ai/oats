@@ -19,6 +19,7 @@ APPLICATIONS_ICON_X="${DMG_APPLICATIONS_ICON_X:-645}"
 APPLICATIONS_ICON_Y="${DMG_APPLICATIONS_ICON_Y:-280}"
 WINDOW_WIDTH="${DMG_WINDOW_WIDTH:-820}"
 WINDOW_HEIGHT="${DMG_WINDOW_HEIGHT:-500}"
+FINDER_SCRIPT_TIMEOUT_SECONDS="${DMG_FINDER_SCRIPT_TIMEOUT_SECONDS:-600}"
 
 if [[ ! -d "${APP_PATH}" ]]; then
   echo "Missing app bundle: ${APP_PATH}" >&2
@@ -66,35 +67,38 @@ hdiutil create \
 hdiutil detach "${MOUNT_DIR}" >/dev/null 2>&1 || true
 hdiutil attach "${RW_DMG}" -readwrite -noverify -noautoopen -quiet
 
-# Finder persists the icon size, positions, and background into .DS_Store; this
-# keeps the oatmeal bowl composition stable when users open the packaged DMG.
+# Finder persists the icon size, positions, and background into .DS_Store; the
+# explicit timeout keeps slow CI runners from hitting AppleScript's default
+# AppleEvent timeout while preserving the Finder-authored layout metadata.
 osascript <<APPLESCRIPT
-tell application "Finder"
-  tell disk "${VOLUME_NAME}"
-    open
-    make new alias file to POSIX file "/Applications" at container window with properties {name:"Applications"}
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set bounds of container window to {10, 60, 10 + ${WINDOW_WIDTH}, 60 + ${WINDOW_HEIGHT}}
+with timeout of ${FINDER_SCRIPT_TIMEOUT_SECONDS} seconds
+  tell application "Finder"
+    tell disk "${VOLUME_NAME}"
+      open
+      make new alias file to POSIX file "/Applications" at container window with properties {name:"Applications"}
+      set current view of container window to icon view
+      set toolbar visible of container window to false
+      set statusbar visible of container window to false
+      set bounds of container window to {10, 60, 10 + ${WINDOW_WIDTH}, 60 + ${WINDOW_HEIGHT}}
 
-    set opts to icon view options of container window
-    set icon size of opts to ${ICON_SIZE}
-    set text size of opts to 16
-    set arrangement of opts to not arranged
-    set background picture of opts to file ".background:${BACKGROUND_NAME}"
+      set opts to icon view options of container window
+      set icon size of opts to ${ICON_SIZE}
+      set text size of opts to 16
+      set arrangement of opts to not arranged
+      set background picture of opts to file ".background:${BACKGROUND_NAME}"
 
-    set position of item "${APP_BUNDLE_NAME}" to {${APP_ICON_X}, ${APP_ICON_Y}}
-    set position of item "Applications" to {${APPLICATIONS_ICON_X}, ${APPLICATIONS_ICON_Y}}
-    set extension hidden of item "${APP_BUNDLE_NAME}" to true
-    update without registering applications
-    delay 2
-    close
-    open
-    delay 1
-    close
+      set position of item "${APP_BUNDLE_NAME}" to {${APP_ICON_X}, ${APP_ICON_Y}}
+      set position of item "Applications" to {${APPLICATIONS_ICON_X}, ${APPLICATIONS_ICON_Y}}
+      set extension hidden of item "${APP_BUNDLE_NAME}" to true
+      update without registering applications
+      delay 2
+      close
+      open
+      delay 1
+      close
+    end tell
   end tell
-end tell
+end timeout
 APPLESCRIPT
 
 for _ in {1..10}; do
