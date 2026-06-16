@@ -34,6 +34,21 @@
       "icons/icon.png"
     ],
     "macOS": {
+      "dmg": {
+        "background": "assets/dmg-background.png",
+        "windowSize": {
+          "width": 820,
+          "height": 500
+        },
+        "appPosition": {
+          "x": 210,
+          "y": 270
+        },
+        "applicationFolderPosition": {
+          "x": 645,
+          "y": 280
+        }
+      },
       "entitlements": "entitlements.plist",
       "infoPlist": "Info.plist",
       "minimumSystemVersion": "14.4"
