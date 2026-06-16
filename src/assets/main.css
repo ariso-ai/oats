@@ -29,3 +29,13 @@
   font-style: normal;
   font-display: swap;
 }
+
+/* Instrument Serif — display face for the date/time heading on the Up Next
+   empty state (from the Figma design system). */
+@font-face {
+  font-family: 'Instrument Serif';
+  src: url('./fonts/InstrumentSerif-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
