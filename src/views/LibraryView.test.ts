@@ -112,7 +112,7 @@ beforeEach(() => {
   writeRecordingNote.mockResolvedValue(undefined);
   backendId.mockReturnValue('local');
   usesMeetingPicker.mockReturnValue(false);
-  supportsSearch.mockReturnValue(false);
+  supportsSearch.mockReturnValue(true);
   searchMeetings.mockResolvedValue([]);
 });
 afterEach(() => {
@@ -164,7 +164,19 @@ describe('LibraryView', () => {
     expect(document.body.querySelector('.palette-panel')).not.toBeNull();
   });
 
-  it('hides the search trigger for local backend', async () => {
+  it('shows the search trigger for local backend and opens the shared palette', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Local' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+
+    expect(document.body.querySelector('.palette-panel')).not.toBeNull();
+  });
+
+  it('hides the search trigger when the backend does not support search', async () => {
+    supportsSearch.mockReturnValue(false);
     listMeetings.mockResolvedValue([item({ id: 'a', title: 'Local' })]);
     const wrapper = mount(LibraryView);
     await flushPromises();
@@ -223,6 +235,33 @@ describe('LibraryView', () => {
     expect(document.body.textContent).toContain('1min');
     expect(document.body.textContent).toContain('Discussed note search');
     vi.useRealTimers();
+  });
+
+  it('resets the search query when the backend changes', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+    input.value = 'note';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+    expect(document.body.querySelector<HTMLInputElement>('.palette-input')!.value).toBe('note');
+
+    // Switch backends via the focus-driven reload; the palette is keyed by the
+    // active backend, so it remounts and the previous query is discarded.
+    backendId.mockReturnValue('local');
+    window.dispatchEvent(new Event('focus'));
+    await flushPromises();
+
+    const inputs = [...document.body.querySelectorAll<HTMLInputElement>('.palette-input')];
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(inputs.every((el) => el.value === '')).toBe(true);
   });
 
   it('clears stale search rows as soon as the query changes', async () => {

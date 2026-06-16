@@ -125,7 +125,10 @@
       />
     </section>
 
+    <!-- Key by backend id so switching backends remounts the palette, discarding
+         any query/results typed against the previous backend's corpus. -->
     <LibrarySearchPalette
+      :key="activeBackend?.id"
       :open="searchPaletteOpen"
       :search-meetings="searchMeetings"
       @close="searchPaletteOpen = false"
@@ -580,8 +583,8 @@ function onWindowFocus(): void {
   void refreshRecordingState();
 }
 
-// Global keyboard entry mirrors the sidebar pill. It is scoped by backend so
-// Local users do not open a remote-only search surface.
+// ⌘K mirrors the sidebar Search pill, gated on the active backend supporting
+// search (both Ariso and local do — local filters its recordings by title).
 function onGlobalKeydown(event: KeyboardEvent): void {
   const key = event.key.toLowerCase();
   const triggered = (isMac.value ? event.metaKey : event.ctrlKey) && key === 'k';
