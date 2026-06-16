@@ -19,6 +19,7 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
 });
 
 import UpNextCard from './UpNextCard.vue';
+import { todayLabel } from '../composables/groupMeetingsByDate';
 
 // Fixed "now"; meetings below are all in the future relative to it so they land
 // in the UPCOMING bucket.
@@ -154,10 +155,59 @@ describe('UpNextCard', () => {
     expect(wrapper.find('.head-title').text()).toBe('Second');
   });
 
-  it('shows the empty state when nothing is upcoming', async () => {
+  it('shows the empty state when nothing is upcoming today or later', async () => {
     const wrapper = mountCard([meeting({ id: 'past', timestamp: '2020-01-01T00:00:00Z', endTimestamp: '2020-01-01T01:00:00Z' })]);
     await flushPromises();
     expect(wrapper.find('.up-next-empty').exists()).toBe(true);
+    expect(wrapper.find('.up-next-empty--notice').exists()).toBe(false);
     expect(wrapper.find('.card').exists()).toBe(false);
+  });
+
+  it('labels the featured card with the current day and its date', async () => {
+    const wrapper = mountCard([meeting({ id: 'a', title: 'Discovery call' })]);
+    await flushPromises();
+    expect(wrapper.find('.up-next-empty--notice').exists()).toBe(false);
+    expect(wrapper.find('.up-next-day').text()).toBe(todayLabel(NOW));
+  });
+
+  it('falls back to the next day’s meetings when today is clear', async () => {
+    const wrapper = mountCard([
+      // Today's only meeting is already over.
+      meeting({ id: 'done', timestamp: '2026-06-16T09:00:00Z', endTimestamp: '2026-06-16T10:00:00Z' }),
+      // The next day has meetings — these should fill the card.
+      meeting({ id: 'tom-late', title: 'Sync', timestamp: '2026-06-17T16:00:00Z', endTimestamp: '2026-06-17T16:30:00Z' }),
+      meeting({ id: 'tom-early', title: 'Standup', timestamp: '2026-06-17T15:00:00Z', endTimestamp: '2026-06-17T15:15:00Z' }),
+    ]);
+    await flushPromises();
+    // The "no upcoming today" notice sits above the card…
+    expect(wrapper.find('.up-next-empty--notice').text()).toContain('No upcoming meetings today');
+    // …with the next day's earliest meeting featured and its date shown.
+    expect(wrapper.find('.card').exists()).toBe(true);
+    expect(wrapper.find('.head-title').text()).toBe('Standup');
+    expect(wrapper.find('.up-next-day').text()).toBeTruthy();
+    const rows = wrapper.findAll('.meeting-row:not(.meeting-row--more)');
+    expect(rows.map((r) => r.find('.row-title').text())).toEqual(['Sync']);
+    // The next day fills the main card, so there's no separate compact preview.
+    expect(wrapper.find('.card--compact').exists()).toBe(false);
+    expect(wrapper.find('.next-day-head').exists()).toBe(false);
+  });
+
+  it('shows the next day as a compact preview below today’s card', async () => {
+    const wrapper = mountCard([
+      meeting({ id: 'today', title: 'Discovery call', timestamp: '2026-06-16T16:00:00Z', endTimestamp: '2026-06-16T16:45:00Z' }),
+      meeting({ id: 'tom-late', title: 'Sync', timestamp: '2026-06-17T16:00:00Z', endTimestamp: '2026-06-17T16:30:00Z' }),
+      meeting({ id: 'tom-early', title: 'Standup', timestamp: '2026-06-17T15:00:00Z', endTimestamp: '2026-06-17T15:15:00Z' }),
+    ]);
+    await flushPromises();
+    // Today is still the featured card.
+    expect(wrapper.find('.up-next-empty--notice').exists()).toBe(false);
+    expect(wrapper.find('.head-title').text()).toBe('Discovery call');
+    expect(wrapper.find('.up-next-day').text()).toBe(todayLabel(NOW));
+    // The next day appears as a compact, date-headed list below it.
+    const preview = wrapper.find('.card--compact');
+    expect(preview.exists()).toBe(true);
+    expect(wrapper.find('.next-day-head').text()).toBeTruthy();
+    const rows = preview.findAll('.meeting-row:not(.meeting-row--more)');
+    expect(rows.map((r) => r.find('.row-title').text())).toEqual(['Standup', 'Sync']);
   });
 });

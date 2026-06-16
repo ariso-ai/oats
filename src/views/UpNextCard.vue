@@ -21,10 +21,18 @@
     </div>
 
     <template v-if="featured">
-      <!-- "Up Next • in 22min" label with prev/next navigation across the
-           upcoming meetings. -->
+      <!-- Today is clear — say so, then show the next day's meetings below. -->
+      <div v-if="showingNextDay" class="up-next-empty up-next-empty--notice">
+        <p>No upcoming meetings today.</p>
+      </div>
+
+      <!-- "Up Next • in 22min" label, the day's date, and prev/next navigation
+           across the upcoming meetings. -->
       <div class="up-next-head">
-        <span class="up-next-label">Up Next<template v-if="featuredRel"> • {{ featuredRel }}</template></span>
+        <div class="up-next-head-main">
+          <span class="up-next-label">Up Next<template v-if="featuredRel"> • {{ featuredRel }}</template></span>
+          <span class="up-next-day">{{ dayLabel }}</span>
+        </div>
         <div v-if="upcoming.length > 1" class="up-next-nav">
           <button
             class="nav-chevron"
@@ -102,6 +110,26 @@
           {{ moreCount }} more…
         </div>
       </div>
+
+      <!-- Compact preview of the next day's meetings, beneath today's card. -->
+      <template v-if="nextDayPreview">
+        <div class="next-day-head">{{ nextDayPreview.label }}</div>
+        <div class="card card--compact">
+          <button
+            v-for="m in visibleNextDay"
+            :key="m.id"
+            class="meeting-row"
+            type="button"
+            @click="$emit('select', m)"
+          >
+            <span class="row-title">{{ m.title }}</span>
+            <span class="row-sub">{{ rowSub(m) }}</span>
+          </button>
+          <div v-if="nextDayMore > 0" class="meeting-row meeting-row--more">
+            {{ nextDayMore }} more…
+          </div>
+        </div>
+      </template>
     </template>
 
     <div v-else class="up-next-empty">
@@ -117,7 +145,12 @@ import {
   type MeetingListItem,
   type MeetingParticipantInfo,
 } from '../composables/useBackend';
-import { groupMeetingsByDate, upcomingRelLabel } from '../composables/groupMeetingsByDate';
+import {
+  groupTodaysMeetings,
+  nextDaySection,
+  todayLabel,
+  upcomingRelLabel,
+} from '../composables/groupMeetingsByDate';
 import oatsLogo from '../assets/oats-light.svg';
 
 const props = defineProps<{
@@ -155,12 +188,37 @@ const greeting = computed(() => {
   return `${weekday} ${month} ${d.getDate()} ${time}`;
 });
 
-// Reuse the sidebar's grouping so "upcoming" here means exactly what it means
-// in the list: future meetings and ones in progress, ordered earliest-first.
-const upcoming = computed<MeetingListItem[]>(() => {
-  const section = groupMeetingsByDate(props.meetings, props.now).find((s) => s.key === 'upcoming');
+// Today's still-to-come meetings, matching the sidebar's "today / upcoming"
+// split: future meetings and ones in progress, ordered earliest-first.
+const todaysUpcoming = computed<MeetingListItem[]>(() => {
+  const section = groupTodaysMeetings(props.meetings, props.now).find((s) => s.key === 'upcoming');
   return section?.items ?? [];
 });
+
+// The next calendar day that has meetings. Shown either as the main card (when
+// today is already done) or as a compact preview beneath today's card.
+const nextDay = computed(() => nextDaySection(props.meetings, props.now));
+const showingNextDay = computed(() => todaysUpcoming.value.length === 0 && nextDay.value !== null);
+
+// The meetings the main card pages through: today's upcoming, else the next day's.
+const upcoming = computed<MeetingListItem[]>(() =>
+  todaysUpcoming.value.length ? todaysUpcoming.value : (nextDay.value?.items ?? [])
+);
+
+// Date heading for whichever day the main card is showing.
+const dayLabel = computed(() =>
+  showingNextDay.value ? nextDay.value!.label : todayLabel(props.now)
+);
+
+// Next day's meetings as a compact preview below today's card — only when today
+// has its own meetings (otherwise the next day already fills the main card).
+const nextDayPreview = computed(() =>
+  showingNextDay.value ? null : nextDay.value
+);
+const visibleNextDay = computed(() => nextDayPreview.value?.items.slice(0, MAX_VISIBLE_REST) ?? []);
+const nextDayMore = computed(
+  () => (nextDayPreview.value?.items.length ?? 0) - visibleNextDay.value.length
+);
 
 // Which upcoming meeting is featured in the header; the chevrons page through
 // them. Clamp on read so a shrinking list (a meeting starting) never points
@@ -202,6 +260,13 @@ watch(
     }
   },
   { immediate: true }
+);
+
+// Reset paging when the card switches between today and the next day, so the
+// chevrons don't start mid-list against a freshly-swapped set of meetings.
+watch(
+  () => (showingNextDay.value ? nextDay.value?.key ?? null : 'today'),
+  () => { featuredIndex.value = 0; }
 );
 
 function step(delta: number): void {
@@ -345,10 +410,22 @@ function rowSub(m: MeetingListItem): string {
   padding: 0 2px 10px;
   flex-shrink: 0;
 }
+.up-next-head-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
 .up-next-label {
   font-size: 14px;
   font-weight: 600;
   color: #6f6f6f;
+}
+.up-next-day {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #9a9a9a;
 }
 .up-next-nav {
   display: flex;
@@ -380,6 +457,24 @@ function rowSub(m: MeetingListItem): string {
   border-radius: 16px;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* Compact preview card for the next day: just rows, with a little breathing
+   room so the first/last rows sit clear of the rounded corners. */
+.card--compact {
+  padding: 6px 0;
+  overflow: hidden;
+}
+
+/* Date heading above the next day's compact preview. */
+.next-day-head {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #9a9a9a;
+  padding: 0 2px 8px;
+  margin-top: 18px;
   flex-shrink: 0;
 }
 
@@ -527,5 +622,12 @@ function rowSub(m: MeetingListItem): string {
   border-radius: 16px;
   color: #6f6f6f;
   font-size: 14px;
+}
+/* Compact variant shown above the next day's card when today is already done. */
+.up-next-empty--notice {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+  padding: 14px 16px;
+  margin-bottom: 12px;
 }
 </style>

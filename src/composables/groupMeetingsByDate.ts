@@ -62,6 +62,48 @@ export function dateLabel(key: string, now: Date): string {
     .toUpperCase();
 }
 
+/** Like dateLabel but always carries the calendar date, so the relative days
+ *  read "TODAY · JUN 16" / "TOMORROW · JUN 17"; other days already include it. */
+export function dayLabelWithDate(key: string, now: Date): string {
+  const rel = dateLabel(key, now);
+  if (rel === 'TODAY' || rel === 'TOMORROW' || rel === 'YESTERDAY') {
+    const [y, mo, d] = key.split('-').map(Number);
+    const md = new Date(y, mo - 1, d)
+      .toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+      .toUpperCase();
+    return `${rel} · ${md}`;
+  }
+  return rel;
+}
+
+/** Today's date as a heading, e.g. "TODAY · JUN 16". */
+export function todayLabel(now: Date): string {
+  return dayLabelWithDate(localDateKey(now), now);
+}
+
+/** The earliest calendar day strictly after today that has any meetings, as a
+ *  labelled section ordered earliest-first; null when there are none. */
+export function nextDaySection(meetings: MeetingListItem[], now: Date): MeetingSection | null {
+  const today = localDateKey(now);
+  const buckets = new Map<string, MeetingListItem[]>();
+  for (const meeting of meetings) {
+    const d = new Date(meeting.timestamp);
+    if (Number.isNaN(d.getTime())) continue;
+    // Zero-padded YYYY-MM-DD keys compare lexically, so this keeps future days.
+    const key = localDateKey(d);
+    if (key <= today) continue;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(meeting);
+    else buckets.set(key, [meeting]);
+  }
+  if (buckets.size === 0) return null;
+  const nextKey = [...buckets.keys()].sort()[0];
+  const items = [...buckets.get(nextKey)!].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+  return { key: nextKey, label: dayLabelWithDate(nextKey, now), items };
+}
+
 /** Bucket every meeting under per-calendar-date headers, newest date first, and
  *  within each date ordered earliest-first (ascending by start time). */
 export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): MeetingSection[] {
