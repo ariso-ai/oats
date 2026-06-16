@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.0](https://github.com/ariso-ai/oats/compare/v0.6.0...v0.7.0) (2026-06-16)
+
+
+### Features
+
+* local-meeting search dialog in titlebar ([d6aa308](https://github.com/ariso-ai/oats/commit/d6aa308eb1128af30a22970e9edcdbe51db4d209))
+
+
+### Bug Fixes
+
+* avoid auto loading a meeting into detail view ([6bf4b1e](https://github.com/ariso-ai/oats/commit/6bf4b1ebf9af244fced492a15254b1679330726c))
+* avoid auto loading a meeting into detail view ([1ed1ad6](https://github.com/ariso-ai/oats/commit/1ed1ad679f2f86594357d2eda72039d25547c020))
+* capture mic raw so recording doesn't lower the user's voice on calls ([992ce08](https://github.com/ariso-ai/oats/commit/992ce0807fe454276813bd4cd41816c3abc33101))
+* keep the same search UX ([a6bc6df](https://github.com/ariso-ai/oats/commit/a6bc6df7e61ded892034ab0ddec420f4ffd8f453))
+* remove sidecar header ([b1e4eab](https://github.com/ariso-ai/oats/commit/b1e4eab6ab2b82ccafdf2fb4ecd4730077eb8cfd))
+* remove sidecar header ([423085a](https://github.com/ariso-ai/oats/commit/423085aa6a6c50044e98659718bb5447fcb2e7ea))
+* show today's upcoming meetings and the next day in Up Next card ([f3456eb](https://github.com/ariso-ai/oats/commit/f3456eb433929276f67e24d086d4ddcfeb2742e1))
+* show today's upcoming meetings and the next day in Up Next card ([3e960bb](https://github.com/ariso-ai/oats/commit/3e960bb6fa2f43735c7d9dc8e3e821f2845ae4ff))
+
 ## [0.6.0](https://github.com/ariso-ai/oats/compare/v0.5.0...v0.6.0) (2026-06-16)
 
 
