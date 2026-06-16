@@ -3,6 +3,9 @@ import {
   groupMeetingsByDate,
   groupTodaysMeetings,
   dateLabel,
+  dayLabelWithDate,
+  todayLabel,
+  nextDaySection,
   upcomingRelLabel,
   isMeetingInProgress,
 } from './groupMeetingsByDate';
@@ -25,6 +28,57 @@ describe('dateLabel', () => {
   it('uses an uppercased weekday/month/day for other dates', () => {
     // 2026-06-07 is a Sunday.
     expect(dateLabel('2026-06-07', NOW)).toBe('SUN, JUN 7');
+  });
+});
+
+describe('dayLabelWithDate', () => {
+  it('appends the calendar date to the relative day labels', () => {
+    expect(dayLabelWithDate('2026-06-10', NOW)).toBe('TODAY · JUN 10');
+    expect(dayLabelWithDate('2026-06-11', NOW)).toBe('TOMORROW · JUN 11');
+    expect(dayLabelWithDate('2026-06-09', NOW)).toBe('YESTERDAY · JUN 9');
+  });
+
+  it('leaves other days as-is since they already carry the date', () => {
+    expect(dayLabelWithDate('2026-06-07', NOW)).toBe('SUN, JUN 7');
+  });
+
+  it('todayLabel labels the current day with its date', () => {
+    expect(todayLabel(NOW)).toBe('TODAY · JUN 10');
+  });
+});
+
+describe('nextDaySection', () => {
+  it('returns the earliest future day that has meetings, earliest-first', () => {
+    const meetings = [
+      m('today', '2026-06-10T18:00:00'),
+      m('tom-late', '2026-06-11T16:00:00'),
+      m('tom-early', '2026-06-11T09:00:00'),
+      m('far', '2026-06-13T10:00:00'),
+    ];
+    const section = nextDaySection(meetings, NOW);
+    expect(section?.key).toBe('2026-06-11');
+    expect(section?.label).toBe('TOMORROW · JUN 11');
+    expect(section?.items.map((x) => x.id)).toEqual(['tom-early', 'tom-late']);
+  });
+
+  it('skips empty days and lands on the next day that has meetings', () => {
+    // Nothing tomorrow (the 11th); the next meetings are on the 13th.
+    const section = nextDaySection([m('far', '2026-06-13T10:00:00')], NOW);
+    expect(section?.key).toBe('2026-06-13');
+    expect(section?.label).toBe('SAT, JUN 13');
+  });
+
+  it('ignores today and past meetings', () => {
+    const meetings = [
+      m('today', '2026-06-10T18:00:00'),
+      m('past', '2026-06-09T09:00:00'),
+    ];
+    expect(nextDaySection(meetings, NOW)).toBeNull();
+  });
+
+  it('returns null when there are no future meetings', () => {
+    expect(nextDaySection([], NOW)).toBeNull();
+    expect(nextDaySection([m('bad', 'nope')], NOW)).toBeNull();
   });
 });
 
