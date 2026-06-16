@@ -513,6 +513,82 @@ fn deliver_auto_record_decision(record: bool) {
     }
 }
 
+/// Whether the meeting happening right now is already flagged for server-side
+/// auto-join (an Ariso notetaker will record it), in which case the desktop must
+/// not also record. Only the Ariso backend has a calendar; everything else — and
+/// any network/parse error — returns false so detection proceeds normally.
+pub async fn current_meeting_auto_join_scheduled(app: &AppHandle) -> bool {
+    use crate::commands::{active_backend, api_base_url, get_session_token, http_client};
+    if active_backend(app) != "ariso" {
+        return false;
+    }
+    let Some(token) = get_session_token(app) else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    let start = (now - chrono::Duration::hours(2)).to_rfc3339();
+    let end = (now + chrono::Duration::hours(2)).to_rfc3339();
+    let result = tokio::time::timeout(HTTP_TIMEOUT, async {
+        http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .query(&[("startDate", start.as_str()), ("endDate", end.as_str())])
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    })
+    .await;
+    match result {
+        Ok(Some(v)) => current_meeting_auto_join_from(&v, now.timestamp_millis()),
+        _ => false,
+    }
+}
+
+/// Pure selector (testable): given the `/meetings` response and the current time
+/// in epoch-ms, return whether the *current* meeting is auto-join-scheduled.
+/// "Current" mirrors the frontend's `pickDefaultMeeting`: a meeting is current
+/// when `start - 5min <= now <= start + 60min`; if several overlap, the latest
+/// start wins (the one you most recently joined).
+fn current_meeting_auto_join_from(resp: &Value, now_ms: i64) -> bool {
+    const FIVE_MIN_MS: i64 = 5 * 60_000;
+    const SIXTY_MIN_MS: i64 = 60 * 60_000;
+    let Some(meetings) = resp.get("meetings").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut current_start = i64::MIN;
+    let mut current_auto_join = false;
+    for m in meetings {
+        let Some(start_str) = m.get("start_at").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(start_ms) = chrono::DateTime::parse_from_rfc3339(start_str)
+            .map(|dt| dt.timestamp_millis())
+        else {
+            continue;
+        };
+        let is_current = start_ms - FIVE_MIN_MS <= now_ms && now_ms <= start_ms + SIXTY_MIN_MS;
+        if is_current && start_ms >= current_start {
+            current_start = start_ms;
+            current_auto_join = truthy(m.get("auto_join_scheduled"));
+        }
+    }
+    current_auto_join
+}
+
+/// Lenient truthiness for an API flag that may arrive as a bool, 0/1, or string.
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_i64().map(|i| i != 0).unwrap_or(false),
+        Some(Value::String(s)) => s == "true" || s == "1",
+        _ => false,
+    }
+}
+
 /// Show the auto-record confirm/deny notification and await the user's choice.
 /// Resolves `true` to start recording. Returns `default_record` if the user
 /// doesn't respond within the 10s window — or on a build where the action
@@ -520,7 +596,6 @@ fn deliver_auto_record_decision(record: bool) {
 pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
-    eprintln!("auto-record: showing prompt (is_dev={}, default_record={default_record})", tauri::is_dev());
     show_auto_record_prompt(app);
     match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
         Ok(Ok(record)) => record,
@@ -542,16 +617,14 @@ fn show_auto_record_prompt(app: &AppHandle) {
     let body = "Start recording this meeting?";
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
-        eprintln!("auto-record: show via UNUserNotificationCenter (signed bundle path)");
         macos_un::show_auto_record(app, title, body);
         return;
     }
     // Dev / non-macOS: plugin banner (no buttons). NOTE: from `tauri dev` on
-    // macOS the process isn't a real .app bundle, so this typically posts
-    // nothing visible — the prompt only renders reliably from the built bundle.
-    match app.notification().builder().title(title).body(body).show() {
-        Ok(()) => eprintln!("auto-record: plugin banner posted (may not render in dev)"),
-        Err(e) => eprintln!("auto-record: failed to show prompt notification: {e}"),
+    // macOS the process isn't a real .app bundle, so this may post nothing
+    // visible — the prompt with buttons only renders from the built bundle.
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("auto-record: failed to show prompt notification: {e}");
     }
 }
 
@@ -822,4 +895,80 @@ pub async fn sync_meeting_notifications(app: AppHandle) -> Result<(), String> {
 pub async fn stop_meeting_notifications(app: AppHandle) -> Result<(), String> {
     stop(&app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // 2026-06-16T12:00:00Z in epoch-ms, used as "now" across the cases.
+    const NOW_MS: i64 = 1_781_956_800_000;
+
+    fn at(offset_min: i64) -> String {
+        let dt = chrono::DateTime::from_timestamp_millis(NOW_MS + offset_min * 60_000).unwrap();
+        dt.to_rfc3339()
+    }
+
+    #[test]
+    fn skips_when_current_meeting_is_auto_join_scheduled() {
+        // Started 10 min ago (current), flagged for server-side auto-join.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "auto_join_scheduled": true }
+        ]});
+        assert!(current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn does_not_skip_when_current_meeting_is_not_flagged() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "auto_join_scheduled": false }
+        ]});
+        assert!(!current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn flag_on_a_non_current_meeting_is_ignored() {
+        // Started 2h ago (well past the +60min current window) — not current.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-120), "auto_join_scheduled": true }
+        ]});
+        assert!(!current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn latest_starting_current_meeting_wins_on_overlap() {
+        // Two overlapping current meetings; the later-starting one (not flagged)
+        // is the active one, mirroring pickDefaultMeeting's tie-break.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-50), "auto_join_scheduled": true },
+            { "id": 2, "start_at": at(-2),  "auto_join_scheduled": false }
+        ]});
+        assert!(!current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn within_five_minute_lead_in_counts_as_current() {
+        // Starts in 3 min — inside the 5-min lead-in, so it's already current.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(3), "auto_join_scheduled": true }
+        ]});
+        assert!(current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn truthy_accepts_bool_number_and_string_forms() {
+        assert!(truthy(Some(&json!(true))));
+        assert!(truthy(Some(&json!(1))));
+        assert!(truthy(Some(&json!("true"))));
+        assert!(!truthy(Some(&json!(false))));
+        assert!(!truthy(Some(&json!(0))));
+        assert!(!truthy(None));
+    }
+
+    #[test]
+    fn missing_or_empty_meetings_does_not_skip() {
+        assert!(!current_meeting_auto_join_from(&json!({}), NOW_MS));
+        assert!(!current_meeting_auto_join_from(&json!({ "meetings": [] }), NOW_MS));
+    }
 }

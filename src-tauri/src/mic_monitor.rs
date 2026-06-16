@@ -228,7 +228,6 @@ fn enabled(app: &AppHandle) -> bool {
 /// repeatedly (startup, settings toggle).
 pub async fn sync(app: &AppHandle) {
     let desired = is_supported();
-    eprintln!("mic-monitor: sync() supported(desired)={desired}");
     let mgr = app.state::<MicMonitorManager>();
     let mut guard = mgr.handle.lock().unwrap();
     if !desired {
@@ -249,23 +248,14 @@ pub async fn sync(app: &AppHandle) {
 async fn run_loop(app: AppHandle) {
     let mut machine = Machine::new();
     let mut elapsed: u64 = 0;
-    let mut prev_empty = true;
     loop {
         let external = external_input_pids();
         let recording_active = app
             .state::<crate::recording_state::RecordingState>()
             .is_active();
-        // Log only on edges so the 1Hz poll doesn't spam the terminal.
-        if external.is_empty() != prev_empty {
-            eprintln!(
-                "mic-monitor: external mic pids={external:?} recording_active={recording_active}"
-            );
-            prev_empty = external.is_empty();
-        }
         if let Some(action) = machine.tick(elapsed, &external, recording_active) {
             match action {
                 Action::Start => {
-                    eprintln!("mic-monitor: Action::Start — meeting detected, prompting");
                     // Prompt the user (Record/Dismiss, 10s) before recording.
                     // The default when they don't answer follows the setting:
                     // on → record, off → skip. Spawned so the poll loop keeps
@@ -274,6 +264,14 @@ async fn run_loop(app: AppHandle) {
                     let app2 = app.clone();
                     let default_record = enabled(&app2);
                     tauri::async_runtime::spawn(async move {
+                        // An Ariso notetaker already records meetings flagged for
+                        // server-side auto-join — don't double-record. Skip
+                        // silently: no prompt, no recording.
+                        if crate::meeting_notifications::current_meeting_auto_join_scheduled(&app2)
+                            .await
+                        {
+                            return;
+                        }
                         let record =
                             crate::meeting_notifications::prompt_auto_record(&app2, default_record)
                                 .await;
