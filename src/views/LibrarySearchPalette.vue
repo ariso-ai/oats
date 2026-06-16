@@ -2,7 +2,14 @@
   <Teleport to="body">
     <Transition name="palette-fade">
       <div v-if="open" class="palette-backdrop" @mousedown.self="close">
-        <div ref="panelRef" class="palette-panel" role="dialog" aria-modal="true" aria-label="Search notes">
+        <div
+          ref="panelRef"
+          class="palette-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Search notes"
+          @keydown.tab="onPanelTab"
+        >
           <div class="palette-input-row">
             <svg class="input-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
@@ -253,6 +260,40 @@ function onDocumentKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && props.open) {
     event.preventDefault();
     close();
+  }
+}
+
+// Trap Tab/Shift+Tab inside the palette so focus cannot escape into the page
+// behind the aria-modal dialog. We cycle between the first and last focusable
+// elements within panelRef instead of marking the rest of the app inert, which
+// would conflict with Teleport's body-level mount point.
+const focusableSelector =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function onPanelTab(event: KeyboardEvent): void {
+  const panel = panelRef.value;
+  if (!panel) return;
+  const focusable = Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+    (el) => !el.hasAttribute('disabled') && el.tabIndex !== -1
+  );
+  if (focusable.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement as HTMLElement | null;
+  const inPanel = active != null && panel.contains(active);
+  if (event.shiftKey) {
+    if (!inPanel || active === first) {
+      event.preventDefault();
+      last.focus();
+    }
+  } else {
+    if (!inPanel || active === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 }
 
