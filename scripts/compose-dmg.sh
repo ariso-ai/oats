@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${VERSION:-$(cd "${ROOT_DIR}" && node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')}"
 DMG_ARCH_SUFFIX="${DMG_ARCH_SUFFIX:-aarch64}"
 APP_PATH="${APP_PATH:-${ROOT_DIR}/src-tauri/target/release/bundle/macos/oats.app}"
+APP_BUNDLE_NAME="$(basename "${APP_PATH}")"
 BACKGROUND_PATH="${BACKGROUND_PATH:-${ROOT_DIR}/src-tauri/assets/dmg-background.png}"
 VOLUME_ICON_PATH="${VOLUME_ICON_PATH:-${ROOT_DIR}/src-tauri/icons/icon.icns}"
 OUTPUT_PATH="${OUTPUT_PATH:-${ROOT_DIR}/src-tauri/target/release/bundle/dmg/oats_${VERSION}_${DMG_ARCH_SUFFIX}.dmg}"
@@ -83,9 +84,9 @@ tell application "Finder"
     set arrangement of opts to not arranged
     set background picture of opts to file ".background:${BACKGROUND_NAME}"
 
-    set position of item "oats.app" to {${APP_ICON_X}, ${APP_ICON_Y}}
+    set position of item "${APP_BUNDLE_NAME}" to {${APP_ICON_X}, ${APP_ICON_Y}}
     set position of item "Applications" to {${APPLICATIONS_ICON_X}, ${APPLICATIONS_ICON_Y}}
-    set extension hidden of item "oats.app" to true
+    set extension hidden of item "${APP_BUNDLE_NAME}" to true
     update without registering applications
     delay 2
     close
