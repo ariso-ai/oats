@@ -10,7 +10,7 @@
 //! fetch of the inbox and surface any meeting-prep we haven't notified yet.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
@@ -473,6 +474,87 @@ fn prep_url(prep_id: i64) -> String {
     format!("{}/my/meeting-prep-v2/{prep_id}", web_app_base_url())
 }
 
+// ---------------------------------------------------------------------------
+// Auto-record confirm/deny prompt
+//
+// When the mic monitor detects a meeting it asks here for a decision via a
+// notification carrying Record / Dismiss buttons. The user has 10 seconds to
+// choose; if they don't, the caller's mode default applies (record when
+// auto-record is on, skip when it's off). Lives in this module because there
+// is a single UNUserNotificationCenter delegate and it must route both the
+// meeting-prep clicks and these action buttons.
+// ---------------------------------------------------------------------------
+
+/// Identifiers for the auto-record prompt. The category id tells macOS which
+/// action buttons to attach to the notification; the action ids come back in
+/// the delegate's `didReceive` so we know which button was tapped.
+const AUTO_RECORD_CATEGORY: &str = "ai.ariso.auto-record";
+const AUTO_RECORD_ACTION_RECORD: &str = "ai.ariso.auto-record.record";
+const AUTO_RECORD_ACTION_DISMISS: &str = "ai.ariso.auto-record.dismiss";
+
+/// How long the prompt stays actionable before the caller's mode default wins.
+const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One-shot sender for the in-flight auto-record prompt. The notification
+/// delegate (ObjC callback, main thread) fills it when a button is tapped; the
+/// awaiting `prompt_auto_record` task receives the choice. Only one prompt is
+/// ever live at a time — the mic monitor stays in its Recording phase until the
+/// meeting ends — so a new prompt simply replaces any stale sender.
+fn prompt_slot() -> &'static Mutex<Option<oneshot::Sender<bool>>> {
+    static SLOT: OnceLock<Mutex<Option<oneshot::Sender<bool>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Deliver the user's choice from the notification delegate to the awaiting
+/// `prompt_auto_record`. No-op if nothing is waiting (already timed out).
+fn deliver_auto_record_decision(record: bool) {
+    if let Some(tx) = prompt_slot().lock().unwrap().take() {
+        let _ = tx.send(record);
+    }
+}
+
+/// Show the auto-record confirm/deny notification and await the user's choice.
+/// Resolves `true` to start recording. Returns `default_record` if the user
+/// doesn't respond within the 10s window — or on a build where the action
+/// buttons aren't available (the plugin fallback can't report a tap).
+pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
+    let (tx, rx) = oneshot::channel();
+    *prompt_slot().lock().unwrap() = Some(tx);
+    eprintln!("auto-record: showing prompt (is_dev={}, default_record={default_record})", tauri::is_dev());
+    show_auto_record_prompt(app);
+    match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
+        Ok(Ok(record)) => record,
+        // Timed out, or the sender was dropped/replaced — apply the mode
+        // default and drop any stale sender we still own.
+        _ => {
+            let _ = prompt_slot().lock().unwrap().take();
+            default_record
+        }
+    }
+}
+
+/// Show the prompt notification with Record/Dismiss buttons. On a signed macOS
+/// bundle this uses UNUserNotificationCenter (the only path that renders action
+/// buttons). In dev / on other platforms it falls back to a plain banner with
+/// no buttons — the prompt then resolves on the timeout default.
+fn show_auto_record_prompt(app: &AppHandle) {
+    let title = "Meeting detected";
+    let body = "Start recording this meeting?";
+    #[cfg(target_os = "macos")]
+    if !tauri::is_dev() {
+        eprintln!("auto-record: show via UNUserNotificationCenter (signed bundle path)");
+        macos_un::show_auto_record(app, title, body);
+        return;
+    }
+    // Dev / non-macOS: plugin banner (no buttons). NOTE: from `tauri dev` on
+    // macOS the process isn't a real .app bundle, so this typically posts
+    // nothing visible — the prompt only renders reliably from the built bundle.
+    match app.notification().builder().title(title).body(body).show() {
+        Ok(()) => eprintln!("auto-record: plugin banner posted (may not render in dev)"),
+        Err(e) => eprintln!("auto-record: failed to show prompt notification: {e}"),
+    }
+}
+
 /// Initialize native notification support. On a macOS bundle this installs the
 /// UNUserNotificationCenter delegate (which handles clicks) — MUST be called on
 /// the main thread. In dev / on other platforms it's a no-op (the plugin path
@@ -511,9 +593,10 @@ mod macos_un {
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread};
-    use objc2_foundation::{NSError, NSString};
+    use objc2_foundation::{NSArray, NSError, NSSet, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
+        UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
         UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
@@ -544,7 +627,9 @@ mod macos_un {
                 completion.call((opts,));
             }
 
-            // On click, open the deep link carried as the request identifier.
+            // Auto-record action buttons resolve the pending prompt; otherwise
+            // (a meeting-prep body click) open the deep link carried as the
+            // request identifier.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -552,6 +637,17 @@ mod macos_un {
                 response: &UNNotificationResponse,
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
+                let action = response.actionIdentifier().to_string();
+                if action == super::AUTO_RECORD_ACTION_RECORD {
+                    super::deliver_auto_record_decision(true);
+                    completion.call(());
+                    return;
+                }
+                if action == super::AUTO_RECORD_ACTION_DISMISS {
+                    super::deliver_auto_record_decision(false);
+                    completion.call(());
+                    return;
+                }
                 let url = response.notification().request().identifier().to_string();
                 if url.starts_with("http") {
                     let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -584,11 +680,66 @@ mod macos_un {
         // setDelegate stores a weak reference; leak a strong ref so the
         // delegate lives for the whole process.
         std::mem::forget(delegate);
+        register_auto_record_category(&center);
         let handler = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
         center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &handler,
         );
+    }
+
+    /// Register the auto-record category so the prompt notification renders its
+    /// Record / Dismiss buttons. Actions run in the background (no Foreground
+    /// option) — the handler only signals a channel, it doesn't need the app
+    /// frontmost. Dismiss is styled destructive.
+    fn register_auto_record_category(center: &UNUserNotificationCenter) {
+        let record = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::AUTO_RECORD_ACTION_RECORD),
+            &NSString::from_str("Record"),
+            UNNotificationActionOptions::empty(),
+        );
+        let dismiss = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::AUTO_RECORD_ACTION_DISMISS),
+            &NSString::from_str("Dismiss"),
+            UNNotificationActionOptions::Destructive,
+        );
+        let actions = NSArray::from_retained_slice(&[record, dismiss]);
+        let intents: Retained<NSArray<NSString>> = NSArray::from_slice(&[]);
+        let category =
+            UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                &NSString::from_str(super::AUTO_RECORD_CATEGORY),
+                &actions,
+                &intents,
+                UNNotificationCategoryOptions::empty(),
+            );
+        let categories = NSSet::from_retained_slice(&[category]);
+        center.setNotificationCategories(&categories);
+    }
+
+    /// Show the auto-record prompt with action buttons. Mirrors `show` but tags
+    /// the content with the auto-record category so macOS attaches the buttons;
+    /// on UNC failure it falls back to a (button-less) plugin banner.
+    pub fn show_auto_record(app: &AppHandle, title: &str, body: &str) {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setCategoryIdentifier(&NSString::from_str(super::AUTO_RECORD_CATEGORY));
+        // A non-http identifier so the body-click handler's URL guard skips it.
+        let identifier = NSString::from_str(super::AUTO_RECORD_CATEGORY);
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &identifier, &content, None,
+        );
+        let app = app.clone();
+        let title = title.to_string();
+        let body = body.to_string();
+        let handler = RcBlock::new(move |err: *mut NSError| {
+            if let Some(desc) = err_desc(err) {
+                eprintln!("auto-record: UNC unavailable ({desc}); using plugin fallback (no buttons)");
+                let _ = app.notification().builder().title(&title).body(&body).show();
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
     }
 
     pub fn show(app: &AppHandle, title: &str, body: &str, url: &str) {

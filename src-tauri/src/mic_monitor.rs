@@ -209,7 +209,11 @@ impl MicMonitorManager {
     }
 }
 
-/// Whether the user has auto-record enabled (defaults to true).
+/// Whether auto-record is enabled (defaults to true). The monitor now runs
+/// regardless — on detection it always prompts — so this only decides the
+/// no-response default: enabled → start recording when the prompt times out;
+/// disabled → skip. Read fresh per detection so a settings toggle takes effect
+/// without restarting the monitor.
 fn enabled(app: &AppHandle) -> bool {
     use tauri_plugin_store::StoreExt;
     match app.store(SETTINGS_PATH) {
@@ -218,10 +222,13 @@ fn enabled(app: &AppHandle) -> bool {
     }
 }
 
-/// Start the monitor if supported and enabled; otherwise stop it. Safe to call
+/// Start the monitor if the OS supports per-process input detection; otherwise
+/// stop it. The enabled setting no longer gates the monitor (it only sets the
+/// prompt's timeout default), so the prompt fires in both modes. Safe to call
 /// repeatedly (startup, settings toggle).
 pub async fn sync(app: &AppHandle) {
-    let desired = is_supported() && enabled(app);
+    let desired = is_supported();
+    eprintln!("mic-monitor: sync() supported(desired)={desired}");
     let mgr = app.state::<MicMonitorManager>();
     let mut guard = mgr.handle.lock().unwrap();
     if !desired {
@@ -242,20 +249,49 @@ pub async fn sync(app: &AppHandle) {
 async fn run_loop(app: AppHandle) {
     let mut machine = Machine::new();
     let mut elapsed: u64 = 0;
+    let mut prev_empty = true;
     loop {
         let external = external_input_pids();
         let recording_active = app
             .state::<crate::recording_state::RecordingState>()
             .is_active();
+        // Log only on edges so the 1Hz poll doesn't spam the terminal.
+        if external.is_empty() != prev_empty {
+            eprintln!(
+                "mic-monitor: external mic pids={external:?} recording_active={recording_active}"
+            );
+            prev_empty = external.is_empty();
+        }
         if let Some(action) = machine.tick(elapsed, &external, recording_active) {
             match action {
                 Action::Start => {
-                    let app_main = app.clone();
-                    let _ = app.run_on_main_thread(move || {
-                        if let Err(e) =
-                            crate::commands::open_waveform_window(&app_main, None, true)
+                    eprintln!("mic-monitor: Action::Start — meeting detected, prompting");
+                    // Prompt the user (Record/Dismiss, 10s) before recording.
+                    // The default when they don't answer follows the setting:
+                    // on → record, off → skip. Spawned so the poll loop keeps
+                    // running during the prompt; the machine is already in its
+                    // Recording phase so no second prompt fires for this meeting.
+                    let app2 = app.clone();
+                    let default_record = enabled(&app2);
+                    tauri::async_runtime::spawn(async move {
+                        let record =
+                            crate::meeting_notifications::prompt_auto_record(&app2, default_record)
+                                .await;
+                        // A manual recording may have started during the prompt;
+                        // don't stack a second recorder on top of it.
+                        if record
+                            && !app2
+                                .state::<crate::recording_state::RecordingState>()
+                                .is_active()
                         {
-                            eprintln!("mic-monitor: failed to open recorder window: {e}");
+                            let app_main = app2.clone();
+                            let _ = app2.run_on_main_thread(move || {
+                                if let Err(e) =
+                                    crate::commands::open_waveform_window(&app_main, None, true)
+                                {
+                                    eprintln!("mic-monitor: failed to open recorder window: {e}");
+                                }
+                            });
                         }
                     });
                 }
