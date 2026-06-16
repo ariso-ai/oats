@@ -125,6 +125,7 @@ import MeetingDetailView from './MeetingDetailView.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
+import { decideRecordingAction } from '../composables/decideRecordingAction';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -350,24 +351,63 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
   return Number.isSafeInteger(id) ? id : undefined;
 }
 
-// Open the floating recorder pill (its own always-on-top window).
+// True when a meeting's start falls on the current local day.
+function isTodayItem(m: MeetingListItem | null): boolean {
+  if (!m) return false;
+  const d = new Date(m.timestamp);
+  if (Number.isNaN(d.getTime())) return false;
+  const n = now.value;
+  return (
+    d.getFullYear() === n.getFullYear() &&
+    d.getMonth() === n.getMonth() &&
+    d.getDate() === n.getDate()
+  );
+}
+
+// The meeting currently in progress (the one the Today list flags with the green
+// "Now" chip): a today meeting with start <= now < end. Earliest start wins so it
+// matches the chip.
+function currentNowItem(): MeetingListItem | null {
+  const live = displayMeetings.value.filter(
+    (m) => isTodayItem(m) && isMeetingInProgress(m, now.value)
+  );
+  if (live.length === 0) return null;
+  live.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return live[0];
+}
+
+// Open the floating recorder pill (its own always-on-top window). The button's
+// behaviour follows the active nav view: Meetings always asks the picker; Today
+// records the in-progress meeting (or a deliberately selected today meeting),
+// falling back to the picker when neither applies. Non-picker (local) backends
+// just open the recorder with no meeting attached.
 async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
-    // Ariso scheduled meetings use numeric backend ids; pass that id into the
-    // recorder so the eventual upload attaches to the selected meeting.
-    const meetingId = backend.id === 'ariso' ? numericMeetingId(selectedItem.value) : undefined;
-    if (meetingId != null) {
-      await invoke('start_recording_window', { meetingId });
-      setRecording(true);
-      return;
-    }
-    if (backend.usesMeetingPicker) {
-      // Picker-using backends (Ariso) choose a meeting first; the picker then
-      // starts the recorder itself.
+    const usesPicker = backend.usesMeetingPicker;
+    const selectedTodayId =
+      usesPicker && activeView.value === 'today' && isTodayItem(selectedItem.value)
+        ? numericMeetingId(selectedItem.value)
+        : undefined;
+    const nowMeetingId = usesPicker ? numericMeetingId(currentNowItem()) : undefined;
+
+    const action = decideRecordingAction({
+      view: activeView.value,
+      usesPicker,
+      selectedTodayId: selectedTodayId ?? null,
+      nowMeetingId: nowMeetingId ?? null,
+    });
+
+    if (action.kind === 'picker') {
       await invoke('open_meeting_picker', {});
       return;
     }
+    if (action.kind === 'record') {
+      await invoke('start_recording_window', { meetingId: action.meetingId });
+      setRecording(true);
+      return;
+    }
+    // record-adhoc: non-picker (local) backend with no meeting attached.
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {

@@ -1,6 +1,6 @@
 <template>
   <div class="picker">
-    <h2 class="title">Select a meeting</h2>
+    <h2 class="title">{{ state === 'empty' ? 'New meeting' : 'Select a meeting' }}</h2>
 
     <div v-if="state === 'loading'" class="state-row">
       <span class="spinner" />
@@ -12,11 +12,7 @@
       <span>Could not load meetings.</span>
     </div>
 
-    <div v-else-if="state === 'empty'" class="state-row">
-      <span>No meetings today.</span>
-    </div>
-
-    <template v-else>
+    <template v-else-if="state === 'list'">
       <!-- Collapsed default: a single featured meeting (or a prompt) -->
       <template v-if="!showAll">
         <p v-if="defaultMeeting.kind !== 'none'" class="section-label">
@@ -72,7 +68,7 @@
           @keydown.esc.prevent="cancelNewMeeting"
         />
         <div class="new-meeting-actions">
-          <button class="btn btn-secondary" type="button" :disabled="isChoosing" @click="cancelNewMeeting">
+          <button v-if="state !== 'empty'" class="btn btn-secondary" type="button" :disabled="isChoosing" @click="cancelNewMeeting">
             Cancel
           </button>
           <button class="btn btn-primary" :disabled="isChoosing" @click="startNewMeeting">
@@ -141,6 +137,9 @@ async function openNewMeetingPrompt(): Promise<void> {
 }
 
 function cancelNewMeeting(): void {
+  // In the empty state the prompt IS the whole UI — there is nothing to cancel
+  // back to, so Escape/Cancel must not collapse it into a dead-end.
+  if (state.value === 'empty') return;
   showTitlePrompt.value = false;
   titleDraft.value = '';
   createError.value = null;
@@ -170,7 +169,12 @@ onMounted(async () => {
     const { startDate, endDate } = todayBoundsLocal();
     const result = await meetingApi.listScheduledMeetings(startDate, endDate);
     if (result.length === 0) {
+      // No meetings to choose from — go straight to creating one. The optional
+      // title prompt becomes the whole UI instead of a dead-end message.
       state.value = 'empty';
+      showTitlePrompt.value = true;
+      await nextTick();
+      titleInput.value?.focus();
     } else {
       meetings.value = result;
       state.value = 'list';
