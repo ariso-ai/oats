@@ -62,20 +62,11 @@ export function dateLabel(key: string, now: Date): string {
     .toUpperCase();
 }
 
-/** Bucket meetings under per-calendar-date headers (newest date first) with a
- *  single trailing UPCOMING section for everything starting after `now`. */
+/** Bucket every meeting under per-calendar-date headers, newest date first, and
+ *  within each date ordered earliest-first (ascending by start time). */
 export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): MeetingSection[] {
-  const nowMs = now.getTime();
-  const history: MeetingListItem[] = [];
-  const upcoming: MeetingListItem[] = [];
-  for (const meeting of meetings) {
-    // "Upcoming" = not yet over: future meetings and ones in progress right now.
-    if (meetingEndMs(meeting) > nowMs) upcoming.push(meeting);
-    else history.push(meeting);
-  }
-
   const buckets = new Map<string, MeetingListItem[]>();
-  for (const meeting of history) {
+  for (const meeting of meetings) {
     const d = new Date(meeting.timestamp);
     const key = Number.isNaN(d.getTime()) ? 'unknown' : localDateKey(d);
     const bucket = buckets.get(key);
@@ -89,16 +80,12 @@ export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): Mee
   const datedKeys = [...buckets.keys()].filter((k) => k !== 'unknown').sort().reverse();
   for (const key of datedKeys) {
     const items = [...buckets.get(key)!].sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
     sections.push({ key, label: dateLabel(key, now), items });
   }
   if (buckets.has('unknown')) {
     sections.push({ key: 'unknown', label: 'UNDATED', items: buckets.get('unknown')! });
-  }
-  if (upcoming.length) {
-    upcoming.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    sections.push({ key: 'upcoming', label: 'UPCOMING', items: upcoming });
   }
   return sections;
 }
