@@ -7,7 +7,7 @@
     <div class="prompt">
       <img class="prompt-logo" :src="oatsLogo" alt="oats" />
       <div class="prompt-body">
-        <p class="prompt-bubble">Ready for the next meet? Or do you want to spin up a impromptu meeting?</p>
+        <p class="prompt-bubble">Ready for the next meet? Or do you want to spin up an impromptu meeting?</p>
         <button class="impromptu-btn" type="button" title="Start an impromptu recording" @click="$emit('record')">
           <span class="impromptu-label">Impromptu Meeting</span>
           <span class="impromptu-icon" aria-hidden="true">
