@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.0](https://github.com/ariso-ai/oats/compare/v0.5.0...v0.6.0) (2026-06-16)
+
+
+### Features
+
+* add AI Assessment tab and relocate transcript audio player ([4139d0d](https://github.com/ariso-ai/oats/commit/4139d0d48b7c093c4c3adb4c9e9432a33f9cab64))
+* add decideRecordingAction decision function for start-recording button ([1fb96bb](https://github.com/ariso-ai/oats/commit/1fb96bb436ee4c9711e1ee5e0c779f7440c55a9d))
+* add Up Next opening screen for the meetings window ([15a605b](https://github.com/ariso-ai/oats/commit/15a605bbe070c0c5ac9d7910d71bc9fe27744a3c))
+* AI Assessment tab + transcript audio player ([349dc33](https://github.com/ariso-ai/oats/commit/349dc33c8dafd9b4a03fbae8ce0ad3a04ea1c77a))
+* customize DMG installer layout ([8f14a79](https://github.com/ariso-ai/oats/commit/8f14a79613dde87737e24be9e636e9409ac0943f))
+* drive start-recording button from the active nav view ([1a140ce](https://github.com/ariso-ai/oats/commit/1a140ceb835ab106fae79a86406c30919b349788))
+* nav-aware start-recording button + direct-create meeting picker ([334a120](https://github.com/ariso-ai/oats/commit/334a120e1c5182a57f92b2f3204df129c9f6ef6a))
+* picker creates a meeting directly when none exist today ([558c1e8](https://github.com/ariso-ai/oats/commit/558c1e8b5261331e6085f0879b603438443f8ffa))
+* Up Next opening screen for the meetings window ([578545f](https://github.com/ariso-ai/oats/commit/578545ff8dc9f70531e2887a9b9878f6141596aa))
+
+
+### Bug Fixes
+
+* fix article grammar ([44ef647](https://github.com/ariso-ai/oats/commit/44ef647c665ef1e7804d1c1c7af9f0af1abe5f10))
+* group Meetings list purely by date, drop UPCOMING section ([a19e867](https://github.com/ariso-ai/oats/commit/a19e8675f6fe3d6c774f983b683b347ef52573eb))
+* make the My Notes title editable ([e845144](https://github.com/ariso-ai/oats/commit/e8451446683efa2e88f41fc727cd51bdee07b19f))
+* make the My Notes title editable ([523c65e](https://github.com/ariso-ai/oats/commit/523c65e231cb1103e2f26ec60734c91eaab8b84a))
+
 ## [0.5.0](https://github.com/ariso-ai/oats/compare/v0.4.0...v0.5.0) (2026-06-15)
 
 
