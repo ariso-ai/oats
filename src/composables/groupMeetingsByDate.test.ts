@@ -29,7 +29,7 @@ describe('dateLabel', () => {
 });
 
 describe('groupMeetingsByDate', () => {
-  it('buckets history by calendar date newest-first, with UPCOMING last', () => {
+  it('buckets every meeting by calendar date, newest date first, earliest-first within a date', () => {
     const meetings = [
       m('past1', '2026-06-09T09:00:00'),
       m('today1', '2026-06-10T09:00:00'),
@@ -38,28 +38,31 @@ describe('groupMeetingsByDate', () => {
       m('future', '2026-06-12T10:00:00'),
     ];
     const sections = groupMeetingsByDate(meetings, NOW);
-    expect(sections.map((s) => s.label)).toEqual(['TODAY', 'YESTERDAY', 'UPCOMING']);
-    expect(sections[0].items.map((x) => x.id)).toEqual(['today2', 'today1']);
-    expect(sections[2].items.map((x) => x.id)).toEqual(['soon', 'future']);
+    // No UPCOMING section: future meetings live under their own date header.
+    expect(sections.map((s) => s.label)).toEqual(['FRI, JUN 12', 'TODAY', 'YESTERDAY']);
+    // Within a date, earliest-first (ascending).
+    expect(sections[1].items.map((x) => x.id)).toEqual(['today1', 'today2', 'soon']);
+    expect(sections[0].items.map((x) => x.id)).toEqual(['future']);
   });
 
   it('returns an empty array for no meetings', () => {
     expect(groupMeetingsByDate([], NOW)).toEqual([]);
   });
 
-  it('keeps NaN-timestamp meetings under an UNDATED bucket at the end of history', () => {
+  it('keeps NaN-timestamp meetings under an UNDATED bucket at the end', () => {
     const sections = groupMeetingsByDate([m('bad', 'not-a-date'), m('t', '2026-06-10T09:00:00')], NOW);
     const labels = sections.map((s) => s.label);
     expect(labels).toContain('UNDATED');
     expect(labels.indexOf('UNDATED')).toBeGreaterThan(labels.indexOf('TODAY'));
   });
 
-  it('treats an in-progress meeting (not yet ended) as UPCOMING, not history', () => {
+  it('places an in-progress meeting under its date bucket in start order', () => {
     const sections = groupMeetingsByDate(
       [m('live', '2026-06-10T14:30:00', '2026-06-10T15:30:00'), m('past', '2026-06-10T09:00:00')],
       NOW
     );
-    expect(sections.find((s) => s.label === 'UPCOMING')?.items.map((x) => x.id)).toEqual(['live']);
+    expect(sections.map((s) => s.label)).toEqual(['TODAY']);
+    expect(sections[0].items.map((x) => x.id)).toEqual(['past', 'live']);
   });
 });
 

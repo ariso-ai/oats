@@ -307,7 +307,7 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
   });
 
-  it('starts recording against the selected scheduled meeting id', async () => {
+  it('always opens the picker from the Meetings view, even with a meeting selected', async () => {
     backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
     listMeetings.mockResolvedValue([
@@ -316,12 +316,69 @@ describe('LibraryView', () => {
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-
+    // Meetings is the default view; the first row auto-selects (id 42).
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  });
 
-    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  it('Today view records the in-progress meeting when nothing today is selected', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    listMeetings.mockResolvedValue([
+      // meetings[0] auto-selects but is NOT today, so it can't override.
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
     expect(invoke).not.toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('Today view opens the picker when no meeting is live and none is selected today', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('Today view records a deliberately selected today meeting (override beats the live one)', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    const earlierToday = new Date(new Date().setHours(7, 0, 0, 0)).toISOString();
+    listMeetings.mockResolvedValue([
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+      item({ id: '50', title: 'Pick Me', timestamp: earlierToday, files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await flushPromises();
+    // Deliberately select the non-live today meeting (id 50).
+    const target = wrapper.findAll('.meeting-item').find((r) => r.text().includes('Pick Me'))!;
+    await target.trigger('click');
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 50 });
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
   });
 
   it('falls back to the meeting picker when the selected scheduled meeting id is not numeric', async () => {
@@ -459,10 +516,11 @@ describe('LibraryView', () => {
 
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
-    // Synthetic row (14:30) sorts above Standup (10:00) on the same date.
-    expect(rows[0].text()).toContain('Recording 2026-06-02');
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
-    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    // Within a date, rows sort earliest-first: Standup (10:00) then the
+    // synthetic recording row (14:30).
+    expect(rows[1].text()).toContain('Recording 2026-06-02');
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
     // The embedded strip shows for the recorded meeting…
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
@@ -475,13 +533,15 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
 
+    // rows[0] is Standup (10:00); rows[1] is the recording (14:30). Click the
+    // other meeting (Standup) to move selection off the recording.
     const rows = wrapper.findAll('.meeting-item');
-    await rows[1].trigger('click');
+    await rows[0].trigger('click');
     await flushPromises();
 
-    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
     expect(wrapper.find('.strip').exists()).toBe(false);
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
   });
 
   it('reloads when the recording closes so the finalized row replaces the synthetic one', async () => {
@@ -508,9 +568,10 @@ describe('LibraryView', () => {
     expect(listMeetings).toHaveBeenCalledTimes(2);
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
-    // The finalized recording keeps the selection under the same id.
-    expect(rows[0].attributes('aria-pressed')).toBe('true');
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(false);
+    // Earliest-first within the date keeps Standup (10:00) at rows[0] and the
+    // finalized recording (14:30) at rows[1]; selection stays on the same id.
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
   });
 
   it('falls back to the first meeting when a discarded recording leaves no row', async () => {
@@ -519,7 +580,9 @@ describe('LibraryView', () => {
     await flushPromises();
     emitEvent('recorder://state', localRecorderState());
     await flushPromises();
-    expect(wrapper.findAll('.meeting-item')[0].attributes('aria-pressed')).toBe('true');
+    // The synthetic recording row (14:30) sorts after Standup (10:00) and holds
+    // the selection at rows[1].
+    expect(wrapper.findAll('.meeting-item')[1].attributes('aria-pressed')).toBe('true');
 
     emitEvent('recorder://state', localRecorderState({ phase: 'closed' }));
     await flushPromises();

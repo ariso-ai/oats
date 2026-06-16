@@ -131,6 +131,7 @@ import UpNextCard from './UpNextCard.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
+import { decideRecordingAction } from '../composables/decideRecordingAction';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -199,7 +200,9 @@ const displayedSections = computed<MeetingSection[]>(() => {
 });
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
-// relative-time chip; it's the first item of the trailing UPCOMING section.
+// relative-time chip; it's the first item of the Today view's UPCOMING section.
+// The Meetings view groups purely by date and has no UPCOMING section, so no
+// chip shows there.
 const nextUpcomingId = computed<string | null>(() => {
   const up = displayedSections.value.find((s) => s.key === 'upcoming');
   return up?.items[0]?.id ?? null;
@@ -354,14 +357,8 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
   return Number.isSafeInteger(id) ? id : undefined;
 }
 
-// Open the floating recorder pill for the current selection (the "+" button).
-function startRecording(): Promise<void> {
-  return startRecordingFor(selectedItem.value);
-}
-
 // Open the floating recorder pill (its own always-on-top window) for a specific
-// meeting — the selection for the "+" button, or the featured meeting behind
-// "Start Meeting Early" on the Up Next card.
+// meeting — the featured meeting behind "Start Meeting Early" on the Up Next card.
 async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
   try {
     const backend = await getActiveBackend();
@@ -379,6 +376,70 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
       await invoke('open_meeting_picker', {});
       return;
     }
+    await invoke('start_recording_window', {});
+    setRecording(true);
+  } catch (e) {
+    console.error('Failed to start recording', e);
+  }
+}
+
+// True when a meeting's start falls on the current local day.
+function isTodayItem(m: MeetingListItem | null): boolean {
+  if (!m) return false;
+  const d = new Date(m.timestamp);
+  if (Number.isNaN(d.getTime())) return false;
+  const n = now.value;
+  return (
+    d.getFullYear() === n.getFullYear() &&
+    d.getMonth() === n.getMonth() &&
+    d.getDate() === n.getDate()
+  );
+}
+
+// The meeting currently in progress (the one the Today list flags with the green
+// "Now" chip): a today meeting with start <= now < end. Earliest start wins so it
+// matches the chip.
+function currentNowItem(): MeetingListItem | null {
+  const live = displayMeetings.value.filter(
+    (m) => isTodayItem(m) && isMeetingInProgress(m, now.value)
+  );
+  if (live.length === 0) return null;
+  live.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return live[0];
+}
+
+// Open the floating recorder pill (its own always-on-top window). The button's
+// behaviour follows the active nav view: Meetings always asks the picker; Today
+// records the in-progress meeting (or a deliberately selected today meeting),
+// falling back to the picker when neither applies. Non-picker (local) backends
+// just open the recorder with no meeting attached.
+async function startRecording(): Promise<void> {
+  try {
+    const backend = await getActiveBackend();
+    const usesPicker = backend.usesMeetingPicker;
+    const selectedTodayId =
+      usesPicker && activeView.value === 'today' && isTodayItem(selectedItem.value)
+        ? numericMeetingId(selectedItem.value)
+        : undefined;
+    const nowMeetingId = usesPicker ? numericMeetingId(currentNowItem()) : undefined;
+
+    const action = decideRecordingAction({
+      view: activeView.value,
+      usesPicker,
+      selectedTodayId: selectedTodayId ?? null,
+      nowMeetingId: nowMeetingId ?? null,
+    });
+
+    if (action.kind === 'picker') {
+      await invoke('open_meeting_picker', {});
+      return;
+    }
+    if (action.kind === 'record') {
+      await invoke('start_recording_window', { meetingId: action.meetingId });
+      setRecording(true);
+      return;
+    }
+    // record-adhoc: non-picker (local) backend with no meeting attached.
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {
