@@ -78,19 +78,6 @@
           </button>
         </div>
 
-        <div v-if="confirmVisible" class="confirm">
-          <button
-            class="ctrl-btn keep-btn"
-            aria-label="Keep recording"
-            @click.stop.prevent="keepRecording"
-          >✓</button>
-          <button
-            class="ctrl-btn discard-btn"
-            aria-label="Discard recording"
-            @click.stop.prevent="discardRecording"
-          >✕</button>
-        </div>
-
         <!-- Tauri only drags when the mousedown target itself carries the
              attribute, so every leaf in the handle needs it. -->
         <div class="drag-handle" data-tauri-drag-region @click.stop>
@@ -155,10 +142,7 @@ const isAuto = route.query.auto === '1';
 // visibility watcher pushes recorder://pill-visible to flip this when the
 // meetings window is minimized or closed mid-recording.
 const pillHidden = ref(route.query.pillHidden === '1');
-const confirmVisible = ref(false);
 const isStopping = ref(false);
-let confirmTimer: ReturnType<typeof setTimeout> | null = null;
-const CONFIRM_TIMEOUT_MS = 60_000;
 // Auto recordings shorter than this are discarded, not uploaded (guards against
 // late mic-on / quick-off races). Manual recordings are never length-gated.
 const MIN_AUTO_DURATION_S = 15;
@@ -303,7 +287,10 @@ async function startRecording() {
   await invoke('set_tray_recording', { isRecording: true, isPaused: false });
 }
 
-// Auto-trigger: resolve calendar association, falling back to a confirm prompt.
+// Auto-trigger: attach to a matching calendar meeting when one is found. The
+// user has already opted in via the pre-recording notification prompt (or
+// auto-record is on), so there's no in-pill confirmation — a no-match recording
+// simply proceeds unattached.
 async function resolveAuto() {
   try {
     if (backend.value?.id === 'ariso') {
@@ -314,45 +301,21 @@ async function resolveAuto() {
       const assoc = resolveAssociation('ariso', meetings, now);
       if (assoc.kind === 'matched') {
         effectiveMeetingId.value = assoc.meetingId ?? null;
-        return;
       }
     }
   } catch (e) {
-    console.error('Auto-trigger match failed; asking for confirmation', e);
+    console.error('Auto-trigger calendar match failed; recording unattached', e);
   }
-  showConfirm();
-}
-
-function showConfirm() {
-  confirmVisible.value = true;
-  // No response within the window → discard (per spec).
-  confirmTimer = setTimeout(() => {
-    confirmTimer = null;
-    void discardRecording();
-  }, CONFIRM_TIMEOUT_MS);
-}
-
-function keepRecording() {
-  if (confirmTimer) {
-    clearTimeout(confirmTimer);
-    confirmTimer = null;
-  }
-  confirmVisible.value = false;
 }
 
 // Discard the in-progress capture without uploading, then close.
 async function discardRecording() {
   if (isStopping.value) return;
   isStopping.value = true;
-  if (confirmTimer) {
-    clearTimeout(confirmTimer);
-    confirmTimer = null;
-  }
   if (closeTimer) {
     clearTimeout(closeTimer);
     closeTimer = null;
   }
-  confirmVisible.value = false;
   if (silenceTimer) {
     clearInterval(silenceTimer);
     silenceTimer = null;
@@ -369,22 +332,15 @@ async function discardRecording() {
 
 async function handleStop() {
   if (isStopping.value) return;
-  // An unanswered confirm overlay means the user never opted in — a stop of any
-  // kind (native mic-off, silence backstop, tray) must discard, not upload.
-  if (confirmVisible.value) {
-    await discardRecording();
-    return;
-  }
+  // Auto recordings that stop almost immediately (late mic-on / quick-off
+  // races) are discarded rather than uploaded as a stub. Manual recordings are
+  // never length-gated.
   if (isAuto && recorder.durationSeconds.value < MIN_AUTO_DURATION_S) {
     await discardRecording();
     return;
   }
   isStopping.value = true;
-  // Tear down the auto-trigger/backstop timers so they can't fire post-stop.
-  if (confirmTimer) {
-    clearTimeout(confirmTimer);
-    confirmTimer = null;
-  }
+  // Tear down the backstop timer so it can't fire post-stop.
   if (silenceTimer) {
     clearInterval(silenceTimer);
     silenceTimer = null;
@@ -566,7 +522,6 @@ onUnmounted(() => {
   unlistenResume?.();
   unlistenStop?.();
   unlistenAutoStop?.();
-  if (confirmTimer) clearTimeout(confirmTimer);
 });
 </script>
 
@@ -721,17 +676,6 @@ html, body {
   border-radius: 50%;
   background: #6b7280;
 }
-
-.confirm {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  margin-top: 7px;
-  flex-shrink: 0;
-}
-.keep-btn { color: #34d399; font-size: 16px; font-weight: 700; }
-.discard-btn { color: #f87171; font-size: 14px; font-weight: 700; }
 
 .status-icon {
   margin-top: 8px;

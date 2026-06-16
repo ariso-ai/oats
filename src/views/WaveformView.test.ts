@@ -315,31 +315,35 @@ describe('WaveformView vertical pill', () => {
     vi.useRealTimers();
   });
 
-  it('auto mode with no calendar match shows the confirm overlay', async () => {
+  it('auto mode records immediately with no in-pill confirm overlay', async () => {
+    // Confirmation now happens before the window opens (the notification
+    // prompt), so the pill itself never shows a keep/discard overlay.
     routeQuery = { auto: '1' };
     listScheduledMeetings.mockResolvedValue([]);
     const wrapper = mount(WaveformView);
     await flushPromises();
-    expect(wrapper.find('.confirm').exists()).toBe(true);
-    expect(wrapper.find('.keep-btn').exists()).toBe(true);
+    expect(wrapper.find('.confirm').exists()).toBe(false);
+    expect(startRecording).toHaveBeenCalledWith('mic');
+    expect(wrapper.findAll('.bar')).toHaveLength(3);
     routeQuery = {};
     wrapper.unmount();
   });
 
-  it('discards (does not upload) when stopped while the confirm overlay is unanswered', async () => {
+  it('discards (does not upload) a too-short auto recording on stop', async () => {
+    // Duration defaults to 5s (< the 15s minimum), so an auto recording that
+    // stops almost immediately is dropped rather than uploaded as a stub.
     routeQuery = { auto: '1' };
     listScheduledMeetings.mockResolvedValue([]);
     const wrapper = mount(WaveformView);
     await flushPromises();
-    // Confirm overlay should be showing (local backend, no match).
-    expect(wrapper.find('.confirm').exists()).toBe(true);
     stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
-    // A native mic-off stop arrives before the user answers.
+    // A native mic-off stop arrives while the recording is still under 15s.
     await eventHandlers['auto-record://stop']?.({});
     await flushPromises();
     // Must NOT have uploaded; must have stopped + closed.
     expect(finalizeRecording).not.toHaveBeenCalled();
     expect(stopRecording).toHaveBeenCalled();
+    expect(closeWin).toHaveBeenCalled();
     routeQuery = {};
     wrapper.unmount();
   });

@@ -570,6 +570,26 @@ pub(crate) fn open_waveform_window(
         .build()
         .map_err(|e| e.to_string())?;
 
+    // When the pill is the visible recording UI (the meetings window is hidden,
+    // minimized, or closed), dock it to the right edge of the primary screen,
+    // vertically centered, rather than leaving it at the OS default spot. When
+    // the meetings window owns the UI the pill is painted-empty, so its position
+    // doesn't matter.
+    if !pill_hidden {
+        if let Ok(Some(monitor)) = win.primary_monitor() {
+            let scale = monitor.scale_factor();
+            let msize = monitor.size();
+            let mpos = monitor.position();
+            // Window outer size is the fixed inner size (no decorations).
+            let win_w = (92.0 * scale).round() as i32;
+            let win_h = (284.0 * scale).round() as i32;
+            let margin = (16.0 * scale).round() as i32;
+            let x = mpos.x + msize.width as i32 - win_w - margin;
+            let y = mpos.y + (msize.height as i32 - win_h) / 2;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
+
     let source = if auto {
         crate::recording_state::RecordingSource::Auto
     } else {
