@@ -953,6 +953,30 @@ pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> 
     crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
 }
 
+/// Read the user-authored My-note title sidecar (`user-note-title.txt`). Kept in
+/// its own artifact beside `user-note.md` so the editable title round-trips
+/// without touching the hand-written `meta` format. Missing files return an
+/// empty string, matching `read_recording_note` for fresh recordings.
+#[tauri::command]
+pub fn read_recording_note_title(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("user-note-title.txt");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read recording note title: {e}")),
+    }
+}
+
+/// Persist the user-authored My-note title to `user-note-title.txt` beside the
+/// recording, mirroring `write_recording_note` so title and body share the same
+/// autosave path.
+#[tauri::command]
+pub fn write_recording_note_title(id: String, title: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note-title.txt"), title.as_bytes())
+}
+
 /// Return the meeting id the active recording is attached to, if any. The
 /// library window queries this on mount so it can re-select the attached
 /// meeting after being closed/reopened mid-recording — the `recording://started`
@@ -1228,6 +1252,30 @@ mod tests {
         let saved = read_recording_note(id.into()).unwrap();
         assert_eq!(saved, "# Note\n- point");
         assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn recording_note_title_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        // Missing sidecar reads as empty so a fresh recording has no title yet.
+        assert_eq!(read_recording_note_title(id.into()).unwrap(), "");
+        write_recording_note_title(id.into(), "Kickoff sync".into()).unwrap();
+        let saved = read_recording_note_title(id.into()).unwrap();
+        assert_eq!(saved, "Kickoff sync");
+        assert!(crate::storage::recordings_dir(tmp.path())
+            .join(id)
+            .join("user-note-title.txt")
+            .is_file());
 
         unsafe {
             std::env::remove_var("ARISO_ROOT");
