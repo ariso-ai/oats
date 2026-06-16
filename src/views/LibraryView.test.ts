@@ -159,7 +159,8 @@ describe('LibraryView', () => {
     await wrapper.get('.search-trigger').trigger('click');
     await flushPromises();
 
-    expect(document.body.textContent).toContain('Search notes');
+    expect(document.body.querySelector<HTMLInputElement>('.palette-input')?.placeholder).toBe('Search');
+    expect(document.body.textContent).not.toContain('Search notes');
     expect(document.body.querySelector('.palette-panel')).not.toBeNull();
   });
 
@@ -180,6 +181,7 @@ describe('LibraryView', () => {
         id: 's1',
         title: 'Search Note',
         timestamp: '2026-06-07T10:00:00Z',
+        endTimestamp: '2026-06-07T10:01:00Z',
         snippet: 'Discussed note search',
         files: undefined,
       }),
@@ -199,7 +201,64 @@ describe('LibraryView', () => {
 
     expect(searchMeetings).toHaveBeenCalledWith('note');
     expect(document.body.textContent).toContain('Search Note');
+    expect(document.body.textContent).toContain('Jun 7');
+    expect(document.body.textContent).toContain('1min');
     expect(document.body.textContent).toContain('Discussed note search');
+    vi.useRealTimers();
+  });
+
+  it('shows Home only when the search query matches it', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+
+    expect(document.body.textContent).not.toContain('Home');
+    input.value = 'note';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).not.toContain('Home');
+
+    input.value = 'home';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).toContain('Home');
+    vi.useRealTimers();
+  });
+
+  it('the Home search command clears the selected meeting', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Existing');
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+    input.value = 'home';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+
+    document.body.querySelector<HTMLButtonElement>('.command-row')!.click();
+    await flushPromises();
+
+    expect(document.body.querySelector('.palette-panel')).toBeNull();
+    expect(wrapper.text()).toContain('Select a meeting to view its notes.');
     vi.useRealTimers();
   });
 

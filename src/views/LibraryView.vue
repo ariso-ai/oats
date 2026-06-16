@@ -124,7 +124,7 @@
       :open="searchPaletteOpen"
       :search-meetings="searchMeetings"
       @close="searchPaletteOpen = false"
-      @go-to-notes="searchPaletteOpen = false"
+      @go-to-notes="goHomeFromSearch"
       @select="onSearchResultSelected"
     />
   </div>
@@ -301,6 +301,13 @@ async function searchMeetings(query: string): Promise<MeetingListItem[]> {
 async function onSearchResultSelected(meeting: MeetingListItem): Promise<void> {
   searchPaletteOpen.value = false;
   await selectMeeting(meeting);
+}
+
+// The palette's Home command returns the Library to its neutral detail state:
+// close search, then clear the selected meeting after saving any edits.
+async function goHomeFromSearch(): Promise<void> {
+  searchPaletteOpen.value = false;
+  await clearSelection();
 }
 
 // Keep the sidebar (and the selected reference) in sync after an inline rename
