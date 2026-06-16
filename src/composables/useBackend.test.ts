@@ -62,7 +62,7 @@ describe('LocalBackend', () => {
     expect(b.id).toBe('local');
     expect(b.needsAuth).toBe(false);
     expect(b.usesMeetingPicker).toBe(false);
-    expect(b.supportsSearch).toBe(false);
+    expect(b.supportsSearch).toBe(true);
   });
 
   it('isReady reflects model status', async () => {
@@ -98,8 +98,31 @@ describe('LocalBackend', () => {
     expect(renameRecording).toHaveBeenCalledWith('2026-06-02T14-30-05Z', 'New title');
   });
 
-  it('does not fake local search results', async () => {
-    await expect(new LocalBackend().searchMeetings('standup')).resolves.toEqual([]);
+  it('searches local recordings by case-insensitive title substring', async () => {
+    listRecordings.mockResolvedValue([
+      {
+        id: 'a', title: 'Weekly Standup', createdAt: '2026-06-01T09:00:00Z',
+        durationSeconds: 600, status: 'done', hasAudio: true, hasNote: true, hasTranscript: false,
+      },
+      {
+        id: 'b', title: 'Design Review', createdAt: '2026-06-02T09:00:00Z',
+        durationSeconds: 1800, status: 'done', hasAudio: true, hasNote: false, hasTranscript: true,
+      },
+    ]);
+    const rows = await new LocalBackend().searchMeetings('STANDUP');
+    expect(rows).toEqual([
+      {
+        id: 'a', title: 'Weekly Standup', timestamp: '2026-06-01T09:00:00Z',
+        durationSeconds: 600, status: 'done',
+        files: { hasAudio: true, hasNote: true, hasTranscript: false },
+      },
+    ]);
+  });
+
+  it('returns nothing for a blank local query without hitting the bridge', async () => {
+    const rows = await new LocalBackend().searchMeetings('   ');
+    expect(rows).toEqual([]);
+    expect(listRecordings).not.toHaveBeenCalled();
   });
 
   it('getMeetingAudio reads recording.mp3 when present, null otherwise', async () => {

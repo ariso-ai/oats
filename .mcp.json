@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ariso-desktop": {
+    "oats-desktop": {
       "type": "stdio",
       "command": "node",
       "args": ["-e", "import('tauri-plugin-mcp-server/build/index.js')"],

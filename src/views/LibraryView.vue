@@ -19,26 +19,7 @@
           <line x1="6.75" y1="3" x2="6.75" y2="15" stroke="currentColor" stroke-width="1.5" />
         </svg>
       </button>
-      <button
-        v-if="backendId === 'local'"
-        class="panel-toggle"
-        title="Search meetings"
-        aria-label="Search meetings"
-        @click="searchOpen = true"
-      >
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-          <circle cx="7.75" cy="7.75" r="5" stroke="currentColor" stroke-width="1.5" />
-          <line x1="11.6" y1="11.6" x2="15.5" y2="15.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-        </svg>
-      </button>
     </div>
-
-    <MeetingSearchDialog
-      v-if="searchOpen"
-      :meetings="displayMeetings"
-      @select="onSearchSelect"
-      @close="searchOpen = false"
-    />
 
     <aside v-if="leftPanelVisible" class="sidebar">
       <!-- Date header + new-recording button -->
@@ -144,7 +125,10 @@
       />
     </section>
 
+    <!-- Key by backend id so switching backends remounts the palette, discarding
+         any query/results typed against the previous backend's corpus. -->
     <LibrarySearchPalette
+      :key="activeBackend?.id"
       :open="searchPaletteOpen"
       :search-meetings="searchMeetings"
       @close="searchPaletteOpen = false"
@@ -173,7 +157,6 @@ import UpNextCard from './UpNextCard.vue';
 import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
-import MeetingSearchDialog from './MeetingSearchDialog.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 import { decideRecordingAction } from '../composables/decideRecordingAction';
 
@@ -183,10 +166,6 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
-// Which backend is active, captured on load/focus. The titlebar search button
-// is only offered for local recordings.
-const backendId = ref<'ariso' | 'local'>('ariso');
-const searchOpen = ref(false);
 const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
@@ -354,22 +333,6 @@ function toggleLeftPanel(): void {
   leftPanelVisible.value = !leftPanelVisible.value;
 }
 
-// A search hit opens the meeting in the detail pane and reveals the sidebar so
-// the matching row is highlighted in the list.
-async function onSearchSelect(m: MeetingListItem): Promise<void> {
-  searchOpen.value = false;
-  leftPanelVisible.value = true;
-  await selectMeeting(m);
-}
-
-// ⌘F opens the search dialog when local recordings are active.
-function onKeydown(e: KeyboardEvent): void {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && backendId.value === 'local') {
-    e.preventDefault();
-    searchOpen.value = true;
-  }
-}
-
 async function openSettings(): Promise<void> {
   try {
     await invoke('create_settings_window', {});
@@ -401,8 +364,6 @@ async function loadMeetings(): Promise<void> {
   error.value = null;
   try {
     const backend = await getActiveBackend();
-    backendId.value = backend.id;
-    if (backendId.value !== 'local') searchOpen.value = false;
     activeBackend.value = backend;
     const next = await backend.listMeetings();
     if (requestId !== loadMeetingsRequest) return;
@@ -622,8 +583,8 @@ function onWindowFocus(): void {
   void refreshRecordingState();
 }
 
-// Global keyboard entry mirrors the sidebar pill. It is scoped by backend so
-// Local users do not open a remote-only search surface.
+// ⌘K mirrors the sidebar Search pill, gated on the active backend supporting
+// search (both Ariso and local do — local filters its recordings by title).
 function onGlobalKeydown(event: KeyboardEvent): void {
   const key = event.key.toLowerCase();
   const triggered = (isMac.value ? event.metaKey : event.ctrlKey) && key === 'k';
@@ -659,14 +620,12 @@ onMounted(() => {
     now.value = new Date();
   }, 30_000);
   window.addEventListener('focus', onWindowFocus);
-  window.addEventListener('keydown', onKeydown);
   window.addEventListener('keydown', onGlobalKeydown);
 });
 
 onUnmounted(() => {
   if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
-  window.removeEventListener('keydown', onKeydown);
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
 });

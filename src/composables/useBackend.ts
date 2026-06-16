@@ -105,8 +105,9 @@ export interface Backend {
   id: BackendId;
   needsAuth: boolean;
   usesMeetingPicker: boolean;
-  /** Whether this backend can perform real note search. Local is false until it
-   *  has an indexed local search path instead of fake title filtering. */
+  /** Whether this backend offers note search through the shared search palette.
+   *  Ariso searches its remote note corpus; local does a title-only filter over
+   *  its recordings. */
   supportsSearch: boolean;
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
@@ -190,6 +191,27 @@ function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): Me
   if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
   return item;
 }
+
+// Local recordings map straight onto Library rows; both the full list and the
+// title-filtered search reuse this shape so search hits select like normal rows.
+function recordingToListItem(r: RecordingSummary): MeetingListItem {
+  return {
+    id: r.id,
+    title: r.title,
+    timestamp: r.createdAt,
+    durationSeconds: r.durationSeconds,
+    status: r.status,
+    files: {
+      hasAudio: r.hasAudio,
+      hasNote: r.hasNote,
+      hasTranscript: r.hasTranscript,
+    },
+  };
+}
+
+// Cap local title-search rows so the palette never has to render an unbounded
+// history; mirrors the old search dialog's limit.
+const MAX_LOCAL_SEARCH_RESULTS = 50;
 
 export function timestampTitle(iso: string): string {
   const d = new Date(iso);
@@ -326,7 +348,7 @@ export class LocalBackend implements Backend {
   id: BackendId = 'local';
   needsAuth = false;
   usesMeetingPicker = false;
-  supportsSearch = false;
+  supportsSearch = true;
 
   async isReady(): Promise<Readiness> {
     const status = await local.modelStatus();
@@ -351,24 +373,21 @@ export class LocalBackend implements Backend {
   async listMeetings(): Promise<MeetingListItem[]> {
     // No date window: the local library shows the full recording history.
     const recs = await local.listRecordings();
-    return recs.map((r) => ({
-      id: r.id,
-      title: r.title,
-      timestamp: r.createdAt,
-      durationSeconds: r.durationSeconds,
-      status: r.status,
-      files: {
-        hasAudio: r.hasAudio,
-        hasNote: r.hasNote,
-        hasTranscript: r.hasTranscript,
-      },
-    }));
+    return recs.map(recordingToListItem);
   }
 
-  // Local search is intentionally disabled until the local backend owns a real
-  // index/search path. Returning [] keeps the UI simple and avoids fake results.
-  async searchMeetings(): Promise<MeetingListItem[]> {
-    return [];
+  // Local search has no note/transcript index yet, so it filters the recording
+  // list by a case-insensitive title substring. Routing it through the shared
+  // search palette (same UX as Ariso) keeps a single search surface for both
+  // backends.
+  async searchMeetings(query: string): Promise<MeetingListItem[]> {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const recs = await local.listRecordings();
+    return recs
+      .filter((r) => r.title.toLowerCase().includes(q))
+      .slice(0, MAX_LOCAL_SEARCH_RESULTS)
+      .map(recordingToListItem);
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
