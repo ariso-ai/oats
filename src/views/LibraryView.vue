@@ -35,6 +35,21 @@
         </button>
       </header>
 
+      <button
+        v-if="activeBackend?.supportsSearch"
+        class="search-trigger"
+        type="button"
+        aria-label="Search notes"
+        @click="openSearchPalette"
+      >
+        <svg class="search-trigger-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+          <path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <span>Search</span>
+        <kbd>{{ searchShortcutLabel }}</kbd>
+      </button>
+
       <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
 
       <p v-if="loading" class="hint">Loading…</p>
@@ -109,6 +124,14 @@
         @recording-active="recordingActive = $event"
       />
     </section>
+
+    <LibrarySearchPalette
+      :open="searchPaletteOpen"
+      :search-meetings="searchMeetings"
+      @close="searchPaletteOpen = false"
+      @go-to-notes="goHomeFromSearch"
+      @select="onSearchResultSelected"
+    />
   </div>
 </template>
 
@@ -117,7 +140,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, timestampTitle, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
@@ -128,6 +151,7 @@ import {
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
 import UpNextCard from './UpNextCard.vue';
+import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
@@ -139,6 +163,8 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+const activeBackend = ref<Backend | null>(null);
+const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
 };
@@ -164,6 +190,10 @@ const dayNum = computed(() => now.value.getDate());
 const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'long' }).toUpperCase());
 
 const activeView = ref<'today' | 'meetings'>('meetings');
+const isMac = computed(() =>
+  typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+);
+const searchShortcutLabel = computed(() => (isMac.value ? '⌘K' : 'Ctrl K'));
 
 // An in-progress local recording has no list row yet (the entry is created on
 // finalize). Synthesize one under the id the finalized recording will use, so
@@ -260,6 +290,32 @@ async function clearSelection(): Promise<void> {
   selectedItem.value = null;
 }
 
+function openSearchPalette(): void {
+  if (!activeBackend.value?.supportsSearch) return;
+  searchPaletteOpen.value = true;
+}
+
+// The palette asks the active backend to search, but still returns normal
+// Library rows so selection and detail loading stay on the existing path.
+async function searchMeetings(query: string): Promise<MeetingListItem[]> {
+  const backend = activeBackend.value ?? (await getActiveBackend());
+  activeBackend.value = backend;
+  if (!backend.supportsSearch) return [];
+  return backend.searchMeetings(query);
+}
+
+async function onSearchResultSelected(meeting: MeetingListItem): Promise<void> {
+  searchPaletteOpen.value = false;
+  await selectMeeting(meeting);
+}
+
+// The palette's Home command returns the Library to its neutral detail state:
+// close search, then clear the selected meeting after saving any edits.
+async function goHomeFromSearch(): Promise<void> {
+  searchPaletteOpen.value = false;
+  await clearSelection();
+}
+
 // Keep the sidebar (and the selected reference) in sync after an inline rename
 // in the detail panel, so the list label updates without a full reload.
 function onTitleUpdated(payload: { id: string; title: string }): void {
@@ -304,7 +360,9 @@ async function loadMeetings(): Promise<void> {
   loading.value = true;
   error.value = null;
   try {
-    const next = await (await getActiveBackend()).listMeetings();
+    const backend = await getActiveBackend();
+    activeBackend.value = backend;
+    const next = await backend.listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
     // Drop any pinned ad-hoc meeting the backend list now surfaces on its own.
@@ -522,6 +580,16 @@ function onWindowFocus(): void {
   void refreshRecordingState();
 }
 
+// Global keyboard entry mirrors the sidebar pill. It is scoped by backend so
+// Local users do not open a remote-only search surface.
+function onGlobalKeydown(event: KeyboardEvent): void {
+  const key = event.key.toLowerCase();
+  const triggered = (isMac.value ? event.metaKey : event.ctrlKey) && key === 'k';
+  if (!triggered || !activeBackend.value?.supportsSearch) return;
+  event.preventDefault();
+  searchPaletteOpen.value = true;
+}
+
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 
@@ -549,11 +617,13 @@ onMounted(() => {
     now.value = new Date();
   }, 30_000);
   window.addEventListener('focus', onWindowFocus);
+  window.addEventListener('keydown', onGlobalKeydown);
 });
 
 onUnmounted(() => {
   if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
+  window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
 });
 </script>
@@ -635,6 +705,44 @@ onUnmounted(() => {
   transition: transform 0.1s, box-shadow 0.1s;
 }
 .add-btn:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: translate(1px, 1px); }
+
+.search-trigger {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: calc(100% - 12px);
+  min-height: 42px;
+  margin: 0 6px 10px;
+  padding: 0 12px;
+  border: 1px solid #d7d6d2;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  color: #76736e;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.search-trigger:hover {
+  border-color: #bdbbb6;
+  background: #ffffff;
+  color: #1c1c1c;
+}
+.search-trigger-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+.search-trigger kbd {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: #8f8c87;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
 
 .hint { font-size: 14px; color: #6f6f6f; padding: 0 6px; }
 
