@@ -637,11 +637,11 @@ describe('LibraryView', () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
 
     emitEvent('recording://started', { meetingId: 42 });
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
     // The recording transition also collapses the sidebar immediately.
     expect(wrapper.find('.add-btn').exists()).toBe(false);
   });
@@ -650,11 +650,11 @@ describe('LibraryView', () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
 
     emitEvent('recording://started', { meetingId: null });
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
     expect(wrapper.find('.add-btn').exists()).toBe(false);
   });
 
@@ -669,7 +669,7 @@ describe('LibraryView', () => {
     emitEvent('recording://started', { meetingId: 42 });
     await flushPromises();
     expect(listMeetings).toHaveBeenCalledTimes(2);
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
   });
 
   // A local recording has no list row until finalize; the library synthesizes

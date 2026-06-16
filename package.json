@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
+    "@heroicons/vue": "^2.2.0",
     "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2.5.3",

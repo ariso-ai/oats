@@ -109,9 +109,14 @@
           @close="clearSelection"
           @title-updated="onTitleUpdated"
         />
-        <div v-else class="empty-card">
-          <p>Select a meeting to view its notes.</p>
-        </div>
+        <UpNextCard
+          v-else
+          :meetings="displayMeetings"
+          :now="now"
+          @select="selectMeeting"
+          @start="startRecordingFor"
+          @record="startRecording"
+        />
       </div>
       <RecorderStrip
         :meeting-id="selectedItem?.id ?? null"
@@ -145,6 +150,7 @@ import {
   type MeetingSection,
 } from '../composables/groupMeetingsByDate';
 import MeetingDetailView from './MeetingDetailView.vue';
+import UpNextCard from './UpNextCard.vue';
 import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
@@ -407,6 +413,32 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
   if (!item || !/^\d+$/.test(item.id)) return undefined;
   const id = Number(item.id);
   return Number.isSafeInteger(id) ? id : undefined;
+}
+
+// Open the floating recorder pill (its own always-on-top window) for a specific
+// meeting — the featured meeting behind "Start Meeting Early" on the Up Next card.
+async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
+  try {
+    const backend = await getActiveBackend();
+    // Ariso scheduled meetings use numeric backend ids; pass that id into the
+    // recorder so the eventual upload attaches to the selected meeting.
+    const meetingId = backend.id === 'ariso' ? numericMeetingId(item) : undefined;
+    if (meetingId != null) {
+      await invoke('start_recording_window', { meetingId });
+      setRecording(true);
+      return;
+    }
+    if (backend.usesMeetingPicker) {
+      // Picker-using backends (Ariso) choose a meeting first; the picker then
+      // starts the recorder itself.
+      await invoke('open_meeting_picker', {});
+      return;
+    }
+    await invoke('start_recording_window', {});
+    setRecording(true);
+  } catch (e) {
+    console.error('Failed to start recording', e);
+  }
 }
 
 // True when a meeting's start falls on the current local day.
@@ -861,16 +893,5 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: flex;
-}
-.empty-card {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #ffffff;
-  border: 1px solid #e5e6e3;
-  border-radius: 16px;
-  color: #6f6f6f;
-  font-size: 14px;
 }
 </style>
