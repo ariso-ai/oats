@@ -193,7 +193,9 @@ const displayedSections = computed<MeetingSection[]>(() => {
 });
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
-// relative-time chip; it's the first item of the trailing UPCOMING section.
+// relative-time chip; it's the first item of the Today view's UPCOMING section.
+// The Meetings view groups purely by date and has no UPCOMING section, so no
+// chip shows there.
 const nextUpcomingId = computed<string | null>(() => {
   const up = displayedSections.value.find((s) => s.key === 'upcoming');
   return up?.items[0]?.id ?? null;
