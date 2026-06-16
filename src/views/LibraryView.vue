@@ -19,21 +19,15 @@
           <line x1="6.75" y1="3" x2="6.75" y2="15" stroke="currentColor" stroke-width="1.5" />
         </svg>
       </button>
+      <button class="add-btn" aria-label="Start recording" title="Start recording" @click="startRecording">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        </svg>
+        <span class="add-btn-label">Start recording</span>
+      </button>
     </div>
 
     <aside v-if="leftPanelVisible" class="sidebar">
-      <!-- Date header + new-recording button -->
-      <header class="sidebar-head">
-        <div class="date">
-          <span class="date-day">{{ dayNum }}</span>
-          <span class="date-month">{{ monthName }}</span>
-        </div>
-        <button class="add-btn" aria-label="Start recording" title="Start recording" @click="startRecording">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          </svg>
-        </button>
-      </header>
 
       <button
         v-if="activeBackend?.supportsSearch"
@@ -653,7 +647,7 @@ onUnmounted(() => {
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  padding: 3px 12px 0 78px;
+  padding: 3px 5px 0 78px;
   background: transparent;
 }
 .panel-toggle {
@@ -677,7 +671,7 @@ onUnmounted(() => {
 .sidebar {
   width: 300px;
   flex-shrink: 0;
-  padding: 40px 18px 18px;
+  padding: 30px 18px 18px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -694,12 +688,14 @@ onUnmounted(() => {
 .date-day { font-size: 20px; font-weight: 700; color: #1c1c1c; }
 .date-month { font-size: 13px; font-weight: 500; letter-spacing: 2px; color: #1c1c1c; }
 .add-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  margin-left: auto;
+  height: 22px;
+  padding: 0 9px 0 7px;
+  gap: 5px;
+  border-radius: 11px;
   background: #ffffff;
   border: 1px solid #d6d6d6;
-  box-shadow: 2px 2px 0 #e7e5e2;
+  box-shadow: 1px 1px 0 #e7e5e2;
   color: #1a1a1a;
   display: flex;
   align-items: center;
@@ -707,7 +703,13 @@ onUnmounted(() => {
   cursor: pointer;
   transition: transform 0.1s, box-shadow 0.1s;
 }
-.add-btn:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: translate(1px, 1px); }
+.add-btn-label {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.add-btn:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px, 1px); }
 
 .search-trigger {
   display: flex;
@@ -886,7 +888,7 @@ onUnmounted(() => {
   position: relative;
   flex: 1;
   min-width: 0;
-  padding: 28px 18px 18px 8px;
+  padding: 30px 18px 18px 8px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
