@@ -19,7 +19,17 @@ APPLICATIONS_ICON_X="${DMG_APPLICATIONS_ICON_X:-645}"
 APPLICATIONS_ICON_Y="${DMG_APPLICATIONS_ICON_Y:-280}"
 WINDOW_WIDTH="${DMG_WINDOW_WIDTH:-820}"
 WINDOW_HEIGHT="${DMG_WINDOW_HEIGHT:-500}"
-FINDER_SCRIPT_TIMEOUT_SECONDS="${DMG_FINDER_SCRIPT_TIMEOUT_SECONDS:-600}"
+
+# Validate the Finder timeout before it is injected into AppleScript's
+# `with timeout` statement, keeping the generated script numeric-only.
+if [[ -z "${DMG_FINDER_SCRIPT_TIMEOUT_SECONDS:-}" ]]; then
+  FINDER_SCRIPT_TIMEOUT_SECONDS=600
+elif [[ "${DMG_FINDER_SCRIPT_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+  FINDER_SCRIPT_TIMEOUT_SECONDS="${DMG_FINDER_SCRIPT_TIMEOUT_SECONDS}"
+else
+  echo "DMG_FINDER_SCRIPT_TIMEOUT_SECONDS must be a positive integer; got '${DMG_FINDER_SCRIPT_TIMEOUT_SECONDS}'" >&2
+  exit 1
+fi
 
 if [[ ! -d "${APP_PATH}" ]]; then
   echo "Missing app bundle: ${APP_PATH}" >&2
@@ -66,6 +76,30 @@ hdiutil create \
 
 hdiutil detach "${MOUNT_DIR}" >/dev/null 2>&1 || true
 hdiutil attach "${RW_DMG}" -readwrite -noverify -noautoopen -quiet
+
+# hdiutil can return before Finder's AppleEvent object model has registered
+# the mounted volume, so wait for both the mount path and Finder disk object.
+FINDER_DISK_READY=false
+for _ in {1..30}; do
+  if [[ -d "${MOUNT_DIR}" ]]; then
+    FINDER_DISK_EXISTS="$(
+      osascript \
+        -e "with timeout of 10 seconds" \
+        -e "tell application \"Finder\" to exists disk \"${VOLUME_NAME}\"" \
+        -e "end timeout" 2>/dev/null || true
+    )"
+    if [[ "${FINDER_DISK_EXISTS}" == "true" ]]; then
+      FINDER_DISK_READY=true
+      break
+    fi
+  fi
+  sleep 1
+done
+
+if [[ "${FINDER_DISK_READY}" != "true" ]]; then
+  echo "Finder did not register mounted disk ${VOLUME_NAME} at ${MOUNT_DIR}" >&2
+  exit 1
+fi
 
 # Finder persists the icon size, positions, and background into .DS_Store; the
 # explicit timeout keeps slow CI runners from hitting AppleScript's default
