@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const localFinalize = vi.fn();
 const listRecordings = vi.fn();
 const listMeetingsInWindow = vi.fn();
+const searchMeetings = vi.fn();
 const apiRequest = vi.fn();
 const putPresigned = vi.fn();
 const checkSession = vi.fn();
@@ -42,6 +43,7 @@ vi.mock('./useMeetingApi', () => ({
   useMeetingApi: () => ({
     uploadAudio: (...a: unknown[]) => uploadAudio(...a),
     listMeetingsInWindow: (...a: unknown[]) => listMeetingsInWindow(...a),
+    searchMeetings: (...a: unknown[]) => searchMeetings(...a),
     updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
     getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
   }),
@@ -60,6 +62,7 @@ describe('LocalBackend', () => {
     expect(b.id).toBe('local');
     expect(b.needsAuth).toBe(false);
     expect(b.usesMeetingPicker).toBe(false);
+    expect(b.supportsSearch).toBe(false);
   });
 
   it('isReady reflects model status', async () => {
@@ -95,6 +98,10 @@ describe('LocalBackend', () => {
     expect(renameRecording).toHaveBeenCalledWith('2026-06-02T14-30-05Z', 'New title');
   });
 
+  it('does not fake local search results', async () => {
+    await expect(new LocalBackend().searchMeetings('standup')).resolves.toEqual([]);
+  });
+
   it('getMeetingAudio reads recording.mp3 when present, null otherwise', async () => {
     const b = new LocalBackend();
     const buf = new ArrayBuffer(4);
@@ -119,6 +126,7 @@ describe('ArisoBackend', () => {
     expect(b.id).toBe('ariso');
     expect(b.needsAuth).toBe(true);
     expect(b.usesMeetingPicker).toBe(true);
+    expect(b.supportsSearch).toBe(true);
   });
 
   it('isReady reflects session', async () => {
@@ -352,6 +360,35 @@ describe('ArisoBackend.listMeetings', () => {
     expect(items).toEqual([
       { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z' },
       { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z' },
+    ]);
+  });
+});
+
+describe('ArisoBackend.searchMeetings', () => {
+  it('maps remote search results to selectable list items', async () => {
+    searchMeetings.mockResolvedValue([
+      {
+        id: 9,
+        title: 'Pipeline Review',
+        start_at: '2026-06-11T15:00:00Z',
+        end_at: '2026-06-11T15:30:00Z',
+        snippet: 'Discussed pipeline notes',
+        matched_text: 'pipeline',
+      },
+    ]);
+
+    const items = await new ArisoBackend().searchMeetings('pipeline');
+
+    expect(searchMeetings).toHaveBeenCalledWith('pipeline');
+    expect(items).toEqual([
+      {
+        id: '9',
+        title: 'Pipeline Review',
+        timestamp: '2026-06-11T15:00:00Z',
+        endTimestamp: '2026-06-11T15:30:00Z',
+        snippet: 'Discussed pipeline notes',
+        matchedText: 'pipeline',
+      },
     ]);
   });
 });
