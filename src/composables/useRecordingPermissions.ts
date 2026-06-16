@@ -57,7 +57,12 @@ export async function ensureMicPermission(): Promise<boolean> {
   }
 }
 
-/** Prompt for / verify macOS Screen Recording permission (system audio). */
+/**
+ * Prompt for / verify the macOS "System Audio Recording" permission. System
+ * audio is captured via Core Audio process taps (macOS 14.4+), so the OS lists
+ * the app under the "System Audio Recording Only" section of Privacy &
+ * Security → Screen & System Audio Recording — not full screen recording.
+ */
 export async function ensureSystemAudioPermission(): Promise<boolean> {
   try {
     return await invoke<boolean>('request_screen_capture_permission');
@@ -66,7 +71,8 @@ export async function ensureSystemAudioPermission(): Promise<boolean> {
   }
 }
 
-/** Current Screen Recording status without prompting (for initial UI state). */
+/** Current system-audio recording status (best-effort; there is no public
+ * preflight API, so this attempts a throwaway tap). */
 export async function checkSystemAudioPermission(): Promise<boolean> {
   try {
     return await invoke<boolean>('check_screen_capture_permission');
@@ -81,7 +87,11 @@ export async function openMicSettings(): Promise<void> {
   await openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
 }
 
-/** Open System Settings → Privacy → Screen Recording. macOS only; no-op elsewhere. */
+/**
+ * Open System Settings → Privacy → Screen & System Audio Recording. The
+ * "System Audio Recording Only" entries live in a section of this same pane.
+ * macOS only; no-op elsewhere.
+ */
 export async function openSystemAudioSettings(): Promise<void> {
   if (!isMac()) return;
   await openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');

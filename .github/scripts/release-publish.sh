@@ -3,7 +3,7 @@
 # Build the Tauri updater manifest (latest.json) and publish the release
 # artifacts (updater tarball, DMG, manifest) to Cloudflare R2.
 #
-# Invoked by the publish job in .github/workflows/desktop.yaml after the
+# Invoked by the publish job in .github/workflows/release.yaml after the
 # release job has uploaded the bundler outputs (restored under
 # src-tauri/target/release/bundle/).
 #
@@ -81,7 +81,7 @@ VERSION="${RELEASE_TAG#v}"
 
 # Asset URL is the stable R2 path the updater downloads the payload from. The
 # object at this key is overwritten by the upload below.
-ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/Ariso.app.tar.gz"
+ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz"
 
 # Read the detached signature contents (single line of base64).
 SIG=$(cat "$SIGFILE")
@@ -119,12 +119,12 @@ NOCACHE="no-cache, max-age=0, must-revalidate"
 
 # Upload payloads BEFORE the manifest that references them, so a client reading
 # the new latest.json never points at a missing object.
-aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/desktop/Ariso.app.tar.gz" \
+aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/desktop/oats.app.tar.gz" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/gzip \
   --cache-control "$NOCACHE"
 
-aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/Ariso.dmg" \
+aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/oats.dmg" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/x-apple-diskimage \
   --cache-control "$NOCACHE"

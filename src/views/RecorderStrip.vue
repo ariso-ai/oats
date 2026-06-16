@@ -34,7 +34,7 @@
             <rect x="8.5" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
           </svg>
           <svg v-else width="14" height="14" viewBox="0 0 14 14">
-            <path d="M3 1.8v10.4c0 .7.8 1.2 1.4.8l8.1-5.2c.6-.4.6-1.2 0-1.6L4.4 1c-.6-.4-1.4.1-1.4.8z" fill="currentColor" />
+            <circle cx="7" cy="7" r="5.5" fill="currentColor" />
           </svg>
         </button>
         <button class="ctrl-btn stop-btn" aria-label="Stop recording" @click.stop.prevent="control('tray://stop-recording')">
@@ -67,9 +67,15 @@ interface RecorderState {
 /** The meeting currently shown in the detail panel (null when none). */
 const props = defineProps<{ meetingId: string | null }>();
 
-/** Tells the parent which meeting is being recorded (null when none) —
- *  drives the red dot on the sidebar list. */
-const emitToParent = defineEmits<{ 'recording-change': [string | null] }>();
+/** `recording-change` tells the parent which meeting the session belongs to
+ *  (null when none) so it can select/pin the row; it persists through the
+ *  upload/failed phases. `recording-active` is true only while audio is
+ *  actually being captured — it drives the pulsing red dot, which must stop
+ *  the moment recording ends even if the failed pill keeps heartbeating. */
+const emitToParent = defineEmits<{
+  'recording-change': [string | null];
+  'recording-active': [boolean];
+}>();
 
 // The recorder heartbeats state about every second; a longer silence means it
 // died without broadcasting `closed` (crash / force-close) — clear the strip.
@@ -99,6 +105,7 @@ const visible = computed(() => {
 
 watch(state, (s) => {
   emitToParent('recording-change', s ? recordedMeetingId(s) : null);
+  emitToParent('recording-active', s?.phase === 'recording');
 });
 
 const formattedDuration = computed(() => {

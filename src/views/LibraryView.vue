@@ -50,6 +50,8 @@
         <kbd>{{ searchShortcutLabel }}</kbd>
       </button>
 
+      <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
+
       <p v-if="loading" class="hint">Loading…</p>
       <p v-else-if="error" class="hint">{{ error }}</p>
       <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
@@ -66,7 +68,7 @@
             :aria-pressed="selectedItem?.id === m.id"
             @click="selectMeeting(m)"
           >
-            <span v-if="recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
+            <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
               <span class="mi-title">{{ m.title }}</span>
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
@@ -114,6 +116,7 @@
       <RecorderStrip
         :meeting-id="selectedItem?.id ?? null"
         @recording-change="recordingMeetingId = $event"
+        @recording-active="recordingActive = $event"
       />
     </section>
 
@@ -144,7 +147,9 @@ import {
 import MeetingDetailView from './MeetingDetailView.vue';
 import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
+import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
+import { decideRecordingAction } from '../composables/decideRecordingAction';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -158,8 +163,19 @@ type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
 };
 const detailView = ref<MeetingDetailViewExposed | null>(null);
-// Meeting currently being recorded (reported by the strip) — red dot in the list.
+const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
+// Meeting the recording session belongs to (reported by the strip). Persists
+// through the upload/failed phases so the row stays selected/pinned.
 const recordingMeetingId = ref<string | null>(null);
+// True only while audio is actively being captured — gates the red dot so it
+// stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
+const recordingActive = ref(false);
+// Ad-hoc meetings we recorded this session that the backend list doesn't surface
+// yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
+// isn't a calendar-scheduled meeting and never appears in listMeetings()). We
+// fetch their metadata and keep them in the sidebar during AND after recording,
+// until a reload naturally includes them. Keyed by id.
+const pinnedMeetings = ref<Map<string, MeetingListItem>>(new Map());
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
 // split stay fresh while the window sits open.
@@ -178,10 +194,17 @@ const searchShortcutLabel = computed(() => (isMac.value ? '⌘K' : 'Ctrl K'));
 // the red dot, selection, and the recorder strip have a home that survives the
 // post-recording reload.
 const displayMeetings = computed<MeetingListItem[]>(() => {
+  // Layer pinned ad-hoc meetings the backend list hasn't caught up to on top of
+  // the loaded list (deduped by id), so they survive the post-recording reload.
+  const pinned = [...pinnedMeetings.value.values()].filter(
+    (p) => !meetings.value.some((m) => m.id === p.id)
+  );
+  const base = pinned.length ? [...pinned, ...meetings.value] : meetings.value;
+
   const id = recordingMeetingId.value;
-  if (!id || meetings.value.some((m) => m.id === id)) return meetings.value;
+  if (!id || base.some((m) => m.id === id)) return base;
   const timestamp = timestampFromLocalRecordingId(id);
-  if (!timestamp) return meetings.value; // an Ariso meeting outside the loaded window
+  if (!timestamp) return base; // an Ariso meeting outside the loaded window
   return [
     {
       id,
@@ -189,7 +212,7 @@ const displayMeetings = computed<MeetingListItem[]>(() => {
       timestamp,
       files: { hasAudio: false, hasNote: false, hasTranscript: false },
     },
-    ...meetings.value,
+    ...base,
   ];
 });
 
@@ -201,7 +224,9 @@ const displayedSections = computed<MeetingSection[]>(() => {
 });
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
-// relative-time chip; it's the first item of the trailing UPCOMING section.
+// relative-time chip; it's the first item of the Today view's UPCOMING section.
+// The Meetings view groups purely by date and has no UPCOMING section, so no
+// chip shows there.
 const nextUpcomingId = computed<string | null>(() => {
   const up = displayedSections.value.find((s) => s.key === 'upcoming');
   return up?.items[0]?.id ?? null;
@@ -327,6 +352,14 @@ async function loadMeetings(): Promise<void> {
     const next = await backend.listMeetings();
     if (requestId !== loadMeetingsRequest) return;
     meetings.value = next;
+    // Drop any pinned ad-hoc meeting the backend list now surfaces on its own.
+    if (pinnedMeetings.value.size) {
+      const pruned = new Map(pinnedMeetings.value);
+      for (const id of [...pruned.keys()]) {
+        if (next.some((m) => m.id === id)) pruned.delete(id);
+      }
+      if (pruned.size !== pinnedMeetings.value.size) pinnedMeetings.value = pruned;
+    }
     // The native tray owns its own meeting cache. When this visible list gets
     // fresh data, nudge Rust to re-fetch so the menu-bar title updates now.
     void emitNotificationsSync().catch((err) => {
@@ -347,6 +380,10 @@ async function loadMeetings(): Promise<void> {
   }
 }
 
+async function onPendingUploaded(): Promise<void> {
+  await loadMeetings();
+}
+
 // Recording runs in the separate "waveform" window; its presence is our signal.
 async function refreshRecordingState(): Promise<void> {
   try {
@@ -365,24 +402,63 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
   return Number.isSafeInteger(id) ? id : undefined;
 }
 
-// Open the floating recorder pill (its own always-on-top window).
+// True when a meeting's start falls on the current local day.
+function isTodayItem(m: MeetingListItem | null): boolean {
+  if (!m) return false;
+  const d = new Date(m.timestamp);
+  if (Number.isNaN(d.getTime())) return false;
+  const n = now.value;
+  return (
+    d.getFullYear() === n.getFullYear() &&
+    d.getMonth() === n.getMonth() &&
+    d.getDate() === n.getDate()
+  );
+}
+
+// The meeting currently in progress (the one the Today list flags with the green
+// "Now" chip): a today meeting with start <= now < end. Earliest start wins so it
+// matches the chip.
+function currentNowItem(): MeetingListItem | null {
+  const live = displayMeetings.value.filter(
+    (m) => isTodayItem(m) && isMeetingInProgress(m, now.value)
+  );
+  if (live.length === 0) return null;
+  live.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return live[0];
+}
+
+// Open the floating recorder pill (its own always-on-top window). The button's
+// behaviour follows the active nav view: Meetings always asks the picker; Today
+// records the in-progress meeting (or a deliberately selected today meeting),
+// falling back to the picker when neither applies. Non-picker (local) backends
+// just open the recorder with no meeting attached.
 async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
-    // Ariso scheduled meetings use numeric backend ids; pass that id into the
-    // recorder so the eventual upload attaches to the selected meeting.
-    const meetingId = backend.id === 'ariso' ? numericMeetingId(selectedItem.value) : undefined;
-    if (meetingId != null) {
-      await invoke('start_recording_window', { meetingId });
-      setRecording(true);
-      return;
-    }
-    if (backend.usesMeetingPicker) {
-      // Picker-using backends (Ariso) choose a meeting first; the picker then
-      // starts the recorder itself.
+    const usesPicker = backend.usesMeetingPicker;
+    const selectedTodayId =
+      usesPicker && activeView.value === 'today' && isTodayItem(selectedItem.value)
+        ? numericMeetingId(selectedItem.value)
+        : undefined;
+    const nowMeetingId = usesPicker ? numericMeetingId(currentNowItem()) : undefined;
+
+    const action = decideRecordingAction({
+      view: activeView.value,
+      usesPicker,
+      selectedTodayId: selectedTodayId ?? null,
+      nowMeetingId: nowMeetingId ?? null,
+    });
+
+    if (action.kind === 'picker') {
       await invoke('open_meeting_picker', {});
       return;
     }
+    if (action.kind === 'record') {
+      await invoke('start_recording_window', { meetingId: action.meetingId });
+      setRecording(true);
+      return;
+    }
+    // record-adhoc: non-picker (local) backend with no meeting attached.
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {
@@ -398,18 +474,40 @@ async function onRecordingStarted(event: { payload: { meetingId: number | null }
   await selectRecordingMeeting(event.payload?.meetingId);
 }
 
+// Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
+// reload includes it. Local recordings (timestamp-encoded ids) already get a
+// synthetic row from displayMeetings, so only numeric Ariso ids are pinned.
+async function pinRecordedMeeting(id: string): Promise<void> {
+  if (!/^\d+$/.test(id)) return;
+  if (meetings.value.some((m) => m.id === id) || pinnedMeetings.value.has(id)) return;
+  try {
+    const backend = await getActiveBackend();
+    if (backend.id !== 'ariso') return;
+    const detail = await backend.getMeetingDetail({ id, title: '', timestamp: new Date().toISOString() });
+    pinnedMeetings.value = new Map(pinnedMeetings.value).set(id, {
+      id,
+      title: detail.title,
+      timestamp: detail.startAt,
+      endTimestamp: detail.endAt,
+    });
+  } catch (e) {
+    console.error('Failed to pin recorded meeting', id, e);
+  }
+}
+
 // Shared resolver for "the recording is attached to meeting X, surface it in
 // the detail panel". Used by both the live `recording://started` event and the
 // mount-time backend query that recovers state after the library was closed.
 async function selectRecordingMeeting(id: number | null | undefined): Promise<void> {
   if (id == null) return;
   const idStr = String(id);
-  let m = meetings.value.find((x) => x.id === idStr);
+  let m = displayMeetings.value.find((x) => x.id === idStr);
   if (!m) {
-    // The picker can start a meeting the library hasn't loaded yet (e.g. it
-    // appeared on the calendar after our last refresh) — reload once.
+    // The picker can start a meeting the library hasn't loaded yet — reload, and
+    // pin it if it's an ad-hoc meeting the list still won't surface.
     await loadMeetings();
-    m = meetings.value.find((x) => x.id === idStr);
+    await pinRecordedMeeting(idStr);
+    m = displayMeetings.value.find((x) => x.id === idStr);
   }
   if (m) await selectMeeting(m);
 }
@@ -420,20 +518,26 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
 // replaces the synthetic row under the same id.
 watch(recordingMeetingId, async (id, prevId) => {
   if (id) {
+    // Ensure the recorded meeting has a sidebar row even when it's an ad-hoc
+    // Ariso meeting the calendar list doesn't carry.
+    await pinRecordedMeeting(id);
     const m = displayMeetings.value.find((x) => x.id === id);
     if (m && selectedItem.value?.id !== id) await selectMeeting(m);
     return;
   }
   await loadMeetings();
-  if (prevId && selectedItem.value?.id === prevId && !meetings.value.some((m) => m.id === prevId)) {
-    // Discarded/crashed recording — its synthetic row is gone; fall back.
-    selectedItem.value = meetings.value[0] ?? null;
+  await pendingUploads.value?.refresh();
+  if (prevId && selectedItem.value?.id === prevId && !displayMeetings.value.some((m) => m.id === prevId)) {
+    // Discarded/crashed recording — its row is gone (and nothing pinned it);
+    // fall back to the first available meeting.
+    selectedItem.value = displayMeetings.value[0] ?? null;
   }
 });
 
 function onWindowFocus(): void {
   now.value = new Date();
   void loadMeetings();
+  void pendingUploads.value?.refresh();
   void refreshRecordingState();
 }
 

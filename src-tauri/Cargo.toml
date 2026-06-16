@@ -1,6 +1,6 @@
 [package]
-name = "ariso-desktop"
-version = "0.3.3"
+name = "oats"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]
@@ -18,13 +18,19 @@ futures-util = "0.3"
 url = "2"
 chrono = "0.4"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp", optional = true }
-screencapturekit = { version = "1.5", features = ["macos_13_0"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # UNUserNotificationCenter directly (the plugin has no desktop click API) so a
 # delegate can open the meeting-prep deep link when the notification is clicked.
 objc2 = "0.6"
 objc2-foundation = "0.3"
+# Core Audio process taps (macOS 14.4+) capture system audio under the narrow
+# "System Audio Recording" (NSAudioCaptureUsageDescription) permission rather
+# than the broad "Screen & System Audio Recording" permission ScreenCaptureKit
+# required. Default features pull AudioHardware, the type/CF bridges and block2.
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-core-foundation = "0.3"
 objc2-user-notifications = { version = "0.3", features = [
     "UNNotificationContent",
     "UNNotificationRequest",
@@ -34,6 +40,13 @@ objc2-user-notifications = { version = "0.3", features = [
     "UNUserNotificationCenter",
     "UNError",
     "block2",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSSharingService",
+    "NSView",
+    "NSWindow",
+    "NSResponder",
+    "NSGraphics",
 ] }
 block2 = "0.6"
 

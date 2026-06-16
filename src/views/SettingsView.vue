@@ -1,5 +1,19 @@
 <template>
   <div class="settings">
+    <div v-if="showDownloadConfirm" class="download-confirm" role="dialog" aria-modal="true" aria-labelledby="download-confirm-title">
+      <div class="download-confirm__card">
+        <h2 id="download-confirm-title" class="download-confirm__title">Download on-device models?</h2>
+        <p class="download-confirm__body">
+          Local transcription needs the speech and language models (~750&nbsp;MB).
+          They download once and run entirely on your device.
+        </p>
+        <div class="download-confirm__actions">
+          <button class="secondary-btn download-confirm__cancel" @click="cancelDownloadModels">Cancel</button>
+          <button class="primary-btn download-confirm__confirm" @click="confirmDownloadModels">Download</button>
+        </div>
+      </div>
+    </div>
+
     <h1 class="title">Settings</h1>
 
     <div v-if="signInPrompt && !isSignedIn" class="signin-banner">
@@ -263,7 +277,7 @@
       <h2 class="section-title">About</h2>
       <div class="card">
         <div class="about-header">
-          <span class="version-text">Ariso {{ appVersion }}</span>
+          <span class="version-text">oats {{ appVersion }}</span>
           <span class="status-line" :class="statusClass">
             {{ statusText }}
           </span>
@@ -302,8 +316,8 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
-import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, type ModelStatus } from '../tauri';
+import { shouldPromptDownload, rowStatusText, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import {
   loadRecordingEnabled,
@@ -311,7 +325,6 @@ import {
   setSystemAudioEnabled,
   ensureMicPermission,
   ensureSystemAudioPermission,
-  checkSystemAudioPermission,
   openMicSettings,
   openSystemAudioSettings,
 } from '../composables/useRecordingPermissions';
@@ -354,6 +367,7 @@ const appVersion = __APP_VERSION__;
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
 const modelPrompt = ref(false);
+const showDownloadConfirm = ref(false);
 
 // Per-model download UI state — the STT and LLM Install buttons are independent.
 const sttBusy = ref<Busy>('idle');
@@ -457,11 +471,31 @@ async function selectBackend(next: 'ariso' | 'local') {
   });
   if (next === 'local') {
     await refreshModelStatus();
-    // Auto-start the STT download (needed to record). The LLM is opt-in via its button.
-    if (shouldAutoDownload(next, modelStatus.value.state)) {
-      void onInstallStt();
+    // First time only: ask before fetching the (large) on-device models.
+    const prompted = await hasPromptedLocalModels().catch(() => true);
+    if (shouldPromptDownload(next, prompted, modelStatus.value.state)) {
+      showDownloadConfirm.value = true;
     }
   }
+}
+
+async function confirmDownloadModels() {
+  showDownloadConfirm.value = false;
+  // Best-effort flag write; downloads proceed regardless.
+  await setPromptedLocalModels(true).catch((e) =>
+    console.warn('Failed to persist localModelsPrompted', e),
+  );
+  // Per-target Rust guards allow STT and LLM to download in parallel.
+  void onInstallStt();
+  void onInstallLlm();
+}
+
+async function cancelDownloadModels() {
+  showDownloadConfirm.value = false;
+  // Local is unusable without models — fall back to Ariso. Do NOT set the
+  // prompted flag, so a later switch to Local will ask again.
+  backend.value = 'ariso';
+  await setBackendSetting('ariso');
 }
 
 async function onInstallStt() {
@@ -728,12 +762,10 @@ onMounted(async () => {
     systemAudioEnabled.value = enabled.systemAudio;
     autoRecordSupported.value = await isAutoRecordSupported();
     autoRecordEnabled.value = await isAutoRecordEnabled();
-    // Reflect the current Screen Recording status without prompting. (Mic status
-    // is intentionally left blank on load — there's no silent mic preflight as
-    // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
-    if (enabled.systemAudio) {
-      systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
-    }
+    // Both mic and system-audio status are left blank on load: there's no
+    // silent preflight for either (getUserMedia prompts; the system-audio
+    // probe creates a process tap, which trips the TCC dialog on first use).
+    // The status fills in when the user toggles the row.
   } catch (e) {
     console.warn('Failed to initialize recording settings', e);
   }
@@ -846,7 +878,21 @@ async function handleSignOut() {
   font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   background: #f7f6f4;
   color: #1c1c1c;
-  min-height: 100vh;
+  /* Own the full window height and scroll internally so a tall settings stack
+     (Local models + Account + Recording + Notifications + About) is reachable
+     on short windows instead of being clipped. */
+  height: 100vh;
+  box-sizing: border-box;
+  overflow-y: auto;
+  /* Keep scrolling functional but hide the scrollbar chrome so no persistent
+     bar shows at rest. */
+  scrollbar-width: none; /* Firefox */
+}
+
+/* WebKit (the Tauri webview on macOS): hide the scrollbar track/thumb. */
+.settings::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .title {
@@ -1122,8 +1168,10 @@ async function handleSignOut() {
   color: #ffffff;
 }
 
-.backend-option--active:hover {
+.backend-option--active:hover,
+.backend-option--active:focus-visible {
   background: #1c1c1c;
+  color: #ffffff;
 }
 
 .about-header {
@@ -1242,5 +1290,45 @@ async function handleSignOut() {
 .toggle-input:focus-visible + .toggle-track {
   outline: 2px solid #1c1c1c;
   outline-offset: 2px;
+}
+
+.download-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 24px;
+}
+
+.download-confirm__card {
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 360px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+
+.download-confirm__title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: #1c1c1c;
+}
+
+.download-confirm__body {
+  font-size: 13px;
+  color: #6f6f6f;
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.download-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

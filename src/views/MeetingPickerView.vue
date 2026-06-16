@@ -1,6 +1,6 @@
 <template>
   <div class="picker">
-    <h2 class="title">Select a meeting</h2>
+    <h2 class="title">{{ state === 'empty' ? 'New meeting' : 'Select a meeting' }}</h2>
 
     <div v-if="state === 'loading'" class="state-row">
       <span class="spinner" />
@@ -12,11 +12,7 @@
       <span>Could not load meetings.</span>
     </div>
 
-    <div v-else-if="state === 'empty'" class="state-row">
-      <span>No meetings today.</span>
-    </div>
-
-    <template v-else>
+    <template v-else-if="state === 'list'">
       <!-- Collapsed default: a single featured meeting (or a prompt) -->
       <template v-if="!showAll">
         <p v-if="defaultMeeting.kind !== 'none'" class="section-label">
@@ -49,14 +45,44 @@
       </button>
     </template>
 
-    <button class="skip-btn" :disabled="isChoosing" @click="choose(null)">
-      Record without meeting
-    </button>
+    <div class="new-meeting">
+      <button
+        v-if="!showTitlePrompt"
+        class="skip-btn"
+        :disabled="isChoosing"
+        @click="openNewMeetingPrompt"
+      >
+        Record a new meeting
+      </button>
+
+      <template v-else>
+        <input
+          ref="titleInput"
+          v-model="titleDraft"
+          class="title-input"
+          type="text"
+          placeholder="Meeting title (optional)"
+          :disabled="isChoosing"
+          aria-label="Meeting title"
+          @keydown.enter.prevent="startNewMeeting"
+          @keydown.esc.prevent="cancelNewMeeting"
+        />
+        <div class="new-meeting-actions">
+          <button v-if="state !== 'empty'" class="btn btn-secondary" type="button" :disabled="isChoosing" @click="cancelNewMeeting">
+            Cancel
+          </button>
+          <button class="btn btn-primary" :disabled="isChoosing" @click="startNewMeeting">
+            Start recording
+          </button>
+        </div>
+        <p v-if="createError" class="create-error">{{ createError }}</p>
+      </template>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeetingApi, type ScheduledMeeting } from '../composables/useMeetingApi';
 import { pickDefaultMeeting } from '../composables/pickDefaultMeeting';
@@ -68,6 +94,10 @@ const state = ref<PickerState>('loading');
 const meetings = ref<ScheduledMeeting[]>([]);
 const isChoosing = ref(false);
 const showAll = ref(false);
+const showTitlePrompt = ref(false);
+const titleDraft = ref('');
+const createError = ref<string | null>(null);
+const titleInput = ref<HTMLInputElement | null>(null);
 const now = new Date();
 
 const defaultMeeting = computed(() => pickDefaultMeeting(meetings.value, now));
@@ -99,12 +129,52 @@ async function choose(meetingId: number | null): Promise<void> {
   }
 }
 
+async function openNewMeetingPrompt(): Promise<void> {
+  createError.value = null;
+  showTitlePrompt.value = true;
+  await nextTick();
+  titleInput.value?.focus();
+}
+
+function cancelNewMeeting(): void {
+  // In the empty state the prompt IS the whole UI — there is nothing to cancel
+  // back to, so Escape/Cancel must not collapse it into a dead-end.
+  if (state.value === 'empty') return;
+  showTitlePrompt.value = false;
+  titleDraft.value = '';
+  createError.value = null;
+}
+
+// Create a fresh meeting (current user as the only participant, set server-side)
+// and open the recorder attached to it. Title is optional — an empty draft just
+// leaves the meeting untitled.
+async function startNewMeeting(): Promise<void> {
+  if (isChoosing.value) return;
+  isChoosing.value = true;
+  createError.value = null;
+  try {
+    const { meetingId } = await meetingApi.createAudioMeeting(titleDraft.value);
+    await invoke('start_recording_window', { meetingId });
+  } catch (err) {
+    console.error('Failed to start a new meeting:', err);
+    createError.value =
+      err instanceof Error ? err.message : 'Could not start the meeting.';
+  } finally {
+    isChoosing.value = false;
+  }
+}
+
 onMounted(async () => {
   try {
     const { startDate, endDate } = todayBoundsLocal();
     const result = await meetingApi.listScheduledMeetings(startDate, endDate);
     if (result.length === 0) {
+      // No meetings to choose from — go straight to creating one. The optional
+      // title prompt becomes the whole UI instead of a dead-end message.
       state.value = 'empty';
+      showTitlePrompt.value = true;
+      await nextTick();
+      titleInput.value?.focus();
     } else {
       meetings.value = result;
       state.value = 'list';
@@ -254,8 +324,81 @@ onMounted(async () => {
   color: #6f6f6f;
 }
 
-.skip-btn {
+.new-meeting {
   margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.title-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  color: #1c1c1c;
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.title-input:focus {
+  outline: none;
+  border-color: #9a9a96;
+}
+
+.new-meeting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn {
+  padding: 9px 16px;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.12s;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  color: #1c1c1c;
+}
+
+.btn-secondary:not(:disabled):hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.btn-primary {
+  border: 1px solid #1c1c1c;
+  background: #1c1c1c;
+  color: #f7f6f4;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+
+.btn-primary:not(:disabled):hover {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
+}
+
+.create-error {
+  margin: 0;
+  font-size: 12px;
+  color: #d96a5a;
+}
+
+.skip-btn {
   padding: 10px 14px;
   border-radius: 12px;
   border: 1px solid #d6d6d6;

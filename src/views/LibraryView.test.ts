@@ -61,12 +61,16 @@ vi.mock('../composables/useMeetingNotifications', () => ({
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
+// pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
 vi.mock('../tauri', () => ({
   local: {
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
     readRecordingNote: (id: string) => readRecordingNote(id),
     writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
+  },
+  pending: {
+    list: () => Promise.resolve([]),
   },
 }));
 
@@ -426,7 +430,7 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
   });
 
-  it('starts recording against the selected scheduled meeting id', async () => {
+  it('always opens the picker from the Meetings view, even with a meeting selected', async () => {
     backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
     listMeetings.mockResolvedValue([
@@ -435,12 +439,69 @@ describe('LibraryView', () => {
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-
+    // Meetings is the default view; the first row auto-selects (id 42).
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  });
 
-    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  it('Today view records the in-progress meeting when nothing today is selected', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    listMeetings.mockResolvedValue([
+      // meetings[0] auto-selects but is NOT today, so it can't override.
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
     expect(invoke).not.toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('Today view opens the picker when no meeting is live and none is selected today', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('Today view records a deliberately selected today meeting (override beats the live one)', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    const earlierToday = new Date(new Date().setHours(7, 0, 0, 0)).toISOString();
+    listMeetings.mockResolvedValue([
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+      item({ id: '50', title: 'Pick Me', timestamp: earlierToday, files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await flushPromises();
+    // Deliberately select the non-live today meeting (id 50).
+    const target = wrapper.findAll('.meeting-item').find((r) => r.text().includes('Pick Me'))!;
+    await target.trigger('click');
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 50 });
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
   });
 
   it('falls back to the meeting picker when the selected scheduled meeting id is not numeric', async () => {
@@ -480,6 +541,37 @@ describe('LibraryView', () => {
     const rows = wrapper.findAll('.meeting-item');
     expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
     expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
+  it('hides the red dot once the recording stops, even if the failed pill lingers', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan' }),
+      item({ id: '7', title: 'Other Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'recording',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(true);
+
+    // Upload failed: the pill stays open and keeps heartbeating 'failed', but the
+    // recording has stopped — the row must no longer pulse.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'failed',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(false);
   });
 
   it('selects the picked meeting in the detail panel when a recording starts', async () => {
@@ -547,10 +639,11 @@ describe('LibraryView', () => {
 
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
-    // Synthetic row (14:30) sorts above Standup (10:00) on the same date.
-    expect(rows[0].text()).toContain('Recording 2026-06-02');
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
-    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    // Within a date, rows sort earliest-first: Standup (10:00) then the
+    // synthetic recording row (14:30).
+    expect(rows[1].text()).toContain('Recording 2026-06-02');
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
     // The embedded strip shows for the recorded meeting…
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
@@ -563,13 +656,15 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
 
+    // rows[0] is Standup (10:00); rows[1] is the recording (14:30). Click the
+    // other meeting (Standup) to move selection off the recording.
     const rows = wrapper.findAll('.meeting-item');
-    await rows[1].trigger('click');
+    await rows[0].trigger('click');
     await flushPromises();
 
-    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
     expect(wrapper.find('.strip').exists()).toBe(false);
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
   });
 
   it('reloads when the recording closes so the finalized row replaces the synthetic one', async () => {
@@ -596,9 +691,10 @@ describe('LibraryView', () => {
     expect(listMeetings).toHaveBeenCalledTimes(2);
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
-    // The finalized recording keeps the selection under the same id.
-    expect(rows[0].attributes('aria-pressed')).toBe('true');
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(false);
+    // Earliest-first within the date keeps Standup (10:00) at rows[0] and the
+    // finalized recording (14:30) at rows[1]; selection stays on the same id.
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
   });
 
   it('falls back to the first meeting when a discarded recording leaves no row', async () => {
@@ -607,7 +703,9 @@ describe('LibraryView', () => {
     await flushPromises();
     emitEvent('recorder://state', localRecorderState());
     await flushPromises();
-    expect(wrapper.findAll('.meeting-item')[0].attributes('aria-pressed')).toBe('true');
+    // The synthetic recording row (14:30) sorts after Standup (10:00) and holds
+    // the selection at rows[1].
+    expect(wrapper.findAll('.meeting-item')[1].attributes('aria-pressed')).toBe('true');
 
     emitEvent('recorder://state', localRecorderState({ phase: 'closed' }));
     await flushPromises();
@@ -615,6 +713,98 @@ describe('LibraryView', () => {
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(1);
     expect(rows[0].attributes('aria-pressed')).toBe('true');
+  });
+
+  // An ad-hoc Ariso meeting (created via "Record a new meeting") isn't a
+  // calendar-scheduled meeting, so listMeetings() never returns it. The library
+  // pins it (fetching its metadata) so it stays in the sidebar after the
+  // recording stops instead of vanishing on the post-recording reload.
+  it('keeps an ad-hoc Ariso meeting in the list after its recording stops', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    // The calendar list never carries the ad-hoc meeting (id 77).
+    listMeetings.mockResolvedValue([item({ id: '5', title: 'Calendar Sync', files: undefined })]);
+    getMeetingDetail.mockImplementation((m) =>
+      Promise.resolve({
+        id: m.id,
+        title: m.id === '77' ? 'My ad-hoc meeting' : m.title,
+        startAt: '2026-06-02T14:30:00Z',
+        participants: [],
+        actionItems: [],
+        isLocal: false,
+      })
+    );
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('My ad-hoc meeting');
+
+    // Recording starts against the freshly created meeting 77.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 77,
+      phase: 'recording',
+    });
+    await flushPromises();
+
+    let adhoc = wrapper.findAll('.meeting-item').find((r) => r.text().includes('My ad-hoc meeting'));
+    expect(adhoc).toBeTruthy();
+    expect(adhoc!.find('.mi-rec-dot').exists()).toBe(true);
+
+    // Recording stops — the strip clears, the library reloads (still no 77 from
+    // the calendar), but the pinned row must remain.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 77,
+      phase: 'closed',
+    });
+    await flushPromises();
+
+    adhoc = wrapper.findAll('.meeting-item').find((r) => r.text().includes('My ad-hoc meeting'));
+    expect(adhoc).toBeTruthy();
+    expect(adhoc!.find('.mi-rec-dot').exists()).toBe(false);
+  });
+
+  it('unpins an ad-hoc meeting once the backend list starts returning it', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    // After the recording, a reload finally surfaces meeting 77 from the backend.
+    listMeetings
+      .mockResolvedValueOnce([item({ id: '5', title: 'Calendar Sync', files: undefined })])
+      .mockResolvedValue([
+        item({ id: '77', title: 'My ad-hoc meeting', timestamp: '2026-06-02T14:30:00Z', files: undefined }),
+        item({ id: '5', title: 'Calendar Sync', files: undefined }),
+      ]);
+    getMeetingDetail.mockImplementation((m) =>
+      Promise.resolve({
+        id: m.id,
+        title: m.id === '77' ? 'My ad-hoc meeting' : m.title,
+        startAt: '2026-06-02T14:30:00Z',
+        participants: [],
+        actionItems: [],
+        isLocal: false,
+      })
+    );
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0], durationSeconds: 1, isPaused: false, meetingId: 77, phase: 'recording',
+    });
+    await flushPromises();
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0], durationSeconds: 1, isPaused: false, meetingId: 77, phase: 'closed',
+    });
+    await flushPromises();
+
+    // Exactly one row for 77 (the backend's), not a pinned duplicate.
+    const adhocRows = wrapper.findAll('.meeting-item').filter((r) => r.text().includes('My ad-hoc meeting'));
+    expect(adhocRows).toHaveLength(1);
   });
 
   it('start-recording button opens the recorder directly for local backend', async () => {
@@ -625,5 +815,18 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('renders the PendingUploads section inside the sidebar', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.pending-stub').exists()).toBe(true);
   });
 });

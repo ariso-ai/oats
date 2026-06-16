@@ -6,10 +6,12 @@ import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
+const getMeetingAudio = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
 const saveNote = vi.fn();
+const shareTextNative = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -21,6 +23,11 @@ vi.mock('../composables/useMeetingNotesPersistence', () => ({
     load: (meeting: MeetingListItem) => loadNote(meeting),
     save: (meeting: MeetingListItem, markdown: string) => saveNote(meeting, markdown),
   }),
+}));
+vi.mock('../tauri', () => ({
+  shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
+  getDesktopConfig: () =>
+    Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
@@ -50,10 +57,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   renameMeeting.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
+  getMeetingAudio.mockResolvedValue(null);
   activeBackend.mockResolvedValue({
     getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
     getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
+    getMeetingAudio: (i: MeetingListItem) => getMeetingAudio(i),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue('');
@@ -348,5 +357,150 @@ describe('MeetingDetailView inline title editing', () => {
     expect(saveNote).toHaveBeenCalledWith(first, 'note a');
     expect(wrapper.text()).toContain('Second');
     expect(wrapper.text()).not.toContain('First');
+  });
+
+  it('shows the Share button for an Ariso host and opens the popover', async () => {
+    getMeetingDetail.mockResolvedValue(
+      detail({ isLocal: false, participants: [{ role: 'host', self: true }] })
+    );
+    const wrapper = mount(MeetingDetailView, {
+      props: { item },
+      global: { stubs: { ShareMeetingPopover: true } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(true);
+    expect(wrapper.findComponent({ name: 'ShareMeetingPopover' }).exists()).toBe(false);
+
+    await wrapper.find('.btn-share').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: 'ShareMeetingPopover' }).exists()).toBe(true);
+  });
+
+  it('shows the Share button for local recordings and shares natively', async () => {
+    loadNote.mockResolvedValue('');
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true, note: 'AI body' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(true);
+
+    await wrapper.find('.btn-share').trigger('click');
+    await flushPromises();
+
+    expect(shareTextNative).toHaveBeenCalled();
+  });
+
+  it('hides the Share button for an Ariso non-participant', async () => {
+    getMeetingDetail.mockResolvedValue(
+      detail({ isLocal: false, participants: [{ role: 'host', self: false }] })
+    );
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(false);
+  });
+});
+
+describe('MeetingDetailView audio player', () => {
+  beforeEach(() => {
+    URL.createObjectURL = vi.fn(() => 'blob:test');
+    URL.revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  });
+
+  it('shows the audio player in the Transcript tab for an Ariso meeting', async () => {
+    // Transcript is the only content, so it is the active tab on mount.
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+  });
+
+  it('renders the audio player only once the Transcript tab is opened', async () => {
+    // Digest makes AI Notes the default tab; the player lives behind Transcript.
+    const wrapper = await mountWith(detail({ digest: 'A quick digest', hasTranscript: true }));
+    expect(wrapper.find('.card-audio').exists()).toBe(false);
+
+    const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
+    await transcriptTab!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+  });
+
+  it('does not show the audio player for a local recording, even in the Transcript tab', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, note: 'hi', hasTranscript: true }));
+    const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
+    await transcriptTab!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.card-audio').exists()).toBe(false);
+  });
+
+  it('clicking Play fetches audio through the backend that loaded the detail', async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+    expect(getMeetingAudio).toHaveBeenCalledWith(item);
+    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
+  });
+
+  it('shows No audio when the meeting has no recording', async () => {
+    getMeetingAudio.mockResolvedValue(null);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.card-audio .play-btn').text()).toContain('No audio');
+  });
+});
+
+describe('MeetingDetailView AI Assessment tab', () => {
+  const tabByLabel = (wrapper: ReturnType<typeof mount>, label: string) =>
+    wrapper.findAll('.seg-btn').find((b) => b.text() === label);
+
+  it('shows an "AI Assessment" tab last when the meeting has a score', async () => {
+    const wrapper = await mountWith(
+      detail({ digest: 'A quick digest', score: 5, rationale: 'Great focus', recommendation: 'Keep it up' })
+    );
+
+    const labels = wrapper.findAll('.seg-btn').map((b) => b.text());
+    expect(labels).toContain('AI Assessment');
+    expect(labels[labels.length - 1]).toBe('AI Assessment');
+  });
+
+  it('renders the assessment in its own tab, not in AI Notes', async () => {
+    const wrapper = await mountWith(
+      detail({ digest: 'A quick digest', score: 4, rationale: 'Solid', recommendation: 'Tighten the agenda' })
+    );
+
+    // Defaults to AI Notes (digest present); the assessment lives behind its own tab.
+    expect(tabByLabel(wrapper, 'AI Notes')!.classes()).toContain('seg-btn--active');
+    expect(tabByLabel(wrapper, 'AI Assessment')!.classes()).not.toContain('seg-btn--active');
+
+    await tabByLabel(wrapper, 'AI Assessment')!.trigger('click');
+    await flushPromises();
+
+    const circle = wrapper.find('.score-circle');
+    expect(circle.isVisible()).toBe(true);
+    expect(circle.text()).toBe('4');
+    expect(wrapper.text()).toContain('Tighten the agenda');
+  });
+
+  it('shows the tab for a coaching-only assessment (no score)', async () => {
+    const wrapper = await mountWith(
+      detail({ digest: 'A quick digest', coaching: { strengths: ['Clear ask'] } })
+    );
+    expect(tabByLabel(wrapper, 'AI Assessment')).toBeTruthy();
+  });
+
+  it('hides the tab when the meeting has no score or coaching', async () => {
+    const wrapper = await mountWith(detail({ digest: 'A quick digest' }));
+    expect(tabByLabel(wrapper, 'AI Assessment')).toBeUndefined();
+  });
+
+  it('opens the assessment tab by default when it is the only content', async () => {
+    const wrapper = await mountWith(detail({ score: 3, rationale: 'Mixed' }));
+    expect(wrapper.find('.score-circle').isVisible()).toBe(true);
+    expect(wrapper.find('.score-circle').text()).toBe('3');
   });
 });

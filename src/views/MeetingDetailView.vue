@@ -38,18 +38,30 @@
           <p class="head-sub">{{ subtitle }}</p>
         </div>
         <div class="head-actions">
-          <button class="btn-share" type="button" title="Share">
+          <button
+            v-if="canShare"
+            ref="shareBtn"
+            class="btn-share"
+            type="button"
+            title="Share"
+            @click="onShareClick"
+          >
             <svg viewBox="0 0 24 24" class="ic"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" /><path d="M16 6l-4-4-4 4" /><path d="M12 2v13" /></svg>
             Share
-          </button>
-          <button class="btn-icon" type="button" aria-label="Copy link" title="Copy link">
-            <svg viewBox="0 0 24 24" class="ic"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" /></svg>
           </button>
           <button class="btn-icon btn-close" type="button" aria-label="Close" title="Close" @click="emit('close')">
             <svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>
       </header>
+
+      <ShareMeetingPopover
+        v-if="showShare && detail && !detail.isLocal"
+        :detail="detail"
+        :meeting-id="detail.id"
+        :anchor="shareAnchor"
+        @close="showShare = false"
+      />
 
       <!-- Meta band: duration · attendees · category -->
       <div v-if="hasMeta" class="card-meta">
@@ -133,41 +145,51 @@
                 <div v-if="showFullNotes" class="acc-body"><div class="md" v-html="renderMarkdown(detail.summary)" /></div>
               </div>
             </section>
-
-            <section v-if="detail.score !== undefined" class="sec">
-              <h3 class="sec-h">Meeting Assessment</h3>
-              <div class="assess-score">
-                <div class="score-circle" :style="{ background: scoreBadge?.bg, color: scoreBadge?.text, boxShadow: `0 0 0 4px ${scoreBadge?.ring}` }">{{ detail.score }}</div>
-                <div>
-                  <div class="score-label">{{ scoreBadge?.label }}</div>
-                  <div class="score-sub">out of 5</div>
-                </div>
-              </div>
-              <div v-if="detail.rationale" class="assess-block"><div class="assess-h">Why this score</div><p>{{ detail.rationale }}</p></div>
-              <div v-if="detail.recommendation" class="assess-block"><div class="assess-h">Recommendation</div><p>{{ detail.recommendation }}</p></div>
-            </section>
-
-            <section v-if="hasCoaching" class="sec">
-              <div class="coaching">
-                <h3 class="sec-h">Your Coaching</h3>
-                <div v-if="detail.coaching?.strengths?.length" class="coach-block">
-                  <div class="coach-h coach-h--green">Strengths</div>
-                  <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.strengths" :key="i"><span class="bullet bullet--green">•</span>{{ s }}</li></ul>
-                </div>
-                <div v-if="detail.coaching?.improvements?.length" class="coach-block">
-                  <div class="coach-h coach-h--amber">Areas to Grow</div>
-                  <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.improvements" :key="i"><span class="bullet bullet--amber">•</span>{{ s }}</li></ul>
-                </div>
-                <div v-if="detail.coaching?.patterns" class="coach-block coach-pattern">
-                  <div class="coach-h coach-h--purple">Pattern Observed</div>
-                  <p>{{ detail.coaching!.patterns }}</p>
-                </div>
-              </div>
-            </section>
           </template>
         </div>
 
+        <div v-show="activeTab === 'assessment'" class="tab-pane">
+          <section v-if="detail.score !== undefined" class="sec">
+            <h3 class="sec-h">Meeting Assessment</h3>
+            <div class="assess-score">
+              <div class="score-circle" :style="{ background: scoreBadge?.bg, color: scoreBadge?.text, boxShadow: `0 0 0 4px ${scoreBadge?.ring}` }">{{ detail.score }}</div>
+              <div>
+                <div class="score-label">{{ scoreBadge?.label }}</div>
+                <div class="score-sub">out of 5</div>
+              </div>
+            </div>
+            <div v-if="detail.rationale" class="assess-block"><div class="assess-h">Why this score</div><p>{{ detail.rationale }}</p></div>
+            <div v-if="detail.recommendation" class="assess-block"><div class="assess-h">Recommendation</div><p>{{ detail.recommendation }}</p></div>
+          </section>
+
+          <section v-if="hasCoaching" class="sec">
+            <div class="coaching">
+              <h3 class="sec-h">Your Coaching</h3>
+              <div v-if="detail.coaching?.strengths?.length" class="coach-block">
+                <div class="coach-h coach-h--green">Strengths</div>
+                <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.strengths" :key="i"><span class="bullet bullet--green">•</span>{{ s }}</li></ul>
+              </div>
+              <div v-if="detail.coaching?.improvements?.length" class="coach-block">
+                <div class="coach-h coach-h--amber">Areas to Grow</div>
+                <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.improvements" :key="i"><span class="bullet bullet--amber">•</span>{{ s }}</li></ul>
+              </div>
+              <div v-if="detail.coaching?.patterns" class="coach-block coach-pattern">
+                <div class="coach-h coach-h--purple">Pattern Observed</div>
+                <p>{{ detail.coaching!.patterns }}</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
         <div v-show="activeTab === 'transcript'" class="tab-pane">
+          <!-- Ariso audio playback sits right under the tabs, surfaced only while the
+               Transcript tab is active (and never for local recordings, whose audio
+               stays on disk); keyed by meeting id so switching selection remounts the
+               player instead of leaking the previous blob URL. -->
+          <div v-if="activeTab === 'transcript' && !detail.isLocal" class="card-audio">
+            <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+          </div>
+
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
           <ol v-else-if="transcriptChunks" class="transcript">
@@ -211,6 +233,10 @@ import {
   type MeetingCoaching,
 } from '../composables/useBackend';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
+import ShareMeetingPopover from './ShareMeetingPopover.vue';
+import { composeLocalShareText } from './meetingShareText';
+import { shareTextNative } from '../tauri';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
 const emit = defineEmits<{
@@ -222,7 +248,7 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
-const activeTab = ref<'note' | 'transcript' | 'mynote'>('note');
+const activeTab = ref<'note' | 'transcript' | 'mynote' | 'assessment'>('note');
 
 // Inline title editing. Both backends rename through Backend.renameMeeting
 // (ariso PATCHes the server; local rewrites meta.json). Local titles are
@@ -239,6 +265,59 @@ const titleError = computed<string | null>(() => {
     ? `Title must be ${TITLE_MAX_CHARS} characters or fewer`
     : null;
 });
+
+const showShare = ref(false);
+const shareBtn = ref<HTMLButtonElement | null>(null);
+const shareAnchor = ref<{ bottom: number; right: number } | null>(null);
+
+const isHost = computed(() =>
+  (detail.value?.participants ?? []).some((p) => p.role === 'host' && p.self)
+);
+const isAttendee = computed(() =>
+  (detail.value?.participants ?? []).some((p) => p.role !== 'host' && p.self)
+);
+// Local recordings always get the native share; Ariso meetings only for
+// participants (host/attendee), matching the web.
+const canShare = computed(() => {
+  const d = detail.value;
+  if (!d) return false;
+  return d.isLocal || isHost.value || isAttendee.value;
+});
+
+async function onShareClick(): Promise<void> {
+  const d = detail.value;
+  if (!d) return;
+  if (d.isLocal) {
+    await shareLocal(d);
+    return;
+  }
+  const rect = shareBtn.value?.getBoundingClientRect();
+  shareAnchor.value = rect ? { bottom: rect.bottom, right: rect.right } : null;
+  showShare.value = !showShare.value;
+}
+
+async function shareLocal(d: MeetingDetail): Promise<void> {
+  if (!props.item) return;
+  const rect = shareBtn.value?.getBoundingClientRect();
+  let personalNote = '';
+  try {
+    personalNote = (await notesPersistence.load(props.item)) ?? '';
+  } catch {
+    personalNote = '';
+  }
+  const text = composeLocalShareText(d, personalNote);
+  if (!text) return;
+  try {
+    await shareTextNative(text, {
+      x: rect?.left ?? 0,
+      y: rect?.top ?? 0,
+      width: rect?.width ?? 0,
+      height: rect?.height ?? 0,
+    });
+  } catch (e) {
+    console.error('Native share failed', e);
+  }
+}
 
 // Transcript is loaded lazily when the Transcript tab is opened (Ariso fetches
 // /meeting-notes/{id}/transcript as chunks; local reads transcript.md markdown).
@@ -270,6 +349,15 @@ const notesPlaceholder = computed(() =>
 // the other backend.
 let detailBackend: Backend | null = null;
 
+// Lazy audio loader pinned to the backend that loaded the detail (a Settings
+// backend flip mid-view must not route the fetch through the other backend).
+function loadAudio(): Promise<ArrayBuffer | null> {
+  const i = props.item;
+  const backend = detailBackend;
+  if (!i || !backend) return Promise.resolve(null);
+  return backend.getMeetingAudio(i);
+}
+
 async function load(item: MeetingListItem | null): Promise<void> {
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
@@ -282,6 +370,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   activeTab.value = 'note';
   editingTitle.value = false;
   savingTitle.value = false;
+  showShare.value = false;
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
@@ -323,7 +412,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
 }
 
 // Watch stable detail fields only. User-note autosaves must not reload the
-// whole pane or change Ari's Notes tab visibility while the user switches tabs.
+// whole pane or change AI Notes tab visibility while the user switches tabs.
 watch(
   () => [
     props.item?.id,
@@ -418,30 +507,38 @@ function coachingPresent(c?: MeetingCoaching | null): boolean {
   return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
 }
 function notesPresent(d: MeetingDetail): boolean {
+  // The assessment (score/coaching) lives in its own "AI Assessment" tab, so it
+  // no longer counts toward the AI Notes tab's content.
   return d.isLocal
     ? !!d.note
-    : !!(d.digest || d.summary || d.actionItems.length || d.score !== undefined || coachingPresent(d.coaching));
+    : !!(d.digest || d.summary || d.actionItems.length);
+}
+function assessmentPresent(d: MeetingDetail): boolean {
+  return !d.isLocal && (d.score !== undefined || coachingPresent(d.coaching));
 }
 // The initial tab follows available content, but editable personal notes count
 // as available even before the first note has been saved.
-function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' {
+function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' | 'assessment' {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
   if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
+  if (assessmentPresent(d)) return 'assessment';
   return 'note';
 }
 
-// Tabs appear only when their content exists: Ari's Notes (generated/shared
-// meeting notes), Transcript, then My Notes (the user's editable note).
-const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
+// Tabs appear only when their content exists: AI Notes (generated/shared
+// meeting notes), Transcript, My Notes (the user's editable note), then
+// AI Assessment (score, rationale, coaching) when the meeting has one.
+const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string }[]>(() => {
   const d = detail.value;
   if (!d) return [];
-  const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: "Ari's Notes" });
+  const out: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string }[] = [];
+  if (notesPresent(d)) out.push({ key: 'note', label: "AI Notes" });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
   }
+  if (assessmentPresent(d)) out.push({ key: 'assessment', label: 'AI Assessment' });
   return out;
 });
 
@@ -706,6 +803,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
+.card-audio { display: flex; padding: 0 0 12px; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }

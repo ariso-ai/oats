@@ -12,6 +12,11 @@ const getBackendSetting = vi.fn();
 const uploadAudio = vi.fn();
 const renameRecording = vi.fn();
 const updateMeetingNotesTitle = vi.fn();
+const bufferPendingAudio = vi.fn();
+const discardPendingAudio = vi.fn();
+const fetchMeetingAudio = vi.fn();
+const readRecordingAudio = vi.fn();
+const getMeetingNotes = vi.fn();
 
 vi.mock('../tauri', () => ({
   local: {
@@ -19,11 +24,17 @@ vi.mock('../tauri', () => ({
     modelStatus: () => modelStatus(),
     listRecordings: () => listRecordings(),
     renameRecording: (...a: unknown[]) => renameRecording(...a),
+    readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
   },
   auth: { checkSession: () => checkSession() },
   api: {
     request: (...a: unknown[]) => apiRequest(...a),
     putPresigned: (...a: unknown[]) => putPresigned(...a),
+    fetchMeetingAudio: (...a: unknown[]) => fetchMeetingAudio(...a),
+  },
+  pending: {
+    bufferAudio: (...a: unknown[]) => bufferPendingAudio(...a),
+    discardAudio: (...a: unknown[]) => discardPendingAudio(...a),
   },
   getBackendSetting: () => getBackendSetting(),
 }));
@@ -34,6 +45,7 @@ vi.mock('./useMeetingApi', () => ({
     listMeetingsInWindow: (...a: unknown[]) => listMeetingsInWindow(...a),
     searchMeetings: (...a: unknown[]) => searchMeetings(...a),
     updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
+    getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
   }),
 }));
 
@@ -41,6 +53,7 @@ import { ArisoBackend, LocalBackend, getActiveBackend, arisoMeetingWindow } from
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getMeetingNotes.mockReset();
 });
 
 describe('LocalBackend', () => {
@@ -88,6 +101,23 @@ describe('LocalBackend', () => {
   it('does not fake local search results', async () => {
     await expect(new LocalBackend().searchMeetings('standup')).resolves.toEqual([]);
   });
+
+  it('getMeetingAudio reads recording.mp3 when present, null otherwise', async () => {
+    const b = new LocalBackend();
+    const buf = new ArrayBuffer(4);
+    readRecordingAudio.mockResolvedValue(buf);
+    const withAudio = {
+      id: 'a', title: 'T', timestamp: 't',
+      files: { hasAudio: true, hasNote: false, hasTranscript: false },
+    };
+    expect(await b.getMeetingAudio(withAudio)).toBe(buf);
+    expect(readRecordingAudio).toHaveBeenCalledWith('a');
+
+    const withoutAudio = { ...withAudio, files: { ...withAudio.files, hasAudio: false } };
+    expect(await b.getMeetingAudio(withoutAudio)).toBeNull();
+    const noFiles = { id: 'b', title: 'T', timestamp: 't' };
+    expect(await b.getMeetingAudio(noFiles)).toBeNull();
+  });
 });
 
 describe('ArisoBackend', () => {
@@ -108,6 +138,8 @@ describe('ArisoBackend', () => {
   });
 
   it('finalizeRecording uploads via useMeetingApi and returns the meetingId', async () => {
+    bufferPendingAudio.mockResolvedValue('2026-06-02T14-30-05Z');
+    discardPendingAudio.mockResolvedValue(undefined);
     uploadAudio.mockResolvedValue({ meetingId: 7 });
     const blob = new Blob([new Uint8Array([9])], { type: 'audio/mpeg' });
     const res = await new ArisoBackend().finalizeRecording(blob, {
@@ -128,6 +160,127 @@ describe('ArisoBackend', () => {
     updateMeetingNotesTitle.mockResolvedValue(undefined);
     await new ArisoBackend().renameMeeting('7', 'New title');
     expect(updateMeetingNotesTitle).toHaveBeenCalledWith('7', 'New title');
+  });
+
+  it('finalizeRecording buffers the audio before upload and discards after success', async () => {
+    bufferPendingAudio.mockResolvedValue('2026-06-02T14-30-05Z');
+    discardPendingAudio.mockResolvedValue(undefined);
+    uploadAudio.mockResolvedValue({ meetingId: 7 });
+    const blob = new Blob([new Uint8Array([9])], { type: 'audio/mpeg' });
+    await new ArisoBackend().finalizeRecording(blob, {
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 2400,
+    });
+    expect(bufferPendingAudio).toHaveBeenCalledWith([9], {
+      createdAt: '2026-06-02T14:30:05.000Z',
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 2400,
+      meetingId: undefined,
+    });
+    expect(bufferPendingAudio.mock.invocationCallOrder[0]).toBeLessThan(
+      uploadAudio.mock.invocationCallOrder[0]
+    );
+    expect(discardPendingAudio).toHaveBeenCalledWith('2026-06-02T14:30:05.000Z');
+    expect(uploadAudio.mock.invocationCallOrder[0]).toBeLessThan(
+      discardPendingAudio.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('finalizeRecording keys the buffer by endAt when startAt is null', async () => {
+    bufferPendingAudio.mockResolvedValue('id');
+    discardPendingAudio.mockResolvedValue(undefined);
+    uploadAudio.mockResolvedValue({ meetingId: 7 });
+    await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+      startAt: null,
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 10,
+    });
+    expect(bufferPendingAudio.mock.calls[0][1]).toMatchObject({
+      createdAt: '2026-06-02T15:10:00.000Z',
+      startAt: null,
+      endAt: '2026-06-02T15:10:00.000Z',
+    });
+    expect(discardPendingAudio).toHaveBeenCalledWith('2026-06-02T15:10:00.000Z');
+  });
+
+  it('finalizeRecording leaves the buffer in place when the upload fails', async () => {
+    bufferPendingAudio.mockResolvedValue('id');
+    uploadAudio.mockRejectedValue(new Error('S3 upload failed (500)'));
+    await expect(
+      new ArisoBackend().finalizeRecording(new Blob(['x']), {
+        startAt: '2026-06-02T14:30:05.000Z',
+        endAt: '2026-06-02T15:10:00.000Z',
+        durationSeconds: 10,
+      })
+    ).rejects.toThrow('S3 upload failed');
+    expect(bufferPendingAudio).toHaveBeenCalled();
+    expect(discardPendingAudio).not.toHaveBeenCalled();
+  });
+
+  it('finalizeRecording still uploads when buffering itself fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    bufferPendingAudio.mockRejectedValue(new Error('disk full'));
+    uploadAudio.mockResolvedValue({ meetingId: 7 });
+    discardPendingAudio.mockResolvedValue(undefined);
+    const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 10,
+    });
+    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+    expect(uploadAudio).toHaveBeenCalled();
+  });
+
+  it('finalizeRecording succeeds even when the post-upload discard fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    bufferPendingAudio.mockResolvedValue('id');
+    uploadAudio.mockResolvedValue({ meetingId: 7 });
+    discardPendingAudio.mockRejectedValue(new Error('locked'));
+    const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+      startAt: '2026-06-02T14:30:05.000Z',
+      endAt: '2026-06-02T15:10:00.000Z',
+      durationSeconds: 10,
+    });
+    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+  });
+
+  it('getMeetingAudio returns bytes, maps 404 to null, and rethrows other errors', async () => {
+    const b = new ArisoBackend();
+    const item = { id: '7', title: 'T', timestamp: '2026-06-02T10:00:00Z' };
+    const buf = new ArrayBuffer(4);
+    fetchMeetingAudio.mockResolvedValue(buf);
+    expect(await b.getMeetingAudio(item)).toBe(buf);
+    expect(fetchMeetingAudio).toHaveBeenCalledWith('7');
+
+    fetchMeetingAudio.mockRejectedValue('404: audio fetch failed');
+    expect(await b.getMeetingAudio(item)).toBeNull();
+
+    fetchMeetingAudio.mockRejectedValue('500: audio fetch failed');
+    await expect(b.getMeetingAudio(item)).rejects.toBeTruthy();
+  });
+
+  it('maps share-gating fields and participant ids from getMeetingNotes', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Sync',
+      start_at: '2026-06-01T10:00:00Z',
+      visibility: 'workspace',
+      short_code: 'abc123',
+      public_share_expires_at: '2026-07-01T10:00:00Z',
+      shareMeetingNotesToPublic: 'host_only',
+      participants: [
+        { id: 11, name: 'Ana', email: 'ana@x.com', role: 'host', self: true, avatar_url: 'u' },
+      ],
+      summary: '{}',
+    });
+    const backend = new ArisoBackend();
+    const d = await backend.getMeetingDetail({ id: '7', title: 'Sync', timestamp: '2026-06-01T10:00:00Z' });
+    expect(d.shortCode).toBe('abc123');
+    expect(d.publicShareExpiresAt).toBe('2026-07-01T10:00:00Z');
+    expect(d.shareMeetingNotesToPublic).toBe('host_only');
+    expect(d.participants[0].id).toBe(11);
   });
 });
 

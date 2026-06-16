@@ -5,6 +5,10 @@ import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const getBackendSetting = vi.fn(() => Promise.resolve('ariso' as const));
 const setBackendSetting = vi.fn((_b: unknown) => Promise.resolve());
+const hasPromptedLocalModels = vi.fn(() => Promise.resolve(false));
+const setPromptedLocalModels = vi.fn((_v: unknown) => Promise.resolve());
+const downloadStt = vi.fn(() => Promise.resolve());
+const downloadLlm = vi.fn(() => Promise.resolve());
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -39,10 +43,12 @@ vi.mock('../tauri', () => ({
   },
   getBackendSetting: () => getBackendSetting(),
   setBackendSetting: (b: unknown) => setBackendSetting(b),
+  hasPromptedLocalModels: () => hasPromptedLocalModels(),
+  setPromptedLocalModels: (v: unknown) => setPromptedLocalModels(v),
   local: {
     modelStatus: () => Promise.resolve({ state: 'not_downloaded' }),
-    downloadStt: vi.fn(),
-    downloadLlm: vi.fn(),
+    downloadStt: () => downloadStt(),
+    downloadLlm: () => downloadLlm(),
   },
 }));
 vi.mock('../composables/useRecordingPermissions', () => ({
@@ -158,5 +164,66 @@ describe('SettingsView backend switching during recording', () => {
     expect(listeners.has('recording://state')).toBe(true);
     wrapper.unmount();
     expect(listeners.has('recording://state')).toBe(false);
+  });
+});
+
+describe('SettingsView first-time local models prompt', () => {
+  async function switchToLocal(wrapper: ReturnType<typeof mount>) {
+    await wrapper.get('.backend-trigger').trigger('click');
+    // The Local option is the second backend option.
+    await wrapper.findAll('.backend-option')[1].trigger('mousedown');
+    await flushPromises();
+  }
+
+  it('opens the confirm modal on first switch to Local', async () => {
+    hasPromptedLocalModels.mockResolvedValue(false);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await switchToLocal(wrapper);
+
+    expect(wrapper.find('.download-confirm').exists()).toBe(true);
+    expect(wrapper.text()).toContain('Download on-device models');
+  });
+
+  it('downloads both models and persists the flag on confirm', async () => {
+    hasPromptedLocalModels.mockResolvedValue(false);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    await switchToLocal(wrapper);
+
+    await wrapper.get('.download-confirm__confirm').trigger('click');
+    await flushPromises();
+
+    expect(downloadStt).toHaveBeenCalledTimes(1);
+    expect(downloadLlm).toHaveBeenCalledTimes(1);
+    expect(setPromptedLocalModels).toHaveBeenCalledWith(true);
+    expect(wrapper.find('.download-confirm').exists()).toBe(false);
+  });
+
+  it('reverts to Ariso and does not download on cancel', async () => {
+    hasPromptedLocalModels.mockResolvedValue(false);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    await switchToLocal(wrapper);
+
+    setBackendSetting.mockClear();
+    await wrapper.get('.download-confirm__cancel').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('ariso');
+    expect(downloadStt).not.toHaveBeenCalled();
+    expect(setPromptedLocalModels).not.toHaveBeenCalled();
+    expect(wrapper.find('.download-confirm').exists()).toBe(false);
+  });
+
+  it('does not prompt when already prompted before', async () => {
+    hasPromptedLocalModels.mockResolvedValue(true);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    await switchToLocal(wrapper);
+
+    expect(wrapper.find('.download-confirm').exists()).toBe(false);
+    expect(downloadStt).not.toHaveBeenCalled();
   });
 });
