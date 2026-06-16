@@ -80,11 +80,12 @@ hdiutil attach "${RW_DMG}" -readwrite -noverify -noautoopen -quiet
 # hdiutil can return before Finder's AppleEvent object model has registered
 # the mounted volume, so wait for both the mount path and Finder disk object.
 FINDER_DISK_READY=false
-for _ in {1..30}; do
+FINDER_DISK_READY_DEADLINE=$((SECONDS + FINDER_SCRIPT_TIMEOUT_SECONDS))
+while (( SECONDS < FINDER_DISK_READY_DEADLINE )); do
   if [[ -d "${MOUNT_DIR}" ]]; then
     FINDER_DISK_EXISTS="$(
       osascript \
-        -e "with timeout of 10 seconds" \
+        -e "with timeout of 1 seconds" \
         -e "tell application \"Finder\" to exists disk \"${VOLUME_NAME}\"" \
         -e "end timeout" 2>/dev/null || true
     )"
