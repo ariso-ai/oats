@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/ariso-ai/oats/compare/v0.7.0...v0.7.1) (2026-06-17)
+
+
+### Bug Fixes
+
+* improves app icon ([ab83daf](https://github.com/ariso-ai/oats/commit/ab83daf66fa5361ce6bf88a9a59b53d45b95c25e))
+* improves app icon ([45bcd5b](https://github.com/ariso-ai/oats/commit/45bcd5b1b5681c5cebddd7a289c2d0c82afe7a55))
+
 ## [0.7.0](https://github.com/ariso-ai/oats/compare/v0.6.0...v0.7.0) (2026-06-16)
 
 
