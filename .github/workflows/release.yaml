@@ -247,6 +247,40 @@ jobs:
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
         run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
 
+      - name: Upload Homebrew DMG asset and update cask checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          DMG_COUNT="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          if [[ "$DMG_COUNT" != "1" ]]; then
+            echo "Expected exactly 1 DMG, found ${DMG_COUNT}:" >&2
+            find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print >&2
+            exit 1
+          fi
+          DMG="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg')"
+          DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+
+          cp "$DMG" oats.dmg
+          gh release upload "$RELEASE_TAG" oats.dmg --clobber
+          rm oats.dmg
+
+          git fetch origin main:main
+          git switch main
+          .github/scripts/update-homebrew-cask.sh "$VERSION" "$DMG_SHA256"
+
+          if git diff --quiet Casks/oats.rb; then
+            echo "Homebrew cask already matches ${VERSION}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/oats.rb
+          git commit -m "chore: update Homebrew cask for ${RELEASE_TAG}"
+          git push origin main
+
       - name: Add R2 download link to GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
@@ -257,4 +291,4 @@ jobs:
             ---
             **Download:** [oats.dmg](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
-            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew install --cask oats`
+            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew trust ariso-ai/oats && brew install --cask oats`
