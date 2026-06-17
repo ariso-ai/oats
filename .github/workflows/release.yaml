@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release-please:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     permissions:
       contents: write
       pull-requests: write
@@ -51,7 +51,7 @@ jobs:
   sync-lock:
     needs: release-please
     if: ${{ needs.release-please.outputs.prs_created == 'true' }}
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
@@ -224,7 +224,7 @@ jobs:
   publish:
     name: Generate manifest and publish artifacts to R2
     needs: [release-please, release]
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     # The R2 credentials live in the `release` environment alongside the Apple
     # signing secrets (see README → Signing & Notarization).
     environment: release
