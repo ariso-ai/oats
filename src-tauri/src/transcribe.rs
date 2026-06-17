@@ -200,6 +200,68 @@ pub async fn finalize_core(
     }
 }
 
+/// Re-run the full pipeline (transcription + notes) for an existing recording,
+/// reusing its saved `recording.mp3`. `finalize_core` derives the recording's
+/// dir from `created_at`, which equals the existing folder id, so it rewrites
+/// in place and resets `status`/`error`/`notes_error`. Returns the result plus
+/// the detached notes `JoinHandle` (tests await it; the command drops it).
+pub async fn retry_transcription_core(
+    root: &Path,
+    id: &str,
+) -> Result<(FinalizeResult, JoinHandle<()>), String> {
+    storage::validate_recording_id(id)?;
+    let dir = storage::recordings_dir(root).join(id);
+    let meta = storage::read_meta(&dir)?;
+    let derived_id = storage::sanitize_iso_to_id(&meta.created_at);
+    if meta.id != id || derived_id != id {
+        return Err(format!(
+            "recording metadata/id mismatch: requested={id}, meta.id={}, derived={derived_id}",
+            meta.id
+        ));
+    }
+    let audio = std::fs::read(dir.join("recording.mp3"))
+        .map_err(|e| format!("read recording audio: {e}"))?;
+    finalize_core(root, audio, meta.title, meta.created_at, meta.duration_seconds).await
+}
+
+/// Regenerate AI notes for a recording from its existing `transcript.md`,
+/// without re-running STT. Clears any prior `notes_error` first so the poller
+/// sees a "pending" state immediately, then spawns `process_notes` detached
+/// (it writes `ari-note.md` or a fresh `notes_error`). Returns the handle so
+/// tests can await completion; the command drops it.
+pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, String> {
+    storage::validate_recording_id(id)?;
+    let dir = storage::recordings_dir(root).join(id);
+    if !dir.join("transcript.md").is_file() {
+        return Err("no transcript available to generate notes".to_string());
+    }
+    let mut meta = storage::read_meta(&dir)?;
+    meta.notes_error = None;
+    storage::write_meta(&dir, &meta)?;
+    let models = storage::models_dir(root);
+    Ok(tokio::spawn(process_notes(dir, models, meta)))
+}
+
+/// Retry transcription (and notes) for a failed local recording.
+#[tauri::command]
+pub async fn retry_local_transcription(id: String) -> Result<FinalizeResult, String> {
+    let root = storage::ariso_root()?;
+    // Drop the notes JoinHandle: notes are best-effort and write their outcome
+    // to meta.json directly, matching `local_finalize_recording`.
+    retry_transcription_core(&root, &id)
+        .await
+        .map(|(res, _notes)| res)
+}
+
+/// Retry only AI-notes generation for a recording whose transcript exists.
+#[tauri::command]
+pub async fn retry_local_notes(id: String) -> Result<(), String> {
+    let root = storage::ariso_root()?;
+    // Drop the JoinHandle: the detached task writes its outcome to disk; the
+    // frontend observes completion via `local_recording_status` polling.
+    retry_notes_core(&root, &id).await.map(|_handle| ())
+}
+
 #[tauri::command]
 pub async fn local_finalize_recording(
     audio: Vec<u8>,
@@ -364,5 +426,110 @@ mod tests {
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
         assert!(meta.notes_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn retry_transcription_reruns_failed_recording_to_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Seed a previously-failed recording: audio on disk, meta=failed.
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        std::fs::write(dir.join("recording.mp3"), b"audio").unwrap();
+        let meta = RecordingMeta {
+            id: id.into(),
+            title: "T".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5,
+            status: RecordingStatus::Failed,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: Some("old failure".into()),
+            notes_error: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        // Stub: notes subcommand prints markdown; otherwise transcript JSON.
+        let json = r#"{"language":"en","durationSeconds":5.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, notes_handle) = retry_transcription_core(root, id).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.status, RecordingStatus::Done);
+        assert!(dir.join("transcript.md").exists());
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Done);
+        assert!(meta.error.is_none(), "prior transcription error must be cleared");
+    }
+
+    #[tokio::test]
+    async fn retry_transcription_errors_when_audio_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        // meta but no recording.mp3
+        let meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5, status: RecordingStatus::Failed, language: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        let err = retry_transcription_core(root, id).await.unwrap_err();
+        assert!(err.contains("recording audio"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn retry_notes_regenerates_from_existing_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"# Transcript\nhi").unwrap();
+        let meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None,
+            notes_error: Some("prior notes failure".into()),
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        // Stub: notes subcommand succeeds.
+        let body = "if [ \"$1\" = notes ]; then echo '# Notes'; echo '- point'; exit 0; fi\nexit 1";
+        let stub = write_stub(tmp.path(), body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let handle = retry_notes_core(root, id).await.unwrap();
+        handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
+        assert!(notes.contains("# Notes"), "got: {notes}");
+        assert!(read_meta(&dir).unwrap().notes_error.is_none(), "notes_error must be cleared");
+    }
+
+    #[tokio::test]
+    async fn retry_notes_errors_without_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        let meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        let err = retry_notes_core(root, id).await.unwrap_err();
+        assert!(err.contains("transcript"), "got: {err}");
     }
 }
