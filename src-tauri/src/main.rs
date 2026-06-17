@@ -110,6 +110,7 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::local_recording_status,
             commands::create_library_window,
             commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
