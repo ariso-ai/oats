@@ -1,0 +1,13 @@
+# Issues are reserved for actionable bug reports and feature requests so they
+# don't drown out support questions. Everything else routes to Discussions.
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & support
+    url: https://github.com/ariso-ai/oats/discussions
+    about: Ask how to do something, share feedback, or get help with setup.
+  - name: 🔐 Report a security vulnerability
+    url: https://github.com/ariso-ai/oats/security/advisories/new
+    about: Please report security issues privately — do not open a public issue.
+  - name: ☁️ Ariso cloud account help
+    url: https://ariso.ai/support
+    about: Issues with the Ariso cloud backend, sign-in, or your account.

@@ -1,0 +1,84 @@
+name: 🐛 Bug report
+description: Something in oats isn't working the way you expect.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! The more detail you give, the faster we can fix it.
+        For general questions or feature ideas, please use [Discussions](https://github.com/ariso-ai/oats/discussions) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected to happen instead.
+      placeholder: When I stop a recording, the menu-bar pill keeps spinning and no note appears.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that reliably trigger the problem.
+      placeholder: |
+        1. Open oats from the menu bar
+        2. Hit record, speak for ~30s
+        3. Stop the recording
+        4. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Transcription backend
+      description: Which backend were you using? (Settings → Transcription Backend)
+      options:
+        - Ariso (cloud)
+        - Local (on-device)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: oats-version
+    attributes:
+      label: oats version
+      description: Find it in the app's About / Settings, or the version of the DMG you installed.
+      placeholder: v0.7.0
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Apple menu →  About This Mac.
+      placeholder: macOS 15.1 (Apple Silicon)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install oats?
+      options:
+        - DMG from the Releases page
+        - Homebrew cask
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Paste any relevant logs, error dialogs, or screenshots.
+        Console logs can help — open **Console.app**, filter for `oats`, and copy recent entries.
+        ⚠️ Please scrub anything sensitive (transcripts, audio, account details) before posting.
+      render: shell
+    validations:
+      required: false

@@ -1,0 +1,7 @@
+# Code owners are automatically requested for review on matching PRs.
+# Docs: https://docs.github.com/articles/about-code-owners
+#
+# Listed below are the current human maintainers. Swap this for a GitHub team
+# (e.g. `* @ariso-ai/oats-maintainers`) once one exists to reduce review noise.
+
+* @shawnzhu @maxheckel @mchlggr @chihantung @erkangz @eekprice
