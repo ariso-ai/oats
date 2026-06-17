@@ -89,9 +89,9 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | --- | --- | --- |
 | **Cost** | Free | Free |
 | **Account / login** | Required | None |
-| **Audio leaves your Mac** | Yes (to Ariso) | **Never** |
-| **Transcription** | Ariso backend | Apple Neural Engine |
-| **Summary notes** | Ariso backend | On-device LLM |
+| **Audio leaves your Mac** | Your account (encrypted with your key) | **Never** |
+| **Transcription** | Ariso backend (no model training) | Apple Neural Engine |
+| **Summary notes** | Ariso backend (no model training) | On-device LLM |
 | **Works offline** | No | **Yes** |
 | **Best for** | Convenience, sharing, any Mac | Confidential meetings, air-gapped use |
 
