@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.2](https://github.com/ariso-ai/oats/compare/v0.7.1...v0.7.2) (2026-06-17)
+
+
+### Bug Fixes
+
+* lazy-load router views to isolate import failures ([f8abec7](https://github.com/ariso-ai/oats/commit/f8abec74bb8647971c7d316502313a89496a2be3))
+* lazy-load router views to isolate import failures ([1d50e2d](https://github.com/ariso-ai/oats/commit/1d50e2de30ecd21ed758bd215d384d68279deeb0))
+
 ## [0.7.1](https://github.com/ariso-ai/oats/compare/v0.7.0...v0.7.1) (2026-06-17)
 
 
