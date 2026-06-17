@@ -128,6 +128,8 @@ fn main() {
             commands::fetch_meeting_audio,
             commands::share_text_native,
             transcribe::local_finalize_recording,
+            transcribe::retry_local_transcription,
+            transcribe::retry_local_notes,
             model_manager::local_model_status,
             model_manager::download_local_stt,
             model_manager::download_local_llm,
