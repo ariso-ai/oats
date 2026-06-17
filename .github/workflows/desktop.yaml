@@ -55,14 +55,22 @@ jobs:
       - name: Build frontend
         run: npm run vite:build
 
+      # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
+      # is shared with release.yaml's signed build. Key it on the Xcode toolchain
+      # so a sidecar built by one runner's Xcode is never restored into another's
+      # — e.g. this GitHub-hosted macos-15 build vs release.yaml's self-hosted Mac.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
       # The ariso-stt Swift sidecar is a build artifact (not committed) that
       # tauri's `externalBin` requires to exist before `cargo build`. It lives
       # under the gitignored binaries/ dir. Building it compiles the heavy MLX
       # dependency tree from scratch (~25 min), but its inputs — Package.resolved
       # and Sources/ — rarely change, so cache the produced artifacts keyed on
-      # their hash and skip the build entirely on a hit. Exact-match key only
-      # (no restore-keys): a partial restore would yield artifacts that don't
-      # match the current source.
+      # their hash (plus the toolchain fingerprint) and skip the build on a hit.
+      # Exact-match key only (no restore-keys): a partial restore would yield
+      # artifacts that don't match the current source or toolchain.
       - name: Cache ariso-stt sidecar artifacts
         id: sidecar-cache
         uses: actions/cache@v5
@@ -70,7 +78,7 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
 
       # On a cache miss, build once with xcodebuild. It emits both the
       # executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle, referenced

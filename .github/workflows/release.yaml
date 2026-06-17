@@ -128,15 +128,24 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
+      # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
+      # is shared with desktop.yaml's validate job. Key it on the Xcode toolchain
+      # so a sidecar built by another runner's Xcode (e.g. desktop.yaml's
+      # GitHub-hosted macos-15) is never restored into this signed/notarized build.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
       # The sidecar is a gitignored build artifact that `tauri:build` (via
       # externalBin) needs present before bundling. The artifact cache (keyed on
-      # Package.resolved + Sources/) is shared with desktop.yaml's validate job,
-      # so this usually restores instantly. On a miss, a single xcodebuild emits
-      # both the executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle):
-      # without the bundle the notes (LLM) backend fails at runtime with "Failed
-      # to load the default metallib", and bundle.resources ships it into the
-      # .app. `swift build` is redundant (it can't compile MLX's Metal shaders),
-      # so build once with xcodebuild and copy both products out.
+      # Package.resolved + Sources/ + toolchain fingerprint) is shared with
+      # desktop.yaml's validate job, so this usually restores instantly. On a
+      # miss, a single xcodebuild emits both the executable and the MLX metallib
+      # bundle (mlx-swift_Cmlx.bundle): without the bundle the notes (LLM) backend
+      # fails at runtime with "Failed to load the default metallib", and
+      # bundle.resources ships it into the .app. `swift build` is redundant (it
+      # can't compile MLX's Metal shaders), so build once with xcodebuild and
+      # copy both products out.
       - name: Cache ariso-stt sidecar artifacts
         id: sidecar-cache
         uses: actions/cache@v5
@@ -144,7 +153,7 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
 
       - name: Build ariso-stt sidecar
         if: steps.sidecar-cache.outputs.cache-hit != 'true'
