@@ -21,6 +21,7 @@
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/ariso-ai/oats?utm_source=oss&utm_medium=github&utm_campaign=ariso-ai%2Foats&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 <br>
 
