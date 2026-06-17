@@ -102,10 +102,10 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     const id = getId();
     if (!id || retrying.value) return;
     retrying.value = true;
-    // Optimistic: show "Generating Transcript" immediately, before the (long)
-    // command awaits STT. Polling independently observes completion.
+    // Optimistic: show "Generating Transcript" immediately. Poll only AFTER the
+    // retry RPC resolves — until then the backend still reports the prior
+    // terminal state, and a poll would clobber the optimistic stage and stop.
     status.value = { status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending' };
-    begin();
     try {
       await local.retryTranscription(id);
     } catch (e) {
@@ -113,14 +113,17 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     } finally {
       retrying.value = false;
     }
+    begin();
   }
 
   async function retryNotes(): Promise<void> {
     const id = getId();
     if (!id || retrying.value) return;
     retrying.value = true;
+    // Optimistic: show "Generating AI Notes" immediately. Poll only AFTER the
+    // retry RPC resolves (it clears notes_error), so the first poll reflects the
+    // regenerating state instead of the prior failure.
     status.value = { status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending' };
-    begin();
     try {
       await local.retryNotes(id);
     } catch (e) {
@@ -128,6 +131,7 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     } finally {
       retrying.value = false;
     }
+    begin();
   }
 
   onUnmounted(stop);

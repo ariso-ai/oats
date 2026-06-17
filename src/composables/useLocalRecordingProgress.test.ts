@@ -112,6 +112,29 @@ describe('useLocalRecordingProgress polling', () => {
     expect(retryNotes).toHaveBeenCalledWith('rec-1');
   });
 
+  it('does not poll until the retry binding resolves (no stale-terminal regression)', async () => {
+    let resolveRetry: (() => void) | null = null;
+    retryTranscription.mockImplementation(
+      () => new Promise<void>((resolve) => { resolveRetry = () => resolve(); })
+    );
+    // If a poll DID run before the retry resolved, it would read this terminal view.
+    recordingStatus.mockResolvedValue(view({ status: 'failed' }));
+
+    const p = useLocalRecordingProgress(() => 'rec-1');
+    void p.retryTranscription();
+
+    // Optimistic stage is shown and no poll has happened while the RPC is in flight.
+    expect(p.stage.value).toBe('transcribing');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(recordingStatus).not.toHaveBeenCalled();
+    expect(p.stage.value).toBe('transcribing');
+
+    // Once the RPC resolves, polling starts.
+    resolveRetry!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(recordingStatus).toHaveBeenCalledWith('rec-1');
+  });
+
   it('reset clears state and stops polling', async () => {
     recordingStatus.mockResolvedValue(view({ status: 'transcribing' }));
     const p = useLocalRecordingProgress(() => 'rec-1');
