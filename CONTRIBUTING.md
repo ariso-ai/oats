@@ -170,10 +170,10 @@ Use these prefixes so the changelog and version bumps stay accurate.
 
 ## CI: validation and signed releases
 
-Two workflows run on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`):
+Two workflows build the macOS app, both on Apple Silicon (arm64):
 
-- **`Desktop App`** — CI validation. Its single `validate` job runs on PRs to `main` and pushes to `main`: `vite build` + `cargo build --locked`. No signing secrets exposed.
-- **`release`** — the full release pipeline, all on push to `main` (see [Cutting a release](#cutting-a-release)).
+- **`Desktop App`** — CI validation. Its single `validate` job runs on PRs to `main` and pushes to `main` on a GitHub-hosted `macos-15` runner: `vite build` + `cargo build --locked`. No signing secrets exposed.
+- **`release`** — the full release pipeline, on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`, needed for keychain-based signing + notarization), all on push to `main` (see [Cutting a release](#cutting-a-release)).
 
 | Job              | Runs when                        | What it does                                                                                                                |
 | ---------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
