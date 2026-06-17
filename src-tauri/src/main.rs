@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activation;
 mod audio_capture;
 mod commands;
 mod meeting_notifications;
@@ -220,6 +221,9 @@ fn main() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = settings_clone.hide();
+                    // Settings hides rather than closes, so the global
+                    // Destroyed hook never fires — demote here once it's gone.
+                    activation::refresh(&settings_clone.app_handle());
                 }
             });
 
@@ -276,14 +280,29 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_app, _event| {
-            // macOS: clicking the Dock icon re-activates the app (Reopen).
-            // Surface the meetings window — every other window is a hidden
-            // utility (bootstrap, settings) or transient (recorder pill).
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                if let Err(e) = commands::open_library_window(_app) {
-                    eprintln!("Failed to open meetings window on dock reopen: {e}");
+            match &_event {
+                // Clicking the Dock icon re-activates the app (Reopen).
+                // Surface the meetings window — every other window is a hidden
+                // utility (bootstrap, settings) or transient (recorder pill).
+                tauri::RunEvent::Reopen { .. } => {
+                    if let Err(e) = commands::open_library_window(_app) {
+                        eprintln!("Failed to open meetings window on dock reopen: {e}");
+                    }
                 }
+                // Keep the Dock / Stage Manager presence in sync with the
+                // visible windows: promote to Regular while a real window is up,
+                // demote to Accessory once they're all gone. Focused covers
+                // show()/set_focus(); Destroyed covers transient closes.
+                tauri::RunEvent::WindowEvent { event, .. } => {
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Destroyed
+                    ) {
+                        activation::refresh(_app);
+                    }
+                }
+                _ => {}
             }
         });
 }
