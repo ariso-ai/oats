@@ -212,6 +212,13 @@ pub async fn retry_transcription_core(
     storage::validate_recording_id(id)?;
     let dir = storage::recordings_dir(root).join(id);
     let meta = storage::read_meta(&dir)?;
+    let derived_id = storage::sanitize_iso_to_id(&meta.created_at);
+    if meta.id != id || derived_id != id {
+        return Err(format!(
+            "recording metadata/id mismatch: requested={id}, meta.id={}, derived={derived_id}",
+            meta.id
+        ));
+    }
     let audio = std::fs::read(dir.join("recording.mp3"))
         .map_err(|e| format!("read recording audio: {e}"))?;
     finalize_core(root, audio, meta.title, meta.created_at, meta.duration_seconds).await

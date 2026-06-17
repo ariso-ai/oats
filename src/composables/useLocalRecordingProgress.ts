@@ -66,17 +66,25 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
   async function loop(my: number): Promise<void> {
     const id = getId();
     if (!id || my !== token) return;
+    let shouldContinue = false;
     try {
       const s = await local.recordingStatus(id);
       if (my !== token) return;
       status.value = s;
+      shouldContinue = stage.value === 'transcribing' || stage.value === 'notes-pending';
     } catch (e) {
       if (my !== token) return;
       console.error('local recording status poll failed', e);
+      // Keep retrying if we don't have an initial snapshot yet, so a transient
+      // error doesn't permanently hide in-flight generation progress.
+      shouldContinue =
+        status.value == null ||
+        stage.value === 'transcribing' ||
+        stage.value === 'notes-pending';
     }
     if (my !== token) return;
     // Keep polling only while there is still work in flight.
-    if (stage.value === 'transcribing' || stage.value === 'notes-pending') {
+    if (shouldContinue) {
       timer = setTimeout(() => void loop(my), POLL_MS);
     }
   }
