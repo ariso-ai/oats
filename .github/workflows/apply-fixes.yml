@@ -35,11 +35,16 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 20
     # Only run when the review came from a trusted source AND the PR
-    # head is on this repo (we can't push to fork branches). Skip drafts
-    # and PRs the author opted out of.
+    # head is on this repo (we can't push to fork branches) AND the PR
+    # author is inside the ariso-ai org. For an org-owned repo GitHub
+    # reports author_association as MEMBER (or OWNER) for org members;
+    # outside collaborators, fork contributors, and the public get
+    # COLLABORATOR/CONTRIBUTOR/NONE. Skip drafts and opted-out PRs.
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.author_association == 'MEMBER' ||
+       github.event.pull_request.author_association == 'OWNER') &&
       (github.event.review.user.login == 'coderabbitai[bot]' ||
        github.event.review.user.login == 'shawnzhu') &&
       !contains(github.event.pull_request.title, '[skip-review]') &&

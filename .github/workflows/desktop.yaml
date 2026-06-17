@@ -20,7 +20,8 @@ concurrency:
 jobs:
   validate:
     name: Validate (frontend + cargo build)
-    runs-on: [self-hosted, macOS, ARM64]
+    # macos-15 is a GitHub-hosted Apple Silicon (arm64) runner; macos-13 is Intel.
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
