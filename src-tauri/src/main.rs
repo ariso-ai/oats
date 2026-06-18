@@ -136,6 +136,7 @@ fn main() {
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            meeting_notifications::resolve_meeting_prompt,
             tray_meeting::sync_tray_meeting,
             mic_monitor::sync_auto_record,
             mic_monitor::auto_record_supported,

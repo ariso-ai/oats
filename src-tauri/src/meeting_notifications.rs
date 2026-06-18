@@ -495,6 +495,76 @@ const AUTO_RECORD_ACTION_DISMISS: &str = "ai.ariso.auto-record.dismiss";
 /// How long the prompt stays actionable before the caller's mode default wins.
 const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Inner size of the meeting-start notification window (logical px). Compact
+/// single-row "native macOS mimic" layout from the design.
+const MEETING_PROMPT_W: f64 = 360.0;
+const MEETING_PROMPT_H: f64 = 84.0;
+
+/// The route the meeting-start notification window loads. `seconds` drives the
+/// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`.
+fn meeting_prompt_url(seconds: u64) -> String {
+    format!("/#/meeting-prompt?seconds={seconds}")
+}
+
+/// Build (or focus) the borderless top-right notification window. Mirrors the
+/// waveform pill: no decorations, transparent, always-on-top, never focused so
+/// it can't interrupt the live meeting. Must run on the main thread.
+fn open_meeting_prompt_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Only one prompt is live per meeting; replace any stale window.
+    if let Some(existing) = app.get_webview_window("meeting-prompt") {
+        let _ = existing.close();
+    }
+    let seconds = AUTO_RECORD_PROMPT_TIMEOUT.as_secs();
+    let win = WebviewWindowBuilder::new(
+        app,
+        "meeting-prompt",
+        WebviewUrl::App(meeting_prompt_url(seconds).into()),
+    )
+    .title("")
+    .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .shadow(false)
+    .focused(false)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    // Dock to the top-right of the primary monitor with a margin — the macOS
+    // notification corner.
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let msize = monitor.size();
+        let mpos = monitor.position();
+        let win_w = (MEETING_PROMPT_W * scale).round() as i32;
+        let margin = (16.0 * scale).round() as i32;
+        let x = mpos.x + msize.width as i32 - win_w - margin;
+        let y = mpos.y + margin;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    Ok(())
+}
+
+/// Close the notification window if it is still up (after a decision or timeout).
+fn close_meeting_prompt_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("meeting-prompt") {
+        let _ = win.close();
+    }
+}
+
+/// Command the notification view calls when the user picks an action. Rust owns
+/// the clock, so this only delivers the decision; `prompt_auto_record` closes
+/// the window once it receives it (or on timeout).
+#[tauri::command]
+pub async fn resolve_meeting_prompt(_app: AppHandle, record: bool) -> Result<(), String> {
+    deliver_auto_record_decision(record);
+    Ok(())
+}
+
 /// One-shot sender for the in-flight auto-record prompt. The notification
 /// delegate (ObjC callback, main thread) fills it when a button is tapped; the
 /// awaiting `prompt_auto_record` task receives the choice. Only one prompt is
@@ -591,13 +661,12 @@ fn truthy(v: Option<&Value>) -> bool {
 
 /// Show the auto-record confirm/deny notification and await the user's choice.
 /// Resolves `true` to start recording. Returns `default_record` if the user
-/// doesn't respond within the 10s window — or on a build where the action
-/// buttons aren't available (the plugin fallback can't report a tap).
+/// doesn't respond within the 10s window.
 pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
     show_auto_record_prompt(app);
-    match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
+    let record = match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
         Ok(Ok(record)) => record,
         // Timed out, or the sender was dropped/replaced — apply the mode
         // default and drop any stale sender we still own.
@@ -605,27 +674,22 @@ pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
             let _ = prompt_slot().lock().unwrap().take();
             default_record
         }
-    }
+    };
+    // Tear the window down on the main thread (decision made or timed out).
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main));
+    record
 }
 
-/// Show the prompt notification with Record/Dismiss buttons. On a signed macOS
-/// bundle this uses UNUserNotificationCenter (the only path that renders action
-/// buttons). In dev / on other platforms it falls back to a plain banner with
-/// no buttons — the prompt then resolves on the timeout default.
+/// Open the meeting-start notification window. Window creation must happen on
+/// the main thread (like `open_waveform_window`), so dispatch there.
 fn show_auto_record_prompt(app: &AppHandle) {
-    let title = "Meeting detected";
-    let body = "Start recording this meeting?";
-    #[cfg(target_os = "macos")]
-    if !tauri::is_dev() {
-        macos_un::show_auto_record(app, title, body);
-        return;
-    }
-    // Dev / non-macOS: plugin banner (no buttons). NOTE: from `tauri dev` on
-    // macOS the process isn't a real .app bundle, so this may post nothing
-    // visible — the prompt with buttons only renders from the built bundle.
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        eprintln!("auto-record: failed to show prompt notification: {e}");
-    }
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(e) = open_meeting_prompt_window(&app_main) {
+            eprintln!("meeting-prompt: failed to open notification window: {e}");
+        }
+    });
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
@@ -901,6 +965,12 @@ pub async fn stop_meeting_notifications(app: AppHandle) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn meeting_prompt_url_carries_the_timeout_seconds() {
+        assert_eq!(super::meeting_prompt_url(10), "/#/meeting-prompt?seconds=10");
+        assert_eq!(super::meeting_prompt_url(7), "/#/meeting-prompt?seconds=7");
+    }
 
     // 2026-06-16T12:00:00Z in epoch-ms, used as "now" across the cases.
     const NOW_MS: i64 = 1_781_956_800_000;
