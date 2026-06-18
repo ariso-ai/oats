@@ -419,8 +419,8 @@ describe('ArisoBackend.listMeetings', () => {
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
     );
     expect(items).toEqual([
-      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z' },
-      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z' },
+      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z', autoJoinScheduled: false },
+      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z', autoJoinScheduled: false },
     ]);
   });
 });
@@ -449,6 +449,7 @@ describe('ArisoBackend.searchMeetings', () => {
         endTimestamp: '2026-06-11T15:30:00Z',
         snippet: 'Discussed pipeline notes',
         matchedText: 'pipeline',
+        autoJoinScheduled: false,
       },
     ]);
   });
