@@ -33,7 +33,9 @@ describe('PendingUploads', () => {
     list.mockResolvedValue(items);
     const wrapper = mount(PendingUploads);
     await flushPromises();
+    expect(wrapper.find('.pending-card').exists()).toBe(true);
     expect(wrapper.findAll('.pending-item')).toHaveLength(2);
+    expect(wrapper.findAll('.pi-wave')).toHaveLength(2);
     expect(wrapper.find('.upload').text()).toContain('Upload (2)');
   });
 
