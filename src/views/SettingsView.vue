@@ -104,8 +104,8 @@
     <section v-if="backend === 'local'" class="section">
       <h2 class="section-title">On-device models</h2>
       <div class="card">
-        <div v-if="modelPrompt && !sttInstalled" class="signin-banner">
-          Download the models to record on your device.
+        <div v-if="showModelBanner" class="signin-banner">
+          Both on-device models must finish downloading before you can record.
         </div>
         <div class="setting-row">
           <span class="setting-label">Speech voice model</span>
@@ -317,7 +317,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, type ModelStatus } from '../tauri';
-import { shouldPromptDownload, rowStatusText, type Busy } from './settingsDownload';
+import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import {
   loadRecordingEnabled,
@@ -529,6 +529,16 @@ const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
 const anyDownloading = computed(
   () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
+);
+
+// Hide the banner on unsupported platforms (STT can never install there) so it
+// doesn't linger forever; otherwise show it while either model is incomplete.
+const showModelBanner = computed(() =>
+  modelBannerVisible(
+    modelPrompt.value,
+    unsupported.value || sttInstalled.value,
+    llmInstalled.value,
+  ),
 );
 
 const sttStatusText = computed(() =>
@@ -814,8 +824,15 @@ onMounted(async () => {
   const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
     llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
-  const unModelPrompt = await listen('tray://show-model-prompt', () => {
+  const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
+    // The recording gate fired because a model isn't ready — auto-start the
+    // missing download(s). The Rust per-target guards de-dupe, so re-firing
+    // while one is in progress is a safe no-op.
+    await refreshModelStatus();
+    const pending = pendingInstalls(modelStatus.value, sttBusy.value, llmBusy.value);
+    if (pending.stt) void onInstallStt();
+    if (pending.llm) void onInstallLlm();
   });
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
 });
