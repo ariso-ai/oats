@@ -52,10 +52,10 @@ describe('pendingInstalls', () => {
     ).toEqual({ stt: false, llm: false });
   });
 
-  it('never installs STT on an unsupported platform', () => {
+  it('installs neither model on an unsupported platform', () => {
     expect(
-      pendingInstalls({ state: 'unsupported', llmReady: false }, 'idle', 'idle').stt,
-    ).toBe(false);
+      pendingInstalls({ state: 'unsupported', llmReady: false }, 'idle', 'idle'),
+    ).toEqual({ stt: false, llm: false });
   });
 
   it('does not flag STT while the backend reports a download in progress', () => {

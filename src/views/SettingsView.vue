@@ -475,6 +475,11 @@ async function selectBackend(next: 'ariso' | 'local') {
     const prompted = await hasPromptedLocalModels().catch(() => true);
     if (shouldPromptDownload(next, prompted, modelStatus.value.state)) {
       showDownloadConfirm.value = true;
+    } else {
+      // Already confirmed once before (or STT already installed): skip the
+      // modal and start any still-missing downloads right away, so the models
+      // are ready by the time the user records.
+      startMissingDownloads();
     }
   }
 }
@@ -522,6 +527,16 @@ async function onInstallLlm() {
     console.error('LLM model download failed', e);
     llmBusy.value = 'error';
   }
+}
+
+// Kick off downloads for whichever on-device models are still missing. Shared
+// by the backend switch and the recording-gate prompt. Reads the current
+// modelStatus, so callers refresh it first. The Rust per-target guards de-dupe,
+// so calling this while a download is already in progress is a safe no-op.
+function startMissingDownloads() {
+  const pending = pendingInstalls(modelStatus.value, sttBusy.value, llmBusy.value);
+  if (pending.stt) void onInstallStt();
+  if (pending.llm) void onInstallLlm();
 }
 
 const unsupported = computed(() => modelStatus.value.state === 'unsupported');
@@ -827,12 +842,9 @@ onMounted(async () => {
   const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
     // The recording gate fired because a model isn't ready — auto-start the
-    // missing download(s). The Rust per-target guards de-dupe, so re-firing
-    // while one is in progress is a safe no-op.
+    // missing download(s).
     await refreshModelStatus();
-    const pending = pendingInstalls(modelStatus.value, sttBusy.value, llmBusy.value);
-    if (pending.stt) void onInstallStt();
-    if (pending.llm) void onInstallLlm();
+    startMissingDownloads();
   });
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
 });
