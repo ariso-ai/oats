@@ -46,7 +46,7 @@ in `.claude/` and `.claude-plugin/`.
 - [Rust](https://rustup.rs/) toolchain
 - Node.js + npm
 - From the monorepo root: `npm install`
-- `DEEPGRAM_API_KEY` in `.env` — must have **Member** role or higher (required for `/v1/auth/grant` token provisioning)
+- [Xcode](https://apps.apple.com/app/xcode/id497799835) (full install, not just Command Line Tools) — `xcodebuild` is required to compile the sidecar's MLX Metal shaders (`mlx-swift_Cmlx.bundle`); `swift build` alone cannot
 - **Apple Silicon, macOS 14+** (required to build and run the on-device Local backend sidecar)
 
 ## Development scripts
