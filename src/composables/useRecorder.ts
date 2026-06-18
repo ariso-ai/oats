@@ -40,6 +40,13 @@ export function useRecorder() {
   let mp3Encoder: lamejs.Mp3Encoder | null = null;
   let mp3Chunks: Int8Array[] = [];
   let timerInterval: ReturnType<typeof setInterval> | null = null;
+  // Wall-clock anchors for the elapsed-time display. The duration is derived
+  // from these on each tick rather than incremented per tick, so a throttled
+  // timer (the recorder window runs in the background while the user is in
+  // their meeting app, and the OS slows its JS timers) can't lose real time.
+  let recordingStartMs = 0;
+  let pausedAccumMs = 0;
+  let pausedAtMs: number | null = null;
 
   // System audio state
   let systemAudioActive = false;
@@ -49,6 +56,22 @@ export function useRecorder() {
 
   function getAnalyser(): AnalyserNode | null {
     return analyserNode;
+  }
+
+  // Recompute the elapsed-time display from wall-clock, subtracting paused
+  // gaps (including any in-progress pause). Called both from the timer and
+  // from the audio frame callback — the latter fires ~10/s even while the
+  // window is backgrounded, so the display ticks every second even when the
+  // OS throttles the JS timer below 1 Hz.
+  function recomputeDuration(): void {
+    if (!recordingStartMs) return;
+    const now = Date.now();
+    const pausedSoFar =
+      pausedAccumMs + (pausedAtMs !== null ? now - pausedAtMs : 0);
+    durationSeconds.value = Math.max(
+      0,
+      Math.floor((now - recordingStartMs - pausedSoFar) / 1000)
+    );
   }
 
   /**
@@ -179,6 +202,9 @@ export function useRecorder() {
           analyserNode.getByteFrequencyData(bins);
           frameLevels.value = Array.from(bins, (v) => v / 255);
         }
+        // Advance the elapsed-time display off the (un-throttled) audio clock
+        // so it ticks every second even when the window's JS timer is slowed.
+        recomputeDuration();
         if (!isRecording.value || isPaused.value || !mp3Encoder) return;
         const frame = e.inputBuffer.length;
         let drainPeakRef: Int16Array = new Int16Array(0);
@@ -262,12 +288,13 @@ export function useRecorder() {
       isPaused.value = false;
       startedAt.value = new Date().toISOString();
       lastSoundAt.value = Date.now();
+      recordingStartMs = Date.now();
+      pausedAccumMs = 0;
+      pausedAtMs = null;
 
-      timerInterval = setInterval(() => {
-        if (!isPaused.value) {
-          durationSeconds.value++;
-        }
-      }, 1000);
+      // Backstop tick in case audio frames stop flowing; the audio callback
+      // drives the per-second updates while recording.
+      timerInterval = setInterval(recomputeDuration, 1000);
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
       await cleanup();
@@ -277,11 +304,18 @@ export function useRecorder() {
 
   function pauseRecording(): void {
     if (!isRecording.value || isPaused.value) return;
+    pausedAtMs = Date.now();
     isPaused.value = true;
   }
 
   function resumeRecording(): void {
     if (!isRecording.value || !isPaused.value) return;
+    // Fold the just-ended pause into the running total so it's excluded from
+    // the elapsed duration.
+    if (pausedAtMs !== null) {
+      pausedAccumMs += Date.now() - pausedAtMs;
+      pausedAtMs = null;
+    }
     // Reset so the paused interval never counts as silence.
     lastSoundAt.value = Date.now();
     isPaused.value = false;
