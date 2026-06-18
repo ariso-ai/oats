@@ -217,13 +217,15 @@ describe('SettingsView first-time local models prompt', () => {
     expect(wrapper.find('.download-confirm').exists()).toBe(false);
   });
 
-  it('does not prompt when already prompted before', async () => {
+  it('skips the modal but auto-starts missing downloads when already prompted', async () => {
     hasPromptedLocalModels.mockResolvedValue(true);
     const wrapper = mount(SettingsView);
     await flushPromises();
     await switchToLocal(wrapper);
 
+    // No modal the second time, but the still-missing models download right away.
     expect(wrapper.find('.download-confirm').exists()).toBe(false);
-    expect(downloadStt).not.toHaveBeenCalled();
+    expect(downloadStt).toHaveBeenCalledTimes(1);
+    expect(downloadLlm).toHaveBeenCalledTimes(1);
   });
 });

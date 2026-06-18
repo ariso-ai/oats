@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release-please:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     permissions:
       contents: write
       pull-requests: write
@@ -27,7 +27,7 @@ jobs:
       prs: ${{ steps.release.outputs.prs }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
         id: release
         with:
           # The default GITHUB_TOKEN is sufficient: the release/publish jobs run
@@ -51,22 +51,22 @@ jobs:
   sync-lock:
     needs: release-please
     if: ${{ needs.release-please.outputs.prs_created == 'true' }}
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
       - name: Checkout release-please PR branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ fromJson(needs.release-please.outputs.prs)[0].headBranchName }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: '24'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
 
       - name: Sync package-lock.json
         run: npm install --package-lock-only --ignore-scripts
@@ -99,23 +99,23 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           cache: 'npm'
           node-version: '24'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           targets: aarch64-apple-darwin
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -128,23 +128,32 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
+      # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
+      # is shared with desktop.yaml's validate job. Key it on the Xcode toolchain
+      # so a sidecar built by another runner's Xcode (e.g. desktop.yaml's
+      # GitHub-hosted macos-15) is never restored into this signed/notarized build.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
       # The sidecar is a gitignored build artifact that `tauri:build` (via
       # externalBin) needs present before bundling. The artifact cache (keyed on
-      # Package.resolved + Sources/) is shared with desktop.yaml's validate job,
-      # so this usually restores instantly. On a miss, a single xcodebuild emits
-      # both the executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle):
-      # without the bundle the notes (LLM) backend fails at runtime with "Failed
-      # to load the default metallib", and bundle.resources ships it into the
-      # .app. `swift build` is redundant (it can't compile MLX's Metal shaders),
-      # so build once with xcodebuild and copy both products out.
+      # Package.resolved + Sources/ + toolchain fingerprint) is shared with
+      # desktop.yaml's validate job, so this usually restores instantly. On a
+      # miss, a single xcodebuild emits both the executable and the MLX metallib
+      # bundle (mlx-swift_Cmlx.bundle): without the bundle the notes (LLM) backend
+      # fails at runtime with "Failed to load the default metallib", and
+      # bundle.resources ships it into the .app. `swift build` is redundant (it
+      # can't compile MLX's Metal shaders), so build once with xcodebuild and
+      # copy both products out.
       - name: Cache ariso-stt sidecar artifacts
         id: sidecar-cache
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
 
       - name: Build ariso-stt sidecar
         if: steps.sidecar-cache.outputs.cache-hit != 'true'
@@ -201,7 +210,7 @@ jobs:
       # subdirectories that release-publish.sh expects. The DMG and tarball are
       # already compressed, so skip recompression.
       - name: Upload release bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: release-bundle
           if-no-files-found: error
@@ -215,7 +224,7 @@ jobs:
   publish:
     name: Generate manifest and publish artifacts to R2
     needs: [release-please, release]
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     # The R2 credentials live in the `release` environment alongside the Apple
     # signing secrets (see README → Signing & Notarization).
     environment: release
@@ -223,12 +232,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Download release bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: release-bundle
           path: src-tauri/target/release/bundle
@@ -248,6 +257,13 @@ jobs:
             echo "RELEASE_BODY_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # release-publish.sh uses `mapfile`, a bash 4.0+ builtin. The hosted
+      # macos-15 runner's system bash is 3.2, so install a modern bash from
+      # Homebrew and run the script with it explicitly (the next step's full
+      # path overrides the script's `#!/usr/bin/env bash` shebang).
+      - name: Install modern bash
+        run: brew install bash
+
       - name: Generate manifest and publish artifacts to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -258,10 +274,16 @@ jobs:
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
           RELEASE_BODY: ${{ steps.rel.outputs.body }}
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
-        run: .github/scripts/release-publish.sh
+        run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
+
+      - name: Upload Homebrew DMG asset and update cask checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: .github/scripts/publish-homebrew-cask.sh
 
       - name: Add R2 download link to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           append_body: true
@@ -270,4 +292,4 @@ jobs:
             ---
             **Download:** [oats.dmg](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
-            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew install --cask oats`
+            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew trust ariso-ai/oats && brew install --cask oats`

@@ -20,26 +20,27 @@ concurrency:
 jobs:
   validate:
     name: Validate (frontend + cargo build)
-    runs-on: [self-hosted, macOS, ARM64]
+    # macos-15 is a GitHub-hosted Apple Silicon (arm64) runner; macos-13 is Intel.
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           cache: 'npm'
           node-version: '24'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           targets: aarch64-apple-darwin
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -54,22 +55,30 @@ jobs:
       - name: Build frontend
         run: npm run vite:build
 
+      # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
+      # is shared with release.yaml's signed build. Key it on the Xcode toolchain
+      # so a sidecar built by one runner's Xcode is never restored into another's
+      # — e.g. this GitHub-hosted macos-15 build vs release.yaml's self-hosted Mac.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
       # The ariso-stt Swift sidecar is a build artifact (not committed) that
       # tauri's `externalBin` requires to exist before `cargo build`. It lives
       # under the gitignored binaries/ dir. Building it compiles the heavy MLX
       # dependency tree from scratch (~25 min), but its inputs — Package.resolved
       # and Sources/ — rarely change, so cache the produced artifacts keyed on
-      # their hash and skip the build entirely on a hit. Exact-match key only
-      # (no restore-keys): a partial restore would yield artifacts that don't
-      # match the current source.
+      # their hash (plus the toolchain fingerprint) and skip the build on a hit.
+      # Exact-match key only (no restore-keys): a partial restore would yield
+      # artifacts that don't match the current source or toolchain.
       - name: Cache ariso-stt sidecar artifacts
         id: sidecar-cache
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
 
       # On a cache miss, build once with xcodebuild. It emits both the
       # executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle, referenced

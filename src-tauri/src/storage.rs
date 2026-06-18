@@ -16,6 +16,31 @@ pub enum RecordingStatus {
     Failed,
 }
 
+/// AI-notes generation state, derived from on-disk artifacts. Notes run as a
+/// best-effort background task after the transcript completes, so the
+/// recording's own `RecordingStatus` stays `Done` regardless; this captures
+/// whether the note itself succeeded, is still pending, or failed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NotesStatus {
+    Pending,
+    Ready,
+    Failed,
+}
+
+/// Classify AI-notes generation from the note file's presence and any recorded
+/// `notes_error`. A present `ari-note.md` always means success (a stale error
+/// from a prior attempt is ignored).
+pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
+    if has_note {
+        NotesStatus::Ready
+    } else if notes_error.is_some() {
+        NotesStatus::Failed
+    } else {
+        NotesStatus::Pending
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Participant {
     pub id: u32,
@@ -64,6 +89,18 @@ pub struct RecordingSummary {
     pub has_note: bool,
     /// Whether `transcript.md` exists in the recording's directory.
     pub has_transcript: bool,
+}
+
+/// Lightweight per-recording status for the detail panel's generation poller.
+/// Cheaper than `list_recordings` (no directory scan) and carries the derived
+/// `notes_status` the list summary omits.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStatusView {
+    pub status: RecordingStatus,
+    pub has_transcript: bool,
+    pub has_note: bool,
+    pub notes_status: NotesStatus,
 }
 
 /// Metadata persisted next to a buffered pending upload (`<id>.json`), so a
@@ -263,6 +300,22 @@ pub fn format_hms(secs: f64) -> String {
     let m = (total % 3600) / 60;
     let s = total % 60;
     format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Reject recording ids that could escape the recordings dir. Ids are normally
+/// sanitized timestamps (e.g. `2026-06-02T14-30-05Z`); this mirrors the guard
+/// in `commands::recording_dir` so retry/status commands can validate ids that
+/// arrive from the frontend.
+pub fn validate_recording_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || id.contains("..")
+    {
+        return Err(format!("invalid recording id: {id}"));
+    }
+    Ok(())
 }
 
 pub fn create_recording_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
@@ -659,6 +712,37 @@ mod tests {
         write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"toolong").unwrap();
         let keys = vec!["2026-06-12T09:00:00Z".to_string()];
         assert!(combine_pending_audio(root, &keys, 3).is_err());
+    }
+
+    #[test]
+    fn derive_notes_status_ready_when_note_present() {
+        assert_eq!(derive_notes_status(true, None), NotesStatus::Ready);
+        // A present note wins even if a stale error lingers.
+        assert_eq!(derive_notes_status(true, Some("boom")), NotesStatus::Ready);
+    }
+
+    #[test]
+    fn derive_notes_status_failed_when_error_and_no_note() {
+        assert_eq!(derive_notes_status(false, Some("boom")), NotesStatus::Failed);
+    }
+
+    #[test]
+    fn derive_notes_status_pending_when_no_note_no_error() {
+        assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+    }
+
+    #[test]
+    fn validate_recording_id_accepts_sanitized_timestamp() {
+        assert!(validate_recording_id("2026-06-02T14-30-05Z").is_ok());
+    }
+
+    #[test]
+    fn validate_recording_id_rejects_traversal() {
+        assert!(validate_recording_id("").is_err());
+        assert!(validate_recording_id("../etc").is_err());
+        assert!(validate_recording_id("a/b").is_err());
+        assert!(validate_recording_id("a\\b").is_err());
+        assert!(validate_recording_id("C:foo").is_err());
     }
 
     #[test]

@@ -89,7 +89,7 @@
 
       <div v-else class="divider" />
 
-      <!-- Tabs + Chat -->
+      <!-- Tabs + generation status -->
       <div v-if="availableTabs.length" class="card-tabs">
         <div class="segment">
           <button
@@ -98,10 +98,33 @@
             class="seg-btn"
             :class="{ 'seg-btn--active': activeTab === t.key }"
             type="button"
-            @click="activeTab = t.key"
+            :disabled="t.disabled"
+            @click="t.disabled || (activeTab = t.key)"
           >{{ t.label }}</button>
         </div>
-        <!-- add chat with meeting button later -->
+        <div v-if="showStatusChip" class="tab-status">
+          <span v-if="statusGenerating" class="spinner spinner--sm" />
+          <span class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
+            {{ statusLabel }}
+          </span>
+          <button
+            v-if="!statusGenerating"
+            class="tab-retry"
+            type="button"
+            :disabled="progress.retrying.value"
+            @click="onRetry"
+          >Retry</button>
+        </div>
+        <button
+          v-if="showRegenerate"
+          class="tab-regen"
+          type="button"
+          title="Regenerate AI Notes from the transcript"
+          @click="onRegenerate"
+        >
+          <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+          Regenerate notes
+        </button>
       </div>
 
       <!-- Content -->
@@ -182,11 +205,14 @@
         </div>
 
         <div v-show="activeTab === 'transcript'" class="tab-pane">
-          <!-- Ariso audio playback sits right under the tabs, surfaced only while the
-               Transcript tab is active (and never for local recordings, whose audio
-               stays on disk); keyed by meeting id so switching selection remounts the
-               player instead of leaking the previous blob URL. -->
-          <div v-if="activeTab === 'transcript' && !detail.isLocal" class="card-audio">
+          <!-- Audio playback sits right under the tabs, surfaced only while the
+               Transcript tab is active; keyed by meeting id so switching selection
+               remounts the player instead of leaking the previous blob URL. Both
+               backends resolve their bytes lazily through loadAudio -> the backend's
+               getMeetingAudio (Ariso fetches /meeting-notes/{id}/audio, local reads
+               read_recording_audio off disk), and the player shows "No audio" when
+               that resolves to null. -->
+          <div v-if="activeTab === 'transcript'" class="card-audio">
             <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
           </div>
 
@@ -244,7 +270,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue';
 import { renderMarkdown } from '../utils/markdown';
 import type { TranscriptChunk } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
@@ -260,7 +286,8 @@ import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
-import { shareTextNative } from '../tauri';
+import { shareTextNative, local } from '../tauri';
+import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
 const emit = defineEmits<{
@@ -367,6 +394,8 @@ let noteReqId = 0;
 let saveReqId = 0;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressAutoSave = false;
+let noteDirty = false;
+let loadedNoteItem: MeetingListItem | null = null;
 
 const notesCanEdit = computed(() => !!props.item && notesPersistence.canEdit(props.item));
 const notesPlaceholder = computed(() =>
@@ -378,6 +407,87 @@ const notesPlaceholder = computed(() =>
 // the other backend.
 let detailBackend: Backend | null = null;
 
+// Local recordings generate their transcript + AI notes asynchronously after
+// recording stops. This poller drives the inline status chip and tab enabling.
+const progress = useLocalRecordingProgress(() => (detail.value?.isLocal ? detail.value.id : null));
+
+const showStatusChip = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed'].includes(progress.stage.value)
+);
+const statusGenerating = computed(
+  () => progress.stage.value === 'transcribing' || progress.stage.value === 'notes-pending'
+);
+const statusLabel = computed(() => {
+  switch (progress.stage.value) {
+    case 'transcribing':
+      return 'Generating Transcript';
+    case 'notes-pending':
+      return 'Generating AI Notes';
+    case 'transcript-failed':
+      return 'Transcript failed';
+    case 'notes-failed':
+      return 'AI Notes failed';
+    default:
+      return '';
+  }
+});
+function onRetry(): void {
+  if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
+  else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
+}
+
+// Local AI Notes can be regenerated from the transcript on demand. Shown only on
+// the AI Notes tab once a note already exists and nothing is in flight (the
+// status chip owns the row's right slot while generating/failed). Clicking
+// reuses the notes-retry path, which re-runs generation from transcript.md.
+const showRegenerate = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    activeTab.value === 'note' &&
+    !!detail.value?.note &&
+    !!detail.value?.hasTranscript &&
+    !showStatusChip.value
+);
+function onRegenerate(): void {
+  void progress.retryNotes();
+}
+
+// When the poller reports a newly-ready artifact, read it into `detail` so the
+// now-enabled tab renders its content. Guarded by reqId so a meeting switch
+// mid-read drops the stale result.
+async function reloadLocalArtifact(kind: 'note' | 'transcript'): Promise<void> {
+  const d = detail.value;
+  if (!d?.isLocal) return;
+  const my = reqId;
+  try {
+    const text = await local.readRecordingFile(d.id, kind);
+    if (my !== reqId || !detail.value) return;
+    if (kind === 'transcript') {
+      detail.value.transcript = text ?? undefined;
+      detail.value.hasTranscript = !!text;
+    } else {
+      detail.value.note = text ?? undefined;
+    }
+  } catch (e) {
+    console.error('reload local artifact failed', e);
+  }
+}
+
+watch(
+  () => progress.hasTranscript.value,
+  (now, prev) => {
+    if (now && !prev && detail.value?.isLocal) void reloadLocalArtifact('transcript');
+  }
+);
+watch(
+  () => progress.hasNote.value,
+  (now, prev) => {
+    if (now && !prev && detail.value?.isLocal) void reloadLocalArtifact('note');
+  }
+);
+
 // Lazy audio loader pinned to the backend that loaded the detail (a Settings
 // backend flip mid-view must not route the fetch through the other backend).
 function loadAudio(): Promise<ArrayBuffer | null> {
@@ -388,6 +498,7 @@ function loadAudio(): Promise<ArrayBuffer | null> {
 }
 
 async function load(item: MeetingListItem | null): Promise<void> {
+  await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
   const my = ++reqId;
@@ -403,6 +514,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
+  progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
   loadingIndividualNote.value = false;
@@ -410,6 +522,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   // Clearing view state during a meeting switch is not a user edit. Keep
   // autosave suppressed until the selected note has loaded or the user types.
   suppressAutoSave = true;
+  loadedNoteItem = null;
   notesMarkdown.value = '';
   noteTitleDraft.value = '';
   editingNoteTitle.value = false;
@@ -430,6 +543,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
     }
+    if (d.isLocal) progress.begin();
   } catch (e) {
     if (my !== reqId) return;
     console.error('Failed to load meeting detail', e);
@@ -574,14 +688,25 @@ function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcr
   return 'note';
 }
 
-// Tabs appear only when their content exists: AI Notes (generated/shared
-// meeting notes), Transcript, My Notes (the user's editable note), then
-// AI Assessment (score, rationale, coaching) when the meeting has one.
-const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string }[]>(() => {
+// Tabs appear when their content exists. For local recordings the AI Notes and
+// Transcript tabs are always present (disabled until their content is ready) so
+// the row stays stable while generation runs; the inline status chip reports
+// progress. Ariso meetings keep the content-gated behavior.
+const availableTabs = computed<
+  { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[]
+>(() => {
   const d = detail.value;
   if (!d) return [];
-  const out: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: "AI Notes" });
+  const out: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[] = [];
+  if (d.isLocal) {
+    out.push({ key: 'note', label: 'AI Notes', disabled: !d.note });
+    out.push({ key: 'transcript', label: 'Transcript', disabled: !d.hasTranscript });
+    if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
+      out.push({ key: 'mynote', label: 'My Notes' });
+    }
+    return out;
+  }
+  if (notesPresent(d)) out.push({ key: 'note', label: 'AI Notes' });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
@@ -619,11 +744,11 @@ async function loadTranscript(): Promise<void> {
 async function loadIndividualNote(): Promise<void> {
   if (!props.item || individualNoteLoaded.value || loadingIndividualNote.value) return;
   const my = ++noteReqId;
+  const item = props.item;
   loadingIndividualNote.value = true;
   saveState.value = 'idle';
   suppressAutoSave = true;
   try {
-    const item = props.item;
     const note = await notesPersistence.load(item);
     if (my !== noteReqId || props.item?.id !== item.id) return;
     notesMarkdown.value = note.content;
@@ -631,6 +756,8 @@ async function loadIndividualNote(): Promise<void> {
     editingNoteTitle.value = false;
     individualNote.value = { content: note.content, title: note.title };
     individualNoteLoaded.value = true;
+    loadedNoteItem = item;
+    noteDirty = false;
   } catch (e) {
     if (my !== noteReqId) return;
     console.error('Failed to load individual note', e);
@@ -639,6 +766,8 @@ async function loadIndividualNote(): Promise<void> {
     noteTitleDraft.value = '';
     editingNoteTitle.value = false;
     individualNoteLoaded.value = true;
+    loadedNoteItem = item;
+    noteDirty = false;
     saveState.value = 'error';
   } finally {
     if (my === noteReqId) {
@@ -651,7 +780,7 @@ async function loadIndividualNote(): Promise<void> {
 // Save the editable note target currently selected in the detail pane. The
 // parent calls this before changing selection, and the editor calls it on blur.
 async function saveNotesNow(): Promise<void> {
-  const item = props.item;
+  const item = loadedNoteItem ?? props.item;
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   const my = ++saveReqId;
   const markdown = notesMarkdown.value;
@@ -663,7 +792,9 @@ async function saveNotesNow(): Promise<void> {
   saveState.value = 'saving';
   try {
     await notesPersistence.save(item, { content: markdown, title });
-    if (my !== saveReqId || props.item?.id !== item.id) return;
+    const stillViewingSavedItem = props.item?.id === item.id;
+    if (my === saveReqId) noteDirty = false;
+    if (my !== saveReqId || !stillViewingSavedItem) return;
     if (detail.value) {
       detail.value.hasIndividualNote = markdown.trim().length > 0;
     }
@@ -678,6 +809,14 @@ async function saveNotesNow(): Promise<void> {
 }
 
 defineExpose({ saveNotesNow });
+
+// Flushes the loaded note before the detail pane clears local draft state.
+// This protects quick tab/meeting/window changes where the 700ms debounce has
+// not fired yet, while keeping saves attached to the meeting that supplied the draft.
+async function flushPendingNoteBeforeReset(): Promise<void> {
+  if (!noteDirty) return;
+  await saveNotesNow();
+}
 
 watch(activeTab, (t) => {
   if (t === 'transcript') void loadTranscript();
@@ -694,6 +833,7 @@ function scheduleNoteAutoSave(): void {
     !props.item ||
     !notesPersistence.canEdit(props.item)
   ) return;
+  noteDirty = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     void saveNotesNow();
@@ -703,8 +843,9 @@ function scheduleNoteAutoSave(): void {
 watch(notesMarkdown, scheduleNoteAutoSave);
 watch(noteTitleDraft, scheduleNoteAutoSave);
 
-onUnmounted(() => {
+onBeforeUnmount(() => {
   if (saveTimer) clearTimeout(saveTimer);
+  void flushPendingNoteBeforeReset();
 });
 
 const subtitle = computed(() => {
@@ -899,6 +1040,25 @@ const durationLabel = computed<string | null>(() => {
   font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
 }
 .btn-chat:hover { background: #1a1a1a; }
+.tab-status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; color: #6f6f6f; }
+.tab-status-label { white-space: nowrap; }
+.tab-status-label--err { color: #dc2626; }
+.tab-retry {
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-retry:hover:not(:disabled) { background: #fbfbfb; }
+.tab-retry:disabled { opacity: 0.6; cursor: default; }
+.spinner--sm { width: 14px; height: 14px; }
+.tab-regen {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-regen:hover { background: #fbfbfb; }
+.tab-regen .ic { width: 15px; height: 15px; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }

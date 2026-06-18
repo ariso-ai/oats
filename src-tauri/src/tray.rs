@@ -105,22 +105,16 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         let backend = crate::commands::active_backend(&app_async);
 
                         if backend == "local" {
-                            let root = match crate::storage::ariso_root() {
-                                Ok(r) => r,
-                                Err(_) => return,
-                            };
-                            let ready = crate::model_manager::is_ready(&root);
+                            let ready = crate::commands::local_models_ready();
                             let app_main = app_async.clone();
                             let _ = app_async.run_on_main_thread(move || {
                                 if !ready {
-                                    if let Some(win) = app_main.get_webview_window("settings") {
-                                        let _ = win.show();
-                                        let _ = win.set_focus();
-                                    }
-                                    let _ = app_main.emit("tray://show-model-prompt", ());
+                                    crate::commands::surface_model_download(&app_main);
                                     return;
                                 }
-                                let _ = crate::commands::open_waveform_window(&app_main, None, false);
+                                let _ = crate::commands::open_waveform_window(
+                                    &app_main, None, false,
+                                );
                             });
                             return;
                         }
@@ -305,6 +299,7 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
     };
     let stop = MenuItemBuilder::with_id("stop_recording", "Stop Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
 
     // Quit is intentionally omitted while recording to prevent
@@ -314,6 +309,7 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
         .item(&stop)
         .separator()
         .item(&settings)
+        .item(&library)
         .item(&check_updates)
         .build()
 }

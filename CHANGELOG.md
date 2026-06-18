@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.8.1](https://github.com/ariso-ai/oats/compare/v0.8.0...v0.8.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* hide model banner on unsupported platforms ([ca70fad](https://github.com/ariso-ai/oats/commit/ca70faddc0bb164f60517bdeba08dc2178f2ad69))
+* run release-publish.sh with modern bash on hosted runner ([b2b0100](https://github.com/ariso-ai/oats/commit/b2b0100934256dd18c4fb9a1a82379d2e97538f2))
+* run release-publish.sh with modern bash on hosted runner ([98e0c63](https://github.com/ariso-ai/oats/commit/98e0c63d191ec418039c1dd214b6b06bc72e81cb)), closes [#114](https://github.com/ariso-ai/oats/issues/114)
+* show Play button for local recordings in Transcript tab ([7a96d56](https://github.com/ariso-ai/oats/commit/7a96d56f9e22c77063c33e9451aaa233456322d1))
+
+## [0.8.0](https://github.com/ariso-ai/oats/compare/v0.7.2...v0.8.0) (2026-06-18)
+
+
+### Features
+
+* friendly default title for local meetings ([af1566d](https://github.com/ariso-ai/oats/commit/af1566d61670b5860b140ecce94438ed9606f8a9))
+* friendly default title for local meetings ([d15fced](https://github.com/ariso-ai/oats/commit/d15fcedb1ed2d761b8def8c14be0c4df6100c670))
+* **local:** add Regenerate notes button on the AI Notes tab ([7b04cc1](https://github.com/ariso-ai/oats/commit/7b04cc1d270251f014ca3161b8622880c4226646))
+
+
+### Bug Fixes
+
+* **local:** clear stale ari-note.md on notes regeneration so it's observable ([59fb01f](https://github.com/ariso-ai/oats/commit/59fb01ff6bfa65568eb29528bc65b357518a75e2))
+* **tray:** keep Meetings menu item visible while recording ([c128c42](https://github.com/ariso-ai/oats/commit/c128c42ff92d8c3fc79aadce2cae6ab3f3920df6))
+* **tray:** keep Meetings menu item visible while recording ([8c1c298](https://github.com/ariso-ai/oats/commit/8c1c29853758493fcd16220302ce744aef81f710))
+
+## [0.7.2](https://github.com/ariso-ai/oats/compare/v0.7.1...v0.7.2) (2026-06-17)
+
+
+### Bug Fixes
+
+* lazy-load router views to isolate import failures ([f8abec7](https://github.com/ariso-ai/oats/commit/f8abec74bb8647971c7d316502313a89496a2be3))
+* lazy-load router views to isolate import failures ([1d50e2d](https://github.com/ariso-ai/oats/commit/1d50e2de30ecd21ed758bd215d384d68279deeb0))
+
 ## [0.7.1](https://github.com/ariso-ai/oats/compare/v0.7.0...v0.7.1) (2026-06-17)
 
 

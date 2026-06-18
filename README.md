@@ -21,6 +21,7 @@
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/ariso-ai/oats?utm_source=oss&utm_medium=github&utm_campaign=ariso-ai%2Foats&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 <br>
 
@@ -50,6 +51,21 @@ You decide where the work happens:
 ## 📥 Install
 
 > **Requires Apple Silicon (M-series) and macOS 14 or later.**
+
+### 🍺 Homebrew
+
+```bash
+# Add the tap (the cask lives in this repo, so point Homebrew at it directly)
+brew tap ariso-ai/oats https://github.com/ariso-ai/oats
+
+# Trust the cask, then install
+brew trust --cask ariso-ai/oats/oats
+brew install --cask oats
+```
+
+> Homebrew 6.0 introduced [tap trust](https://docs.brew.sh/Tap-Trust): third-party taps must be explicitly trusted before they install. The `brew trust` step grants that once — without it you'll see `Refusing to load cask … from untrusted tap`.
+
+### 📦 Direct download
 
 1. Download the latest `oats.dmg` from the [**Releases page**](https://github.com/ariso-ai/oats/releases/latest).
 2. Open the DMG and drag **oats** into your Applications folder.
@@ -89,9 +105,9 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | --- | --- | --- |
 | **Cost** | Free | Free |
 | **Account / login** | Required | None |
-| **Audio leaves your Mac** | Yes (to Ariso) | **Never** |
-| **Transcription** | Ariso backend | Apple Neural Engine |
-| **Summary notes** | Ariso backend | On-device LLM |
+| **Audio leaves your Mac** | Your account (encrypted with your key) | **Never** |
+| **Transcription** | Ariso backend (no model training) | Apple Neural Engine |
+| **Summary notes** | Ariso backend (no model training) | On-device LLM |
 | **Works offline** | No | **Yes** |
 | **Best for** | Convenience, sharing, any Mac | Confidential meetings, air-gapped use |
 
