@@ -205,11 +205,14 @@
         </div>
 
         <div v-show="activeTab === 'transcript'" class="tab-pane">
-          <!-- Ariso audio playback sits right under the tabs, surfaced only while the
-               Transcript tab is active (and never for local recordings, whose audio
-               stays on disk); keyed by meeting id so switching selection remounts the
-               player instead of leaking the previous blob URL. -->
-          <div v-if="activeTab === 'transcript' && !detail.isLocal" class="card-audio">
+          <!-- Audio playback sits right under the tabs, surfaced only while the
+               Transcript tab is active; keyed by meeting id so switching selection
+               remounts the player instead of leaking the previous blob URL. Both
+               backends resolve their bytes lazily through loadAudio -> the backend's
+               getMeetingAudio (Ariso fetches /meeting-notes/{id}/audio, local reads
+               read_recording_audio off disk), and the player shows "No audio" when
+               that resolves to null. -->
+          <div v-if="activeTab === 'transcript'" class="card-audio">
             <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
           </div>
 
