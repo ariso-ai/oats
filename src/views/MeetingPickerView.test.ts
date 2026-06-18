@@ -94,3 +94,64 @@ describe('MeetingPickerView — record a new meeting', () => {
     expect(wrapper.find('input').exists()).toBe(true);
   });
 });
+
+describe('MeetingPickerView — Ari-join gate', () => {
+  it('flagged meeting shows confirm dialog and only records on "Record anyway"', async () => {
+    listScheduledMeetings.mockResolvedValue([
+      {
+        id: 42,
+        title: 'Standup',
+        start_at: new Date().toISOString(),
+        auto_join_scheduled: true,
+      },
+    ]);
+    const wrapper = mount(MeetingPickerView);
+    await flushPromises();
+
+    // Expand to see all meetings and click the flagged one.
+    await byText(wrapper, 'View all ▾')!.trigger('click');
+    await flushPromises();
+
+    const meetingBtn = wrapper.findAll('.meeting-row').find((b) => b.text().includes('Standup'));
+    expect(meetingBtn).toBeTruthy();
+    await meetingBtn!.trigger('click');
+    await flushPromises();
+
+    // Dialog must be visible.
+    expect(wrapper.text()).toContain('Ari is scheduled to join this meeting and take notes');
+    // Recording must NOT have started yet.
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+
+    // Click "Record anyway" → recording proceeds.
+    const buttons = wrapper.findAll('.ari-confirm__actions button');
+    const recordBtn = buttons.find((b) => b.text() === 'Record anyway');
+    expect(recordBtn).toBeTruthy();
+    await recordBtn!.trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  });
+
+  it('unflagged meeting records immediately with no dialog', async () => {
+    listScheduledMeetings.mockResolvedValue([
+      {
+        id: 7,
+        title: 'Planning',
+        start_at: new Date().toISOString(),
+        auto_join_scheduled: false,
+      },
+    ]);
+    const wrapper = mount(MeetingPickerView);
+    await flushPromises();
+
+    await byText(wrapper, 'View all ▾')!.trigger('click');
+    await flushPromises();
+
+    const meetingBtn = wrapper.findAll('.meeting-row').find((b) => b.text().includes('Planning'));
+    expect(meetingBtn).toBeTruthy();
+    await meetingBtn!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain('Ari is scheduled to join this meeting');
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 7 });
+  });
+});

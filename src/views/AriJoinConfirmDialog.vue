@@ -5,6 +5,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="ari-confirm-title"
+    @click.self="$emit('cancel')"
   >
     <div class="ari-confirm__card">
       <h2 id="ari-confirm-title" class="ari-confirm__title">Ari is joining this meeting</h2>
