@@ -85,6 +85,7 @@
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
         </span>
+        <AriWillJoinTag v-if="detail?.autoJoinScheduled" class="meta-ari" />
       </div>
 
       <div v-else class="divider" />
@@ -282,6 +283,7 @@ import {
   type MeetingActionItem,
   type MeetingCoaching,
 } from '../composables/useBackend';
+import AriWillJoinTag from './AriWillJoinTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
@@ -869,7 +871,7 @@ const hasCoaching = computed(() => {
 // The meta band (duration · attendees · category) renders only when at least
 // one of its fields is present; otherwise a plain divider separates header and tabs.
 const hasMeta = computed(
-  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType)
+  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType || detail.value?.autoJoinScheduled)
 );
 
 const otesEmpty = computed(() => {
@@ -1002,6 +1004,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
+.meta-ari { margin-left: auto; }
 .card-audio { display: flex; padding: 0 0 12px; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
