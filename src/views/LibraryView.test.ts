@@ -75,6 +75,7 @@ vi.mock('../tauri', () => ({
 }));
 
 import LibraryView from './LibraryView.vue';
+import UpNextCard from './UpNextCard.vue';
 
 function item(over: Record<string, unknown>) {
   return {
@@ -1002,5 +1003,47 @@ describe('LibraryView', () => {
     });
     await flushPromises();
     expect(wrapper.find('.pending-stub').exists()).toBe(true);
+  });
+
+  it('confirms before recording an ariso auto-join meeting, and records only on confirm', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    const upNext = wrapper.findComponent(UpNextCard);
+    expect(upNext.exists()).toBe(true);
+
+    // Emit "Start Meeting Early" for a flagged ariso meeting (numeric id).
+    upNext.vm.$emit('start', item({ id: '42', autoJoinScheduled: true }));
+    await flushPromises();
+
+    // Dialog is shown; recording has NOT started yet.
+    expect(wrapper.text()).toContain('Ari is scheduled to join this meeting');
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+
+    // "Record anyway" proceeds.
+    const buttons = wrapper.findAll('.ari-confirm__actions button');
+    const recordBtn = buttons.find((b) => b.text() === 'Record anyway');
+    expect(recordBtn).toBeTruthy();
+    await recordBtn!.trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  });
+
+  it('records an unflagged ariso meeting immediately, no dialog', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    const upNext = wrapper.findComponent(UpNextCard);
+    upNext.vm.$emit('start', item({ id: '7', autoJoinScheduled: false }));
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain('Ari is scheduled to join this meeting');
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 7 });
   });
 });

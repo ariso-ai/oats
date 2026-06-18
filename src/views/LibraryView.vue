@@ -129,6 +129,11 @@
       @go-to-notes="goHomeFromSearch"
       @select="onSearchResultSelected"
     />
+    <AriJoinConfirmDialog
+      :open="ariConfirm.open.value"
+      @confirm="ariConfirm.confirm"
+      @cancel="ariConfirm.cancel"
+    />
   </div>
 </template>
 
@@ -153,6 +158,9 @@ import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 import { decideRecordingAction } from '../composables/decideRecordingAction';
+import { shouldConfirmAriJoin } from '../composables/autoJoin';
+import { useAriJoinConfirm } from '../composables/useAriJoinConfirm';
+import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -160,6 +168,7 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+const ariConfirm = useAriJoinConfirm();
 const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
@@ -421,6 +430,12 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
 async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
   try {
     const backend = await getActiveBackend();
+    if (
+      shouldConfirmAriJoin(backend.id, item?.autoJoinScheduled) &&
+      !(await ariConfirm.requestConfirm())
+    ) {
+      return; // user chose Cancel
+    }
     // Ariso scheduled meetings use numeric backend ids; pass that id into the
     // recorder so the eventual upload attaches to the selected meeting.
     const meetingId = backend.id === 'ariso' ? numericMeetingId(item) : undefined;
@@ -494,6 +509,15 @@ async function startRecording(): Promise<void> {
       return;
     }
     if (action.kind === 'record') {
+      const recItem =
+        (selectedTodayId != null && isTodayItem(selectedItem.value) ? selectedItem.value : null) ??
+        currentNowItem();
+      if (
+        shouldConfirmAriJoin(backend.id, recItem?.autoJoinScheduled) &&
+        !(await ariConfirm.requestConfirm())
+      ) {
+        return; // user chose Cancel
+      }
       await invoke('start_recording_window', { meetingId: action.meetingId });
       setRecording(true);
       return;
