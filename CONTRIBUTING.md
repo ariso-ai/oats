@@ -36,10 +36,10 @@ Be kind, be constructive, and assume good intent. We want oats to be a welcoming
 ## Working with Claude Code
 
 This repo is set up for [Claude Code](https://claude.com/claude-code). On clone, trust
-the folder and you get the **superpowers** plugin plus four repo-specific skills
-(`oats-architecture`, `oats-vue`, `oats-tauri`, `oats-debugging`) that encode our
-conventions. See [`CLAUDE.md`](CLAUDE.md) for the full guide. Plugin/skill config lives
-in `.claude/` and `.claude-plugin/`.
+the folder and you get the **superpowers** plugin plus five repo-specific skills
+(`oats-architecture`, `oats-vue`, `oats-tauri`, `oats-security`, `oats-debugging`) that
+encode our conventions. See [`CLAUDE.md`](CLAUDE.md) for the full guide. Plugin/skill
+config lives in `.claude/` and `.claude-plugin/`.
 
 ## Prerequisites
 

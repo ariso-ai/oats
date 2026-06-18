@@ -18,6 +18,8 @@ conventions, not generic framework docs):
 - **`oats-vue`** — any frontend change (views, composables, routing, Tailwind, TipTap).
 - **`oats-tauri`** — any Rust/Tauri change, the invoke contract, capabilities, and the
   macOS build/test workarounds.
+- **`oats-security`** — changes touching auth, tokens, capabilities, invoke commands,
+  file paths, URL/deep-link opening, the sidecar, or the offline-mode privacy guarantee.
 - **`oats-debugging`** — drive/inspect the running app via the `oats-desktop` MCP server.
 
 ## Recommended workflow
@@ -56,6 +58,6 @@ A fresh git worktree needs bootstrapping first (sidecar binaries, `npm ci`,
 - `settings.json` — shared: registers the official marketplace, auto-enables superpowers.
 - `settings.local.json` — personal overrides (not your concern when shared); it disables
   the `oats-desktop` MCP server by default — `oats-debugging` explains enabling it.
-- `skills/` — the four oats skills above (auto-discovered; also packaged as the
+- `skills/` — the five oats skills above (auto-discovered; also packaged as the
   `oats-skills` plugin via `.claude-plugin/`).
 - `commands/` — repo slash commands (e.g. `apply-coderabbit`).
