@@ -1024,8 +1024,7 @@ pub fn show_silence_prompt(app: AppHandle) {
 
 /// Clear a shown silence prompt (audio resumed, paused, or recording ended).
 #[tauri::command]
-pub fn dismiss_silence_prompt(app: AppHandle) {
-    let _ = &app;
+pub fn dismiss_silence_prompt(_app: AppHandle) {
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
         macos_un::dismiss_silence();
