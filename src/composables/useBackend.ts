@@ -5,6 +5,7 @@ import {
   type MeetingSearchResult,
   type TranscriptChunk,
 } from './useMeetingApi';
+import { arisoTruthy } from './autoJoin';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -42,6 +43,8 @@ export interface MeetingListItem {
   snippet?: string | null;
   /** Remote search only: the exact matched text, when the backend returns it. */
   matchedText?: string | null;
+  /** Ariso scheduled meetings: Ari is set to auto-join and record server-side. */
+  autoJoinScheduled?: boolean;
 }
 
 export interface MeetingActionItem {
@@ -88,6 +91,8 @@ export interface MeetingDetail {
   recommendation?: string;
   coaching?: MeetingCoaching;
   meetingType?: string;
+  /** Ariso: Ari is scheduled to auto-join and record this meeting server-side. */
+  autoJoinScheduled?: boolean;
   /** Whether a transcript exists — drives the Live Transcript tab. Content is
    *  loaded lazily via `getMeetingTranscript`. */
   hasTranscript?: boolean;
@@ -186,6 +191,7 @@ function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): Me
     title: m.title || 'Untitled meeting',
     timestamp: m.start_at,
     endTimestamp: m.end_at,
+    autoJoinScheduled: arisoTruthy(m.auto_join_scheduled),
   };
   if ('snippet' in m && m.snippet) item.snippet = m.snippet;
   if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
@@ -323,6 +329,7 @@ export class ArisoBackend implements Backend {
       hasTranscript: !!data.hasTranscript,
       hasIndividualNote: !!data.individual_note?.content,
       isLocal: false,
+      autoJoinScheduled: item.autoJoinScheduled ?? false,
     };
   }
 
@@ -423,6 +430,7 @@ export class LocalBackend implements Backend {
       note: note ?? undefined,
       transcript: transcript ?? undefined,
       hasTranscript: !!item.files?.hasTranscript,
+      autoJoinScheduled: false,
     };
   }
 

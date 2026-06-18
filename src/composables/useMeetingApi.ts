@@ -40,6 +40,9 @@ interface ScheduledMeeting {
   title: string | null;
   start_at: string;
   end_at?: string;
+  /** Ariso: when truthy, Ari (the notetaker bot) is scheduled to auto-join and
+   *  record this meeting server-side. May arrive as bool / 0-1 / "true"-"1". */
+  auto_join_scheduled?: boolean | number | string;
 }
 
 // Search currently returns the same meeting shape as `/meetings`, with optional
