@@ -225,10 +225,17 @@ pub async fn retry_transcription_core(
 }
 
 /// Regenerate AI notes for a recording from its existing `transcript.md`,
-/// without re-running STT. Clears any prior `notes_error` first so the poller
-/// sees a "pending" state immediately, then spawns `process_notes` detached
-/// (it writes `ari-note.md` or a fresh `notes_error`). Returns the handle so
-/// tests can await completion; the command drops it.
+/// without re-running STT. Clears any prior `notes_error` and removes any
+/// existing `ari-note.md` first — readiness is signaled by that file's
+/// presence, so leaving a stale note in place would make the poller report the
+/// recording as "ready" the instant polling resumes, finishing the regeneration
+/// silently in the background. Removing it makes the regeneration observable
+/// (`hasNote` false → generating → true when the new note lands). Then spawns
+/// `process_notes` detached (it writes `ari-note.md` or a fresh `notes_error`).
+/// Returns the handle so tests can await completion; the command drops it.
+///
+/// Trade-off: a failed regeneration leaves the recording note-less (surfaced as
+/// "AI Notes failed" with a Retry), since the prior note is not restored.
 pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, String> {
     storage::validate_recording_id(id)?;
     let dir = storage::recordings_dir(root).join(id);
@@ -238,6 +245,13 @@ pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, S
     let mut meta = storage::read_meta(&dir)?;
     meta.notes_error = None;
     storage::write_meta(&dir, &meta)?;
+    // Clear the stale note so regeneration is observable (see doc comment).
+    // A missing file is fine — only surface real removal errors.
+    match std::fs::remove_file(dir.join("ari-note.md")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("remove stale note: {e}")),
+    }
     let models = storage::models_dir(root);
     Ok(tokio::spawn(process_notes(dir, models, meta)))
 }
@@ -514,6 +528,43 @@ mod tests {
         let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert!(notes.contains("# Notes"), "got: {notes}");
         assert!(read_meta(&dir).unwrap().notes_error.is_none(), "notes_error must be cleared");
+    }
+
+    #[tokio::test]
+    async fn retry_notes_removes_stale_note_so_regeneration_is_observable() {
+        // Regenerate precondition: a note already exists. The readiness signal is
+        // `ari-note.md`'s presence, so retry must remove the stale note up front —
+        // otherwise the poller would instantly report the old note as "ready" and
+        // the regeneration would finish in the background, never surfacing.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"# Transcript\nhi").unwrap();
+        std::fs::write(dir.join("ari-note.md"), b"# Old note").unwrap();
+        let meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        // Notes regeneration fails: with the stale note cleared up front, the
+        // recording is observably note-less afterwards (rather than still showing
+        // the old note), which is what lets the poller track regeneration.
+        let body = "if [ \"$1\" = notes ]; then echo 'boom' >&2; exit 1; fi\nexit 1";
+        let stub = write_stub(tmp.path(), body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let handle = retry_notes_core(root, id).await.unwrap();
+        handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert!(
+            !dir.join("ari-note.md").exists(),
+            "stale note must be removed so regeneration is observable"
+        );
+        assert!(read_meta(&dir).unwrap().notes_error.is_some());
     }
 
     #[tokio::test]
