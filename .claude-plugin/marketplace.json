@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "oats",
+  "owner": { "name": "ariso-ai" },
+  "metadata": {
+    "description": "oats codebase skills for Claude Code — Vue, Tauri, architecture, security, and MCP-driven debugging."
+  },
+  "plugins": [
+    {
+      "name": "oats-skills",
+      "source": "./",
+      "description": "Vue, Tauri, architecture, security, and MCP-debugging skills tailored to the oats desktop app."
+    }
+  ]
+}

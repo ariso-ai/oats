@@ -1,0 +1,8 @@
+{
+  "name": "oats-skills",
+  "description": "Vue, Tauri, architecture, security, and MCP-debugging skills tailored to the oats desktop app.",
+  "author": { "name": "ariso-ai" },
+  "homepage": "https://github.com/ariso-ai/oats",
+  "license": "MIT",
+  "skills": "./.claude/skills"
+}
