@@ -546,13 +546,13 @@ const anyDownloading = computed(
   () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
 );
 
-// Hide the banner on unsupported platforms (STT can never install there) so it
-// doesn't linger forever; otherwise show it while either model is incomplete.
+// Hide the banner on unsupported platforms (neither model can install there) so
+// it doesn't linger forever; otherwise show it while either model is incomplete.
 const showModelBanner = computed(() =>
   modelBannerVisible(
     modelPrompt.value,
     unsupported.value || sttInstalled.value,
-    llmInstalled.value,
+    unsupported.value || llmInstalled.value,
   ),
 );
 
