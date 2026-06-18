@@ -174,7 +174,48 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- -- --features prod-api
+        run: npm run tauri:build -- --bundles app -- --features prod-api
+
+      # Compose the public DMG after the signed app bundle exists. appdmg
+      # writes Finder metadata without needing Finder or AppleScript in CI.
+      - name: Compose DMG layout
+        run: npm run dmg:compose
+
+      # The composer writes DMG metadata after Tauri signs the .app, so sign,
+      # notarize, and staple the final DMG before it becomes the public artifact.
+      - name: Sign and notarize composed DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for required_var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!required_var:-}" ]]; then
+              echo "${required_var} is required to sign and notarize the composed DMG." >&2
+              exit 1
+            fi
+          done
+
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          DMG_COUNT="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          if [[ "${DMG_COUNT}" != "1" ]]; then
+            echo "Expected exactly 1 DMG in ${DMG_DIR}, found ${DMG_COUNT}." >&2
+            find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print >&2
+            exit 1
+          fi
+
+          DMG="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print)"
+          codesign --force --sign "${APPLE_SIGNING_IDENTITY}" --timestamp "${DMG}"
+          codesign --verify --verbose=4 "${DMG}"
+          xcrun notarytool submit "${DMG}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+          xcrun stapler staple "${DMG}"
+          xcrun stapler validate "${DMG}"
 
       # Hand the bundler outputs to the publish job. Paths share the common
       # ancestor bundle/, so the artifact preserves the macos/ and dmg/
