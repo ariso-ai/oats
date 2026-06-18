@@ -271,6 +271,7 @@ describe('WaveformView vertical pill', () => {
     stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
     const wrapper = mount(WaveformView);
     await flushPromises();
+    invoke.mockClear();
     // First tick: shows the prompt (lastSoundAt stays 0, silence persists).
     await vi.advanceTimersByTimeAsync(1_100);
     await flushPromises();
@@ -279,6 +280,7 @@ describe('WaveformView vertical pill', () => {
     // Advance past the 60s grace — still silent, prompt ignored → auto-stop.
     await vi.advanceTimersByTimeAsync(SILENCE_GRACE_MS + 1_000);
     await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('dismiss_silence_prompt');
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
