@@ -493,12 +493,20 @@ describe('MeetingDetailView audio player', () => {
     expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
   });
 
-  it('does not show the audio player for a local recording, even in the Transcript tab', async () => {
+  it('shows the audio player for a local recording in the Transcript tab, like Ariso', async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
     const wrapper = await mountWith(detail({ isLocal: true, note: 'hi', hasTranscript: true }));
     const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
     await transcriptTab!.trigger('click');
     await flushPromises();
-    expect(wrapper.find('.card-audio').exists()).toBe(false);
+    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+
+    // Play routes through the same backend.getMeetingAudio path as Ariso (local
+    // reads read_recording_audio off disk).
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+    expect(getMeetingAudio).toHaveBeenCalledWith(item);
+    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
   });
 
   it('clicking Play fetches audio through the backend that loaded the detail', async () => {
