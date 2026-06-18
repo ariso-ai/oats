@@ -10,6 +10,7 @@ Much of oats was built with [Claude Code](https://claude.com/claude-code) and th
 
 - [Code of conduct](#code-of-conduct)
 - [Ways to contribute](#ways-to-contribute)
+- [Working with Claude Code](#working-with-claude-code)
 - [Prerequisites](#prerequisites)
 - [Development scripts](#development-scripts)
 - [API build targets vs. transcription backend](#api-build-targets-vs-transcription-backend)
@@ -31,6 +32,14 @@ Be kind, be constructive, and assume good intent. We want oats to be a welcoming
 - 🐛 **Report bugs** — open an [issue](https://github.com/ariso-ai/oats/issues) with steps to reproduce, your macOS version, and which transcription backend you were using.
 - 💡 **Suggest features** — open an issue describing the problem you'd like solved.
 - 🔧 **Send pull requests** — fix a bug, improve docs, or build a feature. See [Submitting changes](#submitting-changes).
+
+## Working with Claude Code
+
+This repo is set up for [Claude Code](https://claude.com/claude-code). On clone, trust
+the folder and you get the **superpowers** plugin plus four repo-specific skills
+(`oats-architecture`, `oats-vue`, `oats-tauri`, `oats-debugging`) that encode our
+conventions. See [`CLAUDE.md`](CLAUDE.md) for the full guide. Plugin/skill config lives
+in `.claude/` and `.claude-plugin/`.
 
 ## Prerequisites
 
