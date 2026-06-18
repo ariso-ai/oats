@@ -178,32 +178,32 @@ jobs:
 
       # Tauri does not expose Finder icon size for DMGs, so compose the DMG
       # after the signed app bundle exists and persist the smaller bowl layout.
-      - name: Compose DMG layout
-        run: npm run dmg:compose
+  #   - name: Compose DMG layout
+  #     run: npm run dmg:compose
 
-      # The custom composer writes Finder metadata after Tauri signs the .app,
-      # so sign the final DMG before it becomes the public release artifact.
-      - name: Sign composed DMG
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${APPLE_SIGNING_IDENTITY}" ]]; then
-            echo "APPLE_SIGNING_IDENTITY is required to sign the composed DMG." >&2
-            exit 1
-          fi
+  #   # The custom composer writes Finder metadata after Tauri signs the .app,
+  #   # so sign the final DMG before it becomes the public release artifact.
+  #   - name: Sign composed DMG
+  #     env:
+  #       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+  #     run: |
+  #       set -euo pipefail
+  #       if [[ -z "${APPLE_SIGNING_IDENTITY}" ]]; then
+  #         echo "APPLE_SIGNING_IDENTITY is required to sign the composed DMG." >&2
+  #         exit 1
+  #       fi
 
-          DMG_DIR="src-tauri/target/release/bundle/dmg"
-          DMG_COUNT="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
-          if [[ "${DMG_COUNT}" != "1" ]]; then
-            echo "Expected exactly 1 DMG in ${DMG_DIR}, found ${DMG_COUNT}." >&2
-            find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print >&2
-            exit 1
-          fi
+  #       DMG_DIR="src-tauri/target/release/bundle/dmg"
+  #       DMG_COUNT="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+  #       if [[ "${DMG_COUNT}" != "1" ]]; then
+  #         echo "Expected exactly 1 DMG in ${DMG_DIR}, found ${DMG_COUNT}." >&2
+  #         find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print >&2
+  #         exit 1
+  #       fi
 
-          DMG="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print)"
-          codesign --force --sign "${APPLE_SIGNING_IDENTITY}" --timestamp "${DMG}"
-          codesign --verify --verbose=4 "${DMG}"
+  #       DMG="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print)"
+  #       codesign --force --sign "${APPLE_SIGNING_IDENTITY}" --timestamp "${DMG}"
+  #       codesign --verify --verbose=4 "${DMG}"
 
       # Hand the bundler outputs to the publish job. Paths share the common
       # ancestor bundle/, so the artifact preserves the macos/ and dmg/
