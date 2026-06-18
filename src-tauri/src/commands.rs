@@ -19,11 +19,11 @@ pub(crate) fn http_client() -> reqwest::Client {
 compile_error!("Features `prod-api` and `dev-api` are mutually exclusive");
 
 #[cfg(feature = "prod-api")]
-pub(crate) const API_BASE_URL: &str = "https://api.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
+const DEFAULT_API_BASE_URL: &str = "https://api-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const API_BASE_URL: &str = "http://localhost:4000";
+const DEFAULT_API_BASE_URL: &str = "http://localhost:4000";
 
 // Public Pusher client key. dev-api and local both use the dev key, so this
 // gates on prod-api only (unlike WEB_APP_BASE_URL's three-way split).
@@ -35,11 +35,50 @@ pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
 #[cfg(feature = "prod-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
-pub(crate) const WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
+const DEFAULT_WEB_APP_BASE_URL: &str = "https://web-dev.ari.ariso.ai";
 #[cfg(not(any(feature = "prod-api", feature = "dev-api")))]
-pub(crate) const WEB_APP_BASE_URL: &str = "http://localhost:5173";
+const DEFAULT_WEB_APP_BASE_URL: &str = "http://localhost:5173";
+
+/// Resolve the production API origin from the baked binary constant. Production
+/// builds intentionally ignore environment overrides so deployment endpoints
+/// cannot be changed outside the signed app.
+#[cfg(feature = "prod-api")]
+pub(crate) fn api_base_url() -> String {
+    DEFAULT_API_BASE_URL.to_string()
+}
+
+/// Resolve the API origin used by desktop-native HTTP calls in development.
+/// Non-production launchers can point the app at an isolated Agents dev stack.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn api_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_API_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Resolve the production web origin from the baked binary constant. Production
+/// builds intentionally ignore environment overrides to keep deep links fixed.
+#[cfg(feature = "prod-api")]
+pub(crate) fn web_app_base_url() -> String {
+    DEFAULT_WEB_APP_BASE_URL.to_string()
+}
+
+/// Resolve the browser-facing web origin used for deep links in development.
+/// Keeping this separate from the API origin matches the Agents dev.sh Caddy /api routing.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn web_app_base_url() -> String {
+    std::env::var("ARISO_DESKTOP_WEB_APP_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WEB_APP_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
 
 const STORE_PATH: &str = "session.json";
 const SESSION_KEY: &str = "session_token";
@@ -98,7 +137,7 @@ pub async fn is_session_valid(app: &tauri::AppHandle) -> bool {
 
     let client = http_client();
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -135,11 +174,14 @@ pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> 
 pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, String> {
     let client = http_client();
 
-    // Step 1: Get the OAuth redirect URL from the API
+    // Step 1: Get the OAuth redirect URL from the API. The backend expands
+    // these service names into Google scopes and owns credential persistence.
     let response = client
-        .post(format!("{API_BASE_URL}/oauth2/prepare-state"))
+        .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
-        .body(r#"{"integration":"google-signin"}"#)
+        .body(
+            r#"{"integration":"google-signin","scopes":["calendar-readonly"],"newUserSignupIntent":"personal_unless_domain_autojoin"}"#,
+        )
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -235,7 +277,7 @@ async fn exchange_token_for_session(
     let client = http_client();
 
     let response = match client
-        .get(format!("{API_BASE_URL}/auth/check"))
+        .get(format!("{}/auth/check", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -302,7 +344,7 @@ pub async fn check_session(app: tauri::AppHandle) -> Result<Option<SessionResult
 
     let client = http_client();
     let response = client
-        .get(format!("{API_BASE_URL}/auth/session"))
+        .get(format!("{}/auth/session", api_base_url()))
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header(CONTENT_TYPE, "application/json")
         .send()
@@ -334,7 +376,7 @@ pub async fn api_request(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let mut request = match method.to_uppercase().as_str() {
         "GET" => client.get(&url),
@@ -376,7 +418,7 @@ pub async fn upload_file(
 ) -> Result<ApiResponse, String> {
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{API_BASE_URL}{path}");
+    let url = format!("{}{}", api_base_url(), path);
 
     let file_part = reqwest::multipart::Part::bytes(file_data)
         .file_name(file_name)
@@ -405,6 +447,15 @@ pub async fn upload_file(
 
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
+    let state = app.state::<crate::recording_state::RecordingState>();
+    if is_recording {
+        // Mark capture before redrawing the tray so the title refresh sees the
+        // active recording and clears the countdown text in the menu bar.
+        state.mark_capture_active();
+    } else {
+        state.clear();
+        let _ = app.emit("recording://state", false);
+    }
     crate::tray::set_menu(&app, is_recording, is_paused);
     Ok(())
 }
@@ -415,12 +466,13 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
 
     // Focus if already exists
     if let Some(win) = app.get_webview_window("settings") {
+        win.show().map_err(|e: tauri::Error| e.to_string())?;
         win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
         return Ok(());
     }
 
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/#/settings".into()))
-        .title("Ariso Settings")
+        .title("Oats Settings")
         .inner_size(450.0, 800.0)
         .resizable(false)
         .center()
@@ -430,10 +482,60 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
-/// Shared helper to open the waveform recording window. Used by the
-/// `start_recording_window` command and by the tray (Local backend path).
-pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i64>) -> Result<(), String> {
+/// Open the dedicated first-run onboarding window. It is separate from Settings
+/// so a fresh install can explain sign-in before the main preferences surface.
+#[tauri::command]
+pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Focus if already exists
+    if let Some(win) = app.get_webview_window("onboarding") {
+        win.show().map_err(|e: tauri::Error| e.to_string())?;
+        win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, "onboarding", WebviewUrl::App("/#/onboarding".into()))
+        .title("Welcome to oats")
+        .inner_size(450.0, 600.0)
+        .resizable(false)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Build the waveform window's route, appending the optional `auto` and
+/// `pillHidden` query flags. Kept pure so the flag wiring is unit-testable.
+fn waveform_url(meeting_id: Option<i64>, auto: bool, pill_hidden: bool) -> String {
+    let mut url = match meeting_id {
+        Some(id) => format!("/#/waveform?meetingId={id}"),
+        None => "/#/waveform".to_string(),
+    };
+    let mut push = |flag: &str| {
+        url.push_str(if url.contains('?') { "&" } else { "?" });
+        url.push_str(flag);
+    };
+    if auto {
+        push("auto=1");
+    }
+    if pill_hidden {
+        push("pillHidden=1");
+    }
+    url
+}
+
+/// Shared helper to open the waveform recording window. Used by the
+/// `start_recording_window` command, the tray (Local backend path), and the
+/// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
+/// `RecordingState` as an auto recording.
+pub(crate) fn open_waveform_window(
+    app: &tauri::AppHandle,
+    meeting_id: Option<i64>,
+    auto: bool,
+) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
     if let Some(picker) = app.get_webview_window("meeting-picker") {
         let _ = picker.close();
@@ -442,13 +544,23 @@ pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i6
         let _ = existing.set_focus();
         return Ok(());
     }
-    let url = match meeting_id {
-        Some(id) => format!("/#/waveform?meetingId={id}"),
-        None => "/#/waveform".to_string(),
-    };
-    WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
+    // Born hidden (painted-empty) when the meetings window already owns the
+    // recorder UI, so the pill never flashes over it. The window is still
+    // created visible for getUserMedia; only its painting is suppressed.
+    let pill_hidden = !crate::recorder_pill::should_show_now(app);
+    let url = waveform_url(meeting_id, auto, pill_hidden);
+    let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
-        .inner_size(320.0, 56.0)
+        // Fixed size: room for the expanded pill plus its CSS shadow. The pill
+        // itself is anchored to the bottom and grows upward within this window.
+        .inner_size(92.0, 284.0)
+        // Born visible even when the library's embedded strip is the real UI:
+        // WebKit won't resolve getUserMedia for a hidden window, so the pill
+        // must stay on screen until capture starts. The visibility watcher
+        // hides it then (set_tray_recording marks capture active).
+        // Throttling is disabled so the hidden webview keeps recording and
+        // broadcasting recorder://state.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
@@ -457,8 +569,81 @@ pub(crate) fn open_waveform_window(app: &tauri::AppHandle, meeting_id: Option<i6
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
+
+    // When the pill is the visible recording UI (the meetings window is hidden,
+    // minimized, or closed), dock it to the right edge of the primary screen,
+    // vertically centered, rather than leaving it at the OS default spot. When
+    // the meetings window owns the UI the pill is painted-empty, so its position
+    // doesn't matter.
+    if !pill_hidden {
+        if let Ok(Some(monitor)) = win.primary_monitor() {
+            let scale = monitor.scale_factor();
+            let msize = monitor.size();
+            let mpos = monitor.position();
+            // Window outer size is the fixed inner size (no decorations).
+            let win_w = (92.0 * scale).round() as i32;
+            let win_h = (284.0 * scale).round() as i32;
+            let margin = (16.0 * scale).round() as i32;
+            let x = mpos.x + msize.width as i32 - win_w - margin;
+            let y = mpos.y + (msize.height as i32 - win_h) / 2;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
+
+    let source = if auto {
+        crate::recording_state::RecordingSource::Auto
+    } else {
+        crate::recording_state::RecordingSource::Manual
+    };
+    app.state::<crate::recording_state::RecordingState>()
+        .set(source, meeting_id);
+    let _ = app.emit("recording://state", true);
+
+    // If the window is destroyed without a clean stop (crash / force-close),
+    // clear the shared flag so the monitor can recover and re-arm.
+    let app_for_event = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            app_for_event
+                .state::<crate::recording_state::RecordingState>()
+                .clear();
+            let _ = app_for_event.emit("recording://state", false);
+        }
+    });
+
     crate::tray::set_menu(app, true, false);
+
+    // Show the pill only while the library window (with its embedded
+    // recorder strip) can't be seen — minimized or closed.
+    crate::recorder_pill::spawn_watcher(app);
+
+    // Tell every window (the library in particular) which meeting the new
+    // recording is attached to, so it can surface that meeting immediately.
+    let _ = app.emit(
+        "recording://started",
+        serde_json::json!({ "meetingId": meeting_id }),
+    );
     Ok(())
+}
+
+/// Gate recording on a valid session for the Ariso backend. The Local backend
+/// needs no auth and always passes. When the Ariso user is signed out, surface
+/// the (pre-created) Settings window and emit `tray://show-sign-in-prompt` so its
+/// sign-in banner appears, then report `false` so the caller aborts. Mirrors the
+/// tray's session gate so every recording entry point behaves identically.
+async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
+    if active_backend(app) != "ariso" {
+        return true;
+    }
+    if is_session_valid(app).await {
+        return true;
+    }
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit("tray://show-sign-in-prompt", ());
+    false
 }
 
 /// Open the waveform recording window, optionally attaching to an existing
@@ -469,7 +654,42 @@ pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
 ) -> Result<(), String> {
-    open_waveform_window(&app, meeting_id)
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
+    open_waveform_window(&app, meeting_id, false)
+}
+
+/// Show/focus the meeting-picker window, building it if absent. Shared by the
+/// tray (Ariso path) and the `open_meeting_picker` command so both open the
+/// picker identically.
+pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(picker) = app.get_webview_window("meeting-picker") {
+        let _ = picker.show();
+        let _ = picker.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "meeting-picker", WebviewUrl::App("/#/meeting-picker".into()))
+        .title("Select a meeting")
+        .inner_size(400.0, 500.0)
+        .resizable(false)
+        .center()
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open (or focus) the meeting-picker window. Invoked by the library's
+/// start-recording button for picker-using backends.
+#[tauri::command]
+pub async fn open_meeting_picker(app: tauri::AppHandle) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
+    open_meeting_picker_window(&app)
 }
 
 /// PUT binary data to a presigned URL (bypasses CORS via native HTTP client)
@@ -507,7 +727,7 @@ pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
-        web_app_base_url: WEB_APP_BASE_URL.to_string(),
+        web_app_base_url: web_app_base_url(),
     }
 }
 
@@ -515,6 +735,43 @@ pub fn get_desktop_config() -> DesktopConfig {
 pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
     let root = crate::storage::ariso_root()?;
     crate::storage::list_recordings(&root)
+}
+
+/// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
+/// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
+#[tauri::command]
+pub fn buffer_pending_audio(
+    audio: Vec<u8>,
+    meta: crate::storage::PendingUploadMeta,
+) -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::write_pending_audio(&root, &meta, &audio)
+}
+
+/// Remove the buffered mp3 for `created_at` (idempotent). Called after a
+/// confirmed upload and on explicit dismiss of a failed one.
+#[tauri::command]
+pub fn discard_pending_audio(created_at: String) -> Result<(), String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::discard_pending_audio(&root, &created_at)
+}
+
+/// List buffered pending uploads (oldest-first) for the Library's resume UI.
+#[tauri::command]
+pub fn list_pending_uploads() -> Result<Vec<crate::storage::PendingUploadMeta>, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::list_pending_uploads(&root)
+}
+
+/// Concatenate the given pending uploads (chronological key order) into a
+/// single mp3, returned as raw bytes for re-upload. Bounded by MAX_AUDIO_BYTES.
+#[tauri::command]
+pub fn combine_pending_audio(
+    created_at_keys: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let root = crate::storage::ariso_root()?;
+    let bytes = crate::storage::combine_pending_audio(&root, &created_at_keys, MAX_AUDIO_BYTES)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
@@ -539,7 +796,7 @@ fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
 /// `transcript` are valid; anything else is an error.
 fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
     match kind {
-        "note" => Ok("note.md"),
+        "note" => Ok("ari-note.md"),
         "transcript" => Ok("transcript.md"),
         other => Err(format!("invalid recording file kind: {other}")),
     }
@@ -567,7 +824,89 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Open a recording's `note.md` or `transcript.md` in the OS default app.
+/// Meeting ids are numeric on the Ariso backend; rejecting anything else also
+/// keeps the id from smuggling path segments into the URL below.
+fn validate_meeting_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("invalid meeting id: {id}"));
+    }
+    Ok(())
+}
+
+/// Fetch a meeting's recorded audio from the Ariso API as raw bytes (the
+/// endpoint streams the file directly). Non-200 responses become an error
+/// whose message is prefixed with the HTTP status so the frontend can map
+/// 404 to a "no audio" state.
+#[tauri::command]
+pub async fn fetch_meeting_audio(
+    app: tauri::AppHandle,
+    meeting_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    validate_meeting_id(&meeting_id)?;
+    let token = get_session_token(&app).unwrap_or_default();
+    let client = http_client();
+    let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
+
+    // Bound the request so a stalled upstream/TCP connection can't hang the
+    // command indefinitely; reqwest's builder has no default timeout.
+    let mut response = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("{status}: audio fetch failed"));
+    }
+    if let Some(len) = response.content_length() {
+        if len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {len} bytes"));
+        }
+    }
+    // Stream the body and enforce MAX_AUDIO_BYTES as we go — buffering the
+    // whole response first can blow memory if content_length is absent or wrong.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {next_len} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Upper bound on a note/transcript markdown file we'll read into memory for
+/// in-app rendering. These are plain text; 16 MB is far above any real note or
+/// transcript and just guards against a pathological/corrupt file.
+const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a recording's `ari-note.md` or `transcript.md` as UTF-8 so the
+/// frontend can render it inline. Returns `Ok(None)` when the file doesn't
+/// exist yet (a normal "not generated" state), distinct from a read error.
+/// `kind` must be `"note"` or `"transcript"`.
+#[tauri::command]
+pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, String> {
+    let filename = note_or_transcript_filename(&kind)?;
+    let path = recording_dir(&id)?.join(filename);
+    // Only a genuine "not found" means the file hasn't been generated yet;
+    // surface permission/IO errors instead of masking them as `Ok(None)`.
+    let size = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read recording file: {e}")),
+    };
+    if size > MAX_TEXT_BYTES {
+        return Err(format!("recording file too large to read: {size} bytes"));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read recording file: {e}"))?;
+    Ok(Some(text))
+}
+
+/// Open a recording's `ari-note.md` or `transcript.md` in the OS default app.
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
@@ -583,19 +922,129 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
+/// `view_height` is the content view's height in points; `y`/`height` are the
+/// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
+fn flip_y(view_height: f64, y: f64, height: f64) -> f64 {
+    view_height - (y + height)
+}
+
+/// Maximum local recording title length, in characters. Mirrors the frontend
+/// limit (the UI validates first; this is defense in depth).
+const MAX_TITLE_CHARS: usize = 40;
+
+/// Rename a local recording by updating `title` in its `meta.json`. The folder
+/// id stays immutable; serde_json escapes quotes/special characters natively.
+#[tauri::command]
+pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("title must not be empty".to_string());
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("title must be {MAX_TITLE_CHARS} characters or fewer"));
+    }
+    let dir = recording_dir(&id)?;
+    let mut meta = crate::storage::read_meta(&dir)?;
+    meta.title = title.to_string();
+    crate::storage::write_meta(&dir, &meta)
+}
+
+/// Read the user-authored local note artifact used by the Library editor.
+/// Missing notes return an empty string so a fresh recording can autosave into
+/// `user-note.md` without affecting generated Overview content.
+#[tauri::command]
+pub fn read_recording_note(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("user-note.md");
+    let size = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("read recording note: {e}")),
+    };
+    if size > MAX_TEXT_BYTES {
+        return Err(format!("recording note too large to read: {size} bytes"));
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) => Err(format!("read recording note: {e}")),
+    }
+}
+
+/// Persist user-authored in-meeting notes to `user-note.md` beside the
+/// recording. Generated meeting notes use `ari-note.md`, keeping Overview
+/// visibility independent from My note autosaves.
+#[tauri::command]
+pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> {
+    let size = markdown.as_bytes().len() as u64;
+    if size > MAX_TEXT_BYTES {
+        return Err(format!("recording note too large to write: {size} bytes"));
+    }
+    let dir = recording_dir(&id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
+}
+
+/// Read the user-authored My-note title sidecar (`user-note-title.txt`). Kept in
+/// its own artifact beside `user-note.md` so the editable title round-trips
+/// without touching the hand-written `meta` format. Missing files return an
+/// empty string, matching `read_recording_note` for fresh recordings.
+#[tauri::command]
+pub fn read_recording_note_title(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("user-note-title.txt");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read recording note title: {e}")),
+    }
+}
+
+/// Persist the user-authored My-note title to `user-note-title.txt` beside the
+/// recording, mirroring `write_recording_note` so title and body share the same
+/// autosave path.
+#[tauri::command]
+pub fn write_recording_note_title(id: String, title: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note-title.txt"), title.as_bytes())
+}
+
+/// Return the meeting id the active recording is attached to, if any. The
+/// library window queries this on mount so it can re-select the attached
+/// meeting after being closed/reopened mid-recording — the `recording://started`
+/// event is one-shot and the new window would otherwise miss it.
+#[tauri::command]
+pub async fn get_active_recording_meeting_id(app: tauri::AppHandle) -> Option<i64> {
+    app.state::<crate::recording_state::RecordingState>()
+        .active_meeting_id()
+}
+
 #[tauri::command]
 pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    open_library_window(&app)
+}
+
+/// Open (or focus) the meetings library window. Shared by the
+/// `create_library_window` command and the macOS dock-icon Reopen handler.
+pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
+        // Restore the window if it was minimized/hidden before focusing it.
+        let _ = win.unminimize();
+        let _ = win.show();
         win.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    WebviewWindowBuilder::new(&app, "library", WebviewUrl::App("/#/library".into()))
+    // Overlay title bar (with the native title hidden) lets the web content
+    // extend under the traffic lights, so the in-app panel toggle can sit on
+    // the same row, just to the right of them.
+    WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
         .title("Meetings")
-        .inner_size(460.0, 560.0)
+        .title_bar_style(TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
         .skip_taskbar(true)
@@ -604,13 +1053,99 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+pub struct ShareAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Open the native macOS share sheet over `text`, anchored to the button rect
+/// (`anchor`, in CSS points relative to the window's content view).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn share_text_native(
+    window: tauri::WebviewWindow,
+    text: String,
+    anchor: ShareAnchor,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("nothing to share".to_string());
+    }
+    let window_for_main = window.clone();
+
+    window
+        .run_on_main_thread(move || {
+            use objc2::rc::Retained;
+            use objc2::runtime::AnyObject;
+            use objc2::AnyThread;
+            use objc2_app_kit::{NSSharingServicePicker, NSWindow};
+            use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+
+            // SAFETY: ns_window() is fetched on the main thread immediately
+            // before use, so the NSWindow* is valid for this closure's lifetime.
+            // AppKit requires this to run on the main thread.
+            unsafe {
+                let ns_window_ptr = match window_for_main.ns_window() {
+                    Ok(ptr) => ptr as *const NSWindow,
+                    Err(_) => return,
+                };
+                let ns_window = &*ns_window_ptr;
+                let Some(content_view) = ns_window.contentView() else {
+                    return;
+                };
+                let view_height = content_view.bounds().size.height;
+
+                let ns_text = NSString::from_str(&text);
+                let item: Retained<AnyObject> = Retained::into_super(ns_text).into();
+                let items = NSArray::from_retained_slice(&[item]);
+                let picker = NSSharingServicePicker::initWithItems(
+                    NSSharingServicePicker::alloc(),
+                    &items,
+                );
+
+                let appkit_y = flip_y(view_height, anchor.y, anchor.height);
+                let rect = NSRect::new(
+                    NSPoint::new(anchor.x, appkit_y),
+                    NSSize::new(anchor.width.max(1.0), anchor.height.max(1.0)),
+                );
+                picker.showRelativeToRect_ofView_preferredEdge(
+                    rect,
+                    &content_view,
+                    NSRectEdge::MinY,
+                );
+            }
+        })
+        .map_err(|e| format!("run_on_main_thread: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), String> {
+    Err("native share is only supported on macOS".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn waveform_url_appends_flags_with_correct_separators() {
+        assert_eq!(waveform_url(None, false, false), "/#/waveform");
+        assert_eq!(waveform_url(Some(42), false, false), "/#/waveform?meetingId=42");
+        // First flag uses `?`, the second uses `&`.
+        assert_eq!(waveform_url(None, true, true), "/#/waveform?auto=1&pillHidden=1");
+        assert_eq!(waveform_url(None, false, true), "/#/waveform?pillHidden=1");
+        assert_eq!(
+            waveform_url(Some(7), true, true),
+            "/#/waveform?meetingId=7&auto=1&pillHidden=1"
+        );
+    }
+
+    #[test]
     fn note_or_transcript_filename_maps_known_kinds() {
-        assert_eq!(note_or_transcript_filename("note").unwrap(), "note.md");
+        assert_eq!(note_or_transcript_filename("note").unwrap(), "ari-note.md");
         assert_eq!(
             note_or_transcript_filename("transcript").unwrap(),
             "transcript.md"
@@ -649,5 +1184,185 @@ mod tests {
         let dir = recording_dir(id).unwrap();
         assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    fn test_meta(id: &str) -> crate::storage::RecordingMeta {
+        crate::storage::RecordingMeta {
+            id: id.into(),
+            title: "Old".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 1,
+            status: crate::storage::RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+        }
+    }
+
+    #[test]
+    fn rename_local_recording_updates_title_in_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // Quotes round-trip through meta.json (serde escapes them); whitespace
+        // is trimmed before saving. Only `title` changes.
+        rename_local_recording(id.to_string(), "  Team sync \"Q2\"  ".to_string()).unwrap();
+
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Team sync \"Q2\"");
+        assert_eq!(meta.created_at, "2026-06-02T14:30:05Z");
+        assert_eq!(meta.status, crate::storage::RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_empty_title() {
+        // Validation runs before any filesystem access, so no ARISO_ROOT needed.
+        assert!(rename_local_recording("any-id".to_string(), "".to_string()).is_err());
+        assert!(rename_local_recording("any-id".to_string(), "   ".to_string()).is_err());
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_over_limit_title_but_allows_40() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // 41 characters is rejected without touching the file.
+        assert!(rename_local_recording(id.to_string(), "x".repeat(41)).is_err());
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "Old");
+
+        // Exactly 40 characters saves.
+        rename_local_recording(id.to_string(), "x".repeat(40)).unwrap();
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "x".repeat(40));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_rejects_missing_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
+        assert!(res.is_err());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn meeting_id_must_be_digits_only() {
+        assert!(validate_meeting_id("123").is_ok());
+        assert!(validate_meeting_id("").is_err());
+        assert!(validate_meeting_id("12/audio").is_err());
+        assert!(validate_meeting_id("abc").is_err());
+        assert!(validate_meeting_id("12 ").is_err());
+    }
+
+    #[test]
+    fn recording_note_roundtrips_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note commands resolve through ARISO_ROOT, so this test follows the
+        // same serial test command requirement as the recording-dir tests.
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        assert_eq!(read_recording_note(id.into()).unwrap(), "");
+        write_recording_note(id.into(), "# Note\n- point".into()).unwrap();
+        let saved = read_recording_note(id.into()).unwrap();
+        assert_eq!(saved, "# Note\n- point");
+        assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn recording_note_title_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        // Missing sidecar reads as empty so a fresh recording has no title yet.
+        assert_eq!(read_recording_note_title(id.into()).unwrap(), "");
+        write_recording_note_title(id.into(), "Kickoff sync".into()).unwrap();
+        let saved = read_recording_note_title(id.into()).unwrap();
+        assert_eq!(saved, "Kickoff sync");
+        assert!(crate::storage::recordings_dir(tmp.path())
+            .join(id)
+            .join("user-note-title.txt")
+            .is_file());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn recording_note_read_rejects_oversized_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note commands resolve through ARISO_ROOT, so this test follows the
+        // same serial test command requirement as the recording-dir tests.
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::recordings_dir(tmp.path()).join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = std::fs::File::create(dir.join("user-note.md")).unwrap();
+        file.set_len(MAX_TEXT_BYTES + 1).unwrap();
+
+        let err = read_recording_note(id.into()).unwrap_err();
+        assert!(err.contains("recording note too large to read"));
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn recording_note_write_rejects_oversized_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note commands resolve through ARISO_ROOT, so this test follows the
+        // same serial test command requirement as the recording-dir tests.
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        let markdown = "x".repeat((MAX_TEXT_BYTES + 1) as usize);
+        let err = write_recording_note(id.into(), markdown).unwrap_err();
+        assert!(err.contains("recording note too large to write"));
+        assert!(!crate::storage::recordings_dir(tmp.path()).join(id).exists());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::flip_y;
+    #[test]
+    fn flips_web_top_left_to_appkit_bottom_left() {
+        // view 600 tall, button at css-y=40 height=32 -> appkit-y = 600-(40+32)=528
+        assert_eq!(flip_y(600.0, 40.0, 32.0), 528.0);
     }
 }

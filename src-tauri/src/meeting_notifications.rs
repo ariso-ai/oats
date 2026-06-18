@@ -10,7 +10,7 @@
 //! fetch of the inbox and surface any meeting-prep we haven't notified yet.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -19,11 +19,12 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
-    clear_session_token, get_session_token, http_client, API_BASE_URL, PUSHER_CLUSTER, PUSHER_KEY,
-    WEB_APP_BASE_URL,
+    api_base_url, clear_session_token, get_session_token, http_client, web_app_base_url,
+    PUSHER_CLUSTER, PUSHER_KEY,
 };
 
 const SETTINGS_PATH: &str = "settings.json";
@@ -264,7 +265,7 @@ async fn fetch_me(app: &AppHandle) -> Result<(String, String), SessionError> {
     let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .get(format!("{API_BASE_URL}/auth/me"))
+            .get(format!("{}/auth/me", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .send()
@@ -313,7 +314,7 @@ async fn pusher_auth(
     let body = json!({ "socketId": socket_id, "channelName": channel });
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .post(format!("{API_BASE_URL}/pusher/auth"))
+            .post(format!("{}/pusher/auth", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
@@ -355,7 +356,7 @@ async fn fetch_inbox(app: &AppHandle) -> Result<Vec<InboxItem>, SessionError> {
     let token = get_session_token(app).ok_or(SessionError::Auth)?;
     let v: Value = tokio::time::timeout(HTTP_TIMEOUT, async {
         let resp = http_client()
-            .get(format!("{API_BASE_URL}/user-inbox-messages?limit=20"))
+            .get(format!("{}/user-inbox-messages?limit=20", api_base_url()))
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
             .send()
@@ -470,7 +471,161 @@ fn build_notification(message: Option<&str>) -> (String, String) {
 
 /// The web deep link a meeting-prep notification opens when clicked.
 fn prep_url(prep_id: i64) -> String {
-    format!("{WEB_APP_BASE_URL}/my/meeting-prep-v2/{prep_id}")
+    format!("{}/my/meeting-prep-v2/{prep_id}", web_app_base_url())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-record confirm/deny prompt
+//
+// When the mic monitor detects a meeting it asks here for a decision via a
+// notification carrying Record / Dismiss buttons. The user has 10 seconds to
+// choose; if they don't, the caller's mode default applies (record when
+// auto-record is on, skip when it's off). Lives in this module because there
+// is a single UNUserNotificationCenter delegate and it must route both the
+// meeting-prep clicks and these action buttons.
+// ---------------------------------------------------------------------------
+
+/// Identifiers for the auto-record prompt. The category id tells macOS which
+/// action buttons to attach to the notification; the action ids come back in
+/// the delegate's `didReceive` so we know which button was tapped.
+const AUTO_RECORD_CATEGORY: &str = "ai.ariso.auto-record";
+const AUTO_RECORD_ACTION_RECORD: &str = "ai.ariso.auto-record.record";
+const AUTO_RECORD_ACTION_DISMISS: &str = "ai.ariso.auto-record.dismiss";
+
+/// How long the prompt stays actionable before the caller's mode default wins.
+const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One-shot sender for the in-flight auto-record prompt. The notification
+/// delegate (ObjC callback, main thread) fills it when a button is tapped; the
+/// awaiting `prompt_auto_record` task receives the choice. Only one prompt is
+/// ever live at a time — the mic monitor stays in its Recording phase until the
+/// meeting ends — so a new prompt simply replaces any stale sender.
+fn prompt_slot() -> &'static Mutex<Option<oneshot::Sender<bool>>> {
+    static SLOT: OnceLock<Mutex<Option<oneshot::Sender<bool>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Deliver the user's choice from the notification delegate to the awaiting
+/// `prompt_auto_record`. No-op if nothing is waiting (already timed out).
+fn deliver_auto_record_decision(record: bool) {
+    if let Some(tx) = prompt_slot().lock().unwrap().take() {
+        let _ = tx.send(record);
+    }
+}
+
+/// Whether the meeting happening right now is already flagged for server-side
+/// auto-join (an Ariso notetaker will record it), in which case the desktop must
+/// not also record. Only the Ariso backend has a calendar; everything else — and
+/// any network/parse error — returns false so detection proceeds normally.
+pub async fn current_meeting_auto_join_scheduled(app: &AppHandle) -> bool {
+    use crate::commands::{active_backend, api_base_url, get_session_token, http_client};
+    if active_backend(app) != "ariso" {
+        return false;
+    }
+    let Some(token) = get_session_token(app) else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    let start = (now - chrono::Duration::hours(2)).to_rfc3339();
+    let end = (now + chrono::Duration::hours(2)).to_rfc3339();
+    let result = tokio::time::timeout(HTTP_TIMEOUT, async {
+        http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .query(&[("startDate", start.as_str()), ("endDate", end.as_str())])
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    })
+    .await;
+    match result {
+        Ok(Some(v)) => current_meeting_auto_join_from(&v, now.timestamp_millis()),
+        _ => false,
+    }
+}
+
+/// Pure selector (testable): given the `/meetings` response and the current time
+/// in epoch-ms, return whether the *current* meeting is auto-join-scheduled.
+/// "Current" mirrors the frontend's `pickDefaultMeeting`: a meeting is current
+/// when `start - 5min <= now <= start + 60min`; if several overlap, the latest
+/// start wins (the one you most recently joined).
+fn current_meeting_auto_join_from(resp: &Value, now_ms: i64) -> bool {
+    const FIVE_MIN_MS: i64 = 5 * 60_000;
+    const SIXTY_MIN_MS: i64 = 60 * 60_000;
+    let Some(meetings) = resp.get("meetings").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut current_start = i64::MIN;
+    let mut current_auto_join = false;
+    for m in meetings {
+        let Some(start_str) = m.get("start_at").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(start_ms) = chrono::DateTime::parse_from_rfc3339(start_str)
+            .map(|dt| dt.timestamp_millis())
+        else {
+            continue;
+        };
+        let is_current = start_ms - FIVE_MIN_MS <= now_ms && now_ms <= start_ms + SIXTY_MIN_MS;
+        if is_current && start_ms >= current_start {
+            current_start = start_ms;
+            current_auto_join = truthy(m.get("auto_join_scheduled"));
+        }
+    }
+    current_auto_join
+}
+
+/// Lenient truthiness for an API flag that may arrive as a bool, 0/1, or string.
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_i64().map(|i| i != 0).unwrap_or(false),
+        Some(Value::String(s)) => s == "true" || s == "1",
+        _ => false,
+    }
+}
+
+/// Show the auto-record confirm/deny notification and await the user's choice.
+/// Resolves `true` to start recording. Returns `default_record` if the user
+/// doesn't respond within the 10s window — or on a build where the action
+/// buttons aren't available (the plugin fallback can't report a tap).
+pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
+    let (tx, rx) = oneshot::channel();
+    *prompt_slot().lock().unwrap() = Some(tx);
+    show_auto_record_prompt(app);
+    match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
+        Ok(Ok(record)) => record,
+        // Timed out, or the sender was dropped/replaced — apply the mode
+        // default and drop any stale sender we still own.
+        _ => {
+            let _ = prompt_slot().lock().unwrap().take();
+            default_record
+        }
+    }
+}
+
+/// Show the prompt notification with Record/Dismiss buttons. On a signed macOS
+/// bundle this uses UNUserNotificationCenter (the only path that renders action
+/// buttons). In dev / on other platforms it falls back to a plain banner with
+/// no buttons — the prompt then resolves on the timeout default.
+fn show_auto_record_prompt(app: &AppHandle) {
+    let title = "Meeting detected";
+    let body = "Start recording this meeting?";
+    #[cfg(target_os = "macos")]
+    if !tauri::is_dev() {
+        macos_un::show_auto_record(app, title, body);
+        return;
+    }
+    // Dev / non-macOS: plugin banner (no buttons). NOTE: from `tauri dev` on
+    // macOS the process isn't a real .app bundle, so this may post nothing
+    // visible — the prompt with buttons only renders from the built bundle.
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("auto-record: failed to show prompt notification: {e}");
+    }
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
@@ -511,9 +666,10 @@ mod macos_un {
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread};
-    use objc2_foundation::{NSError, NSString};
+    use objc2_foundation::{NSArray, NSError, NSSet, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
+        UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
         UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
@@ -544,7 +700,9 @@ mod macos_un {
                 completion.call((opts,));
             }
 
-            // On click, open the deep link carried as the request identifier.
+            // Auto-record action buttons resolve the pending prompt; otherwise
+            // (a meeting-prep body click) open the deep link carried as the
+            // request identifier.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -552,6 +710,17 @@ mod macos_un {
                 response: &UNNotificationResponse,
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
+                let action = response.actionIdentifier().to_string();
+                if action == super::AUTO_RECORD_ACTION_RECORD {
+                    super::deliver_auto_record_decision(true);
+                    completion.call(());
+                    return;
+                }
+                if action == super::AUTO_RECORD_ACTION_DISMISS {
+                    super::deliver_auto_record_decision(false);
+                    completion.call(());
+                    return;
+                }
                 let url = response.notification().request().identifier().to_string();
                 if url.starts_with("http") {
                     let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -584,11 +753,66 @@ mod macos_un {
         // setDelegate stores a weak reference; leak a strong ref so the
         // delegate lives for the whole process.
         std::mem::forget(delegate);
+        register_auto_record_category(&center);
         let handler = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
         center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &handler,
         );
+    }
+
+    /// Register the auto-record category so the prompt notification renders its
+    /// Record / Dismiss buttons. Actions run in the background (no Foreground
+    /// option) — the handler only signals a channel, it doesn't need the app
+    /// frontmost. Dismiss is styled destructive.
+    fn register_auto_record_category(center: &UNUserNotificationCenter) {
+        let record = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::AUTO_RECORD_ACTION_RECORD),
+            &NSString::from_str("Record"),
+            UNNotificationActionOptions::empty(),
+        );
+        let dismiss = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::AUTO_RECORD_ACTION_DISMISS),
+            &NSString::from_str("Dismiss"),
+            UNNotificationActionOptions::Destructive,
+        );
+        let actions = NSArray::from_retained_slice(&[record, dismiss]);
+        let intents: Retained<NSArray<NSString>> = NSArray::from_slice(&[]);
+        let category =
+            UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                &NSString::from_str(super::AUTO_RECORD_CATEGORY),
+                &actions,
+                &intents,
+                UNNotificationCategoryOptions::empty(),
+            );
+        let categories = NSSet::from_retained_slice(&[category]);
+        center.setNotificationCategories(&categories);
+    }
+
+    /// Show the auto-record prompt with action buttons. Mirrors `show` but tags
+    /// the content with the auto-record category so macOS attaches the buttons;
+    /// on UNC failure it falls back to a (button-less) plugin banner.
+    pub fn show_auto_record(app: &AppHandle, title: &str, body: &str) {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setCategoryIdentifier(&NSString::from_str(super::AUTO_RECORD_CATEGORY));
+        // A non-http identifier so the body-click handler's URL guard skips it.
+        let identifier = NSString::from_str(super::AUTO_RECORD_CATEGORY);
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &identifier, &content, None,
+        );
+        let app = app.clone();
+        let title = title.to_string();
+        let body = body.to_string();
+        let handler = RcBlock::new(move |err: *mut NSError| {
+            if let Some(desc) = err_desc(err) {
+                eprintln!("auto-record: UNC unavailable ({desc}); using plugin fallback (no buttons)");
+                let _ = app.notification().builder().title(&title).body(&body).show();
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
     }
 
     pub fn show(app: &AppHandle, title: &str, body: &str, url: &str) {
@@ -671,4 +895,80 @@ pub async fn sync_meeting_notifications(app: AppHandle) -> Result<(), String> {
 pub async fn stop_meeting_notifications(app: AppHandle) -> Result<(), String> {
     stop(&app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // 2026-06-16T12:00:00Z in epoch-ms, used as "now" across the cases.
+    const NOW_MS: i64 = 1_781_956_800_000;
+
+    fn at(offset_min: i64) -> String {
+        let dt = chrono::DateTime::from_timestamp_millis(NOW_MS + offset_min * 60_000).unwrap();
+        dt.to_rfc3339()
+    }
+
+    #[test]
+    fn skips_when_current_meeting_is_auto_join_scheduled() {
+        // Started 10 min ago (current), flagged for server-side auto-join.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "auto_join_scheduled": true }
+        ]});
+        assert!(current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn does_not_skip_when_current_meeting_is_not_flagged() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "auto_join_scheduled": false }
+        ]});
+        assert!(!current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn flag_on_a_non_current_meeting_is_ignored() {
+        // Started 2h ago (well past the +60min current window) — not current.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-120), "auto_join_scheduled": true }
+        ]});
+        assert!(!current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn latest_starting_current_meeting_wins_on_overlap() {
+        // Two overlapping current meetings; the later-starting one (not flagged)
+        // is the active one, mirroring pickDefaultMeeting's tie-break.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-50), "auto_join_scheduled": true },
+            { "id": 2, "start_at": at(-2),  "auto_join_scheduled": false }
+        ]});
+        assert!(!current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn within_five_minute_lead_in_counts_as_current() {
+        // Starts in 3 min — inside the 5-min lead-in, so it's already current.
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(3), "auto_join_scheduled": true }
+        ]});
+        assert!(current_meeting_auto_join_from(&resp, NOW_MS));
+    }
+
+    #[test]
+    fn truthy_accepts_bool_number_and_string_forms() {
+        assert!(truthy(Some(&json!(true))));
+        assert!(truthy(Some(&json!(1))));
+        assert!(truthy(Some(&json!("true"))));
+        assert!(!truthy(Some(&json!(false))));
+        assert!(!truthy(Some(&json!(0))));
+        assert!(!truthy(None));
+    }
+
+    #[test]
+    fn missing_or_empty_meetings_does_not_skip() {
+        assert!(!current_meeting_auto_join_from(&json!({}), NOW_MS));
+        assert!(!current_meeting_auto_join_from(&json!({ "meetings": [] }), NOW_MS));
+    }
 }

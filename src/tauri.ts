@@ -2,6 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { load } from '@tauri-apps/plugin-store';
 
+// Broadcast when any window completes desktop auth. Settings is pre-created and
+// can mount before onboarding signs in, so it needs a cross-window refresh cue.
+export const AUTH_SIGNED_IN_EVENT = 'auth://signed-in';
+
 interface SignInResult {
   success?: boolean;
   sessionToken?: string;
@@ -74,6 +78,12 @@ export const api = {
   ): Promise<number> {
     return invoke<number>('put_presigned', { url, data, contentType });
   },
+
+  /** Raw audio bytes for an Ariso meeting. Rejects with a message prefixed
+   *  by the HTTP status (e.g. "404: …") when the server has no audio. */
+  async fetchMeetingAudio(meetingId: string | number): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('fetch_meeting_audio', { meetingId: String(meetingId) });
+  },
 };
 
 export interface DesktopConfig {
@@ -84,6 +94,19 @@ export interface DesktopConfig {
 
 export async function getDesktopConfig(): Promise<DesktopConfig> {
   return invoke<DesktopConfig>('get_desktop_config');
+}
+
+export interface ShareAnchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Open the native macOS share sheet over `text`, anchored to `anchor`
+ *  (the Share button's getBoundingClientRect in CSS px). macOS only. */
+export function shareTextNative(text: string, anchor: ShareAnchor): Promise<void> {
+  return invoke('share_text_native', { text, anchor });
 }
 
 export interface PusherAuthResponse {
@@ -185,8 +208,31 @@ export const local = {
   readRecordingAudio(id: string): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('read_recording_audio', { id });
   },
+  /** Reads the local `user-note.md` artifact the Library editor autosaves. */
+  readRecordingNote(id: string): Promise<string> {
+    return invoke<string>('read_recording_note', { id });
+  },
+  writeRecordingNote(id: string, markdown: string): Promise<void> {
+    return invoke('write_recording_note', { id, markdown });
+  },
+  /** Reads the local `user-note-title.txt` sidecar holding the My-note title. */
+  readRecordingNoteTitle(id: string): Promise<string> {
+    return invoke<string>('read_recording_note_title', { id });
+  },
+  writeRecordingNoteTitle(id: string, title: string): Promise<void> {
+    return invoke('write_recording_note_title', { id, title });
+  },
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
+  },
+  /** Read a recording's note/transcript markdown for in-app rendering.
+   *  Resolves to null when the file hasn't been generated yet. */
+  readRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<string | null> {
+    return invoke<string | null>('read_recording_file', { id, kind });
+  },
+  /** Update a local recording's title in its meta.json (folder id unchanged). */
+  renameRecording(id: string, title: string): Promise<void> {
+    return invoke('rename_local_recording', { id, title });
   },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
@@ -202,6 +248,37 @@ export const local = {
   },
 };
 
+/** Metadata persisted next to a buffered Ariso upload, mirrors the Rust
+ *  `PendingUploadMeta`. Lets the Library resume a failed upload after restart. */
+export interface PendingUploadMeta {
+  createdAt: string;
+  startAt: string | null;
+  endAt: string;
+  durationSeconds: number;
+  meetingId?: number;
+}
+
+/** Disk buffer for Ariso uploads: audio + metadata are persisted before the
+ *  upload attempt and removed once the server confirms (or the user
+ *  dismisses). Keyed by the recording's ISO `createdAt`; Rust derives the id. */
+export const pending = {
+  bufferAudio(audio: number[], meta: PendingUploadMeta): Promise<string> {
+    return invoke<string>('buffer_pending_audio', { audio, meta });
+  },
+  /** Idempotent — missing buffer files are not an error. */
+  discardAudio(createdAt: string): Promise<void> {
+    return invoke('discard_pending_audio', { createdAt });
+  },
+  /** Buffered uploads awaiting resume, oldest-first. */
+  list(): Promise<PendingUploadMeta[]> {
+    return invoke<PendingUploadMeta[]>('list_pending_uploads');
+  },
+  /** Concatenate the given buffers (chronological keys) into one mp3's bytes. */
+  combine(createdAtKeys: string[]): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('combine_pending_audio', { createdAtKeys });
+  },
+};
+
 export async function getBackendSetting(): Promise<'ariso' | 'local'> {
   const store = await load('settings.json', { autoSave: true });
   const v = await store.get<string>('backend');
@@ -211,4 +288,35 @@ export async function getBackendSetting(): Promise<'ariso' | 'local'> {
 export async function setBackendSetting(backend: 'ariso' | 'local'): Promise<void> {
   const store = await load('settings.json', { autoSave: true });
   await store.set('backend', backend);
+}
+
+export async function isOnboarded(): Promise<boolean> {
+  const store = await load('settings.json', { autoSave: true });
+  return (await store.get<boolean>('onboarded')) === true;
+}
+
+export async function setOnboarded(value: boolean): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('onboarded', value);
+}
+
+/** Whether the first-time "download local models?" dialog has been confirmed. */
+export async function hasPromptedLocalModels(): Promise<boolean> {
+  const store = await load('settings.json', { autoSave: true });
+  return (await store.get<boolean>('localModelsPrompted')) === true;
+}
+
+export async function setPromptedLocalModels(value: boolean): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('localModelsPrompted', value);
+}
+
+/** Open (or focus) the first-run onboarding window. */
+export async function openOnboardingWindow(): Promise<void> {
+  await invoke('create_onboarding_window');
+}
+
+/** Open (or focus) Settings after flows that need the user back in native UI. */
+export async function openSettingsWindow(): Promise<void> {
+  await invoke('create_settings_window');
 }

@@ -5,7 +5,29 @@ use tauri::{
     AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
 
-const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../src/assets/ariso-logo-w.png");
+// Appearance-aware tray icons (NOT template images, so the fill color shows).
+// Both are 128x128 so the icon renders at the same size in either appearance.
+// The dark-mode mark has a yellow outline (visible on a dark menu bar).
+// `apply_theme` swaps between them on system-appearance changes.
+const TRAY_ICON_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
+const TRAY_ICON_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
+
+fn tray_icon_bytes(theme: tauri::Theme) -> &'static [u8] {
+    match theme {
+        tauri::Theme::Dark => TRAY_ICON_DARK,
+        _ => TRAY_ICON_LIGHT,
+    }
+}
+
+/// Swap the tray icon to match the current menu-bar appearance. Called once
+/// after the main window exists (to set the correct initial icon) and again on
+/// every `ThemeChanged` event.
+pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    if let Ok(icon) = Image::from_bytes(tray_icon_bytes(theme)) {
+        let _ = tray.set_icon(Some(icon));
+    }
+}
 
 /// Rebuild the tray menu in-place. Called from tray events (main thread)
 /// and from the `set_tray_recording` command.
@@ -14,18 +36,65 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
     let menu = if is_recording {
         build_recording_menu(app, is_paused)
     } else {
-        build_idle_menu(app)
+        let featured = app
+            .state::<crate::tray_meeting::FeaturedMeetingState>()
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                // If a previous tray update panicked while holding this lock,
+                // keep the last meeting instead of crashing the whole tray.
+                eprintln!("tray: FeaturedMeetingState mutex poisoned; recovering");
+                poisoned.into_inner()
+            })
+            .clone();
+        build_idle_menu(app, featured.as_ref())
     };
     if let Ok(menu) = menu {
         let _ = tray.set_menu(Some(menu));
     }
+    refresh_tray_title(app);
+}
+
+/// Render or clear the menu-bar text next to the tray icon. Shows the
+/// featured meeting's countdown only when idle; recording (or no upcoming
+/// meeting / Local backend / signed out) clears it. macOS-only effect —
+/// `set_title` is a no-op elsewhere.
+pub fn refresh_tray_title(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    let recording = app
+        .state::<crate::recording_state::RecordingState>()
+        .is_active();
+    let featured = app
+        .state::<crate::tray_meeting::FeaturedMeetingState>()
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| {
+            // If the shared meeting state was poisoned, use the stored value
+            // anyway so the tray can clear or redraw instead of panicking.
+            eprintln!("tray: FeaturedMeetingState mutex poisoned; recovering");
+            poisoned.into_inner()
+        })
+        .clone();
+    let title = match featured {
+        Some(f) if !recording => crate::tray_meeting::format_title_bar(
+            f.title.as_deref(),
+            f.start_at,
+            chrono::Utc::now(),
+        ),
+        // macOS keeps the previous status-item title when passed `None`; use
+        // an explicit empty string for signed-out, Local, and recording states.
+        _ => String::new(),
+    };
+    let _ = tray.set_title(Some(title));
 }
 
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
-    let menu = build_idle_menu(app)?;
+    let menu = build_idle_menu(app, None)?;
 
     TrayIconBuilder::with_id("main")
-        .icon(Image::from_bytes(TRAY_ICON_BYTES)?)
+        // Default to the light-mode icon; main.rs corrects this to the actual
+        // system appearance once the main window exists, then keeps it in sync.
+        .icon(Image::from_bytes(TRAY_ICON_LIGHT)?)
         .icon_as_template(false)
         .menu(&menu)
         .on_menu_event(|app, event| {
@@ -51,7 +120,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                     let _ = app_main.emit("tray://show-model-prompt", ());
                                     return;
                                 }
-                                let _ = crate::commands::open_waveform_window(&app_main, None);
+                                let _ = crate::commands::open_waveform_window(&app_main, None, false);
                             });
                             return;
                         }
@@ -68,22 +137,45 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                 let _ = app_main.emit("tray://show-sign-in-prompt", ());
                                 return;
                             }
-                            if let Some(picker) = app_main.get_webview_window("meeting-picker") {
-                                let _ = picker.show();
-                                let _ = picker.set_focus();
+                            let _ = crate::commands::open_meeting_picker_window(&app_main);
+                        });
+                    });
+                }
+                "record_featured" => {
+                    let app_async = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let meeting_id = app_async
+                            .state::<crate::tray_meeting::FeaturedMeetingState>()
+                            .0
+                            .lock()
+                            .unwrap_or_else(|poisoned| {
+                                // A poisoned lock still contains the selected
+                                // meeting; recover it so one-click record works.
+                                eprintln!(
+                                    "tray: FeaturedMeetingState mutex poisoned; recovering"
+                                );
+                                poisoned.into_inner()
+                            })
+                            .as_ref()
+                            .map(|f| f.id);
+                        let Some(meeting_id) = meeting_id else { return };
+
+                        let valid = crate::commands::is_session_valid(&app_async).await;
+                        let app_main = app_async.clone();
+                        let _ = app_async.run_on_main_thread(move || {
+                            if !valid {
+                                if let Some(win) = app_main.get_webview_window("settings") {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
                                 return;
                             }
-                            let _ = WebviewWindowBuilder::new(
+                            let _ = crate::commands::open_waveform_window(
                                 &app_main,
-                                "meeting-picker",
-                                tauri::WebviewUrl::App("/#/meeting-picker".into()),
-                            )
-                            .title("Select a meeting")
-                            .inner_size(400.0, 500.0)
-                            .resizable(false)
-                            .center()
-                            .skip_taskbar(true)
-                            .build();
+                                Some(meeting_id),
+                                false,
+                            );
                         });
                     });
                 }
@@ -115,7 +207,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         "settings",
                         tauri::WebviewUrl::App("/#/settings".into()),
                     )
-                    .title("Ariso Settings")
+                    .title("oats Settings")
                     .inner_size(450.0, 800.0)
                     .resizable(false)
                     .center()
@@ -134,21 +226,13 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 "library" => {
+                    // The Meetings window is backend-aware: its list is
+                    // populated from the active backend (Ariso server meetings
+                    // or local recordings), so open the in-app window for both
+                    // rather than sending Ariso users out to the browser.
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        if crate::commands::active_backend(&app_async) == "local" {
-                            // Local backend: reuse the in-app Library window
-                            // (titled "Meetings").
-                            let _ = crate::commands::create_library_window(app_async).await;
-                        } else {
-                            // Ariso backend: meetings live in the web app.
-                            use tauri_plugin_opener::OpenerExt;
-                            let url = format!(
-                                "{}/my/meetings",
-                                crate::commands::WEB_APP_BASE_URL
-                            );
-                            let _ = app_async.opener().open_url(url, None::<&str>);
-                        }
+                        let _ = crate::commands::create_library_window(app_async).await;
                     });
                 }
                 "check_updates" => {
@@ -168,14 +252,39 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+pub fn build_idle_menu(
+    app: &AppHandle,
+    featured: Option<&crate::tray_meeting::FeaturedMeeting>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let mut builder = MenuBuilder::new(app);
+
+    // Featured next meeting: a clickable full-title row that records that
+    // meeting, over a disabled (gray) time row. muda has no per-item font
+    // control, so a disabled item is the closest native "subtitle".
+    if let Some(f) = featured {
+        let title = f
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "Untitled meeting".to_string());
+        let record_featured = MenuItemBuilder::with_id("record_featured", title).build(app)?;
+        let time_label = crate::tray_meeting::format_time_range(
+            f.start_at.with_timezone(&chrono::Local),
+            f.end_at.map(|e| e.with_timezone(&chrono::Local)),
+        );
+        let time_row = MenuItemBuilder::with_id("featured_time", time_label)
+            .enabled(false)
+            .build(app)?;
+        builder = builder.item(&record_featured).item(&time_row).separator();
+    }
+
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
     let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit Ariso").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit oats").build(app)?;
 
-    MenuBuilder::new(app)
+    builder
         .item(&start)
         .separator()
         .item(&settings)
@@ -186,6 +295,8 @@ pub fn build_idle_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
         .build()
 }
 
+/// Build the smaller tray menu shown while a recording is running. It exposes
+/// only controls that are safe during capture, so users cannot quit mid-upload.
 pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let pause_or_resume = if is_paused {
         MenuItemBuilder::with_id("resume_recording", "Resume Recording").build(app)?

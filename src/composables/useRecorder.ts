@@ -3,11 +3,16 @@ import lamejs from '@breezystack/lamejs';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-export type RecordingMode = 'mic' | 'mic_and_system';
+export type { RecordingMode } from '../views/recordingSettings';
+import type { RecordingMode } from '../views/recordingSettings';
 
 const hasTauri =
   typeof window !== 'undefined' &&
   ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
+
+// Peak (absolute Int16) below which a frame counts as "no sound activity".
+// ~0.01 of full scale (32768) — above the noise floor, below real speech.
+const SILENCE_LEVEL = 300;
 
 export function useRecorder() {
   const isRecording: Ref<boolean> = ref(false);
@@ -16,12 +21,22 @@ export function useRecorder() {
   const durationSeconds: Ref<number> = ref(0);
   const startedAt: Ref<string | null> = ref(null);
   const systemAudioSupported: Ref<boolean> = ref(hasTauri);
+  // Wall-clock of the last frame that carried real sound, for the silence
+  // backstop. Seeded on start and reset on resume so paused gaps don't count.
+  const lastSoundAt: Ref<number> = ref(Date.now());
+  // Analyser spectrum (0–1 per bin) sampled once per audio frame (~10/s).
+  // Unlike a rAF-driven loop, this keeps updating while the window is hidden,
+  // so it can drive waveform mirrors in other windows.
+  const frameLevels: Ref<number[]> = ref([]);
 
   let audioContext: AudioContext | null = null;
   let micStream: MediaStream | null = null;
   let micSource: MediaStreamAudioSourceNode | null = null;
   let processor: ScriptProcessorNode | null = null;
   let analyserNode: AnalyserNode | null = null;
+  // Silent sink used only in system-audio-only mode to keep the Web Audio graph
+  // pulling (so the ScriptProcessor fires) without playing the captured audio.
+  let systemGain: GainNode | null = null;
   let mp3Encoder: lamejs.Mp3Encoder | null = null;
   let mp3Chunks: Int8Array[] = [];
   let timerInterval: ReturnType<typeof setInterval> | null = null;
@@ -85,27 +100,40 @@ export function useRecorder() {
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
 
-    const useSystemAudio = mode === 'mic_and_system' && hasTauri;
+    const useSystemAudio = (mode === 'mic_and_system' || mode === 'system') && hasTauri;
+    const useMic = mode !== 'system';
+    // Outside Tauri, system-audio-only collapses to no usable input; fail fast
+    // rather than building a silent graph and recording zeroes.
+    if (!useMic && !useSystemAudio) {
+      throw new Error('No recording source is available');
+    }
 
     try {
-      const debug =
-        import.meta.env.DEV && import.meta.env.VITE_DEBUG_AUDIO === 'true';
-
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: !debug,
-          noiseSuppression: !debug,
-          sampleRate: 44100,
-        },
-      });
-
       audioContext = new AudioContext({ sampleRate: 44100 });
-      micSource = audioContext.createMediaStreamSource(micStream);
-
-      // Analyser for waveform visualization
       analyserNode = audioContext.createAnalyser();
-      micSource.connect(analyserNode);
+
+      if (useMic) {
+        // Capture the mic raw — no echo cancellation, noise suppression, or
+        // auto gain control. Enabling any of these routes the mic through
+        // macOS Voice-Processing I/O, whose AGC drives the *shared* physical
+        // input device gain down. A video-conference app reading the same
+        // microphone then captures a quieter signal, so the remote end hears
+        // the user's voice drop while Oats records. We capture system audio on
+        // a separate channel anyway, so we don't need echo cancellation to keep
+        // the other participants out of the mic channel.
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 44100,
+          },
+        });
+        micSource = audioContext.createMediaStreamSource(micStream);
+        // Analyser for waveform visualization (mic path)
+        micSource.connect(analyserNode);
+      }
 
       if (useSystemAudio) {
         // Start Tauri system audio capture and listen for PCM data events
@@ -133,50 +161,107 @@ export function useRecorder() {
           systemAudioBuffer = merged;
         });
         systemAudioUnlisten = unlisten;
-
-        // Stereo encoder: ch0 = mic, ch1 = system audio
-        mp3Encoder = new lamejs.Mp3Encoder(2, 44100, 128);
-      } else {
-        // Mono mic-only encoder
-        mp3Encoder = new lamejs.Mp3Encoder(1, 44100, 128);
       }
 
-      // ScriptProcessor to capture PCM samples
+      // Stereo (ch0 mic, ch1 system) only when mixing both; otherwise mono.
+      const channels = useMic && useSystemAudio ? 2 : 1;
+      mp3Encoder = new lamejs.Mp3Encoder(channels, 44100, 128);
+
+      // ScriptProcessor to capture PCM samples. Fires whenever it is connected
+      // to the destination — even with no input (the system-audio-only case).
       processor = audioContext.createScriptProcessor(4096, 1, 1);
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        // Sample the analyser before the paused/stopped early-return so the
+        // waveform mirrors keep moving (matching the local rAF display, which
+        // also keeps reading the analyser while paused).
+        if (analyserNode) {
+          const bins = new Uint8Array(analyserNode.frequencyBinCount);
+          analyserNode.getByteFrequencyData(bins);
+          frameLevels.value = Array.from(bins, (v) => v / 255);
+        }
         if (!isRecording.value || isPaused.value || !mp3Encoder) return;
+        const frame = e.inputBuffer.length;
+        let drainPeakRef: Int16Array = new Int16Array(0);
 
-        const samples = e.inputBuffer.getChannelData(0);
-        const micInt16 = new Int16Array(samples.length);
-        for (let i = 0; i < samples.length; i++) {
-          const s = Math.max(-1, Math.min(1, samples[i]));
-          micInt16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        // Mic channel (silent zero when mic is disabled)
+        const micInt16 = new Int16Array(frame);
+        if (useMic) {
+          const samples = e.inputBuffer.getChannelData(0);
+          for (let i = 0; i < samples.length; i++) {
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            micInt16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+          }
         }
 
         let mp3buf: Int8Array;
-        if (useSystemAudio) {
+        if (useMic && useSystemAudio) {
           // Drain system audio buffer, padded/trimmed to match mic frame size
           const sysRaw = drainSystemAudio(micInt16.length);
           const sysInt16 = new Int16Array(micInt16.length); // zero-filled
           if (sysRaw) {
             sysInt16.set(sysRaw.slice(0, micInt16.length));
           }
+          drainPeakRef = sysInt16;
           mp3buf = mp3Encoder.encodeBuffer(micInt16, sysInt16);
+        } else if (useSystemAudio) {
+          // System-audio-only: mono encode from the ring buffer, and feed the
+          // analyser by writing the same samples to the processor output (which
+          // routes through analyser → silent gain → destination).
+          const sysRaw = drainSystemAudio(frame);
+          const sysInt16 = new Int16Array(frame); // zero-filled
+          if (sysRaw) {
+            sysInt16.set(sysRaw.slice(0, frame));
+          }
+          drainPeakRef = sysInt16;
+          mp3buf = mp3Encoder.encodeBuffer(sysInt16);
+          const out = e.outputBuffer.getChannelData(0);
+          for (let i = 0; i < frame; i++) out[i] = sysInt16[i] / 0x8000;
         } else {
+          // Mic-only mono encode
           mp3buf = mp3Encoder.encodeBuffer(micInt16);
         }
 
         if (mp3buf.length > 0) {
           mp3Chunks.push(new Int8Array(mp3buf));
         }
+
+        // Silence backstop: note the time if this frame carried real sound on
+        // any active source (mic and/or system).
+        let peak = 0;
+        for (let i = 0; i < micInt16.length; i++) {
+          const a = Math.abs(micInt16[i]);
+          if (a > peak) peak = a;
+        }
+        if (useSystemAudio) {
+          const sys = drainPeakRef;
+          for (let i = 0; i < sys.length; i++) {
+            const a = Math.abs(sys[i]);
+            if (a > peak) peak = a;
+          }
+        }
+        if (peak >= SILENCE_LEVEL) {
+          lastSoundAt.value = Date.now();
+        }
       };
 
-      micSource.connect(processor);
-      processor.connect(audioContext.destination);
+      if (useMic) {
+        micSource!.connect(processor);
+        processor.connect(audioContext.destination);
+      } else {
+        // System-audio-only graph: processor → analyser → gain(0) → destination.
+        // The zero gain keeps playback silent while the connection to the
+        // destination keeps the processor firing.
+        systemGain = audioContext.createGain();
+        systemGain.gain.value = 0;
+        processor.connect(analyserNode);
+        analyserNode.connect(systemGain);
+        systemGain.connect(audioContext.destination);
+      }
 
       isRecording.value = true;
       isPaused.value = false;
       startedAt.value = new Date().toISOString();
+      lastSoundAt.value = Date.now();
 
       timerInterval = setInterval(() => {
         if (!isPaused.value) {
@@ -197,6 +282,8 @@ export function useRecorder() {
 
   function resumeRecording(): void {
     if (!isRecording.value || !isPaused.value) return;
+    // Reset so the paused interval never counts as silence.
+    lastSoundAt.value = Date.now();
     isPaused.value = false;
   }
 
@@ -240,6 +327,12 @@ export function useRecorder() {
     if (processor && micSource) {
       try {
         micSource.disconnect(processor);
+      } catch {
+        // Already disconnected
+      }
+    }
+    if (processor) {
+      try {
         processor.disconnect();
       } catch {
         // Already disconnected
@@ -248,6 +341,21 @@ export function useRecorder() {
     if (analyserNode && micSource) {
       try {
         micSource.disconnect(analyserNode);
+      } catch {
+        // Already disconnected
+      }
+    }
+    if (systemGain) {
+      try {
+        systemGain.disconnect();
+      } catch {
+        // Already disconnected
+      }
+      systemGain = null;
+    }
+    if (analyserNode) {
+      try {
+        analyserNode.disconnect();
       } catch {
         // Already disconnected
       }
@@ -274,6 +382,7 @@ export function useRecorder() {
     mp3Chunks = [];
     isRecording.value = false;
     isPaused.value = false;
+    frameLevels.value = [];
   }
 
   return {
@@ -282,6 +391,8 @@ export function useRecorder() {
     error,
     durationSeconds,
     startedAt,
+    lastSoundAt,
+    frameLevels,
     systemAudioSupported,
     getAnalyser,
     startRecording,
