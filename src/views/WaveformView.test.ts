@@ -77,6 +77,7 @@ vi.mock('../tauri', () => ({
 }));
 
 import WaveformView from './WaveformView.vue';
+import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -246,14 +247,37 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.status-icon.ok').exists()).toBe(false);
   });
 
-  it('auto-stops after the silence timeout elapses', async () => {
+  it('shows the silence prompt after 10 min of silence', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(16 * 60_000); // now well past lastSoundAt (0) + 15min
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // now past lastSoundAt (0) + 10 min
     finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    invoke.mockClear();
+    // One loop tick: should show the prompt but NOT stop.
     await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(stopRecording).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('auto-stops 60s after an unanswered silence prompt', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // past 10 min silence threshold
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    // First tick: shows the prompt (lastSoundAt stays 0, silence persists).
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(stopRecording).not.toHaveBeenCalled();
+    // Advance past the 60s grace — still silent, prompt ignored → auto-stop.
+    await vi.advanceTimersByTimeAsync(SILENCE_GRACE_MS + 1_000);
     await flushPromises();
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();
