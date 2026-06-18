@@ -257,6 +257,13 @@ jobs:
             echo "RELEASE_BODY_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # release-publish.sh uses `mapfile`, a bash 4.0+ builtin. The hosted
+      # macos-15 runner's system bash is 3.2, so install a modern bash from
+      # Homebrew and run the script with it explicitly (the next step's full
+      # path overrides the script's `#!/usr/bin/env bash` shebang).
+      - name: Install modern bash
+        run: brew install bash
+
       - name: Generate manifest and publish artifacts to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -267,7 +274,7 @@ jobs:
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
           RELEASE_BODY: ${{ steps.rel.outputs.body }}
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
-        run: .github/scripts/release-publish.sh
+        run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
 
       - name: Add R2 download link to GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
