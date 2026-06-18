@@ -20,6 +20,9 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 
 import { useRecorder } from './useRecorder';
 
+type AudioProcCb = ((e: unknown) => void) | null;
+let lastProcessor: { onaudioprocess: AudioProcCb } | null = null;
+
 class FakeAudioContext {
   destination = {};
   createAnalyser() {
@@ -34,11 +37,13 @@ class FakeAudioContext {
     return { connect: () => {}, disconnect: () => {} };
   }
   createScriptProcessor() {
-    return {
+    const proc = {
       connect: () => {},
       disconnect: () => {},
-      onaudioprocess: null as unknown,
+      onaudioprocess: null as AudioProcCb,
     };
+    lastProcessor = proc;
+    return proc;
   }
   createGain() {
     return { gain: { value: 0 }, connect: () => {}, disconnect: () => {} };
@@ -46,7 +51,17 @@ class FakeAudioContext {
   close() {}
 }
 
+// Minimal AudioProcessingEvent for the mic-only path.
+function fireAudioFrame(): void {
+  const samples = new Float32Array(4096);
+  lastProcessor?.onaudioprocess?.({
+    inputBuffer: { length: 4096, getChannelData: () => samples },
+    outputBuffer: { getChannelData: () => new Float32Array(4096) },
+  });
+}
+
 beforeEach(() => {
+  lastProcessor = null;
   (globalThis as unknown as { AudioContext: unknown }).AudioContext =
     FakeAudioContext;
   Object.defineProperty(navigator, 'mediaDevices', {
@@ -77,6 +92,24 @@ describe('useRecorder duration', () => {
     vi.advanceTimersByTime(1000);
 
     expect(rec.durationSeconds.value).toBe(25 * 60);
+  });
+
+  it('advances every second off the audio frame clock without a timer tick', async () => {
+    // No fake timers: the interval never fires. The audio callback must keep
+    // the display current on its own (it runs even while the window is hidden).
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const rec = useRecorder();
+    await rec.startRecording();
+
+    now += 1_000;
+    fireAudioFrame();
+    expect(rec.durationSeconds.value).toBe(1);
+
+    now += 1_000;
+    fireAudioFrame();
+    expect(rec.durationSeconds.value).toBe(2);
   });
 
   it('excludes paused time from the elapsed duration', async () => {

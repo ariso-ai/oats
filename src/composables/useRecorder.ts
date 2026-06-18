@@ -58,6 +58,22 @@ export function useRecorder() {
     return analyserNode;
   }
 
+  // Recompute the elapsed-time display from wall-clock, subtracting paused
+  // gaps (including any in-progress pause). Called both from the timer and
+  // from the audio frame callback — the latter fires ~10/s even while the
+  // window is backgrounded, so the display ticks every second even when the
+  // OS throttles the JS timer below 1 Hz.
+  function recomputeDuration(): void {
+    if (!recordingStartMs) return;
+    const now = Date.now();
+    const pausedSoFar =
+      pausedAccumMs + (pausedAtMs !== null ? now - pausedAtMs : 0);
+    durationSeconds.value = Math.max(
+      0,
+      Math.floor((now - recordingStartMs - pausedSoFar) / 1000)
+    );
+  }
+
   /**
    * Resample Int16 PCM from srcRate to dstRate using linear interpolation.
    */
@@ -186,6 +202,9 @@ export function useRecorder() {
           analyserNode.getByteFrequencyData(bins);
           frameLevels.value = Array.from(bins, (v) => v / 255);
         }
+        // Advance the elapsed-time display off the (un-throttled) audio clock
+        // so it ticks every second even when the window's JS timer is slowed.
+        recomputeDuration();
         if (!isRecording.value || isPaused.value || !mp3Encoder) return;
         const frame = e.inputBuffer.length;
         let drainPeakRef: Int16Array = new Int16Array(0);
@@ -273,18 +292,9 @@ export function useRecorder() {
       pausedAccumMs = 0;
       pausedAtMs = null;
 
-      // Recompute from wall-clock instead of counting ticks: subtract elapsed
-      // paused time (including the in-progress pause) so the value stays
-      // accurate even when the timer fires irregularly.
-      timerInterval = setInterval(() => {
-        const now = Date.now();
-        const pausedSoFar =
-          pausedAccumMs + (pausedAtMs !== null ? now - pausedAtMs : 0);
-        durationSeconds.value = Math.max(
-          0,
-          Math.floor((now - recordingStartMs - pausedSoFar) / 1000)
-        );
-      }, 1000);
+      // Backstop tick in case audio frames stop flowing; the audio callback
+      // drives the per-second updates while recording.
+      timerInterval = setInterval(recomputeDuration, 1000);
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
       await cleanup();
