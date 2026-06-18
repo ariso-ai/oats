@@ -661,4 +661,48 @@ describe('MeetingDetailView local generation progress', () => {
     const aiNotes = wrapper.findAll('.seg-btn').find((b) => b.text() === 'AI Notes')!;
     expect(aiNotes.attributes('disabled')).toBeUndefined();
   });
+
+  it('shows a Regenerate notes button when local AI Notes are ready and clicking it calls retryNotes', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+    });
+    readRecordingFile.mockResolvedValue('AI body');
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
+    await flushPromises();
+
+    // AI Notes is the default active tab (note present), so the button shows.
+    const regen = wrapper.find('.tab-regen');
+    expect(regen.exists()).toBe(true);
+    expect(regen.text()).toContain('Regenerate notes');
+
+    await regen.trigger('click');
+    await flushPromises();
+    expect(retryNotes).toHaveBeenCalledWith('7');
+  });
+
+  it('does not show the Regenerate notes button when no AI note exists yet', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
+    await flushPromises();
+    expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+
+  it('does not show the Regenerate notes button for an Ariso meeting', async () => {
+    const wrapper = await mountLocal(detail({ isLocal: false, digest: 'A digest' }));
+    await flushPromises();
+    expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+
+  it('hides the Regenerate notes button while notes are regenerating, showing the chip instead', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'Old body', hasTranscript: true }));
+    await flushPromises();
+    // A note exists (old body) but notes are generating -> chip owns the row.
+    expect(wrapper.find('.tab-status-label').text()).toBe('Generating AI Notes');
+    expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
 });

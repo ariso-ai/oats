@@ -115,6 +115,16 @@
             @click="onRetry"
           >Retry</button>
         </div>
+        <button
+          v-if="showRegenerate"
+          class="tab-regen"
+          type="button"
+          title="Regenerate AI Notes from the transcript"
+          @click="onRegenerate"
+        >
+          <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+          Regenerate notes
+        </button>
       </div>
 
       <!-- Content -->
@@ -421,6 +431,22 @@ const statusLabel = computed(() => {
 function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
   else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
+}
+
+// Local AI Notes can be regenerated from the transcript on demand. Shown only on
+// the AI Notes tab once a note already exists and nothing is in flight (the
+// status chip owns the row's right slot while generating/failed). Clicking
+// reuses the notes-retry path, which re-runs generation from transcript.md.
+const showRegenerate = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    activeTab.value === 'note' &&
+    !!detail.value?.note &&
+    !!detail.value?.hasTranscript &&
+    !showStatusChip.value
+);
+function onRegenerate(): void {
+  void progress.retryNotes();
 }
 
 // When the poller reports a newly-ready artifact, read it into `detail` so the
@@ -1002,6 +1028,14 @@ const durationLabel = computed<string | null>(() => {
 .tab-retry:hover:not(:disabled) { background: #fbfbfb; }
 .tab-retry:disabled { opacity: 0.6; cursor: default; }
 .spinner--sm { width: 14px; height: 14px; }
+.tab-regen {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-regen:hover { background: #fbfbfb; }
+.tab-regen .ic { width: 15px; height: 15px; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
