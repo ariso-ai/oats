@@ -42,6 +42,7 @@ vi.mock('../tauri', () => ({
 }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
+import MeetingNotesEditor from './MeetingNotesEditor.vue';
 
 function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
   return {
@@ -375,6 +376,40 @@ describe('MeetingDetailView inline title editing', () => {
     await wrapper.setProps({ item: second });
     await flushPromises();
 
+    expect(loadNote).toHaveBeenCalledWith(second);
+  });
+
+  it('flushes a pending My Notes draft before reloading the detail pane', async () => {
+    notesCanEdit.mockReturnValue(true);
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(detail({ id: meeting.id, title: meeting.title, isLocal: true }))
+    );
+    loadNote.mockResolvedValue({ content: '', title: '' });
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: false },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+
+    wrapper.findComponent(MeetingNotesEditor).vm.$emit('update:modelValue', 'draft from call');
+    await flushPromises();
+    expect(saveNote).not.toHaveBeenCalled();
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    expect(saveNote).toHaveBeenCalledWith(first, { content: 'draft from call', title: '' });
     expect(loadNote).toHaveBeenCalledWith(second);
   });
 

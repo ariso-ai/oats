@@ -270,7 +270,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue';
 import { renderMarkdown } from '../utils/markdown';
 import type { TranscriptChunk } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
@@ -394,6 +394,8 @@ let noteReqId = 0;
 let saveReqId = 0;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressAutoSave = false;
+let noteDirty = false;
+let loadedNoteItem: MeetingListItem | null = null;
 
 const notesCanEdit = computed(() => !!props.item && notesPersistence.canEdit(props.item));
 const notesPlaceholder = computed(() =>
@@ -496,6 +498,7 @@ function loadAudio(): Promise<ArrayBuffer | null> {
 }
 
 async function load(item: MeetingListItem | null): Promise<void> {
+  await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
   const my = ++reqId;
@@ -519,6 +522,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   // Clearing view state during a meeting switch is not a user edit. Keep
   // autosave suppressed until the selected note has loaded or the user types.
   suppressAutoSave = true;
+  loadedNoteItem = null;
   notesMarkdown.value = '';
   noteTitleDraft.value = '';
   editingNoteTitle.value = false;
@@ -740,11 +744,11 @@ async function loadTranscript(): Promise<void> {
 async function loadIndividualNote(): Promise<void> {
   if (!props.item || individualNoteLoaded.value || loadingIndividualNote.value) return;
   const my = ++noteReqId;
+  const item = props.item;
   loadingIndividualNote.value = true;
   saveState.value = 'idle';
   suppressAutoSave = true;
   try {
-    const item = props.item;
     const note = await notesPersistence.load(item);
     if (my !== noteReqId || props.item?.id !== item.id) return;
     notesMarkdown.value = note.content;
@@ -752,6 +756,8 @@ async function loadIndividualNote(): Promise<void> {
     editingNoteTitle.value = false;
     individualNote.value = { content: note.content, title: note.title };
     individualNoteLoaded.value = true;
+    loadedNoteItem = item;
+    noteDirty = false;
   } catch (e) {
     if (my !== noteReqId) return;
     console.error('Failed to load individual note', e);
@@ -760,6 +766,8 @@ async function loadIndividualNote(): Promise<void> {
     noteTitleDraft.value = '';
     editingNoteTitle.value = false;
     individualNoteLoaded.value = true;
+    loadedNoteItem = item;
+    noteDirty = false;
     saveState.value = 'error';
   } finally {
     if (my === noteReqId) {
@@ -772,7 +780,7 @@ async function loadIndividualNote(): Promise<void> {
 // Save the editable note target currently selected in the detail pane. The
 // parent calls this before changing selection, and the editor calls it on blur.
 async function saveNotesNow(): Promise<void> {
-  const item = props.item;
+  const item = loadedNoteItem ?? props.item;
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   const my = ++saveReqId;
   const markdown = notesMarkdown.value;
@@ -784,7 +792,9 @@ async function saveNotesNow(): Promise<void> {
   saveState.value = 'saving';
   try {
     await notesPersistence.save(item, { content: markdown, title });
-    if (my !== saveReqId || props.item?.id !== item.id) return;
+    const stillViewingSavedItem = props.item?.id === item.id;
+    if (my === saveReqId) noteDirty = false;
+    if (my !== saveReqId || !stillViewingSavedItem) return;
     if (detail.value) {
       detail.value.hasIndividualNote = markdown.trim().length > 0;
     }
@@ -799,6 +809,14 @@ async function saveNotesNow(): Promise<void> {
 }
 
 defineExpose({ saveNotesNow });
+
+// Flushes the loaded note before the detail pane clears local draft state.
+// This protects quick tab/meeting/window changes where the 700ms debounce has
+// not fired yet, while keeping saves attached to the meeting that supplied the draft.
+async function flushPendingNoteBeforeReset(): Promise<void> {
+  if (!noteDirty) return;
+  await saveNotesNow();
+}
 
 watch(activeTab, (t) => {
   if (t === 'transcript') void loadTranscript();
@@ -815,6 +833,7 @@ function scheduleNoteAutoSave(): void {
     !props.item ||
     !notesPersistence.canEdit(props.item)
   ) return;
+  noteDirty = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     void saveNotesNow();
@@ -824,8 +843,9 @@ function scheduleNoteAutoSave(): void {
 watch(notesMarkdown, scheduleNoteAutoSave);
 watch(noteTitleDraft, scheduleNoteAutoSave);
 
-onUnmounted(() => {
+onBeforeUnmount(() => {
   if (saveTimer) clearTimeout(saveTimer);
+  void flushPendingNoteBeforeReset();
 });
 
 const subtitle = computed(() => {
