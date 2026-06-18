@@ -167,7 +167,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --bundles app -- --features prod-api
 
-      # Compose the public DMG after the signed app bundle exists. create-dmg
+      # Compose the public DMG after the signed app bundle exists. appdmg
       # writes Finder metadata without needing Finder or AppleScript in CI.
       - name: Compose DMG layout
         run: npm run dmg:compose
