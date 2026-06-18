@@ -52,8 +52,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$(dirname "${OUTPUT_PATH}")"
-rm -f "${OUTPUT_PATH}"
+OUTPUT_DIR="$(dirname "${OUTPUT_PATH}")"
+mkdir -p "${OUTPUT_DIR}"
+find "${OUTPUT_DIR}" -maxdepth 1 -type f -name '*.dmg' -exec rm -f {} +
 
 CONFIG_PATH="${CONFIG_PATH}" \
 VOLUME_NAME="${VOLUME_NAME}" \
