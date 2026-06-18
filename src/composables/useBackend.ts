@@ -213,16 +213,27 @@ function recordingToListItem(r: RecordingSummary): MeetingListItem {
 // history; mirrors the old search dialog's limit.
 const MAX_LOCAL_SEARCH_RESULTS = 50;
 
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
 export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
-  // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same
-  // timezone (mixing toISOString's UTC date with toTimeString's local time can
-  // disagree near midnight).
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `Recording ${date} ${time}`;
+  // A friendly LOCAL label like "Sat Jun 17 @ 1PM" — every part reads from the
+  // same Date so they can't disagree across a timezone boundary near midnight.
+  const day = `${WEEKDAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  const hours = d.getHours();
+  const minutes = d.getMinutes();
+  const meridiem = hours < 12 ? 'AM' : 'PM';
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  const time =
+    minutes === 0
+      ? `${hour12}${meridiem}`
+      : `${hour12}:${String(minutes).padStart(2, '0')}${meridiem}`;
+  return `${day} @ ${time}`;
 }
 
 export class ArisoBackend implements Backend {

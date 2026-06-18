@@ -299,6 +299,7 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
     };
     let stop = MenuItemBuilder::with_id("stop_recording", "Stop Recording").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
 
     // Quit is intentionally omitted while recording to prevent
@@ -308,6 +309,7 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
         .item(&stop)
         .separator()
         .item(&settings)
+        .item(&library)
         .item(&check_updates)
         .build()
 }

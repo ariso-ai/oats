@@ -174,6 +174,17 @@ export interface RecordingSummary {
   hasTranscript: boolean;
 }
 
+export type NotesStatus = 'pending' | 'ready' | 'failed';
+
+/** Mirrors the Rust `RecordingStatusView`. Drives the detail panel's local
+ *  generation poller (tab enable/disable + the inline status chip). */
+export interface RecordingStatusView {
+  status: RecordingSummary['status'];
+  hasTranscript: boolean;
+  hasNote: boolean;
+  notesStatus: NotesStatus;
+}
+
 export interface LocalFinalizeResult {
   backend: 'local';
   id: string;
@@ -204,6 +215,18 @@ export const local = {
   },
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
+  },
+  /** Cheap single-recording status for the detail panel's generation poller. */
+  recordingStatus(id: string): Promise<RecordingStatusView> {
+    return invoke<RecordingStatusView>('local_recording_status', { id });
+  },
+  /** Re-run transcription (and notes) for a failed recording from saved audio. */
+  retryTranscription(id: string): Promise<LocalFinalizeResult> {
+    return invoke<LocalFinalizeResult>('retry_local_transcription', { id });
+  },
+  /** Regenerate AI notes from the existing transcript (no STT re-run). */
+  retryNotes(id: string): Promise<void> {
+    return invoke('retry_local_notes', { id });
   },
   readRecordingAudio(id: string): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('read_recording_audio', { id });

@@ -815,7 +815,7 @@ describe('LibraryView', () => {
     expect(rows).toHaveLength(2);
     // Within a date, rows sort earliest-first: Standup (10:00) then the
     // synthetic recording row (14:30).
-    expect(rows[1].text()).toContain('Recording 2026-06-02');
+    expect(rows[1].text()).toContain('Jun 2 @');
     expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
     expect(rows[1].attributes('aria-pressed')).toBe('true');
     // The embedded strip shows for the recorded meeting…

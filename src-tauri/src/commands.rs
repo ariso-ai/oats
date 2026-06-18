@@ -767,6 +767,27 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     crate::storage::list_recordings(&root)
 }
 
+/// Lightweight status for a single local recording, used by the detail panel's
+/// generation poller. Reads only that recording's `meta.json` and probes its
+/// two artifact files, deriving the AI-notes state the list summary omits.
+#[tauri::command]
+pub fn local_recording_status(
+    id: String,
+) -> Result<crate::storage::RecordingStatusView, String> {
+    crate::storage::validate_recording_id(&id)?;
+    let dir = recording_dir(&id)?;
+    let meta = crate::storage::read_meta(&dir)?;
+    let has_note = dir.join("ari-note.md").is_file();
+    let has_transcript = dir.join("transcript.md").is_file();
+    let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+    Ok(crate::storage::RecordingStatusView {
+        status: meta.status,
+        has_transcript,
+        has_note,
+        notes_status,
+    })
+}
+
 /// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
 /// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
 #[tauri::command]
@@ -1384,6 +1405,57 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+
+    #[test]
+    fn local_recording_status_reports_derived_notes_status() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let mut meta = crate::storage::RecordingMeta {
+            id: id.into(),
+            title: "T".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5,
+            status: crate::storage::RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+        };
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"t").unwrap();
+
+        // Transcript present, note absent, no error -> notes pending.
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.status, crate::storage::RecordingStatus::Done);
+        assert!(view.has_transcript);
+        assert!(!view.has_note);
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Pending);
+
+        // Record a notes failure -> notes failed.
+        meta.notes_error = Some("boom".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Failed);
+
+        // Write the note file -> notes ready (note presence wins over the error).
+        std::fs::write(dir.join("ari-note.md"), b"n").unwrap();
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert!(view.has_note);
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Ready);
+
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn local_recording_status_rejects_bad_id() {
+        assert!(local_recording_status("../escape".to_string()).is_err());
     }
 }
 

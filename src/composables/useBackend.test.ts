@@ -49,7 +49,13 @@ vi.mock('./useMeetingApi', () => ({
   }),
 }));
 
-import { ArisoBackend, LocalBackend, getActiveBackend, arisoMeetingWindow } from './useBackend';
+import {
+  ArisoBackend,
+  LocalBackend,
+  getActiveBackend,
+  arisoMeetingWindow,
+  timestampTitle,
+} from './useBackend';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -87,9 +93,11 @@ describe('LocalBackend', () => {
     expect(audioArg).toEqual([1, 2, 3]);
     expect(createdAtArg).toBe('2026-06-02T14:30:05.000Z');
     expect(durationArg).toBe(2400);
-    // Title is a consistent local "YYYY-MM-DD HH:MM" (assert format, not a
-    // timezone-specific value).
-    expect(titleArg).toMatch(/^Recording \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    // Title is a friendly local "Ddd Mmm D @ h[:mm]A" label (assert format, not
+    // a timezone-specific value).
+    expect(titleArg).toMatch(
+      /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} @ \d{1,2}(:\d{2})?(AM|PM)$/
+    );
   });
 
   it('renameMeeting forwards to the rename_local_recording bridge', async () => {
@@ -337,6 +345,36 @@ describe('arisoMeetingWindow', () => {
       startDate: '2025-12-27',
       endDate: '2026-01-10',
     });
+  });
+});
+
+describe('timestampTitle', () => {
+  // Construct local-time instants so the assertions hold regardless of the test
+  // machine's timezone (toISOString round-trips the same instant back).
+  const at = (h: number, m: number) => new Date(2026, 5, 17, h, m).toISOString();
+
+  it('formats an on-the-hour afternoon time without minutes', () => {
+    expect(timestampTitle(at(13, 0))).toBe('Wed Jun 17 @ 1PM');
+  });
+
+  it('includes minutes when not on the hour', () => {
+    expect(timestampTitle(at(13, 30))).toBe('Wed Jun 17 @ 1:30PM');
+  });
+
+  it('renders midnight as 12AM', () => {
+    expect(timestampTitle(at(0, 0))).toBe('Wed Jun 17 @ 12AM');
+  });
+
+  it('renders noon as 12PM', () => {
+    expect(timestampTitle(at(12, 0))).toBe('Wed Jun 17 @ 12PM');
+  });
+
+  it('zero-pads minutes but not the hour', () => {
+    expect(timestampTitle(at(9, 5))).toBe('Wed Jun 17 @ 9:05AM');
+  });
+
+  it('falls back to the raw value for an unparseable timestamp', () => {
+    expect(timestampTitle('not-a-date')).toBe('Recording not-a-date');
   });
 });
 
