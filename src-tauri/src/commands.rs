@@ -93,6 +93,27 @@ pub(crate) fn active_backend(app: &tauri::AppHandle) -> String {
         .unwrap_or_else(|| "ariso".to_string())
 }
 
+/// Whether both on-device models are downloaded for the Local backend. Resolves
+/// the models root; treats an unresolvable root as "not ready" so recording is
+/// gated rather than crashing.
+pub(crate) fn local_models_ready() -> bool {
+    match crate::storage::ariso_root() {
+        Ok(root) => crate::model_manager::local_models_ready(&root),
+        Err(_) => false,
+    }
+}
+
+/// Surface the (pre-created) Settings window and emit `tray://show-model-prompt`
+/// so its on-device-models section auto-starts the missing downloads. Shared by
+/// every recording entry point that gates on Local model readiness.
+pub(crate) fn surface_model_download(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit("tray://show-model-prompt", ());
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SignInResult {
     pub success: Option<bool>,
@@ -627,13 +648,22 @@ pub(crate) fn open_waveform_window(
 }
 
 /// Gate recording on a valid session for the Ariso backend. The Local backend
-/// needs no auth and always passes. When the Ariso user is signed out, surface
-/// the (pre-created) Settings window and emit `tray://show-sign-in-prompt` so its
-/// sign-in banner appears, then report `false` so the caller aborts. Mirrors the
-/// tray's session gate so every recording entry point behaves identically.
+/// needs no auth but is gated on both on-device models being downloaded;
+/// otherwise the Settings window is surfaced and the attempt aborts. When the
+/// Ariso user is signed out, surface the (pre-created) Settings window and emit
+/// `tray://show-sign-in-prompt` so its sign-in banner appears, then report
+/// `false` so the caller aborts. Mirrors the tray's session gate so every
+/// recording entry point behaves identically.
 async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
-    if active_backend(app) != "ariso" {
-        return true;
+    if active_backend(app) == "local" {
+        // Local needs no auth, but both on-device models must be ready. When
+        // they aren't, surface Settings (which auto-starts the downloads) and
+        // abort this recording attempt.
+        if local_models_ready() {
+            return true;
+        }
+        surface_model_download(app);
+        return false;
     }
     if is_session_valid(app).await {
         return true;
