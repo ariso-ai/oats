@@ -167,12 +167,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --bundles app -- --features prod-api
 
-      # Tauri does not expose Finder icon size for DMGs, so compose the DMG
-      # after the signed app bundle exists and persist the smaller bowl layout.
+      # Compose the public DMG after the signed app bundle exists. create-dmg
+      # writes Finder metadata without needing Finder or AppleScript in CI.
       - name: Compose DMG layout
         run: npm run dmg:compose
 
-      # The custom composer writes Finder metadata after Tauri signs the .app,
+      # The composer writes DMG metadata after Tauri signs the .app,
       # so sign the final DMG before it becomes the public release artifact.
       - name: Sign composed DMG
         env:
