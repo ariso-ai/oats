@@ -30,3 +30,34 @@ export function rowStatusText(busy: Busy, progress: number | null): string {
   if (busy === 'error') return 'Download failed';
   return 'Not downloaded';
 }
+
+/**
+ * Which on-device models still need a download kicked off. A model is "pending"
+ * when it is not already installed and not already mid-download. STT is never
+ * pending on an unsupported platform (its download would fail). Used by the
+ * recording gate's `tray://show-model-prompt` handler to auto-start downloads.
+ */
+export function pendingInstalls(
+  status: ModelStatus,
+  sttBusy: Busy,
+  llmBusy: Busy,
+): { stt: boolean; llm: boolean } {
+  const stt =
+    status.state !== 'ready' &&
+    status.state !== 'unsupported' &&
+    sttBusy !== 'downloading';
+  const llm = status.llmReady !== true && llmBusy !== 'downloading';
+  return { stt, llm };
+}
+
+/**
+ * Whether to show the "download the models to record" banner: only after the
+ * recording gate has prompted, and only while at least one model is incomplete.
+ */
+export function modelBannerVisible(
+  prompted: boolean,
+  sttInstalled: boolean,
+  llmInstalled: boolean,
+): boolean {
+  return prompted && (!sttInstalled || !llmInstalled);
+}

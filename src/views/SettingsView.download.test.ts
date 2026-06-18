@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldPromptDownload, rowStatusText } from './settingsDownload';
+import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible } from './settingsDownload';
 
 describe('shouldPromptDownload', () => {
   it('prompts for local on first switch when models are missing', () => {
@@ -30,5 +30,46 @@ describe('rowStatusText', () => {
   });
   it('shows "Not downloaded" when idle and not installed', () => {
     expect(rowStatusText('idle', null)).toBe('Not downloaded');
+  });
+});
+
+describe('pendingInstalls', () => {
+  it('flags both models when neither is ready and neither is downloading', () => {
+    expect(
+      pendingInstalls({ state: 'not_downloaded', llmReady: false }, 'idle', 'idle'),
+    ).toEqual({ stt: true, llm: true });
+  });
+
+  it('skips a model that is already ready', () => {
+    expect(
+      pendingInstalls({ state: 'ready', llmReady: false }, 'idle', 'idle'),
+    ).toEqual({ stt: false, llm: true });
+  });
+
+  it('skips a model that is already downloading', () => {
+    expect(
+      pendingInstalls({ state: 'not_downloaded', llmReady: false }, 'downloading', 'downloading'),
+    ).toEqual({ stt: false, llm: false });
+  });
+
+  it('never installs STT on an unsupported platform', () => {
+    expect(
+      pendingInstalls({ state: 'unsupported', llmReady: false }, 'idle', 'idle').stt,
+    ).toBe(false);
+  });
+});
+
+describe('modelBannerVisible', () => {
+  it('is hidden when not prompted', () => {
+    expect(modelBannerVisible(false, false, false)).toBe(false);
+  });
+
+  it('is shown while either model is incomplete', () => {
+    expect(modelBannerVisible(true, false, true)).toBe(true);
+    expect(modelBannerVisible(true, true, false)).toBe(true);
+  });
+
+  it('is hidden once both models are installed', () => {
+    expect(modelBannerVisible(true, true, true)).toBe(false);
   });
 });
