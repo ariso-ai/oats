@@ -17,7 +17,14 @@ CASK_PATH="${3:-Casks/oats.rb}"
 ruby - "$VERSION" "$DMG_SHA256" "$CASK_PATH" <<'RUBY'
 version, dmg_sha256, cask_path = ARGV
 text = File.read(cask_path)
-text = text.sub(/^  generated_version = .+$/, "  generated_version = \"#{version}\"")
-text = text.sub(/^  generated_sha256 = .+$/, "  generated_sha256 = \"#{dmg_sha256}\"")
+
+new_text = text.sub(/^  generated_version = .+$/, "  generated_version = \"#{version}\"")
+abort "Failed to update generated_version field in #{cask_path}" if new_text == text
+text = new_text
+
+new_text = text.sub(/^  generated_sha256 = .+$/, "  generated_sha256 = \"#{dmg_sha256}\"")
+abort "Failed to update generated_sha256 field in #{cask_path}" if new_text == text
+text = new_text
+
 File.write(cask_path, text)
 RUBY
