@@ -69,23 +69,29 @@
                 @click="$emit('select', featured)"
               >{{ featured.title }}</button>
             </div>
-            <div v-if="attendees.length" class="avatars">
-              <template v-for="(p, i) in attendees.slice(0, 3)" :key="i">
-                <img
-                  v-if="p.avatarUrl"
-                  class="avatar"
-                  :src="p.avatarUrl"
-                  :alt="p.name || p.email || ''"
-                  :title="p.name || p.email || ''"
-                />
-                <span
-                  v-else
-                  class="avatar"
-                  :style="{ background: avatarColor(i) }"
-                  :title="p.name || p.email || ''"
-                >{{ initials(p.name || p.email) }}</span>
-              </template>
-              <span v-if="attendees.length > 3" class="avatar avatar--more">+{{ attendees.length - 3 }}</span>
+            <div
+              v-if="attendees.length || featured.autoJoinScheduled"
+              class="head-right"
+            >
+              <div v-if="attendees.length" class="avatars">
+                <template v-for="(p, i) in attendees.slice(0, 3)" :key="i">
+                  <img
+                    v-if="p.avatarUrl"
+                    class="avatar"
+                    :src="p.avatarUrl"
+                    :alt="p.name || p.email || ''"
+                    :title="p.name || p.email || ''"
+                  />
+                  <span
+                    v-else
+                    class="avatar"
+                    :style="{ background: avatarColor(i) }"
+                    :title="p.name || p.email || ''"
+                  >{{ initials(p.name || p.email) }}</span>
+                </template>
+                <span v-if="attendees.length > 3" class="avatar avatar--more">+{{ attendees.length - 3 }}</span>
+              </div>
+              <AriWillJoinTag v-if="featured.autoJoinScheduled" />
             </div>
           </div>
           <div class="head-actions">
@@ -140,6 +146,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import AriWillJoinTag from './AriWillJoinTag.vue';
 import {
   getActiveBackend,
   type MeetingListItem,
@@ -522,6 +529,7 @@ function rowSub(m: MeetingListItem): string {
 .head-title:hover { color: #000000; }
 
 /* Overlapping attendee avatars, mirroring MeetingDetailView. */
+.head-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .avatars {
   display: flex;
   align-items: center;
