@@ -54,11 +54,13 @@ export function pendingInstalls(
 /**
  * Whether to show the "download the models to record" banner: only after the
  * recording gate has prompted, and only while at least one model is incomplete.
+ * A model is "satisfied" when it is installed (or, for STT, can never install on
+ * an unsupported platform) — so the banner does not linger on such hardware.
  */
 export function modelBannerVisible(
   prompted: boolean,
-  sttInstalled: boolean,
-  llmInstalled: boolean,
+  sttSatisfied: boolean,
+  llmSatisfied: boolean,
 ): boolean {
-  return prompted && (!sttInstalled || !llmInstalled);
+  return prompted && (!sttSatisfied || !llmSatisfied);
 }
