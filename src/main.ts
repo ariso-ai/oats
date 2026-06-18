@@ -16,6 +16,7 @@ const router = createRouter({
     { path: '/settings', name: 'Settings', component: () => import('./views/SettingsView.vue') },
     { path: '/update', name: 'Update', component: () => import('./views/UpdateView.vue') },
     { path: '/meeting-picker', name: 'MeetingPicker', component: () => import('./views/MeetingPickerView.vue') },
+    { path: '/meeting-prompt', name: 'MeetingPrompt', component: () => import('./views/MeetingPromptView.vue') },
     { path: '/library', name: 'Library', component: () => import('./views/LibraryView.vue') },
   ],
 });
