@@ -247,6 +247,12 @@ jobs:
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
         run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
 
+      - name: Upload Homebrew DMG asset and update cask checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: .github/scripts/publish-homebrew-cask.sh
+
       - name: Add R2 download link to GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
@@ -257,4 +263,4 @@ jobs:
             ---
             **Download:** [oats.dmg](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
-            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew install --cask oats`
+            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew trust ariso-ai/oats && brew install --cask oats`
