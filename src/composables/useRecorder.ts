@@ -40,6 +40,13 @@ export function useRecorder() {
   let mp3Encoder: lamejs.Mp3Encoder | null = null;
   let mp3Chunks: Int8Array[] = [];
   let timerInterval: ReturnType<typeof setInterval> | null = null;
+  // Wall-clock anchors for the elapsed-time display. The duration is derived
+  // from these on each tick rather than incremented per tick, so a throttled
+  // timer (the recorder window runs in the background while the user is in
+  // their meeting app, and the OS slows its JS timers) can't lose real time.
+  let recordingStartMs = 0;
+  let pausedAccumMs = 0;
+  let pausedAtMs: number | null = null;
 
   // System audio state
   let systemAudioActive = false;
@@ -262,11 +269,21 @@ export function useRecorder() {
       isPaused.value = false;
       startedAt.value = new Date().toISOString();
       lastSoundAt.value = Date.now();
+      recordingStartMs = Date.now();
+      pausedAccumMs = 0;
+      pausedAtMs = null;
 
+      // Recompute from wall-clock instead of counting ticks: subtract elapsed
+      // paused time (including the in-progress pause) so the value stays
+      // accurate even when the timer fires irregularly.
       timerInterval = setInterval(() => {
-        if (!isPaused.value) {
-          durationSeconds.value++;
-        }
+        const now = Date.now();
+        const pausedSoFar =
+          pausedAccumMs + (pausedAtMs !== null ? now - pausedAtMs : 0);
+        durationSeconds.value = Math.max(
+          0,
+          Math.floor((now - recordingStartMs - pausedSoFar) / 1000)
+        );
       }, 1000);
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
@@ -277,11 +294,18 @@ export function useRecorder() {
 
   function pauseRecording(): void {
     if (!isRecording.value || isPaused.value) return;
+    pausedAtMs = Date.now();
     isPaused.value = true;
   }
 
   function resumeRecording(): void {
     if (!isRecording.value || !isPaused.value) return;
+    // Fold the just-ended pause into the running total so it's excluded from
+    // the elapsed duration.
+    if (pausedAtMs !== null) {
+      pausedAccumMs += Date.now() - pausedAtMs;
+      pausedAtMs = null;
+    }
     // Reset so the paused interval never counts as silence.
     lastSoundAt.value = Date.now();
     isPaused.value = false;
