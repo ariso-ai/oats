@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0](https://github.com/ariso-ai/oats/compare/v0.7.2...v0.8.0) (2026-06-18)
+
+
+### Features
+
+* friendly default title for local meetings ([af1566d](https://github.com/ariso-ai/oats/commit/af1566d61670b5860b140ecce94438ed9606f8a9))
+* friendly default title for local meetings ([d15fced](https://github.com/ariso-ai/oats/commit/d15fcedb1ed2d761b8def8c14be0c4df6100c670))
+* **local:** add Regenerate notes button on the AI Notes tab ([7b04cc1](https://github.com/ariso-ai/oats/commit/7b04cc1d270251f014ca3161b8622880c4226646))
+
+
+### Bug Fixes
+
+* **local:** clear stale ari-note.md on notes regeneration so it's observable ([59fb01f](https://github.com/ariso-ai/oats/commit/59fb01ff6bfa65568eb29528bc65b357518a75e2))
+* **tray:** keep Meetings menu item visible while recording ([c128c42](https://github.com/ariso-ai/oats/commit/c128c42ff92d8c3fc79aadce2cae6ab3f3920df6))
+* **tray:** keep Meetings menu item visible while recording ([8c1c298](https://github.com/ariso-ai/oats/commit/8c1c29853758493fcd16220302ce744aef81f710))
+
 ## [0.7.2](https://github.com/ariso-ai/oats/compare/v0.7.1...v0.7.2) (2026-06-17)
 
 
