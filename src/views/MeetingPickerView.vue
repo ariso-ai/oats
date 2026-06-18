@@ -78,6 +78,12 @@
         <p v-if="createError" class="create-error">{{ createError }}</p>
       </template>
     </div>
+
+    <AriJoinConfirmDialog
+      :open="ariConfirm.open.value"
+      @confirm="ariConfirm.confirm"
+      @cancel="ariConfirm.cancel"
+    />
   </div>
 </template>
 
@@ -86,6 +92,9 @@ import { computed, nextTick, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeetingApi, type ScheduledMeeting } from '../composables/useMeetingApi';
 import { pickDefaultMeeting } from '../composables/pickDefaultMeeting';
+import { arisoTruthy, shouldConfirmAriJoin } from '../composables/autoJoin';
+import { useAriJoinConfirm } from '../composables/useAriJoinConfirm';
+import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
 
 type PickerState = 'loading' | 'list' | 'empty' | 'error';
 
@@ -93,6 +102,7 @@ const meetingApi = useMeetingApi();
 const state = ref<PickerState>('loading');
 const meetings = ref<ScheduledMeeting[]>([]);
 const isChoosing = ref(false);
+const ariConfirm = useAriJoinConfirm();
 const showAll = ref(false);
 const showTitlePrompt = ref(false);
 const titleDraft = ref('');
@@ -120,6 +130,13 @@ function formatTime(iso: string): string {
 
 async function choose(meetingId: number | null): Promise<void> {
   if (isChoosing.value) return;
+  const chosen = meetings.value.find((m) => m.id === meetingId);
+  if (
+    shouldConfirmAriJoin('ariso', arisoTruthy(chosen?.auto_join_scheduled)) &&
+    !(await ariConfirm.requestConfirm())
+  ) {
+    return; // user chose Cancel — leave the picker open
+  }
   isChoosing.value = true;
   try {
     await invoke('start_recording_window', { meetingId });
