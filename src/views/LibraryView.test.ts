@@ -528,6 +528,51 @@ describe('LibraryView', () => {
     expect(listMeetings).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps sidebar rows stable when a meeting is clicked during a pending upload refresh', async () => {
+    let resolveRefresh: ((items: ReturnType<typeof item>[]) => void) | null = null;
+    listMeetings
+      .mockResolvedValueOnce([
+        item({ id: 'a', title: 'Existing' }),
+        item({ id: 'b', title: 'Target meeting' }),
+      ])
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          })
+      );
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.meeting-item').text()).toContain('Existing');
+
+    wrapper.findComponent({ name: 'PendingUploads' }).vm.$emit('uploaded');
+    await flushPromises();
+
+    expect(listMeetings).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).not.toContain('Loading');
+    expect(wrapper.find('.meeting-item').text()).toContain('Existing');
+
+    const rows = wrapper.findAll('.meeting-item');
+    await rows[1].trigger('click');
+    await flushPromises();
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+
+    resolveRefresh?.([
+      item({ id: 'a', title: 'Existing' }),
+      item({ id: 'b', title: 'Target meeting updated' }),
+    ]);
+    await flushPromises();
+    const updatedRows = wrapper.findAll('.meeting-item');
+    expect(updatedRows[1].text()).toContain('Target meeting updated');
+    expect(updatedRows[1].attributes('aria-pressed')).toBe('true');
+  });
+
   it('does not re-select a meeting on window focus once the user is on the Up Next view', async () => {
     listMeetings.mockResolvedValue([
       item({ id: 'a', title: 'Standup' }),

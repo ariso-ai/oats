@@ -174,10 +174,9 @@ const recordingMeetingId = ref<string | null>(null);
 // stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
 const recordingActive = ref(false);
 // Ad-hoc meetings we recorded this session that the backend list doesn't surface
-// yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
-// isn't a calendar-scheduled meeting and never appears in listMeetings()). We
-// fetch their metadata and keep them in the sidebar during AND after recording,
-// until a reload naturally includes them. Keyed by id.
+// yet (e.g. "Record a new meeting" before the refreshed desktop list catches
+// up). We fetch their metadata and keep them in the sidebar during AND after
+// recording, until a reload naturally includes them. Keyed by id.
 const pinnedMeetings = ref<Map<string, MeetingListItem>>(new Map());
 
 // A ticking "now" so relative labels ("in 20min" → "Now") and the upcoming/past
@@ -354,11 +353,12 @@ let loadMeetingsRequest = 0;
 
 // `autoSelectFirst` is only set for the initial mount load: opening the window
 // lands on the most recent meeting. Refresh-driven reloads (window focus/move,
-// upload completion) pass false so they never yank the user off the Up Next
-// greeting/card view back into a meeting detail.
+// upload completion) pass false and keep the existing list visible so a slow
+// refresh cannot flash the sidebar back to its loading state while users click.
 async function loadMeetings(autoSelectFirst = false): Promise<void> {
   const requestId = ++loadMeetingsRequest;
-  loading.value = true;
+  const shouldShowLoading = meetings.value.length === 0 && displayMeetings.value.length === 0;
+  if (shouldShowLoading) loading.value = true;
   error.value = null;
   try {
     const backend = await getActiveBackend();
@@ -390,7 +390,7 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     console.error('Failed to list meetings', e);
     error.value = 'Could not load meetings.';
   } finally {
-    if (requestId === loadMeetingsRequest) loading.value = false;
+    if (requestId === loadMeetingsRequest && shouldShowLoading) loading.value = false;
   }
 }
 
