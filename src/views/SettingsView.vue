@@ -143,7 +143,15 @@
       <h2 class="section-title">Account</h2>
       <div class="card">
         <div v-if="isSignedIn" class="account-info">
-          <div class="avatar">{{ initials }}</div>
+          <img
+            v-if="avatarUrl"
+            class="avatar"
+            :src="avatarUrl"
+            :alt="displayName || email"
+            referrerpolicy="no-referrer"
+            @error="avatarUrl = ''"
+          />
+          <div v-else class="avatar">{{ initials }}</div>
           <div class="account-details">
             <span class="account-name">{{ displayName }}</span>
             <span class="account-email">{{ email }}</span>
@@ -346,6 +354,7 @@ const isSigningIn = ref(false);
 const errorMessage = ref('');
 const displayName = ref('');
 const email = ref('');
+const avatarUrl = ref('');
 const micEnabled = ref(true);
 const systemAudioEnabled = ref(true);
 const autoRecordEnabled = ref(true);
@@ -722,6 +731,44 @@ async function fetchUserProfile() {
   } catch {
     // profile fetch failed — leave fields empty
   }
+  // Avatar is fetched separately and is non-critical: a failure here must not
+  // disturb the name/email above, and the UI falls back to initials.
+  try {
+    const res = await api.request('GET', '/users/google-avatar');
+    const data = res.data as { avatar?: string | null };
+    // Preload before binding to the <img>: WKWebView drops the very first
+    // request for a freshly-rendered <img> during the post-sign-in churn and
+    // never retries it, leaving a broken "?". Loading it through a detached
+    // Image first (which is not affected) warms the cache, so the bound <img>
+    // resolves instantly. Falls back to initials if it truly can't load.
+    avatarUrl.value = data.avatar ? await preloadAvatar(data.avatar) : '';
+  } catch {
+    avatarUrl.value = '';
+  }
+}
+
+// Resolves to `url` once it loads in a detached Image (retrying a few times for
+// transient webview failures), or to '' so the caller falls back to initials.
+function preloadAvatar(url: string): Promise<string> {
+  return new Promise((resolve) => {
+    const MAX_ATTEMPTS = 4;
+    let attempts = 0;
+    const attempt = () => {
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => resolve(url);
+      img.onerror = () => {
+        attempts += 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          resolve('');
+        } else {
+          setTimeout(attempt, 300 * attempts);
+        }
+      };
+      img.src = url;
+    };
+    attempt();
+  });
 }
 
 let unlistenSignInPrompt: UnlistenFn | null = null;
@@ -741,11 +788,13 @@ async function refreshSignedInAccount() {
     } else {
       displayName.value = '';
       email.value = '';
+      avatarUrl.value = '';
     }
   } catch (e) {
     isSignedIn.value = false;
     displayName.value = '';
     email.value = '';
+    avatarUrl.value = '';
     console.warn('Failed to refresh signed-in account', e);
   }
 }
@@ -866,6 +915,7 @@ async function handleSignOut() {
   isSignedIn.value = false;
   displayName.value = '';
   email.value = '';
+  avatarUrl.value = '';
   void emitNotificationsSync().catch((err) => {
     console.warn('Failed to sync notifications after sign-out', err);
   });
@@ -971,6 +1021,8 @@ async function handleSignOut() {
   font-size: 13px;
   font-weight: 600;
   color: white;
+  flex-shrink: 0;
+  object-fit: cover;
 }
 
 .account-details {
