@@ -45,6 +45,7 @@ export function pendingInstalls(
   const stt =
     status.state !== 'ready' &&
     status.state !== 'unsupported' &&
+    status.state !== 'downloading' &&
     sttBusy !== 'downloading';
   const llm = status.llmReady !== true && llmBusy !== 'downloading';
   return { stt, llm };

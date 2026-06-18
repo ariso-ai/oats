@@ -57,6 +57,12 @@ describe('pendingInstalls', () => {
       pendingInstalls({ state: 'unsupported', llmReady: false }, 'idle', 'idle').stt,
     ).toBe(false);
   });
+
+  it('does not flag STT while the backend reports a download in progress', () => {
+    expect(
+      pendingInstalls({ state: 'downloading', llmReady: false }, 'idle', 'idle').stt,
+    ).toBe(false);
+  });
 });
 
 describe('modelBannerVisible', () => {
