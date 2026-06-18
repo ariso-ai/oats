@@ -36,12 +36,14 @@
     "@tauri-apps/cli": "^2.5.0",
     "@vitejs/plugin-vue": "^6.0.5",
     "@vue/test-utils": "^2.4.10",
-    "appdmg": "^0.6.6",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.1.8",
     "tauri-plugin-mcp": "^0.1.0",
     "tauri-plugin-mcp-server": "^0.1.0",
     "vite": "^7.3.2",
     "vitest": "^4.1.7"
+  },
+  "optionalDependencies": {
+    "appdmg": "^0.6.6"
   }
 }
