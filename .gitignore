@@ -1,5 +1,6 @@
 dist/
 node_modules/
+output/
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/ariso-stt/.build/
@@ -9,3 +10,4 @@ src-tauri/ariso-stt/.swiftpm/
 .superpowers/
 docs/superpowers/plans/
 .DS_Store
+.env

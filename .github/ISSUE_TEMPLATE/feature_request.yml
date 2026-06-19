@@ -1,0 +1,46 @@
+name: 💡 Feature request
+description: Suggest an idea or improvement for oats.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea? Great. Describe the **problem** first — the best features start from a real need, not a pre-baked solution.
+        For open-ended discussion, [Discussions](https://github.com/ariso-ai/oats/discussions) may be a better fit.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: What are you trying to do, and where does oats get in the way today?
+      placeholder: I record back-to-back meetings and want oats to auto-split them into separate notes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like oats to do? Sketch the ideal behavior.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Which backend does this relate to?
+      options:
+        - Both (cloud and local)
+        - Ariso (cloud)
+        - Local (on-device)
+        - Not backend-specific
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: Anything you've tried, or other tools that solve this well.
+    validations:
+      required: false

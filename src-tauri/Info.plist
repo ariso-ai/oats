@@ -5,8 +5,8 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Ariso needs microphone access to record meeting audio for transcription.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Ariso needs screen recording permission to capture system audio from video calls.</string>
+	<string>oats needs microphone access to record meeting audio for transcription.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>oats needs system audio recording permission to capture audio from video calls.</string>
 </dict>
 </plist>

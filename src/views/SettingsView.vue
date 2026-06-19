@@ -1,5 +1,19 @@
 <template>
   <div class="settings">
+    <div v-if="showDownloadConfirm" class="download-confirm" role="dialog" aria-modal="true" aria-labelledby="download-confirm-title">
+      <div class="download-confirm__card">
+        <h2 id="download-confirm-title" class="download-confirm__title">Download on-device models?</h2>
+        <p class="download-confirm__body">
+          Local transcription needs the speech and language models (~750&nbsp;MB).
+          They download once and run entirely on your device.
+        </p>
+        <div class="download-confirm__actions">
+          <button class="secondary-btn download-confirm__cancel" @click="cancelDownloadModels">Cancel</button>
+          <button class="primary-btn download-confirm__confirm" @click="confirmDownloadModels">Download</button>
+        </div>
+      </div>
+    </div>
+
     <h1 class="title">Settings</h1>
 
     <div v-if="signInPrompt && !isSignedIn" class="signin-banner">
@@ -8,15 +22,81 @@
 
     <!-- Transcription Backend Section -->
     <section class="section">
-      <h2 class="section-title">Transcription Backend</h2>
       <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Backend</span>
-          <select :value="backend" class="setting-select" @change="onSelectBackend">
-            <option value="ariso">Ariso (cloud)</option>
-            <option value="local">Local (on-device)</option>
-          </select>
+          <span id="backend-label" class="setting-label">Backend</span>
+          <div
+            ref="backendSelectRef"
+            class="backend-select"
+            @focusout="onBackendFocusOut"
+            @keydown.escape.prevent="closeBackendMenu"
+          >
+            <button
+              ref="backendTriggerRef"
+              type="button"
+              class="backend-trigger"
+              :disabled="recordingActive"
+              aria-haspopup="listbox"
+              :aria-expanded="backendOpen"
+              aria-controls="backend-listbox"
+              @click="toggleBackendMenu"
+              @keydown.down.prevent="openBackendMenu(0)"
+              @keydown.up.prevent="openBackendMenu(backendOptions.length - 1)"
+              @keydown.enter.prevent="toggleBackendMenu"
+              @keydown.space.prevent="toggleBackendMenu"
+            >
+              <span class="backend-trigger-text">{{ currentBackend.label }}</span>
+              <svg v-if="backend === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+              </svg>
+              <svg v-else class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+              <svg class="backend-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            <ul
+              v-if="backendOpen"
+              id="backend-listbox"
+              class="backend-menu"
+              role="listbox"
+              aria-labelledby="backend-label"
+            >
+              <li
+                v-for="(opt, idx) in backendOptions"
+                :key="opt.value"
+                class="backend-option"
+                :class="{ 'backend-option--active': backend === opt.value }"
+                role="option"
+                :aria-selected="backend === opt.value"
+                tabindex="-1"
+                @mousedown.prevent="selectBackend(opt.value)"
+                @keydown.down.prevent="focusOption(idx + 1)"
+                @keydown.up.prevent="focusOption(idx - 1)"
+                @keydown.home.prevent="focusOption(0)"
+                @keydown.end.prevent="focusOption(backendOptions.length - 1)"
+                @keydown.enter.prevent="selectBackend(opt.value)"
+                @keydown.space.prevent="selectBackend(opt.value)"
+              >
+                <span>{{ opt.label }}</span>
+                <svg v-if="opt.value === 'ariso'" class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                </svg>
+                <svg v-else class="backend-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                  <line x1="8" y1="21" x2="16" y2="21" />
+                  <line x1="12" y1="17" x2="12" y2="21" />
+                </svg>
+              </li>
+            </ul>
+          </div>
         </div>
+        <p v-if="recordingActive" class="setting-hint">
+          Backend can't be changed while recording.
+        </p>
       </div>
     </section>
 
@@ -24,8 +104,8 @@
     <section v-if="backend === 'local'" class="section">
       <h2 class="section-title">On-device models</h2>
       <div class="card">
-        <div v-if="modelPrompt && !sttInstalled" class="signin-banner">
-          Download the models to record on your device.
+        <div v-if="showModelBanner" class="signin-banner">
+          Both on-device models must finish downloading before you can record.
         </div>
         <div class="setting-row">
           <span class="setting-label">Speech voice model</span>
@@ -63,7 +143,15 @@
       <h2 class="section-title">Account</h2>
       <div class="card">
         <div v-if="isSignedIn" class="account-info">
-          <div class="avatar">{{ initials }}</div>
+          <img
+            v-if="avatarUrl"
+            class="avatar"
+            :src="avatarUrl"
+            :alt="displayName || email"
+            referrerpolicy="no-referrer"
+            @error="avatarUrl = ''"
+          />
+          <div v-else class="avatar">{{ initials }}</div>
           <div class="account-details">
             <span class="account-name">{{ displayName }}</span>
             <span class="account-email">{{ email }}</span>
@@ -90,17 +178,72 @@
       </div>
     </section>
 
-    <!-- Audio Section -->
+    <!-- Recording Section -->
     <section class="section">
-      <h2 class="section-title">Audio</h2>
+      <h2 class="section-title">Recording</h2>
       <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Recording mode</span>
-          <select v-model="recordingMode" class="setting-select">
-            <option value="mic">Microphone only</option>
-            <option value="mic_and_system">Mic + System Audio</option>
-          </select>
+          <span class="setting-label">Microphone</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="micEnabled"
+              :disabled="recordingToggleBusy"
+              @change="onToggleMic"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
         </div>
+        <p v-if="micStatus === 'granted'" class="notif-status notif-status--ok">
+          Permission granted
+        </p>
+        <p v-else-if="micStatus === 'denied'" class="notif-status notif-status--err">
+          Permission not granted
+        </p>
+
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="setting-label">System Audio</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="systemAudioEnabled"
+              :disabled="recordingToggleBusy"
+              @change="onToggleSystemAudio"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p v-if="systemAudioStatus === 'granted'" class="notif-status notif-status--ok">
+          Permission granted
+        </p>
+        <p v-else-if="systemAudioStatus === 'denied'" class="notif-status notif-status--err">
+          Permission not granted
+        </p>
+
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="setting-label">Auto-record meetings</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="autoRecordEnabled"
+              :disabled="!autoRecordSupported"
+              @change="onToggleAutoRecord"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p v-if="!autoRecordSupported" class="notif-status notif-status--err">
+          Requires macOS 14.4+
+        </p>
       </div>
     </section>
 
@@ -142,7 +285,7 @@
       <h2 class="section-title">About</h2>
       <div class="card">
         <div class="about-header">
-          <span class="version-text">Ariso {{ appVersion }}</span>
+          <span class="version-text">oats {{ appVersion }}</span>
           <span class="status-line" :class="statusClass">
             {{ statusText }}
           </span>
@@ -178,11 +321,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
-import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
-import { load } from '@tauri-apps/plugin-store';
+import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, type ModelStatus } from '../tauri';
+import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
+import { applyToggle, type PermissionStatus } from './recordingSettings';
+import {
+  loadRecordingEnabled,
+  setMicEnabled,
+  setSystemAudioEnabled,
+  ensureMicPermission,
+  ensureSystemAudioPermission,
+  openMicSettings,
+  openSystemAudioSettings,
+} from '../composables/useRecordingPermissions';
 import {
   isMeetingNotificationsEnabled,
   setMeetingNotificationsEnabled,
@@ -190,13 +343,31 @@ import {
   openNotificationSettings,
   emitNotificationsSync,
 } from '../composables/useMeetingNotifications';
+import {
+  isAutoRecordEnabled,
+  setAutoRecordEnabled,
+  isAutoRecordSupported,
+} from '../composables/useAutoRecord';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
 const errorMessage = ref('');
 const displayName = ref('');
 const email = ref('');
-const recordingMode = ref<'mic' | 'mic_and_system'>('mic_and_system');
+const avatarUrl = ref('');
+const micEnabled = ref(true);
+const systemAudioEnabled = ref(true);
+const autoRecordEnabled = ref(true);
+const autoRecordSupported = ref(true);
+const micStatus = ref<PermissionStatus>('');
+const systemAudioStatus = ref<PermissionStatus>('');
+const micToggling = ref(false);
+const systemAudioToggling = ref(false);
+// Shared across both recording toggles so one pending permission flow blocks
+// the other — otherwise the user could start overlapping OS prompts.
+const recordingToggleBusy = computed(
+  () => micToggling.value || systemAudioToggling.value,
+);
 const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
@@ -205,6 +376,7 @@ const appVersion = __APP_VERSION__;
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
 const modelPrompt = ref(false);
+const showDownloadConfirm = ref(false);
 
 // Per-model download UI state — the STT and LLM Install buttons are independent.
 const sttBusy = ref<Busy>('idle');
@@ -220,17 +392,124 @@ async function refreshModelStatus() {
   }
 }
 
-async function onSelectBackend(e: Event) {
-  const next = (e.target as HTMLSelectElement).value === 'local' ? 'local' : 'ariso';
+const backendOptions = [
+  { value: 'ariso', label: 'ariso.ai' },
+  { value: 'local', label: 'Local' },
+] as const;
+const backendOpen = ref(false);
+const recordingActive = ref(false);
+
+// Recording runs in the separate "waveform" window; its presence is the
+// source of truth on mount/focus, and recording://state keeps it live while
+// this (persistent) window stays open in the background.
+async function refreshRecordingState() {
+  try {
+    const wins = await getAllWebviewWindows();
+    recordingActive.value = wins.some((w) => w.label === 'waveform');
+  } catch (e) {
+    console.error('Failed to read window state', e);
+  }
+}
+
+function onWindowFocus() {
+  void refreshRecordingState();
+}
+
+watch(recordingActive, (active) => {
+  if (active) backendOpen.value = false;
+});
+
+const backendSelectRef = ref<HTMLElement | null>(null);
+const backendTriggerRef = ref<HTMLButtonElement | null>(null);
+const currentBackend = computed(
+  () => backendOptions.find((o) => o.value === backend.value) ?? backendOptions[0],
+);
+
+function focusOption(idx: number) {
+  const wrapper = backendSelectRef.value;
+  if (!wrapper) return;
+  const options = wrapper.querySelectorAll<HTMLElement>('.backend-option');
+  if (options.length === 0) return;
+  const wrapped = ((idx % options.length) + options.length) % options.length;
+  options[wrapped]?.focus();
+}
+
+async function openBackendMenu(focusIdx: number) {
+  if (!backendOpen.value) {
+    backendOpen.value = true;
+    await nextTick();
+  }
+  focusOption(focusIdx);
+}
+
+function closeBackendMenu() {
+  if (!backendOpen.value) return;
+  backendOpen.value = false;
+  backendTriggerRef.value?.focus();
+}
+
+function toggleBackendMenu() {
+  if (backendOpen.value) {
+    closeBackendMenu();
+  } else {
+    const selectedIdx = backendOptions.findIndex((o) => o.value === backend.value);
+    void openBackendMenu(selectedIdx >= 0 ? selectedIdx : 0);
+  }
+}
+
+function onBackendFocusOut(e: FocusEvent) {
+  // Close when focus moves outside the wrapper (e.g., Tab away or click
+  // elsewhere). Keep open when focus moves between trigger and options.
+  const next = e.relatedTarget as Node | null;
+  if (!next || !backendSelectRef.value?.contains(next)) {
+    backendOpen.value = false;
+  }
+}
+
+async function selectBackend(next: 'ariso' | 'local') {
+  backendOpen.value = false;
+  backendTriggerRef.value?.focus();
+  if (recordingActive.value) return;
+  if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
+  // Native orchestrators (tray next-meeting, notifications) re-evaluate
+  // their backend/session gates via the bootstrap window's SYNC listener.
+  void emitNotificationsSync().catch((err) => {
+    console.warn('Failed to broadcast sync after backend change', err);
+  });
   if (next === 'local') {
     await refreshModelStatus();
-    // Auto-start the STT download (needed to record). The LLM is opt-in via its button.
-    if (shouldAutoDownload(next, modelStatus.value.state)) {
-      void onInstallStt();
+    // First time only: ask before fetching the (large) on-device models.
+    const prompted = await hasPromptedLocalModels().catch(() => true);
+    if (shouldPromptDownload(next, prompted, modelStatus.value.state)) {
+      showDownloadConfirm.value = true;
+    } else {
+      // Already confirmed once before (or STT already installed): skip the
+      // modal and start any still-missing downloads right away, so the models
+      // are ready by the time the user records.
+      startMissingDownloads();
     }
   }
+}
+
+async function confirmDownloadModels() {
+  showDownloadConfirm.value = false;
+  // Best-effort flag write; downloads proceed regardless.
+  await setPromptedLocalModels(true).catch((e) =>
+    console.warn('Failed to persist localModelsPrompted', e),
+  );
+  // Per-target Rust guards allow STT and LLM to download in parallel.
+  void onInstallStt();
+  void onInstallLlm();
+}
+
+async function cancelDownloadModels() {
+  showDownloadConfirm.value = false;
+  // Local is unusable without models — fall back to Ariso. Do NOT set the
+  // prompted flag, so a later switch to Local will ask again.
+  backend.value = 'ariso';
+  await setBackendSetting('ariso');
 }
 
 async function onInstallStt() {
@@ -259,11 +538,31 @@ async function onInstallLlm() {
   }
 }
 
+// Kick off downloads for whichever on-device models are still missing. Shared
+// by the backend switch and the recording-gate prompt. Reads the current
+// modelStatus, so callers refresh it first. The Rust per-target guards de-dupe,
+// so calling this while a download is already in progress is a safe no-op.
+function startMissingDownloads() {
+  const pending = pendingInstalls(modelStatus.value, sttBusy.value, llmBusy.value);
+  if (pending.stt) void onInstallStt();
+  if (pending.llm) void onInstallLlm();
+}
+
 const unsupported = computed(() => modelStatus.value.state === 'unsupported');
 const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
 const anyDownloading = computed(
   () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
+);
+
+// Hide the banner on unsupported platforms (neither model can install there) so
+// it doesn't linger forever; otherwise show it while either model is incomplete.
+const showModelBanner = computed(() =>
+  modelBannerVisible(
+    modelPrompt.value,
+    unsupported.value || sttInstalled.value,
+    unsupported.value || llmInstalled.value,
+  ),
 );
 
 const sttStatusText = computed(() =>
@@ -399,10 +698,54 @@ const initials = computed(() => {
   return name.slice(0, 2).toUpperCase();
 });
 
-watch(recordingMode, async (newMode) => {
-  const store = await load('settings.json', { autoSave: true });
-  await store.set('recordingMode', newMode);
-});
+async function onToggleMic(e: Event) {
+  if (recordingToggleBusy.value) return;
+  micToggling.value = true;
+  try {
+    const checked = (e.target as HTMLInputElement).checked;
+    const previous = micEnabled.value;
+    micEnabled.value = checked;
+    const res = await applyToggle(checked, previous, {
+      ensurePermission: ensureMicPermission,
+      openSettings: openMicSettings,
+      persist: setMicEnabled,
+    });
+    micEnabled.value = res.enabled;
+    micStatus.value = res.status;
+  } finally {
+    micToggling.value = false;
+  }
+}
+
+async function onToggleAutoRecord(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = autoRecordEnabled.value;
+  autoRecordEnabled.value = checked;
+  try {
+    await setAutoRecordEnabled(checked);
+  } catch {
+    autoRecordEnabled.value = previous;
+  }
+}
+
+async function onToggleSystemAudio(e: Event) {
+  if (recordingToggleBusy.value) return;
+  systemAudioToggling.value = true;
+  try {
+    const checked = (e.target as HTMLInputElement).checked;
+    const previous = systemAudioEnabled.value;
+    systemAudioEnabled.value = checked;
+    const res = await applyToggle(checked, previous, {
+      ensurePermission: ensureSystemAudioPermission,
+      openSettings: openSystemAudioSettings,
+      persist: setSystemAudioEnabled,
+    });
+    systemAudioEnabled.value = res.enabled;
+    systemAudioStatus.value = res.status;
+  } finally {
+    systemAudioToggling.value = false;
+  }
+}
 
 async function fetchUserProfile() {
   try {
@@ -413,28 +756,102 @@ async function fetchUserProfile() {
   } catch {
     // profile fetch failed — leave fields empty
   }
+  // Avatar is fetched separately and is non-critical: a failure here must not
+  // disturb the name/email above, and the UI falls back to initials.
+  try {
+    const res = await api.request('GET', '/users/google-avatar');
+    const data = res.data as { avatar?: string | null };
+    // Preload before binding to the <img>: WKWebView drops the very first
+    // request for a freshly-rendered <img> during the post-sign-in churn and
+    // never retries it, leaving a broken "?". Loading it through a detached
+    // Image first (which is not affected) warms the cache, so the bound <img>
+    // resolves instantly. Falls back to initials if it truly can't load.
+    avatarUrl.value = data.avatar ? await preloadAvatar(data.avatar) : '';
+  } catch {
+    avatarUrl.value = '';
+  }
+}
+
+// Resolves to `url` once it loads in a detached Image (retrying a few times for
+// transient webview failures), or to '' so the caller falls back to initials.
+function preloadAvatar(url: string): Promise<string> {
+  return new Promise((resolve) => {
+    const MAX_ATTEMPTS = 4;
+    let attempts = 0;
+    const attempt = () => {
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => resolve(url);
+      img.onerror = () => {
+        attempts += 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          resolve('');
+        } else {
+          setTimeout(attempt, 300 * attempts);
+        }
+      };
+      img.src = url;
+    };
+    attempt();
+  });
 }
 
 let unlistenSignInPrompt: UnlistenFn | null = null;
-let unlistenUpdates: UnlistenFn[] = [];
+const unlistenUpdates: UnlistenFn[] = [];
+
+// Refresh account UI from persisted native session state. The settings window is
+// hidden/pre-created at app startup, so it cannot rely only on its first mount.
+// Never throws: a checkSession failure in onMounted would otherwise abort the
+// rest of initialization (update listeners, recording bootstrap, etc.), and a
+// failure inside the AUTH_SIGNED_IN_EVENT callback would reject the listener.
+async function refreshSignedInAccount() {
+  try {
+    const session = await auth.checkSession();
+    isSignedIn.value = !!session;
+    if (isSignedIn.value) {
+      await fetchUserProfile();
+    } else {
+      displayName.value = '';
+      email.value = '';
+      avatarUrl.value = '';
+    }
+  } catch (e) {
+    isSignedIn.value = false;
+    displayName.value = '';
+    email.value = '';
+    avatarUrl.value = '';
+    console.warn('Failed to refresh signed-in account', e);
+  }
+}
 
 onMounted(async () => {
-  const session = await auth.checkSession();
-  isSignedIn.value = !!session;
-  if (isSignedIn.value) {
-    await fetchUserProfile();
-  }
+  await refreshSignedInAccount();
 
-  const store = await load('settings.json', { autoSave: true });
-  const savedMode = await store.get<string>('recordingMode');
-  if (savedMode === 'mic' || savedMode === 'mic_and_system') {
-    recordingMode.value = savedMode;
+  // Bootstrap recording toggles in its own try/catch so a settings-store or
+  // permission-preflight failure doesn't abort the rest of onMounted (update
+  // listeners, sign-in prompt listener, backend/model state).
+  try {
+    const enabled = await loadRecordingEnabled();
+    micEnabled.value = enabled.mic;
+    systemAudioEnabled.value = enabled.systemAudio;
+    autoRecordSupported.value = await isAutoRecordSupported();
+    autoRecordEnabled.value = await isAutoRecordEnabled();
+    // Both mic and system-audio status are left blank on load: there's no
+    // silent preflight for either (getUserMedia prompts; the system-audio
+    // probe creates a process tap, which trips the TCC dialog on first use).
+    // The status fills in when the user toggles the row.
+  } catch (e) {
+    console.warn('Failed to initialize recording settings', e);
   }
 
   meetingNotifications.value = await isMeetingNotificationsEnabled();
 
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
+  });
+  const unSignedIn = await listen(AUTH_SIGNED_IN_EVENT, async () => {
+    await refreshSignedInAccount();
+    signInPrompt.value = false;
   });
 
   await loadUpdateState();
@@ -454,8 +871,7 @@ onMounted(async () => {
     checking.value = false;
   });
 
-  // Save unlisteners so onUnmounted can clear them.
-  unlistenUpdates = [unAvail, unNone, unChecking, unError];
+  unlistenUpdates.push(unSignedIn, unAvail, unNone, unChecking, unError);
 
   try {
     backend.value = await getBackendSetting();
@@ -472,15 +888,31 @@ onMounted(async () => {
   const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
     llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
-  const unModelPrompt = await listen('tray://show-model-prompt', () => {
+  const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
+    // The recording gate fired because a model isn't ready — auto-start the
+    // missing download(s).
+    await refreshModelStatus();
+    startMissingDownloads();
   });
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
+});
+
+// Registered as its own hook so a failure in the main bootstrap above can't
+// prevent the recording guard from arming.
+onMounted(async () => {
+  void refreshRecordingState();
+  window.addEventListener('focus', onWindowFocus);
+  const unRecording = await listen<boolean>('recording://state', (e) => {
+    recordingActive.value = e.payload;
+  });
+  unlistenUpdates.push(unRecording);
 });
 
 onUnmounted(() => {
   unlistenSignInPrompt?.();
   unlistenUpdates.forEach((un) => un());
+  window.removeEventListener('focus', onWindowFocus);
 });
 
 async function handleGoogleSignIn() {
@@ -512,6 +944,7 @@ async function handleSignOut() {
   isSignedIn.value = false;
   displayName.value = '';
   email.value = '';
+  avatarUrl.value = '';
   void emitNotificationsSync().catch((err) => {
     console.warn('Failed to sync notifications after sign-out', err);
   });
@@ -521,22 +954,37 @@ async function handleSignOut() {
 <style scoped>
 .settings {
   padding: 24px;
-  font-family: -apple-system, system-ui, sans-serif;
-  background: #f5f5f7;
-  min-height: 100vh;
+  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
+  background: #f7f6f4;
+  color: #1c1c1c;
+  /* Own the full window height and scroll internally so a tall settings stack
+     (Local models + Account + Recording + Notifications + About) is reachable
+     on short windows instead of being clipped. */
+  height: 100vh;
+  box-sizing: border-box;
+  overflow-y: auto;
+  /* Keep scrolling functional but hide the scrollbar chrome so no persistent
+     bar shows at rest. */
+  scrollbar-width: none; /* Firefox */
+}
+
+/* WebKit (the Tauri webview on macOS): hide the scrollbar track/thumb. */
+.settings::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .title {
   font-size: 20px;
   font-weight: 700;
   margin-bottom: 24px;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .signin-banner {
-  background: #fef3c7;
-  border: 1px solid #fcd34d;
-  color: #92400e;
+  background: #f7efdc;
+  border: 1px solid #e3d3a8;
+  color: #7a5c1e;
   font-size: 13px;
   font-weight: 500;
   padding: 10px 14px;
@@ -553,15 +1001,15 @@ async function handleSignOut() {
 }
 
 .notif-status--ok {
-  background: #dcfce7;
-  border: 1px solid #86efac;
-  color: #166534;
+  background: #e6f2ea;
+  border: 1px solid #bfe0cc;
+  color: #226741;
 }
 
 .notif-status--err {
-  background: #fee2e2;
-  border: 1px solid #fca5a5;
-  color: #991b1b;
+  background: #f7e7e4;
+  border: 1px solid #e0c0ba;
+  color: #9c3a2e;
 }
 
 .section {
@@ -569,19 +1017,20 @@ async function handleSignOut() {
 }
 
 .section-title {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
-  color: #86868b;
+  color: #9a9a96;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
   margin-bottom: 8px;
 }
 
 .card {
-  background: white;
-  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
   padding: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: 2px 2px 0 #e7e5e2;
 }
 
 .account-info {
@@ -594,13 +1043,15 @@ async function handleSignOut() {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #6366f1;
+  background: #1c1c1c;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 13px;
   font-weight: 600;
   color: white;
+  flex-shrink: 0;
+  object-fit: cover;
 }
 
 .account-details {
@@ -612,12 +1063,12 @@ async function handleSignOut() {
 .account-name {
   font-size: 14px;
   font-weight: 500;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .account-email {
   font-size: 12px;
-  color: #86868b;
+  color: #6f6f6f;
 }
 
 .sign-out-btn {
@@ -644,19 +1095,20 @@ async function handleSignOut() {
   justify-content: center;
   gap: 12px;
   padding: 10px 16px;
-  background: white;
-  border: 1px solid #d1d5db;
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  border-radius: 999px;
+  box-shadow: 2px 2px 0 #e7e5e2;
   font-size: 14px;
   font-weight: 500;
-  color: #374151;
+  color: #1c1c1c;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: transform 0.1s, box-shadow 0.1s;
 }
 
-.google-btn:hover {
-  background: #f9fafb;
+.google-btn:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 
 .google-btn:disabled {
@@ -684,7 +1136,7 @@ async function handleSignOut() {
 
 .setting-label {
   font-size: 14px;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .model-controls {
@@ -695,23 +1147,112 @@ async function handleSignOut() {
 
 .model-status {
   font-size: 13px;
-  color: #6b7280;
+  color: #6f6f6f;
 }
 
 .model-ready {
-  color: #16a34a;
+  color: #2e8b4f;
   font-size: 16px;
   font-weight: 700;
   line-height: 1;
 }
 
-.setting-select {
+.backend-select {
+  position: relative;
+}
+
+.backend-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 13px;
-  padding: 4px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: white;
-  color: #6366f1;
+  padding: 5px 12px;
+  border: 1px solid #d6d6d6;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1c1c1c;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.backend-trigger:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
+}
+
+.backend-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.setting-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6f6f6f;
+}
+
+.backend-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.backend-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: #9a9a96;
+}
+
+.backend-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  min-width: 100%;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+
+.backend-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: #1c1c1c;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.backend-option:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.backend-option:focus-visible {
+  background: #f5f5f7;
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
+}
+
+.backend-option--active {
+  background: #1c1c1c;
+  color: #ffffff;
+}
+
+.backend-option--active:hover,
+.backend-option--active:focus-visible {
+  background: #1c1c1c;
+  color: #ffffff;
 }
 
 .about-header {
@@ -724,16 +1265,16 @@ async function handleSignOut() {
 .version-text {
   font-size: 14px;
   font-weight: 500;
-  color: #1d1d1f;
+  color: #1c1c1c;
 }
 
 .status-line {
   font-size: 12px;
 }
 
-.status-ok       { color: #16a34a; }
-.status-checking { color: #86868b; }
-.status-available { color: #4f46e5; font-weight: 500; }
+.status-ok       { color: #2e8b4f; }
+.status-checking { color: #6f6f6f; }
+.status-available { color: #1c1c1c; font-weight: 500; }
 
 .update-controls {
   margin-bottom: 12px;
@@ -741,23 +1282,32 @@ async function handleSignOut() {
 
 .primary-btn {
   font-size: 13px;
-  padding: 5px 14px;
-  border-radius: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
   border: none;
-  background: linear-gradient(to bottom, #6366f1, #4f46e5);
+  background: #1c1c1c;
   color: white;
   font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
 }
 
 .secondary-btn {
   font-size: 13px;
   padding: 5px 14px;
-  border-radius: 6px;
-  border: 1px solid #d1d5db;
-  background: white;
-  color: #1d1d1f;
+  border-radius: 999px;
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1c1c1c;
+  font-family: inherit;
   cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.secondary-btn:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 
 .secondary-btn:disabled {
@@ -770,7 +1320,7 @@ async function handleSignOut() {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #1d1d1f;
+  color: #1c1c1c;
   cursor: pointer;
 }
 
@@ -797,7 +1347,7 @@ async function handleSignOut() {
   padding: 2px;
   box-sizing: border-box;
   border-radius: 12px;
-  background: #d1d5db;
+  background: #d6d6d6;
   transition: background 0.2s ease;
 }
 
@@ -811,7 +1361,7 @@ async function handleSignOut() {
 }
 
 .toggle-input:checked + .toggle-track {
-  background: #4f46e5;
+  background: #1c1c1c;
 }
 
 .toggle-input:checked + .toggle-track .toggle-thumb {
@@ -819,7 +1369,47 @@ async function handleSignOut() {
 }
 
 .toggle-input:focus-visible + .toggle-track {
-  outline: 2px solid #6366f1;
+  outline: 2px solid #1c1c1c;
   outline-offset: 2px;
+}
+
+.download-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 24px;
+}
+
+.download-confirm__card {
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 360px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+
+.download-confirm__title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: #1c1c1c;
+}
+
+.download-confirm__body {
+  font-size: 13px;
+  color: #6f6f6f;
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.download-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

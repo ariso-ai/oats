@@ -73,6 +73,14 @@ pub fn llm_is_ready(root: &Path) -> bool {
     llm_dir(root).join(".complete").exists()
 }
 
+/// Both on-device models are downloaded and ready to record with: the STT
+/// (transcript) model AND the notes LLM. The Local backend gates recording on
+/// this — see `commands::ensure_recording_allowed`, the tray, and the
+/// mic-monitor auto-record path.
+pub fn local_models_ready(root: &Path) -> bool {
+    is_ready(root) && llm_is_ready(root)
+}
+
 pub fn status(root: &Path) -> ModelStatus {
     let llm_ready = Some(llm_is_ready(root));
     match read_manifest(root) {
@@ -87,8 +95,30 @@ use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-/// Prevents concurrent model downloads (which would race on manifest.tmp).
-static DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+/// Per-target download guards. STT writes `manifest.json` at the models root;
+/// the LLM writes into `llm/<name>/` with its own `.complete` marker — disjoint
+/// paths, so two *different* targets cannot race and may download in parallel.
+/// Each flag still rejects a duplicate of its own target.
+static STT_DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static LLM_DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard over a download flag: sets it on `acquire`, clears it on drop
+/// (every exit path). `acquire` returns `None` if the flag is already set.
+struct DownloadGuard<'a>(&'a AtomicBool);
+
+impl<'a> DownloadGuard<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| DownloadGuard(flag))
+    }
+}
+
+impl Drop for DownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 #[tauri::command]
 pub fn local_model_status() -> Result<ModelStatus, String> {
@@ -111,26 +141,16 @@ struct ProgressLine {
 /// readiness instead). A single global guard serializes downloads.
 async fn run_download(
     app: tauri::AppHandle,
+    guard_flag: &AtomicBool,
     target: &str,
     write_manifest_after: bool,
     ev_progress: &str,
     ev_done: &str,
     ev_error: &str,
 ) -> Result<(), String> {
-    // Reject re-entry; clear the flag on every exit path via the Drop guard.
-    if DOWNLOAD_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("a model download is already in progress".to_string());
-    }
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
-        }
-    }
-    let _guard = Guard;
+    // Reject re-entry for THIS target; the guard clears the flag on drop.
+    let _guard = DownloadGuard::acquire(guard_flag)
+        .ok_or_else(|| "a model download is already in progress".to_string())?;
 
     let root = crate::storage::ariso_root()?;
     let models = crate::storage::models_dir(&root);
@@ -188,6 +208,7 @@ async fn run_download(
 pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     run_download(
         app,
+        &STT_DOWNLOAD_IN_PROGRESS,
         "stt",
         true,
         "model://stt/progress",
@@ -197,12 +218,21 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     .await
 }
 
+/// Public base host for all app CDN assets (Cloudflare R2, r2.dev managed
+/// domain). The desktop updater endpoint in `tauri.conf.json` is served from
+/// this same host (`/desktop/latest.json`); keep them on one host. A macro
+/// (not a `const`) so it can feed `concat!` below at compile time.
+macro_rules! r2_base {
+    () => {
+        "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev"
+    };
+}
+
 /// Public CDN base for the notes LLM files (Cloudflare R2). The model is NOT
 /// fetched via HuggingFace: the published `model.safetensors` is Xet-backed and
 /// the Swift HF client can't download Xet, so we mirror plain files on R2 and
 /// pull them directly.
-const LLM_CDN_BASE: &str =
-    "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/models/gemma-3-1b-it-qat-4bit";
+const LLM_CDN_BASE: &str = concat!(r2_base!(), "/models/gemma-3-1b-it-qat-4bit");
 
 /// The exact files the model loader needs. Doc/git files are omitted, and so is
 /// `tokenizer.model` — Gemma ships a `tokenizer.json` fast tokenizer that the
@@ -232,19 +262,8 @@ fn llm_fraction(done: u64, total: u64) -> f64 {
 /// for a ready model. Files already fully present are skipped (idempotent retry).
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
-    if DOWNLOAD_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("a model download is already in progress".to_string());
-    }
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            DOWNLOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
-        }
-    }
-    let _guard = Guard;
+    let _guard = DownloadGuard::acquire(&LLM_DOWNLOAD_IN_PROGRESS)
+        .ok_or_else(|| "a model download is already in progress".to_string())?;
 
     let root = crate::storage::ariso_root()?;
     let dir = llm_dir(&root);
@@ -399,6 +418,69 @@ mod tests {
         std::fs::write(dir.join(".complete"), b"1").unwrap();
         assert!(llm_is_ready(root));
         assert_eq!(status(root).llm_ready, Some(true));
+    }
+
+    #[test]
+    fn local_models_ready_requires_both_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Neither marker present.
+        assert!(!local_models_ready(root));
+
+        // STT manifest only → not ready (LLM still missing).
+        write_manifest(root, "2026-06-17T00:00:00Z").unwrap();
+        assert!(!local_models_ready(root));
+
+        // Add the LLM completion marker → both ready.
+        let dir = llm_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".complete"), b"1").unwrap();
+        assert!(local_models_ready(root));
+    }
+
+    #[test]
+    fn local_models_ready_false_with_llm_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // LLM marker present but no STT manifest → not ready.
+        let dir = llm_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".complete"), b"1").unwrap();
+        assert!(!local_models_ready(root));
+    }
+
+    #[test]
+    fn llm_cdn_base_uses_shared_r2_host() {
+        // The desktop updater endpoint (tauri.conf.json) and the LLM mirror must
+        // stay on the same R2 host. If this fails, the two URLs have drifted.
+        assert!(
+            LLM_CDN_BASE.starts_with(r2_base!()),
+            "LLM_CDN_BASE must be served from the shared R2 host {}",
+            r2_base!()
+        );
+        assert_eq!(r2_base!(), "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev");
+    }
+
+    #[test]
+    fn download_guard_is_per_flag_and_releases_on_drop() {
+        static A: AtomicBool = AtomicBool::new(false);
+        static B: AtomicBool = AtomicBool::new(false);
+
+        let held = DownloadGuard::acquire(&A).expect("first acquire on A");
+        assert!(
+            DownloadGuard::acquire(&A).is_none(),
+            "same flag must reject a second acquire"
+        );
+        assert!(
+            DownloadGuard::acquire(&B).is_some(),
+            "a different flag must acquire independently"
+        );
+
+        drop(held);
+        assert!(
+            DownloadGuard::acquire(&A).is_some(),
+            "flag must be free again after the guard drops"
+        );
     }
 
     // Hits the network (downloads the full model from R2). Excluded from the

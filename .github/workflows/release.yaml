@@ -1,0 +1,307 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Queue runs instead of overlapping: two concurrent release-please runs can
+# race on the release PR, and never cancel an in-flight release build — it may
+# be signing/notarizing.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: macos-15
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      prs: ${{ steps.release.outputs.prs }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
+        id: release
+        with:
+          # The default GITHUB_TOKEN is sufficient: the release/publish jobs run
+          # in THIS workflow run (gated on releases_created), so we don't rely on
+          # the published Release firing a separate workflow — the one thing the
+          # default token can't do. Creating the Release itself needs only
+          # contents: write.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+
+  # release-please only stamps the version into files declared in its config;
+  # it can't regenerate lockfiles. The release job builds with `cargo build
+  # --locked`, which fails if Cargo.lock disagrees with Cargo.toml's version,
+  # so sync both lockfiles on the release PR branch. Neither command compiles
+  # anything (no sidecar binary needed). Pushing with the default token does not
+  # re-trigger the PR's validate check, which is fine — `main` has no required
+  # checks, and the synced lockfiles are exercised by the release job's
+  # `cargo build --locked` after the PR merges.
+  sync-lock:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.prs_created == 'true' }}
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release-please PR branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ fromJson(needs.release-please.outputs.prs)[0].headBranchName }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '24'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+
+      - name: Sync package-lock.json
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Sync Cargo.lock
+        working-directory: src-tauri
+        run: cargo update --workspace
+
+      - name: Commit and push lockfiles if changed
+        run: |
+          if git diff --quiet package-lock.json src-tauri/Cargo.lock; then
+            echo "lockfiles unchanged — nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json src-tauri/Cargo.lock
+          git commit -m "chore: sync lockfiles for release"
+          git push
+
+  release:
+    name: Sign, notarize, and bundle
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: [self-hosted, macOS, ARM64]
+    # `release` environment holds the Apple signing/notarization secrets and
+    # the required-reviewer protection rule (see README → Signing & Notarization).
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          cache: 'npm'
+          node-version: '24'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-aarch64-apple-darwin-
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
+      # is shared with desktop.yaml's validate job. Key it on the Xcode toolchain
+      # so a sidecar built by another runner's Xcode (e.g. desktop.yaml's
+      # GitHub-hosted macos-15) is never restored into this signed/notarized build.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
+      # The sidecar is a gitignored build artifact that `tauri:build` (via
+      # externalBin) needs present before bundling. The artifact cache (keyed on
+      # Package.resolved + Sources/ + toolchain fingerprint) is shared with
+      # desktop.yaml's validate job, so this usually restores instantly. On a
+      # miss, a single xcodebuild emits both the executable and the MLX metallib
+      # bundle (mlx-swift_Cmlx.bundle): without the bundle the notes (LLM) backend
+      # fails at runtime with "Failed to load the default metallib", and
+      # bundle.resources ships it into the .app. `swift build` is redundant (it
+      # can't compile MLX's Metal shaders), so build once with xcodebuild and
+      # copy both products out.
+      - name: Cache ariso-stt sidecar artifacts
+        id: sidecar-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
+            src-tauri/binaries/mlx-swift_Cmlx.bundle
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+
+      - name: Build ariso-stt sidecar
+        if: steps.sidecar-cache.outputs.cache-hit != 'true'
+        working-directory: src-tauri/ariso-stt
+        run: |
+          mkdir -p ../binaries
+          xcodebuild build -scheme ariso-stt -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation
+          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
+
+      - name: Build, sign, and notarize
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri:build -- --bundles app -- --features prod-api
+
+      # Compose the public DMG after the signed app bundle exists. appdmg
+      # writes Finder metadata without needing Finder or AppleScript in CI.
+      - name: Compose DMG layout
+        run: npm run dmg:compose
+
+      # The composer writes DMG metadata after Tauri signs the .app, so sign,
+      # notarize, and staple the final DMG before it becomes the public artifact.
+      - name: Sign and notarize composed DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for required_var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!required_var:-}" ]]; then
+              echo "${required_var} is required to sign and notarize the composed DMG." >&2
+              exit 1
+            fi
+          done
+
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          DMG_COUNT="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          if [[ "${DMG_COUNT}" != "1" ]]; then
+            echo "Expected exactly 1 DMG in ${DMG_DIR}, found ${DMG_COUNT}." >&2
+            find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print >&2
+            exit 1
+          fi
+
+          DMG="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print)"
+          codesign --force --sign "${APPLE_SIGNING_IDENTITY}" --timestamp "${DMG}"
+          codesign --verify --verbose=4 "${DMG}"
+          xcrun notarytool submit "${DMG}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+          xcrun stapler staple "${DMG}"
+          xcrun stapler validate "${DMG}"
+
+      # Hand the bundler outputs to the publish job. Paths share the common
+      # ancestor bundle/, so the artifact preserves the macos/ and dmg/
+      # subdirectories that release-publish.sh expects. The DMG and tarball are
+      # already compressed, so skip recompression.
+      - name: Upload release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          path: |
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/dmg/*.dmg
+
+  publish:
+    name: Generate manifest and publish artifacts to R2
+    needs: [release-please, release]
+    runs-on: macos-15
+    # The R2 credentials live in the `release` environment alongside the Apple
+    # signing secrets (see README → Signing & Notarization).
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Download release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-bundle
+          path: src-tauri/target/release/bundle
+
+      # The release name/body are no longer delivered via a `release` event
+      # payload, so read them back off the Release that release-please created.
+      - name: Fetch release metadata
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          {
+            echo "name=$(gh release view "$TAG" --json name --jq '.name')"
+            echo "body<<RELEASE_BODY_EOF"
+            gh release view "$TAG" --json body --jq '.body'
+            echo "RELEASE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # release-publish.sh uses `mapfile`, a bash 4.0+ builtin. The hosted
+      # macos-15 runner's system bash is 3.2, so install a modern bash from
+      # Homebrew and run the script with it explicitly (the next step's full
+      # path overrides the script's `#!/usr/bin/env bash` shebang).
+      - name: Install modern bash
+        run: brew install bash
+
+      - name: Generate manifest and publish artifacts to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_BODY: ${{ steps.rel.outputs.body }}
+          RELEASE_NAME: ${{ steps.rel.outputs.name }}
+        run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
+
+      - name: Upload Homebrew DMG asset and update cask checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: .github/scripts/publish-homebrew-cask.sh
+
+      - name: Add R2 download link to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          append_body: true
+          body: |
+
+            ---
+            **Download:** [oats.dmg](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
+
+            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew trust ariso-ai/oats && brew install --cask oats`

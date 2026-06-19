@@ -7,41 +7,40 @@ on:
   push:
     branches:
       - main
-  release:
-    types: [published]
 
 permissions:
   contents: read
-  pull-requests: read
 
+# Signing, notarization, and publishing live in release.yaml; this workflow is
+# CI validation only, so superseded runs are safe to cancel.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Don't cancel in-flight release builds — they may be signing/notarizing.
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     name: Validate (frontend + cargo build)
-    runs-on: [self-hosted, macOS, ARM64]
+    # macos-15 is a GitHub-hosted Apple Silicon (arm64) runner; macos-13 is Intel.
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           cache: 'npm'
           node-version: '24'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           targets: aarch64-apple-darwin
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -56,22 +55,30 @@ jobs:
       - name: Build frontend
         run: npm run vite:build
 
+      # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
+      # is shared with release.yaml's signed build. Key it on the Xcode toolchain
+      # so a sidecar built by one runner's Xcode is never restored into another's
+      # — e.g. this GitHub-hosted macos-15 build vs release.yaml's self-hosted Mac.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
       # The ariso-stt Swift sidecar is a build artifact (not committed) that
       # tauri's `externalBin` requires to exist before `cargo build`. It lives
       # under the gitignored binaries/ dir. Building it compiles the heavy MLX
       # dependency tree from scratch (~25 min), but its inputs — Package.resolved
       # and Sources/ — rarely change, so cache the produced artifacts keyed on
-      # their hash and skip the build entirely on a hit. Exact-match key only
-      # (no restore-keys): a partial restore would yield artifacts that don't
-      # match the current source.
+      # their hash (plus the toolchain fingerprint) and skip the build on a hit.
+      # Exact-match key only (no restore-keys): a partial restore would yield
+      # artifacts that don't match the current source or toolchain.
       - name: Cache ariso-stt sidecar artifacts
         id: sidecar-cache
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
 
       # On a cache miss, build once with xcodebuild. It emits both the
       # executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle, referenced
@@ -93,160 +100,3 @@ jobs:
       - name: Build Rust
         working-directory: src-tauri
         run: cargo build --locked
-
-  release:
-    name: Sign, notarize, and bundle
-    needs: validate
-    if: github.event_name == 'release'
-    runs-on: [self-hosted, macOS, ARM64]
-    # `release` environment holds the Apple signing/notarization secrets and
-    # the required-reviewer protection rule (see README → Signing & Notarization).
-    environment: release
-    permissions:
-      contents: write
-    env:
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          cache: 'npm'
-          node-version: '24'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            rust-aarch64-apple-darwin-
-
-      - name: Install dependencies
-        run: npm ci --prefer-offline
-
-      # Same as the validate job: the sidecar is a gitignored build artifact
-      # that `tauri:build` (via externalBin) needs present before bundling.
-      # The artifact cache (keyed on Package.resolved + Sources/) is shared with
-      # the validate job, so this usually restores instantly. On a miss, a single
-      # xcodebuild emits both the executable and the MLX metallib bundle
-      # (mlx-swift_Cmlx.bundle): without the bundle the notes (LLM) backend fails
-      # at runtime with "Failed to load the default metallib", and bundle.resources
-      # ships it into the .app. `swift build` is redundant (it can't compile MLX's
-      # Metal shaders), so build once with xcodebuild and copy both products out.
-      - name: Cache ariso-stt sidecar artifacts
-        id: sidecar-cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
-            src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
-
-      - name: Build ariso-stt sidecar
-        if: steps.sidecar-cache.outputs.cache-hit != 'true'
-        working-directory: src-tauri/ariso-stt
-        run: |
-          mkdir -p ../binaries
-          xcodebuild build -scheme ariso-stt -configuration Release \
-            -destination 'generic/platform=macOS' \
-            -derivedDataPath .xcode -skipMacroValidation
-          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
-          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
-
-      - name: Build, sign, and notarize
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- -- --features prod-api
-
-      - name: Generate latest.json updater manifest
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_BODY: ${{ github.event.release.body }}
-          RELEASE_NAME: ${{ github.event.release.name }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          # Locate the updater artifacts the bundler produced. Tauri v2
-          # writes these to src-tauri/target/release/bundle/macos/. Cached
-          # builds can leave stale tarballs alongside the fresh one, so
-          # require exactly one match and fail loudly otherwise.
-          mapfile -t TARBALLS < <(find src-tauri/target/release/bundle/macos -maxdepth 1 -type f -name '*.app.tar.gz' | sort)
-          if [[ "${#TARBALLS[@]}" -ne 1 ]]; then
-            echo "Expected exactly 1 updater tarball, found ${#TARBALLS[@]}:" >&2
-            printf ' - %s\n' "${TARBALLS[@]}" >&2
-            exit 1
-          fi
-          TARBALL="${TARBALLS[0]}"
-          SIGFILE="${TARBALL}.sig"
-          BASENAME=$(basename "$TARBALL")
-
-          # The version in tauri.conf.json (strip leading 'v' from tag).
-          VERSION="${RELEASE_TAG#v}"
-
-          # Asset URL is the release-asset download URL on GitHub.
-          ASSET_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BASENAME}"
-
-          # Read the detached signature contents (single line of base64).
-          SIG=$(cat "$SIGFILE")
-
-          # Mandatory flag: derived from the release title containing "[mandatory]".
-          if [[ "$RELEASE_NAME" == *"[mandatory]"* ]]; then
-            MANDATORY="true"
-          else
-            MANDATORY="false"
-          fi
-
-          # Build the manifest using jq to ensure valid JSON escaping
-          # of the (possibly multi-line) release body.
-          jq -n \
-            --arg version "$VERSION" \
-            --arg notes "$RELEASE_BODY" \
-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --argjson mandatory "$MANDATORY" \
-            --arg signature "$SIG" \
-            --arg url "$ASSET_URL" \
-            '{
-              version: $version,
-              notes: $notes,
-              pub_date: $pub_date,
-              mandatory: $mandatory,
-              platforms: {
-                "darwin-aarch64": {
-                  signature: $signature,
-                  url: $url
-                }
-              }
-            }' > latest.json
-
-          # Also copy the tarball and sig to repo root so the upload glob
-          # below picks them up alongside the DMG.
-          cp "$TARBALL" "$SIGFILE" .
-
-      - name: Attach signed DMG + updater manifest to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            *.app.tar.gz
-            *.app.tar.gz.sig
-            latest.json
-          fail_on_unmatched_files: true

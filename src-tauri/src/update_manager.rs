@@ -276,6 +276,9 @@ pub async fn run_check<R: Runtime>(app: AppHandle<R>, force: bool) {
                 save_state(&app, &state);
             }
             let _ = app.emit("update://none", ());
+            if force {
+                open_update_window(&app);
+            }
             finish_check(&app, force, Ok(()));
         }
         Err(e) => {
@@ -296,7 +299,7 @@ fn finish_check<R: Runtime>(app: &AppHandle<R>, force: bool, result: Result<(), 
 /// Open the update window if it doesn't already exist; focus it if it does.
 /// Mandatory updates intercept the close button.
 fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
     if let Some(win) = app.get_webview_window("update") {
         let _ = win.show();
@@ -316,7 +319,8 @@ fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
         WebviewUrl::App("/#/update".into()),
     )
     .title("")
-    .inner_size(420.0, 360.0)
+    .title_bar_style(TitleBarStyle::Overlay)
+    .inner_size(450.0, 600.0)
     .resizable(false)
     .center()
     .skip_taskbar(true)

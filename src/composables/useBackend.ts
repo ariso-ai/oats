@@ -1,5 +1,11 @@
-import { local, auth, getBackendSetting } from '../tauri';
-import { useMeetingApi } from './useMeetingApi';
+import { local, auth, pending, api, getBackendSetting, type RecordingSummary } from '../tauri';
+import {
+  useMeetingApi,
+  type ScheduledMeeting,
+  type MeetingSearchResult,
+  type TranscriptChunk,
+} from './useMeetingApi';
+import { arisoTruthy } from './autoJoin';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -20,34 +26,227 @@ export interface FinalizeResult {
   [k: string]: unknown;
 }
 
+export interface MeetingListItem {
+  id: string;
+  title: string;
+  /** ISO timestamp: local `createdAt` or ariso `start_at`. View formats it. */
+  timestamp: string;
+  /** ISO end timestamp (ariso `end_at`); drives "Now" / start–end display. */
+  endTimestamp?: string;
+  /** Local recordings only. */
+  durationSeconds?: number;
+  /** Local recordings only. */
+  status?: RecordingSummary['status'];
+  /** Local recordings only — drives the row's audio/note/transcript controls. */
+  files?: { hasAudio: boolean; hasNote: boolean; hasTranscript: boolean };
+  /** Remote search only: a short backend-provided match preview when available. */
+  snippet?: string | null;
+  /** Remote search only: the exact matched text, when the backend returns it. */
+  matchedText?: string | null;
+  /** Ariso scheduled meetings: Ari is set to auto-join and record server-side. */
+  autoJoinScheduled?: boolean;
+}
+
+export interface MeetingActionItem {
+  /** Owner/assignee name; absent for ungrouped items. */
+  name?: string;
+  item: string;
+}
+
+export interface MeetingCoaching {
+  strengths?: string[];
+  improvements?: string[];
+  patterns?: string;
+}
+
+export interface MeetingParticipantInfo {
+  id?: number;
+  name?: string;
+  email?: string;
+  role?: string;
+  self?: boolean;
+  avatarUrl?: string | null;
+}
+
+/** Normalized meeting detail rendered by the library's right-hand panel.
+ *  Ariso meetings populate the rich fields (digest/summary/assessment/
+ *  coaching); local recordings populate `note`/`transcript` markdown instead. */
+export interface MeetingDetail {
+  id: string;
+  title: string;
+  startAt: string;
+  endAt?: string;
+  visibility?: string;
+  external?: boolean;
+  shortCode?: string;
+  publicShareExpiresAt?: string | null;
+  shareMeetingNotesToPublic?: 'attendee_and_host' | 'host_only' | 'off';
+  participants: MeetingParticipantInfo[];
+  // Ariso rich fields (markdown where noted)
+  digest?: string;
+  summary?: string;
+  actionItems: MeetingActionItem[];
+  score?: number;
+  rationale?: string;
+  recommendation?: string;
+  coaching?: MeetingCoaching;
+  meetingType?: string;
+  /** Ariso: Ari is scheduled to auto-join and record this meeting server-side. */
+  autoJoinScheduled?: boolean;
+  /** Whether a transcript exists — drives the Live Transcript tab. Content is
+   *  loaded lazily via `getMeetingTranscript`. */
+  hasTranscript?: boolean;
+  /** Whether the requester has an individual note — drives the "My note" tab.
+   *  Content is loaded lazily via `getIndividualNote`. */
+  hasIndividualNote?: boolean;
+  // Local-recording fields
+  isLocal: boolean;
+  durationSeconds?: number;
+  note?: string;
+  transcript?: string;
+}
+
 export interface Backend {
   id: BackendId;
   needsAuth: boolean;
   usesMeetingPicker: boolean;
+  /** Whether this backend offers note search through the shared search palette.
+   *  Ariso searches its remote note corpus; local does a title-only filter over
+   *  its recordings. */
+  supportsSearch: boolean;
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
+  listMeetings(): Promise<MeetingListItem[]>;
+  /** Search the backend's meeting-note corpus and return rows the Library can
+   *  select like normal meetings. */
+  searchMeetings(query: string): Promise<MeetingListItem[]>;
+  /** Load the detail for a single row (from the list item the user clicked). */
+  getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
+  /** Lazily load the meeting's transcript (null when none). Ariso meetings
+   *  resolve to structured chunks; local recordings resolve to markdown text. */
+  getMeetingTranscript(item: MeetingListItem): Promise<string | TranscriptChunk[] | null>;
+  /** Lazily load the requester's individual note (null when none). */
+  getIndividualNote(item: MeetingListItem): Promise<{ content: string; title: string | null } | null>;
+  /** Rename a meeting. Ariso PATCHes the meeting-notes endpoint; local
+   *  rewrites the title in the recording's meta.json. */
+  renameMeeting(id: string, title: string): Promise<void>;
+  /** Fetch the meeting's recorded audio bytes; null when none exists. */
+  getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null>;
+}
+
+interface RawMeetingSummary {
+  digest?: string;
+  summary?: string;
+  actionItems?: Array<string | { name?: string; item?: string }>;
+  score?: number;
+  rationale?: string;
+  recommendation?: string;
+  coaching?: MeetingCoaching;
+  meetingType?: string;
+}
+
+// `summary` arrives as a JSON string, an already-parsed object, or plain prose.
+// Normalize all three to a structured object; plain prose becomes the summary.
+function parseMeetingSummary(
+  summary: string | Record<string, unknown> | null | undefined
+): RawMeetingSummary {
+  if (!summary) return {};
+  if (typeof summary === 'string') {
+    try {
+      return JSON.parse(summary) as RawMeetingSummary;
+    } catch {
+      return { summary };
+    }
+  }
+  return summary as RawMeetingSummary;
+}
+
+function normalizeActionItems(
+  items: RawMeetingSummary['actionItems']
+): MeetingActionItem[] {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((it) => {
+      if (typeof it === 'string') return { item: it };
+      const raw =
+        it && typeof it === 'object'
+          ? (it as { name?: unknown; item?: unknown })
+          : {};
+      const name = typeof raw.name === 'string' ? raw.name : undefined;
+      const item = typeof raw.item === 'string' ? raw.item : '';
+      return { name, item };
+    })
+    .filter((it) => it.item.trim().length > 0);
 }
 
 async function blobToBytes(blob: Blob): Promise<number[]> {
   return [...new Uint8Array(await blob.arrayBuffer())];
 }
 
-function timestampTitle(iso: string): string {
+// The remote list/search endpoints return nearly the same meeting shape. Keep
+// the mapping in one place so search rows stay selectable like regular rows.
+function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): MeetingListItem {
+  const item: MeetingListItem = {
+    id: String(m.id),
+    title: m.title || 'Untitled meeting',
+    timestamp: m.start_at,
+    endTimestamp: m.end_at,
+    autoJoinScheduled: arisoTruthy(m.auto_join_scheduled),
+  };
+  if ('snippet' in m && m.snippet) item.snippet = m.snippet;
+  if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
+  return item;
+}
+
+// Local recordings map straight onto Library rows; both the full list and the
+// title-filtered search reuse this shape so search hits select like normal rows.
+function recordingToListItem(r: RecordingSummary): MeetingListItem {
+  return {
+    id: r.id,
+    title: r.title,
+    timestamp: r.createdAt,
+    durationSeconds: r.durationSeconds,
+    status: r.status,
+    files: {
+      hasAudio: r.hasAudio,
+      hasNote: r.hasNote,
+      hasTranscript: r.hasTranscript,
+    },
+  };
+}
+
+// Cap local title-search rows so the palette never has to render an unbounded
+// history; mirrors the old search dialog's limit.
+const MAX_LOCAL_SEARCH_RESULTS = 50;
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
-  // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same
-  // timezone (mixing toISOString's UTC date with toTimeString's local time can
-  // disagree near midnight).
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `Recording ${date} ${time}`;
+  // A friendly LOCAL label like "Sat Jun 17 @ 1PM" — every part reads from the
+  // same Date so they can't disagree across a timezone boundary near midnight.
+  const day = `${WEEKDAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  const hours = d.getHours();
+  const minutes = d.getMinutes();
+  const meridiem = hours < 12 ? 'AM' : 'PM';
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  const time =
+    minutes === 0
+      ? `${hour12}${meridiem}`
+      : `${hour12}:${String(minutes).padStart(2, '0')}${meridiem}`;
+  return `${day} @ ${time}`;
 }
 
 export class ArisoBackend implements Backend {
   id: BackendId = 'ariso';
   needsAuth = true;
   usesMeetingPicker = true;
+  supportsSearch = true;
 
   async isReady(): Promise<Readiness> {
     const session = await auth.checkSession();
@@ -55,13 +254,111 @@ export class ArisoBackend implements Backend {
   }
 
   async finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult> {
+    const createdAt = meta.startAt ?? meta.endAt;
+    // Crash-safety net: persist the mp3 + metadata before the upload attempt.
+    // A buffering failure must not block the upload — the in-memory blob is
+    // still valid.
+    try {
+      await pending.bufferAudio(await blobToBytes(blob), {
+        createdAt,
+        startAt: meta.startAt,
+        endAt: meta.endAt,
+        durationSeconds: meta.durationSeconds,
+        meetingId: meta.meetingId,
+      });
+    } catch (e) {
+      console.error('Failed to buffer audio locally; uploading anyway', e);
+    }
     const { uploadAudio } = useMeetingApi();
     const { meetingId } = await uploadAudio(blob, {
       startAt: meta.startAt,
       endAt: meta.endAt,
       meetingId: meta.meetingId,
     });
+    try {
+      await pending.discardAudio(createdAt);
+    } catch (e) {
+      console.error('Failed to remove buffered audio after upload', e);
+    }
     return { backend: 'ariso', meetingId };
+  }
+
+  async listMeetings(): Promise<MeetingListItem[]> {
+    const { listMeetingsInWindow } = useMeetingApi();
+    const { startDate, endDate } = arisoMeetingWindow(new Date());
+    const meetings: ScheduledMeeting[] = await listMeetingsInWindow(startDate, endDate);
+    return meetings.map(meetingSummaryToListItem);
+  }
+
+  async searchMeetings(query: string): Promise<MeetingListItem[]> {
+    const { searchMeetings } = useMeetingApi();
+    const meetings = await searchMeetings(query);
+    return meetings.map(meetingSummaryToListItem);
+  }
+
+  async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
+    const { getMeetingNotes } = useMeetingApi();
+    const data = await getMeetingNotes(item.id);
+    const s = parseMeetingSummary(data.summary);
+    return {
+      id: String(data.id ?? item.id),
+      title: data.title || item.title || 'Untitled meeting',
+      startAt: data.start_at || item.timestamp,
+      endAt: data.end_at,
+      visibility: data.visibility,
+      external: data.external,
+      shortCode: data.short_code,
+      publicShareExpiresAt: data.public_share_expires_at ?? null,
+      shareMeetingNotesToPublic: data.shareMeetingNotesToPublic,
+      participants: (data.participants ?? []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        email: p.email,
+        role: p.role,
+        self: p.self,
+        avatarUrl: p.avatar_url ?? null,
+      })),
+      digest: s.digest,
+      summary: typeof s.summary === 'string' ? s.summary : undefined,
+      actionItems: normalizeActionItems(s.actionItems),
+      score: typeof s.score === 'number' ? s.score : undefined,
+      rationale: s.rationale,
+      recommendation: s.recommendation,
+      coaching: s.coaching,
+      meetingType: s.meetingType,
+      hasTranscript: !!data.hasTranscript,
+      hasIndividualNote: !!data.individual_note?.content,
+      isLocal: false,
+      autoJoinScheduled: item.autoJoinScheduled ?? false,
+    };
+  }
+
+  async getMeetingTranscript(item: MeetingListItem): Promise<TranscriptChunk[] | null> {
+    const { getMeetingTranscript } = useMeetingApi();
+    return getMeetingTranscript(item.id);
+  }
+
+  async getIndividualNote(
+    item: MeetingListItem
+  ): Promise<{ content: string; title: string | null } | null> {
+    const { getMeetingIndividualNote } = useMeetingApi();
+    return getMeetingIndividualNote(item.id);
+  }
+
+  async renameMeeting(id: string, title: string): Promise<void> {
+    const { updateMeetingNotesTitle } = useMeetingApi();
+    await updateMeetingNotesTitle(id, title);
+  }
+
+  async getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null> {
+    try {
+      return await api.fetchMeetingAudio(item.id);
+    } catch (e) {
+      // fetch_meeting_audio prefixes errors with the HTTP status; 404 means
+      // the meeting simply has no recorded audio.
+      if (String(e).startsWith('404')) return null;
+      throw e;
+    }
   }
 }
 
@@ -69,6 +366,7 @@ export class LocalBackend implements Backend {
   id: BackendId = 'local';
   needsAuth = false;
   usesMeetingPicker = false;
+  supportsSearch = true;
 
   async isReady(): Promise<Readiness> {
     const status = await local.modelStatus();
@@ -89,6 +387,83 @@ export class LocalBackend implements Backend {
     );
     return { backend: 'local', ...res };
   }
+
+  async listMeetings(): Promise<MeetingListItem[]> {
+    // No date window: the local library shows the full recording history.
+    const recs = await local.listRecordings();
+    return recs.map(recordingToListItem);
+  }
+
+  // Local search has no note/transcript index yet, so it filters the recording
+  // list by a case-insensitive title substring. Routing it through the shared
+  // search palette (same UX as Ariso) keeps a single search surface for both
+  // backends.
+  async searchMeetings(query: string): Promise<MeetingListItem[]> {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const recs = await local.listRecordings();
+    return recs
+      .filter((r) => r.title.toLowerCase().includes(q))
+      .slice(0, MAX_LOCAL_SEARCH_RESULTS)
+      .map(recordingToListItem);
+  }
+
+  async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
+    // Local recordings have no rich summary — just the generated note and
+    // transcript markdown on disk. Read whichever exist (missing → null).
+    const [note, transcript] = await Promise.all([
+      item.files?.hasNote
+        ? local.readRecordingFile(item.id, 'note').catch(() => null)
+        : Promise.resolve(null),
+      item.files?.hasTranscript
+        ? local.readRecordingFile(item.id, 'transcript').catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    return {
+      id: item.id,
+      title: item.title,
+      startAt: item.timestamp,
+      participants: [],
+      actionItems: [],
+      isLocal: true,
+      durationSeconds: item.durationSeconds,
+      note: note ?? undefined,
+      transcript: transcript ?? undefined,
+      hasTranscript: !!item.files?.hasTranscript,
+      autoJoinScheduled: false,
+    };
+  }
+
+  async getMeetingTranscript(item: MeetingListItem): Promise<string | null> {
+    if (!item.files?.hasTranscript) return null;
+    return local.readRecordingFile(item.id, 'transcript').catch(() => null);
+  }
+
+  // Local recordings have no per-user individual note.
+  async getIndividualNote(): Promise<{ content: string; title: string | null } | null> {
+    return null;
+  }
+
+  async renameMeeting(id: string, title: string): Promise<void> {
+    await local.renameRecording(id, title);
+  }
+
+  async getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null> {
+    if (!item.files?.hasAudio) return null;
+    return local.readRecordingAudio(item.id);
+  }
+}
+
+/** Inclusive day window for the Ariso meetings list: 7 days back … 7 days
+ * forward, formatted as local `YYYY-MM-DD`. */
+export function arisoMeetingWindow(now: Date): { startDate: string; endDate: string } {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const start = new Date(now);
+  start.setDate(start.getDate() - 7);
+  const end = new Date(now);
+  end.setDate(end.getDate() + 7);
+  return { startDate: ymd(start), endDate: ymd(end) };
 }
 
 export async function getActiveBackend(): Promise<Backend> {
