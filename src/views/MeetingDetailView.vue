@@ -136,7 +136,7 @@
 
         <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
-          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(detail.note)" />
+          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
 
           <!-- Ariso rich content -->
           <template v-if="!detail.isLocal">
@@ -272,7 +272,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue';
-import { renderMarkdown } from '../utils/markdown';
+import { renderMarkdown, stripFrontmatter } from '../utils/markdown';
 import type { TranscriptChunk } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
 import {
@@ -649,9 +649,11 @@ function commitNoteTitle(): void {
 // Local recordings carry their transcript as markdown on the detail; Ariso
 // loads structured chunks lazily into `transcript`. The Transcript tab renders
 // whichever is present.
-const transcriptMarkdown = computed<string | null>(() =>
-  detail.value?.isLocal ? detail.value?.transcript ?? null : null
-);
+const transcriptMarkdown = computed<string | null>(() => {
+  if (!detail.value?.isLocal) return null;
+  const md = detail.value?.transcript;
+  return md ? stripFrontmatter(md) : null;
+});
 const transcriptChunks = computed<TranscriptChunk[] | null>(() => {
   if (detail.value?.isLocal) return null;
   return Array.isArray(transcript.value) ? transcript.value : null;
@@ -973,7 +975,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Header */
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; border-bottom: 1px solid #e5e6e3; }
-.head-titles { min-width: 0; }
+.head-titles { flex: 1; min-width: 0; }
 .head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
 .head-title--editable { cursor: text; }
 .head-title--input {
@@ -1065,6 +1067,8 @@ const durationLabel = computed<string | null>(() => {
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
+.card-content::-webkit-scrollbar { width: 6px; }
+.card-content::-webkit-scrollbar-thumb { background: #d6d6d6; border-radius: 3px; }
 .tab-pane { min-height: 100%; }
 .tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
