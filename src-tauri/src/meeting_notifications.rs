@@ -477,12 +477,14 @@ fn prep_url(prep_id: i64) -> String {
 // ---------------------------------------------------------------------------
 // Auto-record confirm/deny prompt
 //
-// When the mic monitor detects a meeting it asks here for a decision via a
-// notification carrying Record / Dismiss buttons. The user has 10 seconds to
-// choose; if they don't, the caller's mode default applies (record when
-// auto-record is on, skip when it's off). Lives in this module because there
-// is a single UNUserNotificationCenter delegate and it must route both the
-// meeting-prep clicks and these action buttons.
+// When the mic monitor detects a meeting it asks here for a decision. The
+// decision is surfaced by the custom borderless `meeting-prompt` window (Take
+// notes / Dismiss with a countdown bar), which reports the user's choice back
+// through the `resolve_meeting_prompt` command into the `oneshot` below. The
+// user has 10 seconds to choose; if they don't, the caller's mode default
+// applies (record when auto-record is on, skip when it's off). The
+// UNUserNotificationCenter delegate in `macos_un` now handles only meeting-prep
+// deep-link clicks — it no longer carries the auto-record decision.
 // ---------------------------------------------------------------------------
 
 /// How long the prompt stays actionable before the caller's mode default wins.
