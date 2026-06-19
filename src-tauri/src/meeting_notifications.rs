@@ -492,10 +492,12 @@ const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inner size of the meeting-start notification window (logical px). Compact
 /// single-row "native macOS mimic" layout from the design.
-const MEETING_PROMPT_W: f64 = 360.0;
-const MEETING_PROMPT_H: f64 = 64.0;
+// The window is larger than the visible card: the view adds ~13px of transparent
+// padding around the card so the corner dismiss button can straddle its corner.
+const MEETING_PROMPT_W: f64 = 386.0;
+const MEETING_PROMPT_H: f64 = 84.0;
 /// Height while the "more options" menu (Dismiss) is expanded below the card.
-const MEETING_PROMPT_H_EXPANDED: f64 = 84.0;
+const MEETING_PROMPT_H_EXPANDED: f64 = 102.0;
 
 /// The route the meeting-start notification window loads. `seconds` drives the
 /// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`; `subtitle`,

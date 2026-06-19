@@ -47,10 +47,11 @@ async function resolve(record: boolean) {
 
 <template>
   <div class="stage">
-    <div class="prompt">
-      <!-- macOS-style close button: pinned to the top-left corner, always shown -->
-      <button data-test="dismiss" class="dismiss" aria-label="Dismiss" @click="resolve(false)">✕</button>
+    <!-- close button straddling the card's rounded top-left corner; lives in the
+         stage (not the card) so it can sit on top of / outside the corner -->
+    <button data-test="dismiss" class="dismiss" aria-label="Dismiss" @click="resolve(false)">✕</button>
 
+    <div class="prompt">
       <!-- countdown bar: cosmetic, synced to the Rust timeout -->
       <div class="countdown-track">
         <div
@@ -117,13 +118,16 @@ body,
 </style>
 
 <style scoped>
-/* Fills the window; holds the card and the menu that grows below it. */
+/* Fills the window. Transparent padding insets the floating card so the corner
+   dismiss button can straddle its top-left corner without being clipped. */
 .stage {
   position: relative;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   width: 100vw;
   height: 100vh;
+  padding: 13px;
   font-family: 'Polymath', -apple-system, system-ui, sans-serif;
 }
 
@@ -131,9 +135,9 @@ body,
   position: relative;
   flex: none;
   box-sizing: border-box;
-  /* Matches MEETING_PROMPT_H (collapsed window height) so content stays centered
-     with equal top/bottom padding even when the window grows for the menu. */
-  height: 64px;
+  /* Matches MEETING_PROMPT_H minus the stage padding (top+bottom) so content
+     stays centered even when the window grows for the menu. */
+  height: 58px;
   display: flex;
   overflow: hidden;
   user-select: none;
@@ -141,31 +145,34 @@ body,
   background: #f7f6f4; /* Backdrop/Primary — matches the Meetings & Settings windows */
   color: #1c1c1c;
   border: 1px solid #e5e6e3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
 }
 
-/* macOS-style dismiss: a rectangle filling the top-left corner, always visible.
-   Its top-left radius follows the card so it sits flush in the corner. */
+/* Dismiss: a bordered white circle straddling the card's top-left corner, on
+   top of it (lives in the stage so it isn't clipped by the card). Always shown. */
 .dismiss {
   position: absolute;
-  left: 0;
-  top: 0;
+  left: 1px;
+  top: 1px;
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 26px;
-  border: none;
-  border-radius: 13px 0 9px 0;
-  background: rgba(0, 0, 0, 0.08);
+  width: 24px;
+  height: 24px;
+  border: 1px solid #e0e0dd;
+  border-radius: 999px;
+  background: #ffffff;
   color: #6f6f6f;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.15s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  transition: background 0.15s, color 0.15s;
 }
 .dismiss:hover {
-  background: rgba(0, 0, 0, 0.14);
+  background: #f2f1ee;
+  color: #1c1c1c;
 }
 
 /* Overlay at the very top edge so it doesn't consume layout height — keeps the
@@ -275,8 +282,8 @@ body,
    (overlapping the empty bottom of the card so it reads as a dropdown). */
 .secondary-btn {
   position: absolute;
-  top: 48px;
-  right: 12px;
+  top: 56px;
+  right: 25px;
   box-sizing: border-box;
   text-align: center;
   font-size: 13px;
