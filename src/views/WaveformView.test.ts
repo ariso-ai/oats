@@ -34,12 +34,13 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
 const recorderIsRecording = { value: true };
+const recorderIsPaused = { value: false };
 const recorderDuration = { value: 5 };
 const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: recorderIsRecording,
-    isPaused: { value: false },
+    isPaused: recorderIsPaused,
     durationSeconds: recorderDuration,
     frameLevels: { value: new Array(32).fill(0.5) },
     lastSoundAt: { value: 0 },
@@ -84,6 +85,7 @@ beforeEach(() => {
   for (const k in eventHandlers) delete eventHandlers[k];
   routeQuery = {};
   recorderIsRecording.value = true;
+  recorderIsPaused.value = false;
   recorderDuration.value = 5;
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
@@ -97,6 +99,38 @@ describe('WaveformView vertical pill', () => {
     expect(startRecording).toHaveBeenCalledWith('mic');
     expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.findAll('.dot')).toHaveLength(6);
+  });
+
+  it('uses the white logo in the dark recorder pill', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    expect(wrapper.find('.logo').attributes('src')).toContain('oats-tray-white.svg');
+  });
+
+  it('adds tooltip titles to active recording controls', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.pill').trigger('mouseenter');
+    await flushPromises();
+
+    const pause = wrapper.find('.pause-btn');
+    const stop = wrapper.find('.stop-btn');
+    expect(pause.attributes('title')).toBe('Pause recording');
+    expect(pause.attributes('aria-label')).toBe('Pause recording');
+    expect(stop.attributes('title')).toBe('Stop and save recording');
+    expect(stop.attributes('aria-label')).toBe('Stop and save recording');
+  });
+
+  it('keeps the pause/resume tooltip in sync with paused state', async () => {
+    recorderIsPaused.value = true;
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.pill').trigger('mouseenter');
+    await flushPromises();
+
+    const pause = wrapper.find('.pause-btn');
+    expect(pause.attributes('title')).toBe('Resume recording');
+    expect(pause.attributes('aria-label')).toBe('Resume recording');
   });
 
   it('does not paint the pill when launched with pillHidden=1, but still records', async () => {
@@ -433,6 +467,25 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.retry-btn').exists()).toBe(true);
     expect(wrapper.find('.resume-btn').exists()).toBe(true);
     expect(wrapper.find('.dismiss-btn').exists()).toBe(true);
+  });
+
+  it('adds tooltip titles to failed-upload controls', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    const retry = wrapper.find('.retry-btn');
+    const resume = wrapper.find('.resume-btn');
+    const dismiss = wrapper.find('.dismiss-btn');
+    expect(retry.attributes('title')).toBe('Retry upload');
+    expect(retry.attributes('aria-label')).toBe('Retry upload');
+    expect(resume.attributes('title')).toBe('Continue recording');
+    expect(resume.attributes('aria-label')).toBe('Continue recording');
+    expect(dismiss.attributes('title')).toBe('Discard recording');
+    expect(dismiss.attributes('aria-label')).toBe('Discard recording');
   });
 
   it('Resume clears the failed state, restarts recording, and keeps the blob', async () => {

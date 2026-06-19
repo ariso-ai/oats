@@ -13,23 +13,26 @@
       @mouseleave="collapse"
       @click="showMeetings"
     >
-      <img class="logo" src="../assets/oats-dark.svg" alt="" />
+      <img class="logo" src="../assets/oats-tray-white.svg" alt="" />
 
       <template v-if="uploadResult === 'failed'">
         <span class="status-icon err">✗</span>
         <button
           class="ctrl-btn retry-btn"
-          aria-label="Retry upload"
+          :aria-label="retryButtonLabel"
+          :title="retryButtonLabel"
           @click.stop.prevent="runFinalize"
         >↻</button>
         <button
           class="ctrl-btn resume-btn"
-          aria-label="Continue recording"
+          :aria-label="resumeButtonLabel"
+          :title="resumeButtonLabel"
           @click.stop.prevent="resumeFailed"
         >●</button>
         <button
           class="ctrl-btn dismiss-btn"
-          aria-label="Discard recording"
+          :aria-label="discardButtonLabel"
+          :title="discardButtonLabel"
           @click.stop.prevent="dismissFailed"
         >✕</button>
       </template>
@@ -56,7 +59,8 @@
           <span class="timer">{{ formattedDuration }}</span>
           <button
             class="ctrl-btn pause-btn"
-            :aria-label="recorder.isPaused.value ? 'Resume recording' : 'Pause recording'"
+            :aria-label="pauseResumeLabel"
+            :title="pauseResumeLabel"
             @click.stop.prevent="recorder.isPaused.value ? handleResume() : handlePause()"
           >
             <svg v-if="!recorder.isPaused.value" width="14" height="14" viewBox="0 0 14 14">
@@ -69,7 +73,8 @@
           </button>
           <button
             class="ctrl-btn stop-btn"
-            aria-label="Stop recording"
+            :aria-label="stopButtonLabel"
+            :title="stopButtonLabel"
             @click.stop.prevent="handleStop"
           >
             <svg width="14" height="14" viewBox="0 0 14 14">
@@ -114,6 +119,13 @@ const SUCCESS_CLOSE_MS = 1500;
 const recorder = useRecorder();
 const waveform = useWaveform();
 const backend = ref<Backend | null>(null);
+// These labels drive both native hover tooltips and accessibility names so the
+// icon-only controls stay understandable in local and cloud recording flows.
+const pauseResumeLabel = computed(() => (recorder.isPaused.value ? 'Resume recording' : 'Pause recording'));
+const stopButtonLabel = 'Stop and save recording';
+const retryButtonLabel = 'Retry upload';
+const resumeButtonLabel = 'Continue recording';
+const discardButtonLabel = 'Discard recording';
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
 const isExpanded = ref(false);

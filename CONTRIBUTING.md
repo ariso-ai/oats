@@ -10,6 +10,7 @@ Much of oats was built with [Claude Code](https://claude.com/claude-code) and th
 
 - [Code of conduct](#code-of-conduct)
 - [Ways to contribute](#ways-to-contribute)
+- [Working with Claude Code](#working-with-claude-code)
 - [Prerequisites](#prerequisites)
 - [Development scripts](#development-scripts)
 - [API build targets vs. transcription backend](#api-build-targets-vs-transcription-backend)
@@ -32,12 +33,20 @@ Be kind, be constructive, and assume good intent. We want oats to be a welcoming
 - 💡 **Suggest features** — open an issue describing the problem you'd like solved.
 - 🔧 **Send pull requests** — fix a bug, improve docs, or build a feature. See [Submitting changes](#submitting-changes).
 
+## Working with Claude Code
+
+This repo is set up for [Claude Code](https://claude.com/claude-code). On clone, trust
+the folder and you get the **superpowers** plugin plus five repo-specific skills
+(`oats-architecture`, `oats-vue`, `oats-tauri`, `oats-security`, `oats-debugging`) that
+encode our conventions. See [`CLAUDE.md`](CLAUDE.md) for the full guide. Plugin/skill
+config lives in `.claude/` and `.claude-plugin/`.
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) toolchain
 - Node.js + npm
 - From the monorepo root: `npm install`
-- `DEEPGRAM_API_KEY` in `.env` — must have **Member** role or higher (required for `/v1/auth/grant` token provisioning)
+- [Xcode](https://apps.apple.com/app/xcode/id497799835) (full install, not just Command Line Tools) — `xcodebuild` is required to compile the sidecar's MLX Metal shaders (`mlx-swift_Cmlx.bundle`); `swift build` alone cannot
 - **Apple Silicon, macOS 14+** (required to build and run the on-device Local backend sidecar)
 
 ## Development scripts

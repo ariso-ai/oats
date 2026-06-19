@@ -52,6 +52,21 @@ You decide where the work happens:
 
 > **Requires Apple Silicon (M-series) and macOS 14 or later.**
 
+### 🍺 Homebrew
+
+```bash
+# Add the tap (the cask lives in this repo, so point Homebrew at it directly)
+brew tap ariso-ai/oats https://github.com/ariso-ai/oats
+
+# Trust the cask, then install
+brew trust --cask ariso-ai/oats/oats
+brew install --cask oats
+```
+
+> Homebrew 6.0 introduced [tap trust](https://docs.brew.sh/Tap-Trust): third-party taps must be explicitly trusted before they install. The `brew trust` step grants that once — without it you'll see `Refusing to load cask … from untrusted tap`.
+
+### 📦 Direct download
+
 1. Download the latest `oats.dmg` from the [**Releases page**](https://github.com/ariso-ai/oats/releases/latest).
 2. Open the DMG and drag **oats** into your Applications folder.
 3. Launch it from Applications. oats lives in your menu bar — look for the <img src="src/assets/oats-dark.png" alt="oats icon" width="16" height="16" valign="middle" /> icon.
@@ -90,9 +105,9 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | --- | --- | --- |
 | **Cost** | Free | Free |
 | **Account / login** | Required | None |
-| **Audio leaves your Mac** | Yes (to Ariso) | **Never** |
-| **Transcription** | Ariso backend | Apple Neural Engine |
-| **Summary notes** | Ariso backend | On-device LLM |
+| **Audio leaves your Mac** | Your account (encrypted with your key) | **Never** |
+| **Transcription** | Ariso backend (no model training) | Apple Neural Engine |
+| **Summary notes** | Ariso backend (no model training) | On-device LLM |
 | **Works offline** | No | **Yes** |
 | **Best for** | Convenience, sharing, any Mac | Confidential meetings, air-gapped use |
 

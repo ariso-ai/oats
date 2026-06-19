@@ -73,6 +73,14 @@ pub fn llm_is_ready(root: &Path) -> bool {
     llm_dir(root).join(".complete").exists()
 }
 
+/// Both on-device models are downloaded and ready to record with: the STT
+/// (transcript) model AND the notes LLM. The Local backend gates recording on
+/// this — see `commands::ensure_recording_allowed`, the tray, and the
+/// mic-monitor auto-record path.
+pub fn local_models_ready(root: &Path) -> bool {
+    is_ready(root) && llm_is_ready(root)
+}
+
 pub fn status(root: &Path) -> ModelStatus {
     let llm_ready = Some(llm_is_ready(root));
     match read_manifest(root) {
@@ -410,6 +418,35 @@ mod tests {
         std::fs::write(dir.join(".complete"), b"1").unwrap();
         assert!(llm_is_ready(root));
         assert_eq!(status(root).llm_ready, Some(true));
+    }
+
+    #[test]
+    fn local_models_ready_requires_both_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Neither marker present.
+        assert!(!local_models_ready(root));
+
+        // STT manifest only → not ready (LLM still missing).
+        write_manifest(root, "2026-06-17T00:00:00Z").unwrap();
+        assert!(!local_models_ready(root));
+
+        // Add the LLM completion marker → both ready.
+        let dir = llm_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".complete"), b"1").unwrap();
+        assert!(local_models_ready(root));
+    }
+
+    #[test]
+    fn local_models_ready_false_with_llm_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // LLM marker present but no STT manifest → not ready.
+        let dir = llm_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".complete"), b"1").unwrap();
+        assert!(!local_models_ready(root));
     }
 
     #[test]

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release-please:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     permissions:
       contents: write
       pull-requests: write
@@ -51,12 +51,12 @@ jobs:
   sync-lock:
     needs: release-please
     if: ${{ needs.release-please.outputs.prs_created == 'true' }}
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
       - name: Checkout release-please PR branch
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: ${{ fromJson(needs.release-please.outputs.prs)[0].headBranchName }}
 
@@ -99,7 +99,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
@@ -174,7 +174,48 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- -- --features prod-api
+        run: npm run tauri:build -- --bundles app -- --features prod-api
+
+      # Compose the public DMG after the signed app bundle exists. appdmg
+      # writes Finder metadata without needing Finder or AppleScript in CI.
+      - name: Compose DMG layout
+        run: npm run dmg:compose
+
+      # The composer writes DMG metadata after Tauri signs the .app, so sign,
+      # notarize, and staple the final DMG before it becomes the public artifact.
+      - name: Sign and notarize composed DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for required_var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!required_var:-}" ]]; then
+              echo "${required_var} is required to sign and notarize the composed DMG." >&2
+              exit 1
+            fi
+          done
+
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          DMG_COUNT="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          if [[ "${DMG_COUNT}" != "1" ]]; then
+            echo "Expected exactly 1 DMG in ${DMG_DIR}, found ${DMG_COUNT}." >&2
+            find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print >&2
+            exit 1
+          fi
+
+          DMG="$(find "${DMG_DIR}" -maxdepth 1 -type f -name '*.dmg' -print)"
+          codesign --force --sign "${APPLE_SIGNING_IDENTITY}" --timestamp "${DMG}"
+          codesign --verify --verbose=4 "${DMG}"
+          xcrun notarytool submit "${DMG}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+          xcrun stapler staple "${DMG}"
+          xcrun stapler validate "${DMG}"
 
       # Hand the bundler outputs to the publish job. Paths share the common
       # ancestor bundle/, so the artifact preserves the macos/ and dmg/
@@ -195,7 +236,7 @@ jobs:
   publish:
     name: Generate manifest and publish artifacts to R2
     needs: [release-please, release]
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     # The R2 credentials live in the `release` environment alongside the Apple
     # signing secrets (see README → Signing & Notarization).
     environment: release
@@ -203,7 +244,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
@@ -228,6 +269,13 @@ jobs:
             echo "RELEASE_BODY_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # release-publish.sh uses `mapfile`, a bash 4.0+ builtin. The hosted
+      # macos-15 runner's system bash is 3.2, so install a modern bash from
+      # Homebrew and run the script with it explicitly (the next step's full
+      # path overrides the script's `#!/usr/bin/env bash` shebang).
+      - name: Install modern bash
+        run: brew install bash
+
       - name: Generate manifest and publish artifacts to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -238,7 +286,13 @@ jobs:
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
           RELEASE_BODY: ${{ steps.rel.outputs.body }}
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
-        run: .github/scripts/release-publish.sh
+        run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
+
+      - name: Upload Homebrew DMG asset and update cask checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: .github/scripts/publish-homebrew-cask.sh
 
       - name: Add R2 download link to GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
@@ -250,4 +304,4 @@ jobs:
             ---
             **Download:** [oats.dmg](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
-            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew install --cask oats`
+            **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew trust ariso-ai/oats && brew install --cask oats`

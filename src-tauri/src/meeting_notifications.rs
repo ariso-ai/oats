@@ -477,20 +477,16 @@ fn prep_url(prep_id: i64) -> String {
 // ---------------------------------------------------------------------------
 // Auto-record confirm/deny prompt
 //
-// When the mic monitor detects a meeting it asks here for a decision via a
-// notification carrying Record / Dismiss buttons. The user has 10 seconds to
-// choose; if they don't, the caller's mode default applies (record when
-// auto-record is on, skip when it's off). Lives in this module because there
-// is a single UNUserNotificationCenter delegate and it must route both the
-// meeting-prep clicks and these action buttons.
+// When the mic monitor detects a meeting it asks here for a decision. The
+// decision is surfaced by the custom borderless `meeting-prompt` window (Take
+// notes / Dismiss with a countdown bar), which reports the user's choice back
+// through the `resolve_meeting_prompt` command into the `oneshot` below. The
+// user has 10 seconds to choose; if they don't, the caller's mode default
+// applies (record when auto-record is on, skip when it's off). The
+// UNUserNotificationCenter delegate in `macos_un` no longer carries the
+// auto-record decision — it now handles only meeting-prep deep-link clicks and
+// the silence-stop prompt's Keep / Stop buttons.
 // ---------------------------------------------------------------------------
-
-/// Identifiers for the auto-record prompt. The category id tells macOS which
-/// action buttons to attach to the notification; the action ids come back in
-/// the delegate's `didReceive` so we know which button was tapped.
-const AUTO_RECORD_CATEGORY: &str = "ai.ariso.auto-record";
-const AUTO_RECORD_ACTION_RECORD: &str = "ai.ariso.auto-record.record";
-const AUTO_RECORD_ACTION_DISMISS: &str = "ai.ariso.auto-record.dismiss";
 
 /// How long the prompt stays actionable before the caller's mode default wins.
 const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -502,6 +498,107 @@ const SILENCE_CATEGORY: &str = "ai.ariso.silence-stop";
 const SILENCE_ACTION_KEEP: &str = "ai.ariso.silence-stop.keep";
 const SILENCE_ACTION_STOP: &str = "ai.ariso.silence-stop.stop";
 const SILENCE_IDENTIFIER: &str = "ai.ariso.silence-stop";
+
+/// Inner size of the meeting-start notification window (logical px). Compact
+/// single-row "native macOS mimic" layout from the design.
+// The window is larger than the visible card: the view adds ~13px of transparent
+// padding around the card so the corner dismiss button can straddle its corner.
+const MEETING_PROMPT_W: f64 = 386.0;
+const MEETING_PROMPT_H: f64 = 84.0;
+/// Height while the "more options" menu (Dismiss) is expanded below the card.
+const MEETING_PROMPT_H_EXPANDED: f64 = 102.0;
+
+/// The route the meeting-start notification window loads. `seconds` drives the
+/// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`; `subtitle`,
+/// when present, shows the live meeting's title (the view falls back to its own
+/// default subtitle when it's absent). Values are URL-encoded so titles with
+/// spaces/`&`/`#` survive the hash route.
+fn meeting_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    ser.append_pair("seconds", &seconds.to_string());
+    if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
+        ser.append_pair("subtitle", s);
+    }
+    format!("/#/meeting-prompt?{}", ser.finish())
+}
+
+/// Build (or focus) the borderless top-right notification window. Mirrors the
+/// waveform pill: no decorations, transparent, always-on-top, never focused so
+/// it can't interrupt the live meeting. Must run on the main thread.
+fn open_meeting_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Only one prompt is live per meeting; replace any stale window.
+    if let Some(existing) = app.get_webview_window("meeting-prompt") {
+        let _ = existing.close();
+    }
+    let seconds = AUTO_RECORD_PROMPT_TIMEOUT.as_secs();
+    let win = WebviewWindowBuilder::new(
+        app,
+        "meeting-prompt",
+        WebviewUrl::App(meeting_prompt_url(seconds, subtitle).into()),
+    )
+    .title("")
+    .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .shadow(false)
+    .focused(false)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    // Dock to the top-right of the primary monitor with a margin — the macOS
+    // notification corner.
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let msize = monitor.size();
+        let mpos = monitor.position();
+        let win_w = (MEETING_PROMPT_W * scale).round() as i32;
+        let margin = (16.0 * scale).round() as i32;
+        let x = mpos.x + msize.width as i32 - win_w - margin;
+        let y = mpos.y + margin;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    Ok(())
+}
+
+/// Close the notification window if it is still up (after a decision or timeout).
+fn close_meeting_prompt_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("meeting-prompt") {
+        let _ = win.close();
+    }
+}
+
+/// Command the notification view calls when the user picks an action. Rust owns
+/// the clock, so this only delivers the decision; `prompt_auto_record` closes
+/// the window once it receives it (or on timeout).
+#[tauri::command]
+pub async fn resolve_meeting_prompt(_app: AppHandle, record: bool) -> Result<(), String> {
+    deliver_auto_record_decision(record);
+    Ok(())
+}
+
+/// Grow/shrink the notification window so the view can reveal a small "more
+/// options" menu (Dismiss) below the card. Window sizing must happen on the main
+/// thread; the top-left stays pinned so the window grows downward.
+#[tauri::command]
+pub async fn resize_meeting_prompt(app: AppHandle, expanded: bool) -> Result<(), String> {
+    let height = if expanded {
+        MEETING_PROMPT_H_EXPANDED
+    } else {
+        MEETING_PROMPT_H
+    };
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(win) = app_main.get_webview_window("meeting-prompt") {
+            let _ = win.set_size(tauri::LogicalSize::new(MEETING_PROMPT_W, height));
+        }
+    });
+    Ok(())
+}
 
 /// One-shot sender for the in-flight auto-record prompt. The notification
 /// delegate (ObjC callback, main thread) fills it when a button is tapped; the
@@ -612,6 +709,69 @@ fn current_meeting_auto_join_from(resp: &Value, now_ms: i64) -> bool {
     current_auto_join
 }
 
+/// Best-effort title of the meeting happening right now, shown as the prompt
+/// subtitle. Only the Ariso backend has a calendar; everything else — and any
+/// network/parse error — returns None so the view keeps its default subtitle.
+pub async fn current_meeting_title(app: &AppHandle) -> Option<String> {
+    use crate::commands::{active_backend, api_base_url, get_session_token, http_client};
+    if active_backend(app) != "ariso" {
+        return None;
+    }
+    let token = get_session_token(app)?;
+    let now = chrono::Utc::now();
+    let start = (now - chrono::Duration::hours(2)).to_rfc3339();
+    let end = (now + chrono::Duration::hours(2)).to_rfc3339();
+    let result = tokio::time::timeout(HTTP_TIMEOUT, async {
+        http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .query(&[("startDate", start.as_str()), ("endDate", end.as_str())])
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    })
+    .await;
+    match result {
+        Ok(Some(v)) => current_meeting_title_from(&v, now.timestamp_millis()),
+        _ => None,
+    }
+}
+
+/// Pure selector (testable): title of the *current* meeting, picked the same way
+/// as `current_meeting_auto_join_from` (latest start among the current ones).
+/// Returns None when there is no current meeting or its title is null/empty.
+fn current_meeting_title_from(resp: &Value, now_ms: i64) -> Option<String> {
+    const FIVE_MIN_MS: i64 = 5 * 60_000;
+    const SIXTY_MIN_MS: i64 = 60 * 60_000;
+    let meetings = resp.get("meetings").and_then(Value::as_array)?;
+    let mut current_start = i64::MIN;
+    let mut current_title: Option<String> = None;
+    for m in meetings {
+        let Some(start_str) = m.get("start_at").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(start_ms) = chrono::DateTime::parse_from_rfc3339(start_str)
+            .map(|dt| dt.timestamp_millis())
+        else {
+            continue;
+        };
+        let is_current = start_ms - FIVE_MIN_MS <= now_ms && now_ms <= start_ms + SIXTY_MIN_MS;
+        if is_current && start_ms >= current_start {
+            current_start = start_ms;
+            current_title = m
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+        }
+    }
+    current_title
+}
+
 /// Lenient truthiness for an API flag that may arrive as a bool, 0/1, or string.
 fn truthy(v: Option<&Value>) -> bool {
     match v {
@@ -624,13 +784,14 @@ fn truthy(v: Option<&Value>) -> bool {
 
 /// Show the auto-record confirm/deny notification and await the user's choice.
 /// Resolves `true` to start recording. Returns `default_record` if the user
-/// doesn't respond within the 10s window — or on a build where the action
-/// buttons aren't available (the plugin fallback can't report a tap).
+/// doesn't respond within the 10s window.
 pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
+    // Best-effort: surface the live meeting's title as the prompt subtitle.
+    let subtitle = current_meeting_title(app).await;
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
-    show_auto_record_prompt(app);
-    match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
+    show_auto_record_prompt(app, subtitle);
+    let record = match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
         Ok(Ok(record)) => record,
         // Timed out, or the sender was dropped/replaced — apply the mode
         // default and drop any stale sender we still own.
@@ -638,27 +799,22 @@ pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
             let _ = prompt_slot().lock().unwrap().take();
             default_record
         }
-    }
+    };
+    // Tear the window down on the main thread (decision made or timed out).
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main));
+    record
 }
 
-/// Show the prompt notification with Record/Dismiss buttons. On a signed macOS
-/// bundle this uses UNUserNotificationCenter (the only path that renders action
-/// buttons). In dev / on other platforms it falls back to a plain banner with
-/// no buttons — the prompt then resolves on the timeout default.
-fn show_auto_record_prompt(app: &AppHandle) {
-    let title = "Meeting detected";
-    let body = "Start recording this meeting?";
-    #[cfg(target_os = "macos")]
-    if !tauri::is_dev() {
-        macos_un::show_auto_record(app, title, body);
-        return;
-    }
-    // Dev / non-macOS: plugin banner (no buttons). NOTE: from `tauri dev` on
-    // macOS the process isn't a real .app bundle, so this may post nothing
-    // visible — the prompt with buttons only renders from the built bundle.
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        eprintln!("auto-record: failed to show prompt notification: {e}");
-    }
+/// Open the meeting-start notification window. Window creation must happen on
+/// the main thread (like `open_waveform_window`), so dispatch there.
+fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>) {
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(e) = open_meeting_prompt_window(&app_main, subtitle.as_deref()) {
+            eprintln!("meeting-prompt: failed to open notification window: {e}");
+        }
+    });
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
@@ -734,9 +890,7 @@ mod macos_un {
                 completion.call((opts,));
             }
 
-            // Auto-record action buttons resolve the pending prompt; otherwise
-            // (a meeting-prep body click) open the deep link carried as the
-            // request identifier.
+            // Open the deep link carried as the request identifier.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -752,16 +906,6 @@ mod macos_un {
                 }
                 if action == super::SILENCE_ACTION_STOP {
                     super::emit_silence_decision(false);
-                    completion.call(());
-                    return;
-                }
-                if action == super::AUTO_RECORD_ACTION_RECORD {
-                    super::deliver_auto_record_decision(true);
-                    completion.call(());
-                    return;
-                }
-                if action == super::AUTO_RECORD_ACTION_DISMISS {
-                    super::deliver_auto_record_decision(false);
                     completion.call(());
                     return;
                 }
@@ -805,44 +949,18 @@ mod macos_un {
         );
     }
 
-    /// Register every notification category in one call. `setNotificationCategories`
-    /// is a wholesale REPLACE (not additive), so both the auto-record and silence
-    /// categories must go into a single `NSSet` here or one would clobber the
-    /// other.
+    /// Register the silence notification category. `setNotificationCategories` is
+    /// a wholesale REPLACE (not additive); the auto-record prompt now lives in a
+    /// borderless window (see `open_meeting_prompt_window`), so silence is the only
+    /// native category we attach buttons to.
     fn register_categories(center: &UNUserNotificationCenter) {
-        let categories =
-            NSSet::from_retained_slice(&[auto_record_category(), silence_category()]);
+        let categories = NSSet::from_retained_slice(&[silence_category()]);
         center.setNotificationCategories(&categories);
     }
 
-    /// Build the auto-record category so the prompt notification renders its
-    /// Record / Dismiss buttons. Actions run in the background (no Foreground
-    /// option) — the handler only signals a channel, it doesn't need the app
-    /// frontmost. Dismiss is styled destructive.
-    fn auto_record_category() -> Retained<UNNotificationCategory> {
-        let record = UNNotificationAction::actionWithIdentifier_title_options(
-            &NSString::from_str(super::AUTO_RECORD_ACTION_RECORD),
-            &NSString::from_str("Record"),
-            UNNotificationActionOptions::empty(),
-        );
-        let dismiss = UNNotificationAction::actionWithIdentifier_title_options(
-            &NSString::from_str(super::AUTO_RECORD_ACTION_DISMISS),
-            &NSString::from_str("Dismiss"),
-            UNNotificationActionOptions::Destructive,
-        );
-        let actions = NSArray::from_retained_slice(&[record, dismiss]);
-        let intents: Retained<NSArray<NSString>> = NSArray::from_slice(&[]);
-        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-            &NSString::from_str(super::AUTO_RECORD_CATEGORY),
-            &actions,
-            &intents,
-            UNNotificationCategoryOptions::empty(),
-        )
-    }
-
-    /// Build the silence category so the prompt renders Keep / Stop buttons. Like
-    /// auto-record, actions run in the background (no Foreground option); Stop is
-    /// styled destructive.
+    /// Build the silence category so the prompt renders Keep / Stop buttons.
+    /// Actions run in the background (no Foreground option); Stop is styled
+    /// destructive.
     fn silence_category() -> Retained<UNNotificationCategory> {
         let keep = UNNotificationAction::actionWithIdentifier_title_options(
             &NSString::from_str(super::SILENCE_ACTION_KEEP),
@@ -896,32 +1014,6 @@ mod macos_un {
             NSArray::from_retained_slice(&[NSString::from_str(super::SILENCE_IDENTIFIER)]);
         center.removeDeliveredNotificationsWithIdentifiers(&ids);
         center.removePendingNotificationRequestsWithIdentifiers(&ids);
-    }
-
-    /// Show the auto-record prompt with action buttons. Mirrors `show` but tags
-    /// the content with the auto-record category so macOS attaches the buttons;
-    /// on UNC failure it falls back to a (button-less) plugin banner.
-    pub fn show_auto_record(app: &AppHandle, title: &str, body: &str) {
-        let center = UNUserNotificationCenter::currentNotificationCenter();
-        let content = UNMutableNotificationContent::new();
-        content.setTitle(&NSString::from_str(title));
-        content.setBody(&NSString::from_str(body));
-        content.setCategoryIdentifier(&NSString::from_str(super::AUTO_RECORD_CATEGORY));
-        // A non-http identifier so the body-click handler's URL guard skips it.
-        let identifier = NSString::from_str(super::AUTO_RECORD_CATEGORY);
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &identifier, &content, None,
-        );
-        let app = app.clone();
-        let title = title.to_string();
-        let body = body.to_string();
-        let handler = RcBlock::new(move |err: *mut NSError| {
-            if let Some(desc) = err_desc(err) {
-                eprintln!("auto-record: UNC unavailable ({desc}); using plugin fallback (no buttons)");
-                let _ = app.notification().builder().title(&title).body(&body).show();
-            }
-        });
-        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
     }
 
     pub fn show(app: &AppHandle, title: &str, body: &str, url: &str) {
@@ -1035,6 +1127,66 @@ pub fn dismiss_silence_prompt(_app: AppHandle) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn meeting_prompt_url_carries_the_timeout_seconds() {
+        assert_eq!(super::meeting_prompt_url(10, None), "/#/meeting-prompt?seconds=10");
+        assert_eq!(super::meeting_prompt_url(7, None), "/#/meeting-prompt?seconds=7");
+    }
+
+    #[test]
+    fn meeting_prompt_url_encodes_the_subtitle() {
+        assert_eq!(
+            super::meeting_prompt_url(10, Some("Standup")),
+            "/#/meeting-prompt?seconds=10&subtitle=Standup"
+        );
+        // Spaces and reserved chars must survive the hash route.
+        assert_eq!(
+            super::meeting_prompt_url(10, Some("Q3 Plan & Review")),
+            "/#/meeting-prompt?seconds=10&subtitle=Q3+Plan+%26+Review"
+        );
+        // Empty subtitle is omitted entirely.
+        assert_eq!(super::meeting_prompt_url(10, Some("")), "/#/meeting-prompt?seconds=10");
+    }
+
+    #[test]
+    fn current_meeting_title_picks_the_active_meeting() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "title": "Standup" }
+        ]});
+        assert_eq!(
+            current_meeting_title_from(&resp, NOW_MS),
+            Some("Standup".to_string())
+        );
+    }
+
+    #[test]
+    fn current_meeting_title_is_none_when_null_or_empty() {
+        let null = json!({ "meetings": [ { "id": 1, "start_at": at(-10), "title": null } ]});
+        assert_eq!(current_meeting_title_from(&null, NOW_MS), None);
+        let empty = json!({ "meetings": [ { "id": 1, "start_at": at(-10), "title": "" } ]});
+        assert_eq!(current_meeting_title_from(&empty, NOW_MS), None);
+    }
+
+    #[test]
+    fn current_meeting_title_ignores_non_current_meetings() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-120), "title": "Old" }
+        ]});
+        assert_eq!(current_meeting_title_from(&resp, NOW_MS), None);
+    }
+
+    #[test]
+    fn latest_starting_current_meeting_title_wins_on_overlap() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-50), "title": "Earlier" },
+            { "id": 2, "start_at": at(-2),  "title": "Active" }
+        ]});
+        assert_eq!(
+            current_meeting_title_from(&resp, NOW_MS),
+            Some("Active".to_string())
+        );
+    }
 
     // 2026-06-16T12:00:00Z in epoch-ms, used as "now" across the cases.
     const NOW_MS: i64 = 1_781_956_800_000;

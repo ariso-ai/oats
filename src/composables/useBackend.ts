@@ -5,6 +5,7 @@ import {
   type MeetingSearchResult,
   type TranscriptChunk,
 } from './useMeetingApi';
+import { arisoTruthy } from './autoJoin';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -42,6 +43,8 @@ export interface MeetingListItem {
   snippet?: string | null;
   /** Remote search only: the exact matched text, when the backend returns it. */
   matchedText?: string | null;
+  /** Ariso scheduled meetings: Ari is set to auto-join and record server-side. */
+  autoJoinScheduled?: boolean;
 }
 
 export interface MeetingActionItem {
@@ -88,6 +91,8 @@ export interface MeetingDetail {
   recommendation?: string;
   coaching?: MeetingCoaching;
   meetingType?: string;
+  /** Ariso: Ari is scheduled to auto-join and record this meeting server-side. */
+  autoJoinScheduled?: boolean;
   /** Whether a transcript exists — drives the Live Transcript tab. Content is
    *  loaded lazily via `getMeetingTranscript`. */
   hasTranscript?: boolean;
@@ -186,6 +191,7 @@ function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): Me
     title: m.title || 'Untitled meeting',
     timestamp: m.start_at,
     endTimestamp: m.end_at,
+    autoJoinScheduled: arisoTruthy(m.auto_join_scheduled),
   };
   if ('snippet' in m && m.snippet) item.snippet = m.snippet;
   if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
@@ -213,16 +219,27 @@ function recordingToListItem(r: RecordingSummary): MeetingListItem {
 // history; mirrors the old search dialog's limit.
 const MAX_LOCAL_SEARCH_RESULTS = 50;
 
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
 export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
-  // Build a consistent LOCAL "YYYY-MM-DD HH:MM" — both parts must use the same
-  // timezone (mixing toISOString's UTC date with toTimeString's local time can
-  // disagree near midnight).
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `Recording ${date} ${time}`;
+  // A friendly LOCAL label like "Sat Jun 17 @ 1PM" — every part reads from the
+  // same Date so they can't disagree across a timezone boundary near midnight.
+  const day = `${WEEKDAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  const hours = d.getHours();
+  const minutes = d.getMinutes();
+  const meridiem = hours < 12 ? 'AM' : 'PM';
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  const time =
+    minutes === 0
+      ? `${hour12}${meridiem}`
+      : `${hour12}:${String(minutes).padStart(2, '0')}${meridiem}`;
+  return `${day} @ ${time}`;
 }
 
 export class ArisoBackend implements Backend {
@@ -312,6 +329,7 @@ export class ArisoBackend implements Backend {
       hasTranscript: !!data.hasTranscript,
       hasIndividualNote: !!data.individual_note?.content,
       isLocal: false,
+      autoJoinScheduled: item.autoJoinScheduled ?? false,
     };
   }
 
@@ -412,6 +430,7 @@ export class LocalBackend implements Backend {
       note: note ?? undefined,
       transcript: transcript ?? undefined,
       hasTranscript: !!item.files?.hasTranscript,
+      autoJoinScheduled: false,
     };
   }
 

@@ -1,22 +1,26 @@
 <template>
   <div v-if="items.length > 0" class="pending">
     <div class="group-label">Pending uploads</div>
-    <div v-for="it in items" :key="it.createdAt" class="pending-item">
-      <span class="pi-title">{{ titleFor(it) }}</span>
-      <span class="pi-dur">{{ durationFor(it) }}</span>
+    <div class="pending-card">
+      <div v-for="it in items" :key="it.createdAt" class="pending-item">
+        <span class="pi-dot" aria-hidden="true" />
+        <span class="pi-wave" aria-hidden="true" />
+        <span class="pi-title">{{ titleFor(it) }}</span>
+        <span class="pi-dur">{{ durationFor(it) }}</span>
+      </div>
+      <!-- Leaving the actions row cancels a pending discard confirmation so the
+           destructive second click can't linger armed after the user moves away. -->
+      <div class="pending-actions" @mouseleave="confirmingDiscard = false">
+        <button class="pending-btn upload" :disabled="busy" @click="onUpload">
+          <span v-if="busy" class="spinner" />
+          <span v-else>Upload ({{ items.length }})</span>
+        </button>
+        <button class="pending-btn discard" :disabled="busy" @click="onDiscard">
+          {{ confirmingDiscard ? 'Confirm discard' : 'Discard all' }}
+        </button>
+      </div>
     </div>
     <p v-if="error" class="pending-error">Upload failed — try again.</p>
-    <!-- Leaving the actions row cancels a pending discard confirmation so the
-         destructive second click can't linger armed after the user moves away. -->
-    <div class="pending-actions" @mouseleave="confirmingDiscard = false">
-      <button class="pending-btn upload" :disabled="busy" @click="onUpload">
-        <span v-if="busy" class="spinner" />
-        <span v-else>Upload ({{ items.length }})</span>
-      </button>
-      <button class="pending-btn discard" :disabled="busy" @click="onDiscard">
-        {{ confirmingDiscard ? 'Confirm discard' : 'Discard all' }}
-      </button>
-    </div>
   </div>
 </template>
 
@@ -95,45 +99,125 @@ onMounted(refresh);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 12px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 6px;
+  flex-shrink: 0;
 }
 .group-label {
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #f9a8a8;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  color: #9a9a96;
+  padding: 14px 10px 4px;
+}
+.pending-card {
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid #dedbd6;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), 0 1px 2px rgba(28, 28, 28, 0.04);
 }
 .pending-item {
   display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  color: #e5e5e5;
+  align-items: center;
+  gap: 7px;
+  min-height: 52px;
+  padding: 0 10px;
+  box-sizing: border-box;
 }
-.pi-dur { color: #9ca3af; font-variant-numeric: tabular-nums; }
-.pending-error { font-size: 11px; color: #f87171; margin: 0; }
-.pending-actions { display: flex; gap: 8px; margin-top: 2px; }
-.pending-btn {
+.pending-item + .pending-item {
+  border-top: 1px solid #e5e2dd;
+}
+.pi-dot {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border-radius: 999px;
+  background: #a19d94;
+  box-shadow: inset 0 1px 1px rgba(28, 28, 28, 0.18);
+}
+.pi-wave {
+  width: 20px;
+  height: 24px;
+  flex: 0 0 20px;
+  background:
+    linear-gradient(#8f8c86, #8f8c86) 0 50% / 3px 10px no-repeat,
+    linear-gradient(#8f8c86, #8f8c86) 6px 50% / 3px 24px no-repeat,
+    linear-gradient(#8f8c86, #8f8c86) 12px 50% / 3px 17px no-repeat,
+    linear-gradient(#8f8c86, #8f8c86) 18px 50% / 3px 10px no-repeat;
+  border-radius: 999px;
+}
+.pi-title {
   flex: 1;
-  height: 28px;
-  border: none;
-  border-radius: 8px;
-  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1c1c1c;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+}
+.pi-dur {
+  flex-shrink: 0;
+  color: #6f6f6f;
+  font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.pending-error {
+  margin: 0 10px;
+  color: #c2413b;
+  font-size: 12px;
+}
+.pending-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  min-height: 56px;
+  padding: 10px 12px;
+  border-top: 1px solid #e5e2dd;
+  box-sizing: border-box;
+}
+.pending-btn {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
 .pending-btn:disabled { opacity: 0.6; cursor: default; }
-.upload { background: #f9d852; color: #0d0d0d; }
-.discard { background: #1f1f1f; color: #f87171; }
+.upload {
+  flex: 0 1 128px;
+  background: #1c1c1c;
+  color: #ffffff;
+}
+.upload:not(:disabled):hover { background: #343434; }
+.discard {
+  flex: 0 1 126px;
+  background: rgba(255, 255, 255, 0.62);
+  border-color: #d7d6d2;
+  color: #6f6f6f;
+}
+.discard:not(:disabled):hover {
+  background: #ffffff;
+  border-color: #bdbbb6;
+  color: #1c1c1c;
+}
 .spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid #4b5563;
-  border-top-color: #0d0d0d;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #ffffff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }

@@ -38,6 +38,18 @@ function renderInline(text: string): string {
   return out;
 }
 
+// Strip a leading YAML front-matter block (`---` … `---`) if the string opens
+// with one. Local recordings persist note/transcript markdown with metadata
+// front-matter (title/date/duration/participants) that's useful in the exported
+// file on disk but is noise when rendering in-app, so callers strip it for
+// display only. Returns the input unchanged when there's no leading block.
+export function stripFrontmatter(src: string): string {
+  if (!src) return src;
+  const normalized = src.replace(/\r\n/g, '\n');
+  const match = normalized.match(/^---\n[\s\S]*?\n---[ \t]*(?:\n|$)/);
+  return match ? normalized.slice(match[0].length).replace(/^\n+/, '') : src;
+}
+
 /** Render a Markdown string to a sanitized HTML string. */
 export function renderMarkdown(src: string): string {
   if (!src) return '';
