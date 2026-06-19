@@ -13,7 +13,7 @@
       @mouseleave="collapse"
       @click="showMeetings"
     >
-      <img class="logo" src="../assets/oats-dark.svg" alt="" />
+      <img class="logo" src="../assets/oats-tray-white.svg" alt="" />
 
       <template v-if="uploadResult === 'failed'">
         <span class="status-icon err">✗</span>

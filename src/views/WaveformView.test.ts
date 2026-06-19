@@ -100,6 +100,12 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.findAll('.dot')).toHaveLength(6);
   });
 
+  it('uses the white logo in the dark recorder pill', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    expect(wrapper.find('.logo').attributes('src')).toContain('oats-tray-white.svg');
+  });
+
   it('adds tooltip titles to active recording controls', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();
