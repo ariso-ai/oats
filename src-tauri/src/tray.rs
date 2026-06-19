@@ -5,27 +5,16 @@ use tauri::{
     AppHandle, Emitter, Manager, WebviewWindowBuilder,
 };
 
-// Appearance-aware tray icons (NOT template images, so the fill color shows).
-// Both are 128x128 so the icon renders at the same size in either appearance.
-// The dark-mode mark has a yellow outline (visible on a dark menu bar).
-// `apply_theme` swaps between them on system-appearance changes.
-const TRAY_ICON_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
-const TRAY_ICON_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
+// The menu-bar icon is a macOS template image: AppKit uses the PNG alpha mask
+// and tints it for the current menu-bar material, matching system status items.
+const TRAY_ICON_TEMPLATE: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
 
-fn tray_icon_bytes(theme: tauri::Theme) -> &'static [u8] {
-    match theme {
-        tauri::Theme::Dark => TRAY_ICON_DARK,
-        _ => TRAY_ICON_LIGHT,
-    }
-}
-
-/// Swap the tray icon to match the current menu-bar appearance. Called once
-/// after the main window exists (to set the correct initial icon) and again on
-/// every `ThemeChanged` event.
-pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+/// Re-apply the template tray icon after startup and theme notifications. The
+/// icon bytes stay constant; macOS owns the actual light/dark tint.
+pub fn apply_theme(app: &AppHandle, _theme: tauri::Theme) {
     let Some(tray) = app.tray_by_id("main") else { return };
-    if let Ok(icon) = Image::from_bytes(tray_icon_bytes(theme)) {
-        let _ = tray.set_icon(Some(icon));
+    if let Ok(icon) = Image::from_bytes(TRAY_ICON_TEMPLATE) {
+        let _ = tray.set_icon_with_as_template(Some(icon), true);
     }
 }
 
@@ -92,10 +81,10 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_idle_menu(app, None)?;
 
     TrayIconBuilder::with_id("main")
-        // Default to the light-mode icon; main.rs corrects this to the actual
-        // system appearance once the main window exists, then keeps it in sync.
-        .icon(Image::from_bytes(TRAY_ICON_LIGHT)?)
-        .icon_as_template(false)
+        // Mark it as a template so AppKit tints it alongside the other menu-bar
+        // status icons instead of preserving the brand colors.
+        .icon(Image::from_bytes(TRAY_ICON_TEMPLATE)?)
+        .icon_as_template(true)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
