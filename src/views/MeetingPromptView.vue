@@ -16,9 +16,15 @@ const { seconds, title, subtitle } = parsePromptParams(search);
 // Whether the "more options" menu below the Take notes button is open. Rust
 // grows the (fixed-size, overflow-hidden) window so the menu has room to show.
 const menuOpen = ref(false);
+// The split button, measured so the Dismiss button can match its width.
+const splitEl = ref<HTMLElement | null>(null);
+const menuWidth = ref('auto');
 
 async function toggleMenu() {
   menuOpen.value = !menuOpen.value;
+  if (menuOpen.value && splitEl.value) {
+    menuWidth.value = `${splitEl.value.offsetWidth}px`;
+  }
   try {
     await invoke('resize_meeting_prompt', { expanded: menuOpen.value });
   } catch {
@@ -62,7 +68,7 @@ async function resolve(record: boolean) {
         </div>
 
         <!-- Split button: Take notes + a chevron that reveals more options. -->
-        <div class="split">
+        <div ref="splitEl" class="split">
           <button class="primary-btn split-main" @click="resolve(true)">Take notes</button>
           <button
             data-test="more-options"
@@ -86,6 +92,7 @@ async function resolve(record: boolean) {
       v-if="menuOpen"
       data-test="menu-dismiss"
       class="secondary-btn"
+      :style="{ width: menuWidth }"
       @click="resolve(false)"
     >
       Dismiss
@@ -136,22 +143,23 @@ body,
   border: 1px solid #e5e6e3;
 }
 
-/* macOS-style dismiss: pinned tight into the top-left corner, always visible. */
+/* macOS-style dismiss: a rectangle filling the top-left corner, always visible.
+   Its top-left radius follows the card so it sits flush in the corner. */
 .dismiss {
   position: absolute;
-  left: 4px;
-  top: 4px;
+  left: 0;
+  top: 0;
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 16px;
+  width: 30px;
+  height: 26px;
   border: none;
-  border-radius: 5px;
+  border-radius: 13px 0 9px 0;
   background: rgba(0, 0, 0, 0.08);
   color: #6f6f6f;
-  font-size: 10px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
   transition: background 0.15s;
@@ -269,6 +277,8 @@ body,
   position: absolute;
   top: 48px;
   right: 12px;
+  box-sizing: border-box;
+  text-align: center;
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
