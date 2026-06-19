@@ -74,7 +74,6 @@ body,
   width: 100vw;
   height: 100vh;
   display: flex;
-  flex-direction: column;
   overflow: hidden;
   user-select: none;
   border-radius: 14px;
@@ -112,10 +111,15 @@ body,
   background: rgba(0, 0, 0, 0.14);
 }
 
+/* Overlay at the very top edge so it doesn't consume layout height — keeps the
+   content row's top and bottom padding symmetric. */
 .countdown-track {
-  flex: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
   height: 3px;
-  width: 100%;
   background: rgba(0, 0, 0, 0.08);
 }
 /* Animate `width` (not `transform`) so the bar is clipped correctly by the
@@ -143,7 +147,9 @@ body,
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
+  /* Horizontal padding only; the row fills the card height and centers its
+     content, so top/bottom spacing stays equal and follows the window height. */
+  padding: 0 12px;
 }
 
 .logo {
