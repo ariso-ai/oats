@@ -485,13 +485,6 @@ fn prep_url(prep_id: i64) -> String {
 // meeting-prep clicks and these action buttons.
 // ---------------------------------------------------------------------------
 
-/// Identifiers for the auto-record prompt. The category id tells macOS which
-/// action buttons to attach to the notification; the action ids come back in
-/// the delegate's `didReceive` so we know which button was tapped.
-const AUTO_RECORD_CATEGORY: &str = "ai.ariso.auto-record";
-const AUTO_RECORD_ACTION_RECORD: &str = "ai.ariso.auto-record.record";
-const AUTO_RECORD_ACTION_DISMISS: &str = "ai.ariso.auto-record.dismiss";
-
 /// How long the prompt stays actionable before the caller's mode default wins.
 const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -730,10 +723,9 @@ mod macos_un {
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread};
-    use objc2_foundation::{NSArray, NSError, NSSet, NSString};
+    use objc2_foundation::{NSError, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
-        UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
         UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
@@ -764,9 +756,7 @@ mod macos_un {
                 completion.call((opts,));
             }
 
-            // Auto-record action buttons resolve the pending prompt; otherwise
-            // (a meeting-prep body click) open the deep link carried as the
-            // request identifier.
+            // Open the deep link carried as the request identifier.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -774,17 +764,6 @@ mod macos_un {
                 response: &UNNotificationResponse,
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
-                let action = response.actionIdentifier().to_string();
-                if action == super::AUTO_RECORD_ACTION_RECORD {
-                    super::deliver_auto_record_decision(true);
-                    completion.call(());
-                    return;
-                }
-                if action == super::AUTO_RECORD_ACTION_DISMISS {
-                    super::deliver_auto_record_decision(false);
-                    completion.call(());
-                    return;
-                }
                 let url = response.notification().request().identifier().to_string();
                 if url.starts_with("http") {
                     let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -817,66 +796,11 @@ mod macos_un {
         // setDelegate stores a weak reference; leak a strong ref so the
         // delegate lives for the whole process.
         std::mem::forget(delegate);
-        register_auto_record_category(&center);
         let handler = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
         center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &handler,
         );
-    }
-
-    /// Register the auto-record category so the prompt notification renders its
-    /// Record / Dismiss buttons. Actions run in the background (no Foreground
-    /// option) — the handler only signals a channel, it doesn't need the app
-    /// frontmost. Dismiss is styled destructive.
-    fn register_auto_record_category(center: &UNUserNotificationCenter) {
-        let record = UNNotificationAction::actionWithIdentifier_title_options(
-            &NSString::from_str(super::AUTO_RECORD_ACTION_RECORD),
-            &NSString::from_str("Record"),
-            UNNotificationActionOptions::empty(),
-        );
-        let dismiss = UNNotificationAction::actionWithIdentifier_title_options(
-            &NSString::from_str(super::AUTO_RECORD_ACTION_DISMISS),
-            &NSString::from_str("Dismiss"),
-            UNNotificationActionOptions::Destructive,
-        );
-        let actions = NSArray::from_retained_slice(&[record, dismiss]);
-        let intents: Retained<NSArray<NSString>> = NSArray::from_slice(&[]);
-        let category =
-            UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-                &NSString::from_str(super::AUTO_RECORD_CATEGORY),
-                &actions,
-                &intents,
-                UNNotificationCategoryOptions::empty(),
-            );
-        let categories = NSSet::from_retained_slice(&[category]);
-        center.setNotificationCategories(&categories);
-    }
-
-    /// Show the auto-record prompt with action buttons. Mirrors `show` but tags
-    /// the content with the auto-record category so macOS attaches the buttons;
-    /// on UNC failure it falls back to a (button-less) plugin banner.
-    pub fn show_auto_record(app: &AppHandle, title: &str, body: &str) {
-        let center = UNUserNotificationCenter::currentNotificationCenter();
-        let content = UNMutableNotificationContent::new();
-        content.setTitle(&NSString::from_str(title));
-        content.setBody(&NSString::from_str(body));
-        content.setCategoryIdentifier(&NSString::from_str(super::AUTO_RECORD_CATEGORY));
-        // A non-http identifier so the body-click handler's URL guard skips it.
-        let identifier = NSString::from_str(super::AUTO_RECORD_CATEGORY);
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &identifier, &content, None,
-        );
-        let app = app.clone();
-        let title = title.to_string();
-        let body = body.to_string();
-        let handler = RcBlock::new(move |err: *mut NSError| {
-            if let Some(desc) = err_desc(err) {
-                eprintln!("auto-record: UNC unavailable ({desc}); using plugin fallback (no buttons)");
-                let _ = app.notification().builder().title(&title).body(&body).show();
-            }
-        });
-        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
     }
 
     pub fn show(app: &AppHandle, title: &str, body: &str, url: &str) {
