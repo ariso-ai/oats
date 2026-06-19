@@ -89,6 +89,18 @@ function item(over: Record<string, unknown>) {
   };
 }
 
+// MeetingDetailView mounts a TipTap editor jsdom can't fully host; stub it to a
+// lightweight placeholder when a test only cares about the surrounding Library
+// chrome (selection, the recorder strip, the titlebar button).
+const detailStub = {
+  name: 'MeetingDetailView',
+  emits: ['close', 'title-updated'],
+  template: '<div class="detail-stub"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
+};
+function mountWithDetailStub() {
+  return mount(LibraryView, { global: { stubs: { MeetingDetailView: detailStub } } });
+}
+
 // Auto-unmount between tests so each component's window 'focus' listener is
 // removed — otherwise a dispatched focus event would also fire stale listeners.
 enableAutoUnmount(afterEach);
@@ -500,22 +512,29 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 
-  it('hides the sidebar (and add button) while a recording (waveform window) is active', async () => {
+  it('hides the sidebar and disables the Start button while a recording (waveform window) is active', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    // The sidebar collapses, but the titlebar Start button stays — disabled, so
+    // a second recording can't be started over the live one.
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    const btn = wrapper.find('.add-btn');
+    expect(btn.exists()).toBe(true);
+    expect(btn.attributes('disabled')).toBeDefined();
   });
 
-  it('hides the sidebar immediately after clicking the add button', async () => {
+  it('hides the sidebar and disables the Start button immediately after clicking it', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.add-btn').exists()).toBe(true);
+    expect(wrapper.find('.sidebar').exists()).toBe(true);
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
     await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
@@ -840,6 +859,84 @@ describe('LibraryView', () => {
     expect(rows[0].attributes('aria-pressed')).toBe('true');
     expect(wrapper.find('.strip').exists()).toBe(false);
     expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
+  });
+
+  // Req 1: the floating recorder is docked in the detail pane → the titlebar
+  // keeps the Start button but disables it so a second recording can't begin.
+  it('disables the Start button while the recorder strip is docked in the detail pane', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+
+    expect(wrapper.find('.strip').exists()).toBe(true);
+    const btn = wrapper.find('.add-btn');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain('Start recording');
+    expect(btn.attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(false);
+  });
+
+  // Req 2: recording continues but its meeting is no longer shown (the user
+  // navigated to another meeting) → the Start button becomes a "Recording"
+  // indicator.
+  it('swaps the Start button for a "Recording" indicator when the recording is off-screen', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+
+    // rows[0] is Standup (10:00); rows[1] is the recording (14:30). Move off the
+    // recording onto Standup.
+    const rows = wrapper.findAll('.meeting-item');
+    await rows[0].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    const pill = wrapper.find('.add-btn--recording');
+    expect(pill.exists()).toBe(true);
+    expect(pill.text()).toContain('In recording');
+    // It renders the mini waveform, not the plain "Start recording" button.
+    expect(pill.find('.rec-wave').exists()).toBe(true);
+    expect(wrapper.find('.add-btn').text()).not.toContain('Start recording');
+  });
+
+  // Req 2: clicking the indicator re-docks the strip on the recording meeting.
+  it('clicking the "Recording" indicator re-docks the strip on the recording meeting', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
+    expect(wrapper.find('.strip').exists()).toBe(false);
+
+    await wrapper.find('.add-btn--recording').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.strip').exists()).toBe(true);
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
+  // Req 2: closing the detail pane mid-recording also surfaces the indicator.
+  it('shows the "Recording" indicator after the detail pane is closed mid-recording', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    await wrapper.find('.detail-stub .btn-close').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
   });
 
   it('reloads when the recording closes so the finalized row replaces the synthetic one', async () => {

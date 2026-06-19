@@ -19,7 +19,35 @@
           <line x1="6.75" y1="3" x2="6.75" y2="15" stroke="currentColor" stroke-width="1.5" />
         </svg>
       </button>
-      <button class="add-btn" aria-label="Start recording" title="Start recording" @click="startRecording">
+      <!-- While a recording runs off-screen (its meeting isn't shown), the
+           Start button becomes a "Recording" indicator that re-docks the strip
+           when clicked. Otherwise it starts a recording, disabled while the
+           strip is already on-screen so a second recording can't begin. -->
+      <button
+        v-if="recordingOffscreen"
+        class="add-btn add-btn--recording"
+        type="button"
+        aria-label="Show current recording"
+        title="Show current recording"
+        @click="showRecordingMeeting"
+      >
+        <span class="rec-wave" aria-hidden="true">
+          <span class="rec-wave-bar" />
+          <span class="rec-wave-bar" />
+          <span class="rec-wave-bar" />
+          <span class="rec-wave-bar" />
+        </span>
+        <span class="add-btn-label">In recording</span>
+      </button>
+      <button
+        v-else
+        class="add-btn"
+        type="button"
+        :disabled="startDisabled"
+        aria-label="Start recording"
+        title="Start recording"
+        @click="startRecording"
+      >
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
         </svg>
@@ -182,6 +210,22 @@ const recordingMeetingId = ref<string | null>(null);
 // True only while audio is actively being captured — gates the red dot so it
 // stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
 const recordingActive = ref(false);
+
+// The recorder strip is docked in the detail pane when an active recording's
+// meeting is the one on-screen (a recording with no home row shows anywhere).
+// Mirrors RecorderStrip's own visibility rule.
+const recorderStripVisible = computed(
+  () =>
+    recordingActive.value &&
+    (recordingMeetingId.value == null || recordingMeetingId.value === selectedItem.value?.id)
+);
+// A recording is running but its meeting isn't on-screen (the user closed the
+// detail or navigated to another meeting). The titlebar then shows a
+// "Recording" indicator instead of the Start button.
+const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
+// Block starting a second recording while one is already shown here, or while
+// a session is otherwise live (waveform window up, before the strip heartbeats).
+const startDisabled = computed(() => recording.value || recorderStripVisible.value);
 // Ad-hoc meetings we recorded this session that the backend list doesn't surface
 // yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
 // isn't a calendar-scheduled meeting and never appears in listMeetings()). We
@@ -294,6 +338,15 @@ async function clearSelection(): Promise<void> {
   await detailView.value?.saveNotesNow?.();
   if (my !== selectionReqId) return;
   selectedItem.value = null;
+}
+
+// Re-dock the recorder strip: pull the in-progress recording's meeting back
+// into the detail pane (the titlebar "Recording" indicator's action).
+async function showRecordingMeeting(): Promise<void> {
+  const id = recordingMeetingId.value;
+  if (!id) return;
+  const m = displayMeetings.value.find((x) => x.id === id);
+  if (m) await selectMeeting(m);
 }
 
 function openSearchPalette(): void {
@@ -738,6 +791,39 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .add-btn:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px, 1px); }
+.add-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.add-btn:disabled:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: none; }
+/* Recording indicator: same pill, tinted red, pausing-glyph + "Recording". */
+.add-btn--recording {
+  color: #c5352f;
+  border-color: #f0c5c3;
+  background: #fdf3f2;
+}
+.add-btn--recording .add-btn-label { color: #c5352f; }
+/* Mini live waveform: four bars pulsing on a staggered cycle. */
+.rec-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 1.5px;
+  height: 12px;
+}
+.rec-wave-bar {
+  width: 2px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentColor;
+  animation: rec-wave 0.9s ease-in-out infinite;
+}
+.rec-wave-bar:nth-child(2) { animation-delay: 0.15s; }
+.rec-wave-bar:nth-child(3) { animation-delay: 0.3s; }
+.rec-wave-bar:nth-child(4) { animation-delay: 0.45s; }
+@keyframes rec-wave {
+  0%, 100% { height: 4px; }
+  50% { height: 12px; }
+}
 
 .search-trigger {
   display: flex;

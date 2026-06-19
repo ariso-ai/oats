@@ -6,9 +6,45 @@
 //! closed. Tauri emits no minimize/restore events, so a watcher task polls
 //! and exits once the waveform window is gone.
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Pill ("waveform") window size in CSS px — must match the `inner_size` used
+/// when the window is built (see `open_waveform_window`). Kept here so the
+/// right-edge docking math and the window dimensions stay in sync.
+pub(crate) const PILL_W: f64 = 92.0;
+pub(crate) const PILL_H: f64 = 284.0;
+/// Gap from the screen's right edge, in CSS px.
+const PILL_MARGIN: f64 = 16.0;
+
+/// Physical-pixel top-left for the pill docked to a monitor's right edge,
+/// vertically centered. Pure so the edge math is unit-tested without a window.
+fn pill_dock_position(monitor_pos: (i32, i32), monitor_size: (u32, u32), scale: f64) -> (i32, i32) {
+    let win_w = (PILL_W * scale).round() as i32;
+    let win_h = (PILL_H * scale).round() as i32;
+    let margin = (PILL_MARGIN * scale).round() as i32;
+    let x = monitor_pos.0 + monitor_size.0 as i32 - win_w - margin;
+    let y = monitor_pos.1 + (monitor_size.1 as i32 - win_h) / 2;
+    (x, y)
+}
+
+/// Dock the pill to the right edge of the primary screen, vertically centered,
+/// rather than wherever the OS first placed it (≈ mid-screen). Called both when
+/// the pill is born as the visible UI and each time the watcher reveals it
+/// (e.g. the meetings window was minimized mid-recording).
+pub(crate) fn dock_to_right_edge(win: &WebviewWindow) {
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let msize = monitor.size();
+        let mpos = monitor.position();
+        let (x, y) = pill_dock_position(
+            (mpos.x, mpos.y),
+            (msize.width, msize.height),
+            monitor.scale_factor(),
+        );
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
+}
 
 /// The pill is the fallback recording UI: visible only while the library
 /// window (hosting the embedded recorder strip) is absent or minimized.
@@ -67,6 +103,10 @@ pub(crate) fn spawn_watcher(app: &AppHandle) {
             let visible = wave.is_visible().unwrap_or(desired);
             match visibility_action(desired, capture, visible) {
                 Some(true) => {
+                    // Re-dock to the right edge before revealing: the pill was
+                    // born at the OS default spot when the meetings window owned
+                    // the UI, so show it docked rather than mid-screen.
+                    dock_to_right_edge(&wave);
                     let _ = wave.show();
                 }
                 Some(false) => {
@@ -116,5 +156,23 @@ mod tests {
         assert_eq!(visibility_action(true, true, true), None);
         assert_eq!(visibility_action(false, true, false), None);
         assert_eq!(visibility_action(false, false, false), None);
+    }
+
+    #[test]
+    fn docks_against_the_monitor_right_edge_vertically_centered() {
+        // 1920x1080 primary monitor at the origin, no HiDPI scaling.
+        let (x, y) = pill_dock_position((0, 0), (1920, 1080), 1.0);
+        assert_eq!(x, 1920 - PILL_W as i32 - PILL_MARGIN as i32); // 16px gap from the right
+        assert_eq!(y, (1080 - PILL_H as i32) / 2); // vertically centered
+    }
+
+    #[test]
+    fn dock_position_respects_scale_and_monitor_offset() {
+        // A 2x monitor positioned to the right of a primary one (offset origin).
+        let (x, y) = pill_dock_position((1920, 0), (2560, 1440), 2.0);
+        let win_w = (PILL_W * 2.0) as i32;
+        let margin = (PILL_MARGIN * 2.0) as i32;
+        assert_eq!(x, 1920 + 2560 - win_w - margin);
+        assert_eq!(y, (1440 - (PILL_H * 2.0) as i32) / 2);
     }
 }
