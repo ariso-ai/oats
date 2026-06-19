@@ -8,7 +8,14 @@
         <span class="upload-label">
           {{ uploadResult === 'success' ? successLabel : failLabel }}
         </span>
-        <button class="close-btn" @click.stop.prevent="closeWindow">Close</button>
+        <button
+          class="close-btn"
+          :aria-label="closeButtonLabel"
+          :title="closeButtonLabel"
+          @click.stop.prevent="closeWindow"
+        >
+          Close
+        </button>
       </div>
     </template>
     <template v-else-if="isUploading">
@@ -38,7 +45,8 @@
       <div class="controls">
         <button
           class="ctrl-btn pause-resume-btn"
-          :aria-label="recorder.isPaused.value ? 'Resume recording' : 'Pause recording'"
+          :aria-label="pauseResumeLabel"
+          :title="pauseResumeLabel"
           @click.stop.prevent="recorder.isPaused.value ? handleResume() : handlePause()"
         >
           <svg v-if="!recorder.isPaused.value" width="14" height="14" viewBox="0 0 14 14">
@@ -51,7 +59,8 @@
         </button>
         <button
           class="ctrl-btn stop-btn"
-          aria-label="Stop recording"
+          :aria-label="stopButtonLabel"
+          :title="stopButtonLabel"
           @click.stop.prevent="handleStop"
         >
           <svg width="12" height="12" viewBox="0 0 12 12">
@@ -81,6 +90,11 @@ const isLocal = computed(() => backend.value?.id === 'local');
 const successLabel = computed(() => (isLocal.value ? 'Transcription complete' : 'Upload successful'));
 const failLabel = computed(() => (isLocal.value ? 'Transcription failed' : 'Upload failed'));
 const progressLabel = computed(() => (isLocal.value ? 'Transcribing…' : 'Uploading…'));
+// These labels drive both native hover tooltips and accessibility names so the
+// icon-only controls stay understandable in local and cloud recording flows.
+const pauseResumeLabel = computed(() => (recorder.isPaused.value ? 'Resume recording' : 'Pause recording'));
+const stopButtonLabel = 'Stop and save recording';
+const closeButtonLabel = 'Close recording window';
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
 
