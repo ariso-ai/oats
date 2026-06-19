@@ -26,47 +26,83 @@ async function resolve(record: boolean) {
 </script>
 
 <template>
-  <div
-    class="group relative select-none overflow-hidden rounded-2xl bg-neutral-200/95 text-neutral-900 shadow-2xl backdrop-blur dark:bg-neutral-800/95 dark:text-white"
-  >
+  <div class="prompt group">
     <!-- macOS-style close button: top-left corner, revealed on hover -->
-    <button
-      data-test="dismiss"
-      class="absolute left-1.5 top-1.5 z-10 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/20 text-[11px] leading-none text-neutral-700 opacity-0 transition-opacity hover:bg-black/30 group-hover:opacity-100 dark:bg-white/25 dark:text-white"
-      aria-label="Dismiss"
-      @click="resolve(false)"
-    >
-      ✕
-    </button>
+    <button data-test="dismiss" class="dismiss" aria-label="Dismiss" @click="resolve(false)">✕</button>
 
     <!-- countdown bar: cosmetic, synced to the Rust timeout -->
-    <div class="h-1 w-full bg-black/10 dark:bg-white/15">
+    <div class="countdown-track">
       <div
         data-test="countdown-fill"
-        class="h-full origin-left bg-[#0a84ff] countdown-fill"
+        class="countdown-fill"
         :style="{ animationDuration: `${seconds}s` }"
       ></div>
     </div>
 
-    <div class="flex items-center gap-3 px-3 py-3">
-      <img :src="oatsLogo" alt="oats" class="h-10 w-10 flex-none object-contain" />
-      <div class="min-w-0 flex-1">
-        <div class="text-sm font-semibold">{{ title }}</div>
-        <div class="truncate text-[13px] text-neutral-500 dark:text-white/60">{{ subtitle }}</div>
+    <div class="row">
+      <img :src="oatsLogo" alt="oats" class="logo" />
+      <div class="copy">
+        <div class="title">{{ title }}</div>
+        <div class="subtitle">{{ subtitle }}</div>
       </div>
 
-      <button
-        class="flex-none cursor-pointer rounded-lg bg-[#0a84ff] px-3.5 py-1.5 text-[13px] font-semibold text-white"
-        @click="resolve(true)"
-      >
-        Take notes
-      </button>
+      <button class="primary-btn" @click="resolve(true)">Take notes</button>
     </div>
   </div>
 </template>
 
 <style scoped>
+.prompt {
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  border-radius: 16px;
+  background: #f7f6f4; /* Backdrop/Primary — matches the Meetings & Settings windows */
+  color: #1c1c1c;
+  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
+  border: 1px solid #e5e6e3;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.28),
+    2px 2px 0 #e7e5e2;
+}
+
+/* macOS-style dismiss: top-left, revealed on hover. */
+.dismiss {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+  color: #6f6f6f;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+.group:hover .dismiss {
+  opacity: 1;
+}
+.dismiss:hover {
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.countdown-track {
+  height: 3px;
+  width: 100%;
+  background: rgba(0, 0, 0, 0.08);
+}
 .countdown-fill {
+  height: 100%;
+  transform-origin: left;
+  background: #1c1c1c; /* design-system accent — matches the primary button */
   animation-name: countdown-drain;
   animation-timing-function: linear;
   animation-fill-mode: forwards;
@@ -78,5 +114,52 @@ async function resolve(record: boolean) {
   to {
     transform: scaleX(0);
   }
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+
+.logo {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}
+
+.copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1c1c1c;
+}
+
+.subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #6f6f6f;
+}
+
+/* Primary button — mirrors `.primary-btn` in the Settings window. */
+.primary-btn {
+  flex: none;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: none;
+  background: #1c1c1c;
+  color: white;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
 }
 </style>
