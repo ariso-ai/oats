@@ -80,10 +80,16 @@ async function resolve(record: boolean) {
       </div>
     </div>
 
-    <!-- More-options menu, anchored under the Take notes button. -->
-    <div v-if="menuOpen" class="menu">
-      <button data-test="menu-dismiss" class="menu-item" @click="resolve(false)">Dismiss</button>
-    </div>
+    <!-- Dismiss, revealed under the Take notes button by the chevron. Same
+         shape/size as Take notes, secondary styling. -->
+    <button
+      v-if="menuOpen"
+      data-test="menu-dismiss"
+      class="secondary-btn"
+      @click="resolve(false)"
+    >
+      Dismiss
+    </button>
   </div>
 </template>
 
@@ -139,10 +145,10 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
+  width: 18px;
   height: 16px;
   border: none;
-  border-radius: 999px;
+  border-radius: 5px;
   background: rgba(0, 0, 0, 0.08);
   color: #6f6f6f;
   font-size: 10px;
@@ -256,35 +262,27 @@ body,
   transform: rotate(180deg);
 }
 
-/* More-options menu, anchored directly under the split button (overlapping the
-   empty bottom of the card so it reads as a dropdown attached to the button,
-   not a panel floating far below it). */
-.menu {
+/* Dismiss — a secondary button mirroring Settings' `.secondary-btn`, same
+   pill shape/size as Take notes. Anchored directly under the split button
+   (overlapping the empty bottom of the card so it reads as a dropdown). */
+.secondary-btn {
   position: absolute;
   top: 48px;
   right: 12px;
-  min-width: 132px;
-  padding: 5px;
-  box-sizing: border-box;
-  background: #ffffff;
-  border: 1px solid #e5e6e3;
-  border-radius: 10px;
-  box-shadow: 2px 2px 0 #e7e5e2;
-}
-.menu-item {
-  width: 100%;
-  text-align: left;
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
   color: #1c1c1c;
-  background: none;
-  border: none;
-  border-radius: 7px;
-  padding: 7px 10px;
   cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
 }
-.menu-item:hover {
-  background: #f2f1ee;
+.secondary-btn:hover {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
 }
 </style>
