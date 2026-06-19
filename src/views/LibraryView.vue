@@ -223,9 +223,13 @@ const recorderStripVisible = computed(
 // detail or navigated to another meeting). The titlebar then shows a
 // "Recording" indicator instead of the Start button.
 const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
-// Block starting a second recording while one is already shown here, or while
-// a session is otherwise live (waveform window up, before the strip heartbeats).
-const startDisabled = computed(() => recording.value || recorderStripVisible.value);
+// Disable "Start recording" only while the recorder strip is docked here (its
+// meeting is on-screen). This tracks the live strip — which clears the instant
+// recording ends — rather than the `recording` flag, which only resets on a
+// window refocus and would otherwise leave the button stuck disabled after a
+// stop. A redundant second start is harmless anyway: the backend just refocuses
+// the existing recorder window.
+const startDisabled = computed(() => recorderStripVisible.value);
 // Ad-hoc meetings we recorded this session that the backend list doesn't surface
 // yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
 // isn't a calendar-scheduled meeting and never appears in listMeetings()). We

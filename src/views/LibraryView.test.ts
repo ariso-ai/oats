@@ -512,29 +512,57 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 
-  it('hides the sidebar and disables the Start button while a recording (waveform window) is active', async () => {
+  it('hides the sidebar for an active recording (waveform window) without disabling Start on its own', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    // The sidebar collapses, but the titlebar Start button stays — disabled, so
-    // a second recording can't be started over the live one.
+    // The sidebar collapses for the recording session…
     expect(wrapper.find('.sidebar').exists()).toBe(false);
+    // …but the Start button is disabled only by the docked recorder strip, not
+    // by the mere presence of the recorder window (which can't be reset here).
     const btn = wrapper.find('.add-btn');
     expect(btn.exists()).toBe(true);
-    expect(btn.attributes('disabled')).toBeDefined();
+    expect(btn.attributes('disabled')).toBeUndefined();
   });
 
-  it('hides the sidebar and disables the Start button immediately after clicking it', async () => {
+  it('hides the sidebar immediately after clicking Start, leaving the button usable', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
     expect(wrapper.find('.sidebar').exists()).toBe(true);
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
     await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
+    // Sidebar collapses right away; the button stays enabled until the strip
+    // docks (a redundant click merely refocuses the recorder window).
     expect(wrapper.find('.sidebar').exists()).toBe(false);
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
+  });
+
+  // Regression: stopping a recording from the in-library strip leaves the
+  // window focused, so no focus event fires to reset the internal `recording`
+  // flag. The Start button must NOT stay stuck disabled — disabling is driven
+  // by the docked strip's presence, not by that flag.
+  it('keeps the Start button usable after a recording ends without a refocus', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await wrapper.find('.add-btn').trigger('click');
+    await flushPromises();
+
+    // Recording runs, then stops — the strip relays a 'recording' then 'closed'
+    // heartbeat. No window 'focus' event is dispatched (the strip was in-window).
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState({ phase: 'closed' }));
+    await flushPromises();
+
+    const btn = wrapper.find('.add-btn');
+    expect(btn.attributes('disabled')).toBeUndefined();
+    invoke.mockClear();
+    await btn.trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
