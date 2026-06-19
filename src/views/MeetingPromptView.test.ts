@@ -6,6 +6,9 @@ import { mount, enableAutoUnmount } from '@vue/test-utils';
 const invoke = vi.fn(() => Promise.resolve());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
+const close = vi.fn(() => Promise.resolve());
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ close }) }));
+
 import MeetingPromptView from './MeetingPromptView.vue';
 
 function byText(wrapper: ReturnType<typeof mount>, text: string) {
@@ -38,11 +41,11 @@ describe('MeetingPromptView', () => {
     expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: true });
   });
 
-  it('reveals Dismiss behind the chevron and resolves with record=false', async () => {
+  it('resolves with record=false and closes the banner from the dismiss button', async () => {
     const wrapper = mount(MeetingPromptView);
-    expect(byText(wrapper, 'Dismiss')).toBeFalsy(); // hidden until the chevron is opened
-    await wrapper.find('[data-test="disclosure"]').trigger('click');
-    await byText(wrapper, 'Dismiss')!.trigger('click');
+    await wrapper.find('[data-test="dismiss"]').trigger('click');
+    await Promise.resolve();
     expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: false });
+    expect(close).toHaveBeenCalled();
   });
 });

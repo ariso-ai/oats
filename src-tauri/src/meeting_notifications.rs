@@ -496,15 +496,23 @@ const MEETING_PROMPT_W: f64 = 360.0;
 const MEETING_PROMPT_H: f64 = 84.0;
 
 /// The route the meeting-start notification window loads. `seconds` drives the
-/// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`.
-fn meeting_prompt_url(seconds: u64) -> String {
-    format!("/#/meeting-prompt?seconds={seconds}")
+/// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`; `subtitle`,
+/// when present, shows the live meeting's title (the view falls back to its own
+/// default subtitle when it's absent). Values are URL-encoded so titles with
+/// spaces/`&`/`#` survive the hash route.
+fn meeting_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    ser.append_pair("seconds", &seconds.to_string());
+    if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
+        ser.append_pair("subtitle", s);
+    }
+    format!("/#/meeting-prompt?{}", ser.finish())
 }
 
 /// Build (or focus) the borderless top-right notification window. Mirrors the
 /// waveform pill: no decorations, transparent, always-on-top, never focused so
 /// it can't interrupt the live meeting. Must run on the main thread.
-fn open_meeting_prompt_window(app: &AppHandle) -> Result<(), String> {
+fn open_meeting_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     // Only one prompt is live per meeting; replace any stale window.
@@ -515,7 +523,7 @@ fn open_meeting_prompt_window(app: &AppHandle) -> Result<(), String> {
     let win = WebviewWindowBuilder::new(
         app,
         "meeting-prompt",
-        WebviewUrl::App(meeting_prompt_url(seconds).into()),
+        WebviewUrl::App(meeting_prompt_url(seconds, subtitle).into()),
     )
     .title("")
     .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
@@ -644,6 +652,69 @@ fn current_meeting_auto_join_from(resp: &Value, now_ms: i64) -> bool {
     current_auto_join
 }
 
+/// Best-effort title of the meeting happening right now, shown as the prompt
+/// subtitle. Only the Ariso backend has a calendar; everything else — and any
+/// network/parse error — returns None so the view keeps its default subtitle.
+pub async fn current_meeting_title(app: &AppHandle) -> Option<String> {
+    use crate::commands::{active_backend, api_base_url, get_session_token, http_client};
+    if active_backend(app) != "ariso" {
+        return None;
+    }
+    let token = get_session_token(app)?;
+    let now = chrono::Utc::now();
+    let start = (now - chrono::Duration::hours(2)).to_rfc3339();
+    let end = (now + chrono::Duration::hours(2)).to_rfc3339();
+    let result = tokio::time::timeout(HTTP_TIMEOUT, async {
+        http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .query(&[("startDate", start.as_str()), ("endDate", end.as_str())])
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    })
+    .await;
+    match result {
+        Ok(Some(v)) => current_meeting_title_from(&v, now.timestamp_millis()),
+        _ => None,
+    }
+}
+
+/// Pure selector (testable): title of the *current* meeting, picked the same way
+/// as `current_meeting_auto_join_from` (latest start among the current ones).
+/// Returns None when there is no current meeting or its title is null/empty.
+fn current_meeting_title_from(resp: &Value, now_ms: i64) -> Option<String> {
+    const FIVE_MIN_MS: i64 = 5 * 60_000;
+    const SIXTY_MIN_MS: i64 = 60 * 60_000;
+    let meetings = resp.get("meetings").and_then(Value::as_array)?;
+    let mut current_start = i64::MIN;
+    let mut current_title: Option<String> = None;
+    for m in meetings {
+        let Some(start_str) = m.get("start_at").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(start_ms) = chrono::DateTime::parse_from_rfc3339(start_str)
+            .map(|dt| dt.timestamp_millis())
+        else {
+            continue;
+        };
+        let is_current = start_ms - FIVE_MIN_MS <= now_ms && now_ms <= start_ms + SIXTY_MIN_MS;
+        if is_current && start_ms >= current_start {
+            current_start = start_ms;
+            current_title = m
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+        }
+    }
+    current_title
+}
+
 /// Lenient truthiness for an API flag that may arrive as a bool, 0/1, or string.
 fn truthy(v: Option<&Value>) -> bool {
     match v {
@@ -658,9 +729,11 @@ fn truthy(v: Option<&Value>) -> bool {
 /// Resolves `true` to start recording. Returns `default_record` if the user
 /// doesn't respond within the 10s window.
 pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
+    // Best-effort: surface the live meeting's title as the prompt subtitle.
+    let subtitle = current_meeting_title(app).await;
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
-    show_auto_record_prompt(app);
+    show_auto_record_prompt(app, subtitle);
     let record = match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
         Ok(Ok(record)) => record,
         // Timed out, or the sender was dropped/replaced — apply the mode
@@ -678,10 +751,10 @@ pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
 
 /// Open the meeting-start notification window. Window creation must happen on
 /// the main thread (like `open_waveform_window`), so dispatch there.
-fn show_auto_record_prompt(app: &AppHandle) {
+fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>) {
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Err(e) = open_meeting_prompt_window(&app_main) {
+        if let Err(e) = open_meeting_prompt_window(&app_main, subtitle.as_deref()) {
             eprintln!("meeting-prompt: failed to open notification window: {e}");
         }
     });
@@ -894,8 +967,62 @@ mod tests {
 
     #[test]
     fn meeting_prompt_url_carries_the_timeout_seconds() {
-        assert_eq!(super::meeting_prompt_url(10), "/#/meeting-prompt?seconds=10");
-        assert_eq!(super::meeting_prompt_url(7), "/#/meeting-prompt?seconds=7");
+        assert_eq!(super::meeting_prompt_url(10, None), "/#/meeting-prompt?seconds=10");
+        assert_eq!(super::meeting_prompt_url(7, None), "/#/meeting-prompt?seconds=7");
+    }
+
+    #[test]
+    fn meeting_prompt_url_encodes_the_subtitle() {
+        assert_eq!(
+            super::meeting_prompt_url(10, Some("Standup")),
+            "/#/meeting-prompt?seconds=10&subtitle=Standup"
+        );
+        // Spaces and reserved chars must survive the hash route.
+        assert_eq!(
+            super::meeting_prompt_url(10, Some("Q3 Plan & Review")),
+            "/#/meeting-prompt?seconds=10&subtitle=Q3+Plan+%26+Review"
+        );
+        // Empty subtitle is omitted entirely.
+        assert_eq!(super::meeting_prompt_url(10, Some("")), "/#/meeting-prompt?seconds=10");
+    }
+
+    #[test]
+    fn current_meeting_title_picks_the_active_meeting() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "title": "Standup" }
+        ]});
+        assert_eq!(
+            current_meeting_title_from(&resp, NOW_MS),
+            Some("Standup".to_string())
+        );
+    }
+
+    #[test]
+    fn current_meeting_title_is_none_when_null_or_empty() {
+        let null = json!({ "meetings": [ { "id": 1, "start_at": at(-10), "title": null } ]});
+        assert_eq!(current_meeting_title_from(&null, NOW_MS), None);
+        let empty = json!({ "meetings": [ { "id": 1, "start_at": at(-10), "title": "" } ]});
+        assert_eq!(current_meeting_title_from(&empty, NOW_MS), None);
+    }
+
+    #[test]
+    fn current_meeting_title_ignores_non_current_meetings() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-120), "title": "Old" }
+        ]});
+        assert_eq!(current_meeting_title_from(&resp, NOW_MS), None);
+    }
+
+    #[test]
+    fn latest_starting_current_meeting_title_wins_on_overlap() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-50), "title": "Earlier" },
+            { "id": 2, "start_at": at(-2),  "title": "Active" }
+        ]});
+        assert_eq!(
+            current_meeting_title_from(&resp, NOW_MS),
+            Some("Active".to_string())
+        );
     }
 
     // 2026-06-16T12:00:00Z in epoch-ms, used as "now" across the cases.
