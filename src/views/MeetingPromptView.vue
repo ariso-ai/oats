@@ -51,19 +51,37 @@ async function resolve(record: boolean) {
   </div>
 </template>
 
+<style>
+/* Global, intentionally NOT scoped: this view owns a borderless, transparent
+   window (like the waveform pill). Kill the default body margin and any opaque
+   background so the card fills the window edge-to-edge with no surrounding
+   channel, and the rounded corners reveal the desktop instead of a frame. */
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  height: 100%;
+  overflow: hidden;
+}
+</style>
+
 <style scoped>
 .prompt {
   position: relative;
+  box-sizing: border-box;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   user-select: none;
-  border-radius: 16px;
+  border-radius: 14px;
   background: #f7f6f4; /* Backdrop/Primary — matches the Meetings & Settings windows */
   color: #1c1c1c;
   font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   border: 1px solid #e5e6e3;
-  box-shadow:
-    0 12px 32px rgba(0, 0, 0, 0.28),
-    2px 2px 0 #e7e5e2;
 }
 
 /* macOS-style dismiss: top-left, revealed on hover. */
@@ -95,13 +113,17 @@ async function resolve(record: boolean) {
 }
 
 .countdown-track {
+  flex: none;
   height: 3px;
   width: 100%;
   background: rgba(0, 0, 0, 0.08);
 }
+/* Animate `width` (not `transform`) so the bar is clipped correctly by the
+   card's rounded corners — WebKit fails to clip a transformed child against a
+   rounded `overflow: hidden` parent, which left a square nub in the corner. */
 .countdown-fill {
   height: 100%;
-  transform-origin: left;
+  width: 100%;
   background: #1c1c1c; /* design-system accent — matches the primary button */
   animation-name: countdown-drain;
   animation-timing-function: linear;
@@ -109,24 +131,25 @@ async function resolve(record: boolean) {
 }
 @keyframes countdown-drain {
   from {
-    transform: scaleX(1);
+    width: 100%;
   }
   to {
-    transform: scaleX(0);
+    width: 0%;
   }
 }
 
 .row {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px;
+  padding: 10px 12px;
 }
 
 .logo {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   object-fit: contain;
 }
 
