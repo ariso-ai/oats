@@ -494,6 +494,8 @@ const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// single-row "native macOS mimic" layout from the design.
 const MEETING_PROMPT_W: f64 = 360.0;
 const MEETING_PROMPT_H: f64 = 64.0;
+/// Height while the "more options" menu (Dismiss) is expanded below the card.
+const MEETING_PROMPT_H_EXPANDED: f64 = 116.0;
 
 /// The route the meeting-start notification window loads. `seconds` drives the
 /// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`; `subtitle`,
@@ -565,6 +567,25 @@ fn close_meeting_prompt_window(app: &AppHandle) {
 #[tauri::command]
 pub async fn resolve_meeting_prompt(_app: AppHandle, record: bool) -> Result<(), String> {
     deliver_auto_record_decision(record);
+    Ok(())
+}
+
+/// Grow/shrink the notification window so the view can reveal a small "more
+/// options" menu (Dismiss) below the card. Window sizing must happen on the main
+/// thread; the top-left stays pinned so the window grows downward.
+#[tauri::command]
+pub async fn resize_meeting_prompt(app: AppHandle, expanded: bool) -> Result<(), String> {
+    let height = if expanded {
+        MEETING_PROMPT_H_EXPANDED
+    } else {
+        MEETING_PROMPT_H
+    };
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(win) = app_main.get_webview_window("meeting-prompt") {
+            let _ = win.set_size(tauri::LogicalSize::new(MEETING_PROMPT_W, height));
+        }
+    });
     Ok(())
 }
 

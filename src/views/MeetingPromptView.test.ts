@@ -48,4 +48,24 @@ describe('MeetingPromptView', () => {
     expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: false });
     expect(close).toHaveBeenCalled();
   });
+
+  it('toggles the more-options menu and grows/shrinks the window', async () => {
+    const wrapper = mount(MeetingPromptView);
+    expect(wrapper.find('[data-test="menu-dismiss"]').exists()).toBe(false);
+
+    await wrapper.find('[data-test="more-options"]').trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resize_meeting_prompt', { expanded: true });
+    expect(wrapper.find('[data-test="menu-dismiss"]').exists()).toBe(true);
+
+    await wrapper.find('[data-test="more-options"]').trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resize_meeting_prompt', { expanded: false });
+    expect(wrapper.find('[data-test="menu-dismiss"]').exists()).toBe(false);
+  });
+
+  it('resolves with record=false from the menu Dismiss item', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await wrapper.find('[data-test="more-options"]').trigger('click');
+    await wrapper.find('[data-test="menu-dismiss"]').trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: false });
+  });
 });

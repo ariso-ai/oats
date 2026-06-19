@@ -1,5 +1,6 @@
 <!-- src/views/MeetingPromptView.vue -->
 <script setup lang="ts">
+import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { parsePromptParams } from './meetingPromptParams';
@@ -11,6 +12,19 @@ const search = window.location.hash.includes('?')
   ? window.location.hash.slice(window.location.hash.indexOf('?'))
   : '';
 const { seconds, title, subtitle } = parsePromptParams(search);
+
+// Whether the "more options" menu below the Take notes button is open. Rust
+// grows the (fixed-size, overflow-hidden) window so the menu has room to show.
+const menuOpen = ref(false);
+
+async function toggleMenu() {
+  menuOpen.value = !menuOpen.value;
+  try {
+    await invoke('resize_meeting_prompt', { expanded: menuOpen.value });
+  } catch {
+    // No window in unit tests.
+  }
+}
 
 // Report the choice to Rust (which records / honors it), then close the banner
 // right away for snappy feedback. Rust also tears the window down on decision or
@@ -26,27 +40,49 @@ async function resolve(record: boolean) {
 </script>
 
 <template>
-  <div class="prompt group">
-    <!-- macOS-style close button: top-left corner, revealed on hover -->
-    <button data-test="dismiss" class="dismiss" aria-label="Dismiss" @click="resolve(false)">✕</button>
+  <div class="stage">
+    <div class="prompt">
+      <!-- macOS-style close button: pinned to the top-left corner, always shown -->
+      <button data-test="dismiss" class="dismiss" aria-label="Dismiss" @click="resolve(false)">✕</button>
 
-    <!-- countdown bar: cosmetic, synced to the Rust timeout -->
-    <div class="countdown-track">
-      <div
-        data-test="countdown-fill"
-        class="countdown-fill"
-        :style="{ animationDuration: `${seconds}s` }"
-      ></div>
-    </div>
-
-    <div class="row">
-      <img :src="oatsLogo" alt="oats" class="logo" />
-      <div class="copy">
-        <div class="title">{{ title }}</div>
-        <div class="subtitle">{{ subtitle }}</div>
+      <!-- countdown bar: cosmetic, synced to the Rust timeout -->
+      <div class="countdown-track">
+        <div
+          data-test="countdown-fill"
+          class="countdown-fill"
+          :style="{ animationDuration: `${seconds}s` }"
+        ></div>
       </div>
 
-      <button class="primary-btn" @click="resolve(true)">Take notes</button>
+      <div class="row">
+        <img :src="oatsLogo" alt="oats" class="logo" />
+        <div class="copy">
+          <div class="title">{{ title }}</div>
+          <div class="subtitle">{{ subtitle }}</div>
+        </div>
+
+        <!-- Split button: Take notes + a chevron that reveals more options. -->
+        <div class="split">
+          <button class="primary-btn split-main" @click="resolve(true)">Take notes</button>
+          <button
+            data-test="more-options"
+            class="primary-btn split-chevron"
+            :class="{ 'split-chevron--open': menuOpen }"
+            aria-label="More options"
+            :aria-expanded="menuOpen"
+            @click="toggleMenu"
+          >
+            <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+              <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- More-options menu, anchored under the Take notes button. -->
+    <div v-if="menuOpen" class="menu">
+      <button data-test="menu-dismiss" class="menu-item" @click="resolve(false)">Dismiss</button>
     </div>
   </div>
 </template>
@@ -68,26 +104,36 @@ body,
 </style>
 
 <style scoped>
-.prompt {
-  position: relative;
-  box-sizing: border-box;
+/* Fills the window; holds the card and the menu that grows below it. */
+.stage {
+  display: flex;
+  flex-direction: column;
   width: 100vw;
   height: 100vh;
+  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
+}
+
+.prompt {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  /* Matches MEETING_PROMPT_H (collapsed window height) so content stays centered
+     with equal top/bottom padding even when the window grows for the menu. */
+  height: 64px;
   display: flex;
   overflow: hidden;
   user-select: none;
   border-radius: 14px;
   background: #f7f6f4; /* Backdrop/Primary — matches the Meetings & Settings windows */
   color: #1c1c1c;
-  font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   border: 1px solid #e5e6e3;
 }
 
-/* macOS-style dismiss: top-left, revealed on hover. */
+/* macOS-style dismiss: pinned to the very top-left corner, always visible. */
 .dismiss {
   position: absolute;
-  left: 8px;
-  top: 8px;
+  left: 5px;
+  top: 5px;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -101,11 +147,7 @@ body,
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s;
-}
-.group:hover .dismiss {
-  opacity: 1;
+  transition: background 0.15s;
 }
 .dismiss:hover {
   background: rgba(0, 0, 0, 0.14);
@@ -178,17 +220,68 @@ body,
   color: #6f6f6f;
 }
 
-/* Primary button — mirrors `.primary-btn` in the Settings window. */
-.primary-btn {
+/* Split button — "Take notes" joined to a chevron, both mirror Settings'
+   `.primary-btn`. */
+.split {
   flex: none;
+  display: flex;
+  align-items: stretch;
+}
+.primary-btn {
   font-size: 13px;
-  padding: 6px 14px;
-  border-radius: 999px;
   border: none;
   background: #1c1c1c;
   color: white;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
+}
+.split-main {
+  padding: 6px 10px 6px 14px;
+  border-radius: 999px 0 0 999px;
+}
+.split-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px 0 8px;
+  border-radius: 0 999px 999px 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.18);
+}
+.split-chevron svg {
+  transition: transform 0.15s;
+}
+.split-chevron--open svg {
+  transform: rotate(180deg);
+}
+
+/* More-options menu, anchored under the split button on the right. */
+.menu {
+  align-self: flex-end;
+  margin-top: 6px;
+  margin-right: 12px;
+  min-width: 132px;
+  padding: 5px;
+  box-sizing: border-box;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 10px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+.menu-item {
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: #1c1c1c;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.menu-item:hover {
+  background: #f2f1ee;
 }
 </style>
