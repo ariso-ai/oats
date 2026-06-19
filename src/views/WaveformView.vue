@@ -212,10 +212,14 @@ function collapse() {
 }
 
 // Clicking the pill body (not the controls or the drag handle) brings up the
-// meetings window.
+// meetings window and surfaces the meeting being recorded. A window that was
+// only minimized is already running, so it needs the explicit `reveal` nudge;
+// a freshly-created one instead lands on the recording via its own
+// recordingMeetingId watch once the recorder strip's first heartbeat arrives.
 async function showMeetings() {
   try {
     await invoke('create_library_window');
+    await emit('recording://reveal');
   } catch (e) {
     console.error('Failed to open meetings window', e);
   }

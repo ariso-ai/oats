@@ -670,6 +670,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
+let unlistenRecordingReveal: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -691,6 +692,13 @@ onMounted(() => {
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;
   });
+  // The floating recorder pill asks (on click) to surface the meeting it's
+  // recording — re-dock the strip even if the user had navigated away.
+  void listen('recording://reveal', () => {
+    void showRecordingMeeting();
+  }).then((un) => {
+    unlistenRecordingReveal = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -703,6 +711,7 @@ onUnmounted(() => {
   window.removeEventListener('focus', onWindowFocus);
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
+  unlistenRecordingReveal?.();
 });
 </script>
 

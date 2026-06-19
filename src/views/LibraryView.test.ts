@@ -923,6 +923,26 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
   });
 
+  // Clicking the floating recorder pill emits `recording://reveal`; the open
+  // library must jump back to the recording meeting (re-docking the strip).
+  it('re-selects the recording meeting on a reveal event (recording pill clicked)', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    // Navigate off the recording (14:30) onto Standup (10:00).
+    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(false);
+
+    emitEvent('recording://reveal', {});
+    await flushPromises();
+
+    expect(wrapper.find('.strip').exists()).toBe(true);
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(false);
+  });
+
   // Req 2: closing the detail pane mid-recording also surfaces the indicator.
   it('shows the "Recording" indicator after the detail pane is closed mid-recording', async () => {
     listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
