@@ -106,6 +106,7 @@ body,
 <style scoped>
 /* Fills the window; holds the card and the menu that grows below it. */
 .stage {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100vw;
@@ -129,22 +130,22 @@ body,
   border: 1px solid #e5e6e3;
 }
 
-/* macOS-style dismiss: pinned to the very top-left corner, always visible. */
+/* macOS-style dismiss: pinned tight into the top-left corner, always visible. */
 .dismiss {
   position: absolute;
-  left: 5px;
-  top: 5px;
+  left: 4px;
+  top: 4px;
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border: none;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.08);
   color: #6f6f6f;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1;
   cursor: pointer;
   transition: background 0.15s;
@@ -255,11 +256,13 @@ body,
   transform: rotate(180deg);
 }
 
-/* More-options menu, anchored under the split button on the right. */
+/* More-options menu, anchored directly under the split button (overlapping the
+   empty bottom of the card so it reads as a dropdown attached to the button,
+   not a panel floating far below it). */
 .menu {
-  align-self: flex-end;
-  margin-top: 6px;
-  margin-right: 12px;
+  position: absolute;
+  top: 48px;
+  right: 12px;
   min-width: 132px;
   padding: 5px;
   box-sizing: border-box;
