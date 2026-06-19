@@ -260,14 +260,14 @@ body,
 }
 .split-main {
   padding: 6px 10px 6px 14px;
-  border-radius: 999px 0 0 999px;
+  border-radius: 8px 0 0 8px;
 }
 .split-chevron {
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0 10px 0 8px;
-  border-radius: 0 999px 999px 0;
+  border-radius: 0 8px 8px 0;
   border-left: 1px solid rgba(255, 255, 255, 0.18);
 }
 .split-chevron svg {
@@ -290,7 +290,7 @@ body,
   font-weight: 500;
   font-family: inherit;
   padding: 6px 14px;
-  border-radius: 999px;
+  border-radius: 8px;
   border: 1px solid #d6d6d6;
   background: #ffffff;
   box-shadow: 2px 2px 0 #e7e5e2;
