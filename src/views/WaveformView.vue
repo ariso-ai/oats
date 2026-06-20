@@ -107,6 +107,7 @@ import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
 import { pending } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
+import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
 import { deriveRecordingMode } from './recordingSettings';
 import { centerWeightedBars } from './waveformBars';
 import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/silenceWatch';
@@ -533,36 +534,47 @@ onMounted(async () => {
   await startRecording();
 
   // Silence prompt: after 10 min of no captured sound, prompt the user (native
-  // notification) to keep or stop; auto-stop after a 60s grace if ignored.
-  silenceTimer = setInterval(() => {
-    if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
-    const now = Date.now();
-    if (promptShownAt === null) {
-      if (shouldPromptSilence(recorder.lastSoundAt.value, now, recorder.isPaused.value)) {
-        promptShownAt = now;
-        void invoke('show_silence_prompt');
+  // notification) to keep or stop; auto-stop after a 60s grace if ignored. Gated
+  // on the user setting (default on), read once on mount — toggling it
+  // mid-recording only affects the next recording. Defaults to on if the read
+  // fails, so a quiet recording is still surfaced.
+  let silenceDetectionEnabled = true;
+  try {
+    silenceDetectionEnabled = await isSilenceDetectionEnabled();
+  } catch {
+    /* keep the safe default (on) */
+  }
+  if (silenceDetectionEnabled) {
+    silenceTimer = setInterval(() => {
+      if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
+      const now = Date.now();
+      if (promptShownAt === null) {
+        if (shouldPromptSilence(recorder.lastSoundAt.value, now, recorder.isPaused.value)) {
+          promptShownAt = now;
+          void invoke('show_silence_prompt');
+        }
+        return;
       }
-      return;
-    }
-    // Prompt is showing. Cancel it if paused or if audio resumed.
-    if (recorder.isPaused.value || recorder.lastSoundAt.value > promptShownAt) {
-      promptShownAt = null;
-      void invoke('dismiss_silence_prompt');
-      return;
-    }
-    if (
-      shouldAutoStopAfterPrompt(
-        promptShownAt,
-        recorder.lastSoundAt.value,
-        now,
-        recorder.isPaused.value,
-      )
-    ) {
-      promptShownAt = null;
-      void invoke('dismiss_silence_prompt');
-      void handleStop();
-    }
-  }, 1_000);
+      // Prompt is showing. Cancel it if paused or if audio resumed.
+      if (recorder.isPaused.value || recorder.lastSoundAt.value > promptShownAt) {
+        promptShownAt = null;
+        void invoke('dismiss_silence_prompt');
+        return;
+      }
+      if (
+        shouldAutoStopAfterPrompt(
+          promptShownAt,
+          recorder.lastSoundAt.value,
+          now,
+          recorder.isPaused.value,
+        )
+      ) {
+        promptShownAt = null;
+        void invoke('dismiss_silence_prompt');
+        void handleStop();
+      }
+    }, 1_000);
+  }
 
   unlistenSilenceKeep = await listen('silence-prompt://keep', handleSilenceKeep);
   unlistenSilenceStop = await listen('silence-prompt://stop', handleSilenceStop);

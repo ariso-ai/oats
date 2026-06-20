@@ -244,6 +244,24 @@
         <p v-if="!autoRecordSupported" class="notif-status notif-status--err">
           Requires macOS 14.4+
         </p>
+
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="setting-label">Silence detection</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              :checked="silenceDetectionEnabled"
+              @change="onToggleSilenceDetection"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p class="setting-hint">
+          Prompts you before auto-stopping a recording that's gone quiet.
+        </p>
       </div>
     </section>
 
@@ -348,6 +366,10 @@ import {
   setAutoRecordEnabled,
   isAutoRecordSupported,
 } from '../composables/useAutoRecord';
+import {
+  isSilenceDetectionEnabled,
+  setSilenceDetectionEnabled,
+} from '../composables/useSilenceDetection';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
@@ -359,6 +381,7 @@ const micEnabled = ref(true);
 const systemAudioEnabled = ref(true);
 const autoRecordEnabled = ref(true);
 const autoRecordSupported = ref(true);
+const silenceDetectionEnabled = ref(true);
 const micStatus = ref<PermissionStatus>('');
 const systemAudioStatus = ref<PermissionStatus>('');
 const micToggling = ref(false);
@@ -728,6 +751,17 @@ async function onToggleAutoRecord(e: Event) {
   }
 }
 
+async function onToggleSilenceDetection(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = silenceDetectionEnabled.value;
+  silenceDetectionEnabled.value = checked;
+  try {
+    await setSilenceDetectionEnabled(checked);
+  } catch {
+    silenceDetectionEnabled.value = previous;
+  }
+}
+
 async function onToggleSystemAudio(e: Event) {
   if (recordingToggleBusy.value) return;
   systemAudioToggling.value = true;
@@ -836,6 +870,7 @@ onMounted(async () => {
     systemAudioEnabled.value = enabled.systemAudio;
     autoRecordSupported.value = await isAutoRecordSupported();
     autoRecordEnabled.value = await isAutoRecordEnabled();
+    silenceDetectionEnabled.value = await isSilenceDetectionEnabled();
     // Both mic and system-audio status are left blank on load: there's no
     // silent preflight for either (getUserMedia prompts; the system-audio
     // probe creates a process tap, which trips the TCC dialog on first use).

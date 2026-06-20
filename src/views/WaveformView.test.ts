@@ -66,6 +66,10 @@ vi.mock('../composables/useBackend', () => ({
 vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
 }));
+const isSilenceDetectionEnabled = vi.fn(() => Promise.resolve(true));
+vi.mock('../composables/useSilenceDetection', () => ({
+  isSilenceDetectionEnabled: () => isSilenceDetectionEnabled(),
+}));
 
 const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
 vi.mock('../composables/useMeetingApi', () => ({
@@ -89,6 +93,7 @@ beforeEach(() => {
   recorderDuration.value = 5;
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
+  isSilenceDetectionEnabled.mockResolvedValue(true);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -293,6 +298,25 @@ describe('WaveformView vertical pill', () => {
     await vi.advanceTimersByTimeAsync(1_100);
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(stopRecording).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('never shows the silence prompt when silence detection is disabled', async () => {
+    isSilenceDetectionEnabled.mockResolvedValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // well past the 10-min threshold
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    invoke.mockClear();
+    // Advance well past both the prompt and grace windows — the timer must not
+    // even be running, so nothing is prompted and the recording is never stopped.
+    await vi.advanceTimersByTimeAsync(SILENCE_PROMPT_MS + SILENCE_GRACE_MS + 2_000);
+    await flushPromises();
+    expect(invoke).not.toHaveBeenCalledWith('show_silence_prompt');
     expect(stopRecording).not.toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
