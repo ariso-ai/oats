@@ -224,6 +224,16 @@ mod imp {
         NSDictionary::from_slices(&keys, &values)
     }
 
+    /// Whether a tap stream format is the 32-bit float LinearPCM layout that the
+    /// IO block assumes when `downmix_to_mono` reinterprets buffer bytes as
+    /// `*const f32`. Any other layout would be read as garbage samples, so the
+    /// caller must reject it.
+    fn is_supported_tap_format(asbd: &AudioStreamBasicDescription) -> bool {
+        asbd.mFormatID == kAudioFormatLinearPCM
+            && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            && asbd.mBitsPerChannel == 32
+    }
+
     pub fn start(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
@@ -293,10 +303,7 @@ mod imp {
             // `downmix_to_mono`, so the tap must actually deliver 32-bit float
             // LinearPCM. Taps normally do, but verify before trusting the cast:
             // a non-Float32 layout would otherwise be read as garbage samples.
-            if asbd.mFormatID != kAudioFormatLinearPCM
-                || asbd.mFormatFlags & kAudioFormatFlagIsFloat == 0
-                || asbd.mBitsPerChannel != 32
-            {
+            if !is_supported_tap_format(&asbd) {
                 AudioHardwareDestroyProcessTap(tap_id);
                 return Err(format!(
                     "unsupported tap stream format (id={}, flags={:#x}, bits={}); expected 32-bit float LinearPCM",
@@ -500,6 +507,53 @@ mod imp {
         }
         // Safety: base64 output is always valid UTF-8.
         unsafe { String::from_utf8_unchecked(out) }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2_core_audio_types::kAudioFormatFlagIsPacked;
+
+        /// A 32-bit float LinearPCM tap format like Core Audio actually delivers.
+        fn float32_pcm() -> AudioStreamBasicDescription {
+            AudioStreamBasicDescription {
+                mSampleRate: 48_000.0,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: 4,
+                mFramesPerPacket: 1,
+                mBytesPerFrame: 4,
+                mChannelsPerFrame: 1,
+                mBitsPerChannel: 32,
+                mReserved: 0,
+            }
+        }
+
+        #[test]
+        fn accepts_float32_linear_pcm() {
+            assert!(is_supported_tap_format(&float32_pcm()));
+        }
+
+        #[test]
+        fn rejects_non_linear_pcm_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatID = u32::from_be_bytes(*b"aac "); // compressed, not LinearPCM
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_integer_pcm_missing_float_flag() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags = kAudioFormatFlagIsPacked; // no float flag
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_32_bit_depth() {
+            let mut asbd = float32_pcm();
+            asbd.mBitsPerChannel = 16; // would be misread as f32
+            assert!(!is_supported_tap_format(&asbd));
+        }
     }
 }
 
