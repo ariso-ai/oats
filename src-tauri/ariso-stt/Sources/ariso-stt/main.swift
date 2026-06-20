@@ -27,7 +27,7 @@ struct OutResult: Codable {
     let segments: [OutSegment]
 }
 
-// MARK: - IO helpers (ONLY contract JSON / progress lines on stdout; logs on stderr)
+// MARK: - IO helpers (ONLY contract JSON on stdout; logs on stderr)
 
 func argValue(_ name: String) -> String? {
     let a = CommandLine.arguments
@@ -42,17 +42,6 @@ func stderrLine(_ msg: String) {
 func fail(_ msg: String) -> Never {
     stderrLine(msg)
     exit(1)
-}
-
-/// Write a line to stdout immediately (unbuffered) so the Rust side can stream
-/// progress events as they arrive.
-func stdoutLine(_ s: String) {
-    FileHandle.standardOutput.write(Data((s + "\n").utf8))
-}
-
-func emitProgress(_ fraction: Double) {
-    let clamped = max(0.0, min(1.0, fraction))
-    stdoutLine("{\"type\":\"progress\",\"fraction\":\(clamped)}")
 }
 
 /// Run an async body to completion, then exit. `fail()` handles error exits.
@@ -207,36 +196,14 @@ func stripCodeFence(_ raw: String) -> String {
 // MARK: - Entry
 
 let arguments = CommandLine.arguments
-let isDownload = arguments.count > 1 && arguments[1] == "download"
 
 guard let modelsPath = argValue("--models") else { fail("missing --models") }
 let modelsURL = URL(fileURLWithPath: modelsPath)
+// The STT models (ASR + diarizer) are downloaded and integrity-verified by the
+// Rust app from the project CDN (see download_local_stt) and laid out where
+// FluidAudio expects them, so this sidecar only LOADS them — it never downloads.
 let asrDir = modelsURL.appendingPathComponent("asr")
 let diarizerDir = modelsURL.appendingPathComponent("diarizer")
-
-if isDownload {
-    // Downloads the speech models (ASR + diarizer, CoreML) over a 0..1 bar:
-    // ASR 0..0.66, diarizer 0.66..1.0. The notes LLM is NOT downloaded here —
-    // the Rust app fetches it directly from the project CDN (see download_local_llm).
-    runToCompletion {
-        do {
-            let onAsr: DownloadUtils.ProgressHandler = { p in
-                emitProgress(p.fractionCompleted * 0.66)
-            }
-            let onDiarizer: DownloadUtils.ProgressHandler = { p in
-                emitProgress(0.66 + p.fractionCompleted * 0.34)
-            }
-            _ = try await AsrModels.downloadAndLoad(
-                to: asrDir, version: .v3, progressHandler: onAsr)
-            _ = try await DiarizerModels.downloadIfNeeded(
-                to: diarizerDir, progressHandler: onDiarizer)
-            emitProgress(1.0)
-            stdoutLine("{\"type\":\"done\"}")
-        } catch {
-            fail("download error: \(error)")
-        }
-    }
-}
 
 let isNotes = arguments.count > 1 && arguments[1] == "notes"
 
