@@ -49,7 +49,10 @@ mod imp {
         AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
         CATapDescription, CATapMuteBehavior,
     };
-    use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp};
+    use objc2_core_audio_types::{
+        kAudioFormatFlagIsFloat, kAudioFormatLinearPCM, AudioBufferList, AudioStreamBasicDescription,
+        AudioTimeStamp,
+    };
     use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
     use std::ffi::{c_void, CStr};
@@ -258,7 +261,18 @@ mod imp {
             };
             let output_uid_cf: CFRetained<CFString> =
                 match get_property::<*const CFString>(output_id, kAudioDevicePropertyDeviceUID) {
-                    Ok(ptr) => CFRetained::from_raw(NonNull::new(ptr as *mut CFString).unwrap()),
+                    // Core Audio can return status 0 with a null/absent UID for some
+                    // virtual or aggregate output devices. Guard the pointer instead of
+                    // unwrapping: a null here would panic, and handing a non-owned null to
+                    // `CFRetained::from_raw` (which assumes a +1 retained object) is the
+                    // start of a refcount/UAF bug, not just a crash.
+                    Ok(ptr) => match NonNull::new(ptr as *mut CFString) {
+                        Some(nn) => CFRetained::from_raw(nn),
+                        None => {
+                            AudioHardwareDestroyProcessTap(tap_id);
+                            return Err("default output device has no UID".into());
+                        }
+                    },
                     Err(e) => {
                         AudioHardwareDestroyProcessTap(tap_id);
                         return Err(e);
@@ -275,6 +289,20 @@ mod imp {
                         return Err(e);
                     }
                 };
+            // The IO block reinterprets buffer bytes as `*const f32` in
+            // `downmix_to_mono`, so the tap must actually deliver 32-bit float
+            // LinearPCM. Taps normally do, but verify before trusting the cast:
+            // a non-Float32 layout would otherwise be read as garbage samples.
+            if asbd.mFormatID != kAudioFormatLinearPCM
+                || asbd.mFormatFlags & kAudioFormatFlagIsFloat == 0
+                || asbd.mBitsPerChannel != 32
+            {
+                AudioHardwareDestroyProcessTap(tap_id);
+                return Err(format!(
+                    "unsupported tap stream format (id={}, flags={:#x}, bits={}); expected 32-bit float LinearPCM",
+                    asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel
+                ));
+            }
             let src_rate = asbd.mSampleRate;
 
             // 4. Private aggregate device wrapping the tap.
