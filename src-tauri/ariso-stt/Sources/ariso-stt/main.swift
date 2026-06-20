@@ -202,8 +202,8 @@ let modelsURL = URL(fileURLWithPath: modelsPath)
 // The STT models (ASR + diarizer) are downloaded and integrity-verified by the
 // Rust app from the project CDN (see download_local_stt) and laid out where
 // FluidAudio expects them, so this sidecar only LOADS them — it never downloads.
-let asrDir = modelsURL.appendingPathComponent("asr")
-let diarizerDir = modelsURL.appendingPathComponent("diarizer")
+let asrDir = modelsURL.appendingPathComponent("parakeet-tdt-0.6b-v3")
+let diarizerDir = modelsURL.appendingPathComponent("speaker-diarization")
 
 let isNotes = arguments.count > 1 && arguments[1] == "notes"
 
