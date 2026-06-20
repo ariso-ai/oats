@@ -231,8 +231,12 @@ macro_rules! r2_base {
 /// Public CDN base for the notes LLM files (Cloudflare R2). The model is NOT
 /// fetched via HuggingFace: the published `model.safetensors` is Xet-backed and
 /// the Swift HF client can't download Xet, so we mirror plain files on R2 and
-/// pull them directly.
-const LLM_CDN_BASE: &str = concat!(r2_base!(), "/models/gemma-3-1b-it-qat-4bit");
+/// pull them directly. The path is **version-pinned** (`/v1/`): the pinned
+/// SHA-256s below assume these objects are immutable, so re-publishing the model
+/// must use a new version segment rather than overwriting in place (otherwise
+/// every client's verified download breaks until a new app ships). See
+/// GHSA-9979-m4pv-g6f5.
+const LLM_CDN_BASE: &str = concat!(r2_base!(), "/models/gemma-3-1b-it-qat-4bit/v1");
 
 /// The exact files the model loader needs. Doc/git files are omitted, and so is
 /// `tokenizer.model` — Gemma ships a `tokenizer.json` fast tokenizer that the
@@ -256,10 +260,97 @@ fn llm_fraction(done: u64, total: u64) -> f64 {
     }
 }
 
+/// Pinned integrity metadata — `(sha256 lowercase hex, byte size)` — for every
+/// published LLM file. The model is a fixed, versioned artifact, so each file's
+/// digest and size are compile-time constants. Downloads are verified against
+/// the digest before a `.part` file is promoted to its final name; a mismatch
+/// (compromised R2 bucket, leaked write-creds, on-disk tampering, corruption) is
+/// a hard error. The size is the disk-fill cap and the progress denominator, so
+/// no network HEAD is trusted for sizing. This holds model downloads to the same
+/// integrity bar the updater already enforces via minisign on this same R2 host
+/// — see GHSA-9979-m4pv-g6f5 (CWE-494). To re-pin after a model bump:
+/// `curl -fsSL <LLM_CDN_BASE>/<file> | shasum -a 256` and
+/// `curl -sI <LLM_CDN_BASE>/<file>` for the Content-Length.
+fn pinned(file: &str) -> Option<(&'static str, u64)> {
+    Some(match file {
+        "config.json" => ("eb080baebedaa32151a71988721a64f0be067fc6cd7e20ca16ba11231f822533", 1105),
+        "model.safetensors" => (
+            "b6010f6b03a83f973ca8708eb5784d5b0f80c0e7e9143dbb4c95d0eefe39c837",
+            732_577_304,
+        ),
+        "model.safetensors.index.json" => (
+            "b479eca1f14de16218fc5f45aa270d008944cd3f261f78e90f9b718c8857faef",
+            50_542,
+        ),
+        "tokenizer.json" => (
+            "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+            33_384_568,
+        ),
+        "tokenizer_config.json" => (
+            "be9d72bdf5021aa82d67c3cc60cb0f8ddcc759d4d3f05eb129b9fcc345fc94b7",
+            1_156_959,
+        ),
+        "special_tokens_map.json" => (
+            "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
+            662,
+        ),
+        "added_tokens.json" => ("50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946", 35),
+        _ => return None,
+    })
+}
+
+/// Pinned SHA-256 (lowercase hex) for `file`, or `None` if we don't ship it.
+fn expected_sha256(file: &str) -> Option<&'static str> {
+    pinned(file).map(|(sha, _)| sha)
+}
+
+/// Pinned byte size for `file`, or `None` if we don't ship it.
+fn expected_size(file: &str) -> Option<u64> {
+    pinned(file).map(|(_, size)| size)
+}
+
+/// Stream a file through SHA-256, returning lowercase hex. Reads in 1 MiB chunks
+/// so the ~700 MB weights file never loads fully into memory.
+async fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Check a computed digest against the pinned one for `file`. A file with no
+/// pinned digest is rejected outright (we never ship one), so verification can
+/// never silently pass on an unexpected file.
+fn verify_pinned(file: &str, actual_hex: &str) -> Result<(), String> {
+    match expected_sha256(file) {
+        Some(expected) if expected.eq_ignore_ascii_case(actual_hex) => Ok(()),
+        Some(expected) => Err(format!(
+            "integrity check failed for {file}: expected sha256 {expected}, got {actual_hex}"
+        )),
+        None => Err(format!("refusing unverified file {file}: no pinned sha256")),
+    }
+}
+
 /// Download the notes LLM directly from the app CDN into `<models>/llm/<name>/`,
 /// emitting `model://llm/{progress,done,error}`. A `.complete` marker is written
 /// only after every file finishes, so an interrupted download is never mistaken
-/// for a ready model. Files already fully present are skipped (idempotent retry).
+/// for a ready model. Each file is verified against a pinned SHA-256; an
+/// already-present file is reused only if its digest still matches (idempotent
+/// retry), otherwise it is re-downloaded.
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     let _guard = DownloadGuard::acquire(&LLM_DOWNLOAD_IN_PROGRESS)
@@ -291,6 +382,7 @@ async fn download_llm_files(
     dir: &Path,
     on_progress: &(dyn Fn(f64) + Sync),
 ) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
 
     tokio::fs::create_dir_all(dir)
@@ -301,35 +393,43 @@ async fn download_llm_files(
     // true while a model file is partial. Re-written only after a full success.
     let marker = dir.join(".complete");
     let _ = tokio::fs::remove_file(&marker).await;
-    let client = reqwest::Client::new();
+    // connect_timeout bounds a stalled handshake; read_timeout bounds the gap
+    // *between* received bytes (not total duration), so the 700 MB weights file
+    // can take as long as it needs as long as it keeps making progress.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
 
-    // 1) Size every file (HEAD) so progress is a true byte fraction.
-    let mut sizes = Vec::with_capacity(LLM_FILES.len());
-    for f in LLM_FILES {
-        let url = format!("{LLM_CDN_BASE}/{f}");
-        let resp = client
-            .head(&url)
-            .send()
-            .await
-            .map_err(|e| format!("head {f}: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("head {f}: HTTP {}", resp.status()));
-        }
-        sizes.push(resp.content_length().unwrap_or(0));
-    }
-    let total: u64 = sizes.iter().sum();
+    // 1) Total comes from the compile-time pinned sizes — no network HEAD is
+    //    trusted for sizing (a forgeable/zeroed Content-Length must never drive
+    //    the cap or the progress bar). GHSA-9979-m4pv-g6f5.
+    let total: u64 = LLM_FILES.iter().filter_map(|f| expected_size(f)).sum();
 
-    // 2) Download each file (skip already-complete), streaming with progress.
+    // 2) Download each file, streaming with progress. Integrity is enforced by a
+    //    pinned SHA-256 verified before the `.part` -> final rename; size alone
+    //    is forgeable by whoever serves the bytes, so it is never the gate.
     let mut done: u64 = 0;
-    for (i, f) in LLM_FILES.iter().enumerate() {
+    for f in LLM_FILES {
         let dest = dir.join(f);
-        let expected = sizes[i];
-        if let Ok(meta) = tokio::fs::metadata(&dest).await {
-            if expected != 0 && meta.len() == expected {
-                done += expected;
+        // Every downloaded file must be pinned; refuse to fetch an unpinned one
+        // rather than write unverifiable bytes to disk.
+        let expected_len =
+            expected_size(f).ok_or_else(|| format!("refusing unpinned file {f}"))?;
+
+        // Resume: accept an already-present file only if its digest matches the
+        // pin. A size match is not enough — re-verify or re-download.
+        if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
+            if let Ok(actual) = sha256_file(&dest).await
+                && verify_pinned(f, &actual).is_ok()
+            {
+                done += expected_len;
                 on_progress(llm_fraction(done, total));
                 continue;
             }
+            // Present but wrong or unreadable → discard and re-download.
+            let _ = tokio::fs::remove_file(&dest).await;
         }
 
         let url = format!("{LLM_CDN_BASE}/{f}");
@@ -346,11 +446,24 @@ async fn download_llm_files(
         let mut file = tokio::fs::File::create(&part)
             .await
             .map_err(|e| format!("create {f}.part: {e}"))?;
+        let mut hasher = Sha256::new();
+        let mut written: u64 = 0;
         while let Some(chunk) = resp
             .chunk()
             .await
             .map_err(|e| format!("read {f}: {e}"))?
         {
+            // Disk-fill guard: never write past the declared length. A correct
+            // file ends exactly at expected_len, so this only trips on an origin
+            // streaming more than it advertised.
+            written += chunk.len() as u64;
+            if written > expected_len {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(format!(
+                    "{f} exceeds declared size {expected_len} bytes"
+                ));
+            }
+            hasher.update(&chunk);
             file.write_all(&chunk)
                 .await
                 .map_err(|e| format!("write {f}: {e}"))?;
@@ -359,6 +472,15 @@ async fn download_llm_files(
         }
         file.flush().await.map_err(|e| format!("flush {f}: {e}"))?;
         drop(file);
+
+        // Integrity gate: verify the streamed digest before promoting `.part`.
+        // On mismatch, delete the partial file and fail — never expose unverified
+        // bytes to the sidecar that mmaps and executes the weights.
+        let actual = hex::encode(hasher.finalize());
+        if let Err(e) = verify_pinned(f, &actual) {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(e);
+        }
         tokio::fs::rename(&part, &dest)
             .await
             .map_err(|e| format!("finalize {f}: {e}"))?;
@@ -459,6 +581,56 @@ mod tests {
             r2_base!()
         );
         assert_eq!(r2_base!(), "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev");
+    }
+
+    #[test]
+    fn every_llm_file_has_a_pinned_digest_and_size() {
+        // Verification must not silently no-op: every file we download has to
+        // carry a compile-time SHA-256 and a non-zero byte size to check against.
+        for f in LLM_FILES {
+            assert!(
+                expected_sha256(f).is_some(),
+                "no pinned sha256 for downloaded file {f}"
+            );
+            assert!(
+                expected_size(f).is_some_and(|n| n > 0),
+                "no pinned (non-zero) size for downloaded file {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_digest_present_for_safetensors() {
+        assert_eq!(
+            expected_sha256("model.safetensors"),
+            Some("b6010f6b03a83f973ca8708eb5784d5b0f80c0e7e9143dbb4c95d0eefe39c837")
+        );
+        // A file we don't ship has no pinned digest.
+        assert_eq!(expected_sha256("evil.bin"), None);
+    }
+
+    #[tokio::test]
+    async fn sha256_file_hashes_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x");
+        tokio::fs::write(&p, b"hello").await.unwrap();
+        assert_eq!(
+            sha256_file(&p).await.unwrap(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn verify_pinned_rejects_mismatch_and_accepts_match() {
+        // Wrong bytes for a pinned file → error that names the file.
+        let err = verify_pinned("model.safetensors", "00").unwrap_err();
+        assert!(err.contains("model.safetensors"), "error should name file: {err}");
+        // Correct digest → Ok.
+        verify_pinned(
+            "model.safetensors",
+            "b6010f6b03a83f973ca8708eb5784d5b0f80c0e7e9143dbb4c95d0eefe39c837",
+        )
+        .unwrap();
     }
 
     #[test]
