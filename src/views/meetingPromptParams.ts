@@ -20,3 +20,25 @@ export function parsePromptParams(search: string): PromptParams {
     subtitle: params.get('subtitle') || DEFAULTS.subtitle,
   };
 }
+
+export interface SilencePromptParams {
+  seconds: number;
+  /** Meeting title, or '' when there's no associated meeting (subtitle hidden). */
+  subtitle: string;
+}
+
+/** Grace window before a silent recording auto-stops; drives the countdown bar. */
+const SILENCE_DEFAULT_SECONDS = 60;
+
+/**
+ * Params for the silence-stop prompt window. Unlike the meeting prompt, the
+ * subtitle is left empty when absent (the view hides the line) rather than
+ * falling back to a default, and the title is fixed by the view.
+ */
+export function parseSilencePromptParams(search: string): SilencePromptParams {
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  const rawSeconds = Number(params.get('seconds'));
+  const seconds =
+    Number.isFinite(rawSeconds) && rawSeconds > 0 ? rawSeconds : SILENCE_DEFAULT_SECONDS;
+  return { seconds, subtitle: params.get('subtitle') || '' };
+}

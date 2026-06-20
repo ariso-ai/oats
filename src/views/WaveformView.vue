@@ -405,6 +405,19 @@ async function handleStop() {
   }
 }
 
+// Best-effort meeting title for the silence prompt's subtitle. Ariso recordings
+// attached to a meeting show its title; local/unattached recordings show none
+// (the prompt window hides the subtitle line when it's absent).
+async function resolveSilenceSubtitle(): Promise<string | undefined> {
+  if (backend.value?.id !== 'ariso' || effectiveMeetingId.value === null) return undefined;
+  try {
+    const { meeting } = await useMeetingApi().getMeeting(effectiveMeetingId.value);
+    return meeting.title ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // User chose "Keep recording": reset the silence clock (same mechanism as
 // resume) so the prompt naturally re-fires after another 10 min of silence.
 // The tap auto-dismisses the notification, so no explicit dismiss is needed.
@@ -551,7 +564,9 @@ onMounted(async () => {
       if (promptShownAt === null) {
         if (shouldPromptSilence(recorder.lastSoundAt.value, now, recorder.isPaused.value)) {
           promptShownAt = now;
-          void invoke('show_silence_prompt');
+          void resolveSilenceSubtitle().then((subtitle) =>
+            invoke('show_silence_prompt', subtitle ? { subtitle } : {}),
+          );
         }
         return;
       }

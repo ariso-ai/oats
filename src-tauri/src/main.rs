@@ -138,6 +138,8 @@ fn main() {
             meeting_notifications::stop_meeting_notifications,
             meeting_notifications::show_silence_prompt,
             meeting_notifications::dismiss_silence_prompt,
+            meeting_notifications::resolve_silence_prompt,
+            meeting_notifications::resize_silence_prompt,
             meeting_notifications::resolve_meeting_prompt,
             meeting_notifications::resize_meeting_prompt,
             tray_meeting::sync_tray_meeting,
