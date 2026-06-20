@@ -242,6 +242,9 @@ jobs:
     environment: release
     permissions:
       contents: write
+      # publish-homebrew-cask.sh opens a PR with the cask checksum update
+      # instead of pushing to the protected main branch.
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -288,7 +291,7 @@ jobs:
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
         run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
 
-      - name: Upload Homebrew DMG asset and update cask checksum
+      - name: Open Homebrew cask checksum PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}

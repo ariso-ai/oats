@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 #
-# Publish the Homebrew install asset and commit the generated cask fields. This
-# runs after the signed DMG has been built, so the cask version/checksum are
-# derived from the release tag and the actual installer bytes.
+# Open a PR that updates the generated Homebrew cask fields. This runs after
+# release-publish.sh has shipped the signed DMG to R2 (desktop/oats.dmg), so the
+# cask checksum is computed from the very bytes that R2 now serves — the cask's
+# `url` points straight at that R2 object, so there is no separate asset to
+# upload here.
+#
+# `main` is a protected branch (changes must go through a pull request that
+# passes the required Validate check), so we never push the cask update to main
+# directly — that push is rejected with GH013 and the checksum never lands. We
+# push a dedicated branch and open a PR for a maintainer to merge instead.
 set -euo pipefail
 
 if [[ -z "${RELEASE_TAG:-}" ]]; then
@@ -20,28 +27,21 @@ if [[ "$DMG_COUNT" != "1" ]]; then
   exit 1
 fi
 
+# Hash the local DMG: these are the same bytes release-publish.sh just uploaded
+# to R2, so the checksum matches what `brew install` will download.
 DMG="$(find "$BUNDLE_DMG_DIR" -maxdepth 1 -type f -name '*.dmg')"
 DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
-HOMEBREW_DMG_ASSET="oats.dmg"
-trap 'rm -f "$HOMEBREW_DMG_ASSET"' EXIT
 
-cp "$DMG" "$HOMEBREW_DMG_ASSET"
-gh release upload "$RELEASE_TAG" "$HOMEBREW_DMG_ASSET" --clobber
+# Apply the deterministic cask update on a fresh branch off the latest main, so
+# the PR diff is exactly the version/checksum bump for this release.
+git fetch origin main
+BRANCH="chore/homebrew-cask-${RELEASE_TAG}"
+git switch -C "$BRANCH" origin/main
 
-git fetch origin main:main
-git switch main
-
-# Rebase onto the freshest main before committing, then replay the deterministic
-# cask update so concurrent main changes do not produce an avoidable stale-base
-# commit.
-.github/scripts/update-homebrew-cask.sh "$VERSION" "$DMG_SHA256"
-git checkout -- Casks/oats.rb
-git fetch origin main:refs/remotes/origin/main
-git rebase origin/main
 .github/scripts/update-homebrew-cask.sh "$VERSION" "$DMG_SHA256"
 
 if git diff --quiet Casks/oats.rb; then
-  echo "Homebrew cask already matches ${VERSION}."
+  echo "Homebrew cask already matches ${VERSION}; nothing to publish."
   exit 0
 fi
 
@@ -50,18 +50,24 @@ git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git add Casks/oats.rb
 git commit -m "chore: update Homebrew cask for ${RELEASE_TAG}"
 
-for attempt in 1 2 3; do
-  git fetch origin main:refs/remotes/origin/main
-  git rebase origin/main
+# Force-push is safe: the branch is owned by this automated, deterministic flow,
+# so a re-run of the same release should overwrite any earlier attempt.
+git push --force-with-lease origin "$BRANCH"
 
-  if git push origin main; then
-    exit 0
-  fi
+PR_TITLE="chore: update Homebrew cask for ${RELEASE_TAG}"
+PR_BODY="$(cat <<EOF
+Automated cask checksum update for ${RELEASE_TAG}, opened by the release workflow
+after the signed DMG was published.
 
-  sleep_seconds=$((2 ** attempt))
-  echo "Push failed; retrying after ${sleep_seconds}s (attempt ${attempt}/3)." >&2
-  sleep "$sleep_seconds"
-done
+- version: \`${VERSION}\`
+- sha256: \`${DMG_SHA256}\`
+EOF
+)"
 
-echo "Failed to push Homebrew cask update after 3 attempts." >&2
-exit 1
+# A PR may already exist if this release is being re-run; the force-push above
+# already refreshed its contents, so only create one when it is missing.
+if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+  echo "PR for ${BRANCH} already exists; refreshed cask update."
+else
+  gh pr create --base main --head "$BRANCH" --title "$PR_TITLE" --body "$PR_BODY"
+fi
