@@ -297,7 +297,7 @@ describe('WaveformView vertical pill', () => {
     // One loop tick: should show the prompt but NOT stop.
     await vi.advanceTimersByTimeAsync(1_100);
     await flushPromises();
-    expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
     expect(stopRecording).not.toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
@@ -316,7 +316,7 @@ describe('WaveformView vertical pill', () => {
     // even be running, so nothing is prompted and the recording is never stopped.
     await vi.advanceTimersByTimeAsync(SILENCE_PROMPT_MS + SILENCE_GRACE_MS + 2_000);
     await flushPromises();
-    expect(invoke).not.toHaveBeenCalledWith('show_silence_prompt');
+    expect(invoke.mock.calls.some(([cmd]) => cmd === 'show_silence_prompt')).toBe(false);
     expect(stopRecording).not.toHaveBeenCalled();
     vi.useRealTimers();
     wrapper.unmount();
@@ -333,7 +333,7 @@ describe('WaveformView vertical pill', () => {
     // First tick: shows the prompt (lastSoundAt stays 0, silence persists).
     await vi.advanceTimersByTimeAsync(1_100);
     await flushPromises();
-    expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
     expect(stopRecording).not.toHaveBeenCalled();
     // Advance past the 60s grace — still silent, prompt ignored → auto-stop.
     await vi.advanceTimersByTimeAsync(SILENCE_GRACE_MS + 1_000);
@@ -356,7 +356,7 @@ describe('WaveformView vertical pill', () => {
     // First tick: prompt fires (lastSoundAt is 0, silence window exceeded).
     await vi.advanceTimersByTimeAsync(1_100);
     await flushPromises();
-    expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
     // User taps "Keep recording": reseeds lastSoundAt to fake-now
     // (SILENCE_PROMPT_MS + 1_000 + 1_100ms). promptShownAt is also cleared.
     await eventHandlers['silence-prompt://keep']?.({});
@@ -383,7 +383,7 @@ describe('WaveformView vertical pill', () => {
     // Show prompt.
     await vi.advanceTimersByTimeAsync(1_100);
     await flushPromises();
-    expect(invoke).toHaveBeenCalledWith('show_silence_prompt');
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
     // User taps "Stop now": must trigger stopRecording immediately.
     await eventHandlers['silence-prompt://stop']?.({});
     await flushPromises();
