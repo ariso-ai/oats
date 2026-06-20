@@ -483,12 +483,21 @@ fn prep_url(prep_id: i64) -> String {
 // through the `resolve_meeting_prompt` command into the `oneshot` below. The
 // user has 10 seconds to choose; if they don't, the caller's mode default
 // applies (record when auto-record is on, skip when it's off). The
-// UNUserNotificationCenter delegate in `macos_un` now handles only meeting-prep
-// deep-link clicks — it no longer carries the auto-record decision.
+// UNUserNotificationCenter delegate in `macos_un` no longer carries the
+// auto-record decision — it now handles only meeting-prep deep-link clicks and
+// the silence-stop prompt's Keep / Stop buttons.
 // ---------------------------------------------------------------------------
 
 /// How long the prompt stays actionable before the caller's mode default wins.
 const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Identifiers for the silence stop prompt. Mirrors the auto-record category:
+/// the category id attaches the Keep / Stop buttons; the action ids come back
+/// in the delegate's `didReceive`. The identifier is fixed so we can dismiss it.
+const SILENCE_CATEGORY: &str = "ai.ariso.silence-stop";
+const SILENCE_ACTION_KEEP: &str = "ai.ariso.silence-stop.keep";
+const SILENCE_ACTION_STOP: &str = "ai.ariso.silence-stop.stop";
+const SILENCE_IDENTIFIER: &str = "ai.ariso.silence-stop";
 
 /// Inner size of the meeting-start notification window (logical px). Compact
 /// single-row "native macOS mimic" layout from the design.
@@ -606,6 +615,31 @@ fn prompt_slot() -> &'static Mutex<Option<oneshot::Sender<bool>>> {
 fn deliver_auto_record_decision(record: bool) {
     if let Some(tx) = prompt_slot().lock().unwrap().take() {
         let _ = tx.send(record);
+    }
+}
+
+/// The app handle, stored at delegate init so the notification delegate (an
+/// ObjC callback with no captured state) can emit silence-prompt events back to
+/// the frontend, which owns the silence state machine.
+fn app_handle_slot() -> &'static std::sync::Mutex<Option<AppHandle>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<AppHandle>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Emit the user's silence-prompt choice to the frontend. No-op if no handle
+/// is stored (delegate not initialized — i.e. dev/unsigned, where the frontend
+/// grace timer auto-stops anyway).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn emit_silence_decision(keep: bool) {
+    use tauri::Emitter;
+    let event = if keep {
+        "silence-prompt://keep"
+    } else {
+        "silence-prompt://stop"
+    };
+    if let Some(app) = app_handle_slot().lock().unwrap().as_ref() {
+        let _ = app.emit(event, ());
     }
 }
 
@@ -791,6 +825,7 @@ fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>) {
 pub fn init_native(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
+        *app_handle_slot().lock().unwrap() = Some(app.clone());
         macos_un::init();
     }
 }
@@ -821,9 +856,10 @@ mod macos_un {
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread};
-    use objc2_foundation::{NSError, NSString};
+    use objc2_foundation::{NSArray, NSError, NSSet, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
+        UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
         UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
@@ -862,6 +898,17 @@ mod macos_un {
                 response: &UNNotificationResponse,
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
+                let action = response.actionIdentifier().to_string();
+                if action == super::SILENCE_ACTION_KEEP {
+                    super::emit_silence_decision(true);
+                    completion.call(());
+                    return;
+                }
+                if action == super::SILENCE_ACTION_STOP {
+                    super::emit_silence_decision(false);
+                    completion.call(());
+                    return;
+                }
                 let url = response.notification().request().identifier().to_string();
                 if url.starts_with("http") {
                     let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -894,11 +941,79 @@ mod macos_un {
         // setDelegate stores a weak reference; leak a strong ref so the
         // delegate lives for the whole process.
         std::mem::forget(delegate);
+        register_categories(&center);
         let handler = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
         center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &handler,
         );
+    }
+
+    /// Register the silence notification category. `setNotificationCategories` is
+    /// a wholesale REPLACE (not additive); the auto-record prompt now lives in a
+    /// borderless window (see `open_meeting_prompt_window`), so silence is the only
+    /// native category we attach buttons to.
+    fn register_categories(center: &UNUserNotificationCenter) {
+        let categories = NSSet::from_retained_slice(&[silence_category()]);
+        center.setNotificationCategories(&categories);
+    }
+
+    /// Build the silence category so the prompt renders Keep / Stop buttons.
+    /// Actions run in the background (no Foreground option); Stop is styled
+    /// destructive.
+    fn silence_category() -> Retained<UNNotificationCategory> {
+        let keep = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::SILENCE_ACTION_KEEP),
+            &NSString::from_str("Keep recording"),
+            UNNotificationActionOptions::empty(),
+        );
+        let stop = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::SILENCE_ACTION_STOP),
+            &NSString::from_str("Stop now"),
+            UNNotificationActionOptions::Destructive,
+        );
+        let actions = NSArray::from_retained_slice(&[keep, stop]);
+        let intents: Retained<NSArray<NSString>> = NSArray::from_slice(&[]);
+        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+            &NSString::from_str(super::SILENCE_CATEGORY),
+            &actions,
+            &intents,
+            UNNotificationCategoryOptions::empty(),
+        )
+    }
+
+    /// Show the silence prompt with Keep / Stop buttons under a fixed identifier
+    /// so `dismiss_silence` can remove it. Falls back to a button-less banner on
+    /// UNC failure (unsigned build).
+    pub fn show_silence(app: &AppHandle, title: &str, body: &str) {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setCategoryIdentifier(&NSString::from_str(super::SILENCE_CATEGORY));
+        let identifier = NSString::from_str(super::SILENCE_IDENTIFIER);
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &identifier, &content, None,
+        );
+        let app = app.clone();
+        let title = title.to_string();
+        let body = body.to_string();
+        let handler = RcBlock::new(move |err: *mut NSError| {
+            if let Some(desc) = err_desc(err) {
+                eprintln!("silence-prompt: UNC unavailable ({desc}); using plugin fallback (no buttons)");
+                let _ = app.notification().builder().title(&title).body(&body).show();
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
+    }
+
+    /// Remove the silence prompt (delivered and/or pending) by its fixed identifier.
+    pub fn dismiss_silence() {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let ids: Retained<NSArray<NSString>> =
+            NSArray::from_retained_slice(&[NSString::from_str(super::SILENCE_IDENTIFIER)]);
+        center.removeDeliveredNotificationsWithIdentifiers(&ids);
+        center.removePendingNotificationRequestsWithIdentifiers(&ids);
     }
 
     pub fn show(app: &AppHandle, title: &str, body: &str, url: &str) {
@@ -981,6 +1096,31 @@ pub async fn sync_meeting_notifications(app: AppHandle) -> Result<(), String> {
 pub async fn stop_meeting_notifications(app: AppHandle) -> Result<(), String> {
     stop(&app);
     Ok(())
+}
+
+/// Show the silence stop prompt (Keep / Stop). Native buttons on a signed macOS
+/// bundle; button-less banner otherwise (the frontend grace timer still stops).
+#[tauri::command]
+pub fn show_silence_prompt(app: AppHandle) {
+    let title = "Still recording";
+    let body = "No audio for 10 minutes. Keep recording or stop?";
+    #[cfg(target_os = "macos")]
+    if !tauri::is_dev() {
+        macos_un::show_silence(&app, title, body);
+        return;
+    }
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("silence-prompt: failed to show notification: {e}");
+    }
+}
+
+/// Clear a shown silence prompt (audio resumed, paused, or recording ended).
+#[tauri::command]
+pub fn dismiss_silence_prompt(_app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    if !tauri::is_dev() {
+        macos_un::dismiss_silence();
+    }
 }
 
 #[cfg(test)]

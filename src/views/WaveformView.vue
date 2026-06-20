@@ -107,9 +107,10 @@ import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
 import { pending } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
+import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
 import { deriveRecordingMode } from './recordingSettings';
 import { centerWeightedBars } from './waveformBars';
-import { shouldAutoStop } from '../composables/silenceWatch';
+import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/silenceWatch';
 import { localRecordingIdFromStart } from '../composables/localRecordingId';
 import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
@@ -251,6 +252,10 @@ let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
 let unlistenAutoStop: UnlistenFn | null = null;
+let unlistenSilenceKeep: UnlistenFn | null = null;
+let unlistenSilenceStop: UnlistenFn | null = null;
+// Wall-clock ms when the silence prompt was shown, or null when idle.
+let promptShownAt: number | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
 let silenceTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -336,6 +341,10 @@ async function discardRecording() {
     clearInterval(silenceTimer);
     silenceTimer = null;
   }
+  if (promptShownAt !== null) {
+    promptShownAt = null;
+    void invoke('dismiss_silence_prompt');
+  }
   waveform.stop();
   try {
     await recorder.stopRecording();
@@ -360,6 +369,10 @@ async function handleStop() {
   if (silenceTimer) {
     clearInterval(silenceTimer);
     silenceTimer = null;
+  }
+  if (promptShownAt !== null) {
+    promptShownAt = null;
+    void invoke('dismiss_silence_prompt');
   }
   collapse();
   isUploading.value = true;
@@ -394,6 +407,20 @@ async function handleStop() {
     }
     await closeWindow();
   }
+}
+
+// User chose "Keep recording": reset the silence clock (same mechanism as
+// resume) so the prompt naturally re-fires after another 10 min of silence.
+// The tap auto-dismisses the notification, so no explicit dismiss is needed.
+function handleSilenceKeep() {
+  recorder.lastSoundAt.value = Date.now();
+  promptShownAt = null;
+}
+
+// User chose "Stop now": stop immediately.
+async function handleSilenceStop() {
+  promptShownAt = null;
+  await handleStop();
 }
 
 // Upload the stopped recording. Shared by the stop flow and the failed pill's
@@ -510,20 +537,51 @@ onMounted(async () => {
 
   await startRecording();
 
-  // Universal silence backstop: end any recording after 15 min of no sound.
-  silenceTimer = setInterval(() => {
-    if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
-    if (
-      shouldAutoStop(
-        recorder.lastSoundAt.value,
-        Date.now(),
-        recorder.isPaused.value,
-      )
-    ) {
-      void handleStop();
-    }
-  }, 1_000);
+  // Silence prompt: after 10 min of no captured sound, prompt the user (native
+  // notification) to keep or stop; auto-stop after a 60s grace if ignored. Gated
+  // on the user setting (default on), read once on mount — toggling it
+  // mid-recording only affects the next recording. Defaults to on if the read
+  // fails, so a quiet recording is still surfaced.
+  let silenceDetectionEnabled = true;
+  try {
+    silenceDetectionEnabled = await isSilenceDetectionEnabled();
+  } catch {
+    /* keep the safe default (on) */
+  }
+  if (silenceDetectionEnabled) {
+    silenceTimer = setInterval(() => {
+      if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
+      const now = Date.now();
+      if (promptShownAt === null) {
+        if (shouldPromptSilence(recorder.lastSoundAt.value, now, recorder.isPaused.value)) {
+          promptShownAt = now;
+          void invoke('show_silence_prompt');
+        }
+        return;
+      }
+      // Prompt is showing. Cancel it if paused or if audio resumed.
+      if (recorder.isPaused.value || recorder.lastSoundAt.value > promptShownAt) {
+        promptShownAt = null;
+        void invoke('dismiss_silence_prompt');
+        return;
+      }
+      if (
+        shouldAutoStopAfterPrompt(
+          promptShownAt,
+          recorder.lastSoundAt.value,
+          now,
+          recorder.isPaused.value,
+        )
+      ) {
+        promptShownAt = null;
+        void invoke('dismiss_silence_prompt');
+        void handleStop();
+      }
+    }, 1_000);
+  }
 
+  unlistenSilenceKeep = await listen('silence-prompt://keep', handleSilenceKeep);
+  unlistenSilenceStop = await listen('silence-prompt://stop', handleSilenceStop);
   unlistenAutoStop = await listen('auto-record://stop', handleStop);
   if (isAuto) {
     void resolveAuto();
@@ -538,6 +596,12 @@ onUnmounted(() => {
   unlistenResume?.();
   unlistenStop?.();
   unlistenAutoStop?.();
+  unlistenSilenceKeep?.();
+  unlistenSilenceStop?.();
+  if (promptShownAt !== null) {
+    promptShownAt = null;
+    void invoke('dismiss_silence_prompt');
+  }
 });
 </script>
 
