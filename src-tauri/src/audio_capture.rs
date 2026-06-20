@@ -50,8 +50,9 @@ mod imp {
         CATapDescription, CATapMuteBehavior,
     };
     use objc2_core_audio_types::{
-        kAudioFormatFlagIsFloat, kAudioFormatLinearPCM, AudioBufferList, AudioStreamBasicDescription,
-        AudioTimeStamp,
+        kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
+        kAudioFormatLinearPCM, kLinearPCMFormatFlagIsNonInterleaved, AudioBufferList,
+        AudioStreamBasicDescription, AudioTimeStamp,
     };
     use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
@@ -168,6 +169,15 @@ mod imp {
         if status != 0 {
             return Err(format!("AudioObjectGetPropertyData({selector}) failed: {status}"));
         }
+        // Core Audio can return status 0 with a short read (e.g. 0 bytes for an
+        // absent property), which would leave the buffer uninitialized. Only
+        // `assume_init` once the written size matches `T` exactly.
+        let expected = std::mem::size_of::<T>() as u32;
+        if size != expected {
+            return Err(format!(
+                "AudioObjectGetPropertyData({selector}) returned {size} bytes; expected {expected}"
+            ));
+        }
         Ok(unsafe { value.assume_init() })
     }
 
@@ -224,14 +234,21 @@ mod imp {
         NSDictionary::from_slices(&keys, &values)
     }
 
-    /// Whether a tap stream format is the 32-bit float LinearPCM layout that the
-    /// IO block assumes when `downmix_to_mono` reinterprets buffer bytes as
-    /// `*const f32`. Any other layout would be read as garbage samples, so the
-    /// caller must reject it.
+    /// Whether a tap stream format is the packed, little-endian, interleaved
+    /// 32-bit float LinearPCM layout that the IO block assumes when
+    /// `downmix_to_mono` reinterprets buffer bytes as `*const f32` (dividing
+    /// `mDataByteSize` by 4 bytes per sample). Any other layout — padded,
+    /// big-endian, non-interleaved, or a non-positive sample rate (which would
+    /// make the resampler step 0.0 and stall `Resampler::process` in an infinite
+    /// loop) — would be misread, so the caller must reject it.
     fn is_supported_tap_format(asbd: &AudioStreamBasicDescription) -> bool {
         asbd.mFormatID == kAudioFormatLinearPCM
             && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            && asbd.mFormatFlags & kAudioFormatFlagIsPacked != 0
+            && asbd.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
+            && asbd.mFormatFlags & kLinearPCMFormatFlagIsNonInterleaved == 0
             && asbd.mBitsPerChannel == 32
+            && asbd.mSampleRate > 0.0
     }
 
     pub fn start(app: tauri::AppHandle) -> Result<(), String> {
@@ -552,6 +569,39 @@ mod imp {
         fn rejects_non_32_bit_depth() {
             let mut asbd = float32_pcm();
             asbd.mBitsPerChannel = 16; // would be misread as f32
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_positive_sample_rate() {
+            // step = src_rate / 16_000 would be 0.0, stalling Resampler::process.
+            let mut zero = float32_pcm();
+            zero.mSampleRate = 0.0;
+            assert!(!is_supported_tap_format(&zero));
+
+            let mut negative = float32_pcm();
+            negative.mSampleRate = -48_000.0;
+            assert!(!is_supported_tap_format(&negative));
+        }
+
+        #[test]
+        fn rejects_unpacked_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags = kAudioFormatFlagIsFloat; // padded, not tightly packed
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_big_endian_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags |= kAudioFormatFlagIsBigEndian;
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_interleaved_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
             assert!(!is_supported_tap_format(&asbd));
         }
     }
