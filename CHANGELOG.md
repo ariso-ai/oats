@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.0](https://github.com/ariso-ai/oats/compare/v0.9.0...v0.10.0) (2026-06-21)
+
+
+### Features
+
+* new setting option for silence detection ([8cc68a1](https://github.com/ariso-ai/oats/commit/8cc68a1cbae3285b59a1d800286bec384314007c))
+* replace silence notification with an in-app prompt window ([b92b2b7](https://github.com/ariso-ai/oats/commit/b92b2b7252dab7ccd9f1d278da4492d263b65b23))
+* replace silence notification with an in-app prompt window ([2ee2f32](https://github.com/ariso-ai/oats/commit/2ee2f32216f4defb1f189f7ca7ac650cd845f9c6))
+* verify on-device STT model downloads from a pinned R2 mirror ([15c755f](https://github.com/ariso-ai/oats/commit/15c755ff0a778092355973b5d531b1ddf88cd4c9))
+* verify on-device STT model downloads from a pinned R2 mirror ([c62dc0b](https://github.com/ariso-ai/oats/commit/c62dc0b528978e25a5cc6940e15ae752e8a78626))
+
+
+### Bug Fixes
+
+* guard null device UID and validate tap format (GHSA-cvf3-62r6-ch7v) ([b80a621](https://github.com/ariso-ai/oats/commit/b80a621e3b00f685de220b6898819317e48c410a))
+* guard null device UID and validate tap format in system-audio capture ([b64a966](https://github.com/ariso-ai/oats/commit/b64a966b86df5a3b0aa7efa79b679728e37ee25d))
+* publish Homebrew cask checksum via PR, point cask at R2 ([f682c93](https://github.com/ariso-ai/oats/commit/f682c9330ee32fd44b66a6f8d485e0d242b89a34))
+* publish Homebrew cask checksum via PR, point cask at R2 ([1e10ef9](https://github.com/ariso-ai/oats/commit/1e10ef9bedf327df7b04d09dbac9fa6d5896c236)), closes [#147](https://github.com/ariso-ai/oats/issues/147)
+* verify on-device LLM model downloads with pinned SHA-256 ([c4af2d8](https://github.com/ariso-ai/oats/commit/c4af2d8e36875231c25f1cb6cf56c6f074c75b3a))
+
 ## [0.9.0](https://github.com/ariso-ai/oats/compare/v0.8.1...v0.9.0) (2026-06-19)
 
 
