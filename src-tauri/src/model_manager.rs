@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::storage::MODEL_VERSION;
 
@@ -89,11 +89,8 @@ pub fn status(root: &Path) -> ModelStatus {
     }
 }
 
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 /// Per-target download guards. STT writes `manifest.json` at the models root;
 /// the LLM writes into `llm/<name>/` with its own `.complete` marker — disjoint
@@ -126,96 +123,37 @@ pub fn local_model_status() -> Result<ModelStatus, String> {
     Ok(status(&root))
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProgressLine {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    fraction: Option<f64>,
-}
-
-/// Run the sidecar `download --target <target>`, streaming progress as the
-/// given events. `write_manifest_after` controls whether the STT readiness
-/// manifest is written on success (true for STT; the LLM uses disk-presence
-/// readiness instead). A single global guard serializes downloads.
-async fn run_download(
-    app: tauri::AppHandle,
-    guard_flag: &AtomicBool,
-    target: &str,
-    write_manifest_after: bool,
-    ev_progress: &str,
-    ev_done: &str,
-    ev_error: &str,
-) -> Result<(), String> {
-    // Reject re-entry for THIS target; the guard clears the flag on drop.
-    let _guard = DownloadGuard::acquire(guard_flag)
+/// Download and verify the STT models from the R2 mirror, then write the
+/// readiness manifest. See `download_stt` for the integrity model. A guard
+/// serializes against a concurrent STT download.
+#[tauri::command]
+pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
+    let _guard = DownloadGuard::acquire(&STT_DOWNLOAD_IN_PROGRESS)
         .ok_or_else(|| "a model download is already in progress".to_string())?;
 
     let root = crate::storage::ariso_root()?;
     let models = crate::storage::models_dir(&root);
-    std::fs::create_dir_all(&models).map_err(|e| format!("create models dir: {e}"))?;
+    // Clear any stale readiness marker before (re)downloading: an interrupted
+    // run must not leave `manifest.json` claiming the models are ready. It is
+    // rewritten only after every file downloads and verifies.
+    let _ = std::fs::remove_file(manifest_path(&root));
 
-    let bin = crate::transcribe::sidecar_path()?;
-    let mut child = Command::new(&bin)
-        .arg("download")
-        .arg("--models")
-        .arg(&models)
-        .arg("--target")
-        .arg(target)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
-
-    let stdout = child.stdout.take().ok_or("no stdout from sidecar")?;
-    let stderr = child.stderr.take().ok_or("no stderr from sidecar")?;
-
-    // Drain stderr concurrently so a large stderr burst can't fill the OS pipe
-    // buffer and deadlock against our stdout read loop.
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = tokio::io::AsyncReadExt::read_to_end(&mut BufReader::new(stderr), &mut buf).await;
-        buf
-    });
-
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Ok(p) = serde_json::from_str::<ProgressLine>(&line) {
-            if p.kind == "progress" {
-                let _ = app.emit(ev_progress, p.fraction.unwrap_or(-1.0));
-            }
+    let app2 = app.clone();
+    match download_stt(STT_CDN_BASE, &models, &move |f| {
+        let _ = app2.emit("model://stt/progress", f);
+    })
+    .await
+    {
+        Ok(()) => {
+            write_manifest(&root, &now_marker())?;
+            let _ = app.emit("model://stt/done", ());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("model://stt/error", e.clone());
+            Err(e)
         }
     }
-
-    let exit = child.wait().await.map_err(|e| e.to_string())?;
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
-    if !exit.success() {
-        let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        let _ = app.emit(ev_error, stderr.clone());
-        return Err(format!("model download failed: {stderr}"));
-    }
-
-    if write_manifest_after {
-        write_manifest(&root, &now_marker())?;
-    }
-    let _ = app.emit(ev_done, ());
-    Ok(())
-}
-
-/// Download the STT models (ASR + diarizer) and write the readiness manifest.
-#[tauri::command]
-pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
-    run_download(
-        app,
-        &STT_DOWNLOAD_IN_PROGRESS,
-        "stt",
-        true,
-        "model://stt/progress",
-        "model://stt/done",
-        "model://stt/error",
-    )
-    .await
 }
 
 /// Public base host for all app CDN assets (Cloudflare R2, r2.dev managed
@@ -493,6 +431,264 @@ async fn download_llm_files(
     Ok(())
 }
 
+/// On-device STT models, mirrored on the app CDN at IMMUTABLE, content-addressed
+/// prefixes `models/<folder>/<short-sha>/` (the HuggingFace commit the bytes came
+/// from). Like the LLM mirror's `/v1` path, the prefix is version-pinned so the
+/// pinned manifest hash stays valid — a model bump publishes a NEW prefix and
+/// never overwrites one (see GHSA-9979-m4pv-g6f5). FluidAudio (the sidecar) loads
+/// these from `<models>/<folder>/` at transcribe time and skips its own download
+/// when they are present, so placing them here is sufficient.
+struct SttModel {
+    /// On-disk folder under the models root; matches FluidAudio's repo folder.
+    folder: &'static str,
+    /// Immutable R2 prefix segment — the HF commit short-sha the bytes came from.
+    prefix: &'static str,
+    /// SHA-256 (lowercase hex) of the prefix's `SHA256SUMS` over its raw bytes —
+    /// the single pinned trust anchor. A tampered file list can't match it, and
+    /// every model file is then verified against an entry in that list. Regenerate
+    /// the prefix + this hash via scripts/sync-stt-models.sh on a model bump.
+    manifest_sha256: &'static str,
+}
+
+const STT_MODELS: &[SttModel] = &[
+    SttModel {
+        folder: "parakeet-tdt-0.6b-v3",
+        prefix: "aed027400592",
+        manifest_sha256: "58ca342f4648ed43233f627200d65a605fc6d97807bc300484bfc01b1cb2aa30",
+    },
+    SttModel {
+        folder: "speaker-diarization",
+        prefix: "1ed7a662fdc7",
+        manifest_sha256: "bc9cf65e567d862fa30aea1e71831d7c1d2dddcf58c22e2f90aaac28dc8baa74",
+    },
+];
+
+/// Public CDN base for the STT model mirror (same R2 host as the LLM + updater).
+const STT_CDN_BASE: &str = concat!(r2_base!(), "/models");
+
+/// Per-file disk-fill backstop for STT downloads. The authoritative integrity gate
+/// is the per-file SHA-256 from the (hash-pinned) manifest; this only bounds how
+/// many bytes a compromised origin could write before that hash fails — the
+/// SHA256SUMS manifest, unlike the LLM pins, carries no per-file size to cap
+/// against. Set well above the largest real file (~440 MiB encoder weights).
+const STT_MAX_FILE_BYTES: u64 = 1 << 30; // 1 GiB
+
+/// One `<sha256>  <relpath>` row of a SHA256SUMS manifest.
+struct ManifestEntry {
+    sha256: String,
+    path: String,
+}
+
+/// SHA-256 (lowercase hex) of an in-memory buffer — used for the manifest itself.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Parse a SHA256SUMS manifest (coreutils format: 64 hex chars, a space, a
+/// space|`*` marker, then the path). Rejects malformed lines, an empty manifest,
+/// and any path that could escape the model dir.
+fn parse_sha256sums(text: &str) -> Result<Vec<ManifestEntry>, String> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.len() < 67 {
+            return Err(format!("line {n}: malformed"));
+        }
+        let (hash, rest) = line.split_at(64);
+        if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("line {n}: invalid hash"));
+        }
+        let sep = rest.as_bytes();
+        if sep[0] != b' ' || (sep[1] != b' ' && sep[1] != b'*') {
+            return Err(format!("line {n}: invalid separator"));
+        }
+        let path = &rest[2..];
+        sanitize_rel_path(path).map_err(|e| format!("line {n}: {e}"))?;
+        out.push(ManifestEntry {
+            sha256: hash.to_ascii_lowercase(),
+            path: path.to_string(),
+        });
+    }
+    if out.is_empty() {
+        return Err("manifest is empty".into());
+    }
+    Ok(out)
+}
+
+/// Validate a manifest path is a safe relative path (no absolute root, `.`, `..`,
+/// or empty components) and return it as a `PathBuf`. Defense-in-depth against
+/// traversal even though the manifest is hash-pinned.
+fn sanitize_rel_path(path: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+    if path.is_empty() {
+        return Err("empty path".into());
+    }
+    let mut safe = PathBuf::new();
+    for comp in PathBuf::from(path).components() {
+        match comp {
+            Component::Normal(c) => safe.push(c),
+            _ => return Err(format!("unsafe path: {path:?}")),
+        }
+    }
+    Ok(safe)
+}
+
+/// Append `.part` to a destination path (`weight.bin` -> `weight.bin.part`).
+fn part_path(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_owned();
+    s.push(".part");
+    PathBuf::from(s)
+}
+
+/// Download and verify every STT model into `models_dir/<folder>/`, reporting a
+/// 0.0–1.0 per-file progress fraction via `on_progress`. Per model: fetch
+/// `SHA256SUMS` and check it against the pinned hash (the trust anchor), then
+/// download each listed file (skipping any already present whose hash matches) and
+/// verify it against the manifest before the atomic rename. Like the LLM path it
+/// trusts no network-provided size — the per-file SHA-256 is the gate and a fixed
+/// cap bounds disk-fill (GHSA-9979-m4pv-g6f5). Decoupled from `AppHandle` for
+/// testing; does NOT write the readiness manifest — the caller does that on full
+/// success.
+async fn download_stt(
+    base: &str,
+    models_dir: &Path,
+    on_progress: &(dyn Fn(f64) + Sync),
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
+
+    struct Pending {
+        url: String,
+        dest: PathBuf,
+        sha256: String,
+    }
+    let mut pending: Vec<Pending> = Vec::new();
+
+    // 1) Per model: fetch the manifest, verify it against the pinned hash, parse.
+    for m in STT_MODELS {
+        let prefix = format!("{base}/{}/{}", m.folder, m.prefix);
+        let resp = client
+            .get(format!("{prefix}/SHA256SUMS"))
+            .send()
+            .await
+            .map_err(|e| format!("get manifest {}: {e}", m.folder))?;
+        if !resp.status().is_success() {
+            return Err(format!("get manifest {}: HTTP {}", m.folder, resp.status()));
+        }
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("read manifest {}: {e}", m.folder))?;
+        let got = sha256_hex(&body);
+        if !got.eq_ignore_ascii_case(m.manifest_sha256) {
+            return Err(format!(
+                "manifest integrity check failed for {}: expected {}, got {got}",
+                m.folder, m.manifest_sha256
+            ));
+        }
+        let text = std::str::from_utf8(&body)
+            .map_err(|_| format!("manifest {} is not UTF-8", m.folder))?;
+        for e in parse_sha256sums(text).map_err(|e| format!("manifest {}: {e}", m.folder))? {
+            let rel = sanitize_rel_path(&e.path)?;
+            pending.push(Pending {
+                url: format!("{prefix}/{}", e.path),
+                dest: models_dir.join(m.folder).join(rel),
+                sha256: e.sha256,
+            });
+        }
+    }
+
+    // 2) Download (skip already-verified files) and verify each before renaming.
+    //    Progress is per-file: the manifest carries no sizes, and a network
+    //    Content-Length must not drive the bar (GHSA-9979-m4pv-g6f5).
+    let total = pending.len() as f64;
+    for (i, p) in pending.iter().enumerate() {
+        if let Some(parent) = p.dest.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
+        }
+
+        // Resume: keep an already-present file only if its digest matches the pin.
+        if tokio::fs::try_exists(&p.dest).await.unwrap_or(false) {
+            if sha256_file(&p.dest)
+                .await
+                .is_ok_and(|h| h.eq_ignore_ascii_case(&p.sha256))
+            {
+                on_progress(((i + 1) as f64 / total).clamp(0.0, 1.0));
+                continue;
+            }
+            let _ = tokio::fs::remove_file(&p.dest).await;
+        }
+
+        let mut resp = client
+            .get(&p.url)
+            .send()
+            .await
+            .map_err(|e| format!("get {}: {e}", p.url))?;
+        if !resp.status().is_success() {
+            return Err(format!("get {}: HTTP {}", p.url, resp.status()));
+        }
+
+        let part = part_path(&p.dest);
+        let mut file = tokio::fs::File::create(&part)
+            .await
+            .map_err(|e| format!("create {}: {e}", part.display()))?;
+        let mut hasher = Sha256::new();
+        let mut written: u64 = 0;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("read {}: {e}", p.url))?
+        {
+            // Disk-fill backstop: the SHA-256 below is the real gate, but bound how
+            // much a misbehaving origin can write before we reach it.
+            written += chunk.len() as u64;
+            if written > STT_MAX_FILE_BYTES {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(format!(
+                    "{} exceeds the {STT_MAX_FILE_BYTES}-byte cap",
+                    p.dest.display()
+                ));
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("write {}: {e}", part.display()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("flush {}: {e}", part.display()))?;
+        drop(file);
+
+        let got = hex::encode(hasher.finalize());
+        if !got.eq_ignore_ascii_case(&p.sha256) {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(format!(
+                "integrity check failed for {}: expected {}, got {got}",
+                p.dest.display(),
+                p.sha256
+            ));
+        }
+        tokio::fs::rename(&part, &p.dest)
+            .await
+            .map_err(|e| format!("finalize {}: {e}", p.dest.display()))?;
+        on_progress(((i + 1) as f64 / total).clamp(0.0, 1.0));
+    }
+
+    Ok(())
+}
+
 /// Opaque download marker. Only stored in manifest.json; never parsed for
 /// logic (readiness is presence-based), so a `unix:<secs>` string suffices and
 /// avoids pulling in a date crate.
@@ -669,5 +865,92 @@ mod tests {
         // The big weights file should be its full size.
         let st = std::fs::metadata(tmp.path().join("model.safetensors")).unwrap();
         assert!(st.len() > 700_000_000, "safetensors too small: {}", st.len());
+    }
+
+    #[test]
+    fn parse_sha256sums_accepts_text_and_binary_markers() {
+        let h = "a".repeat(64);
+        let text = format!("{h}  config.json\n{h} *Encoder.mlmodelc/weights/weight.bin\n");
+        let entries = parse_sha256sums(&text).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "config.json");
+        assert_eq!(entries[1].path, "Encoder.mlmodelc/weights/weight.bin");
+        assert_eq!(entries[0].sha256, h);
+    }
+
+    #[test]
+    fn parse_sha256sums_rejects_malformed_and_empty() {
+        assert!(parse_sha256sums("").is_err());
+        // hash too short
+        assert!(parse_sha256sums("deadbeef  short.json").is_err());
+        let h = "a".repeat(64);
+        // wrong separator (tab, not two spaces)
+        assert!(parse_sha256sums(&format!("{h}\tconfig.json")).is_err());
+        // non-hex hash
+        assert!(parse_sha256sums(&format!("{}  x.json", "z".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn parse_sha256sums_rejects_path_traversal() {
+        let h = "a".repeat(64);
+        assert!(parse_sha256sums(&format!("{h}  ../escape.bin")).is_err());
+        assert!(parse_sha256sums(&format!("{h}  /abs/escape.bin")).is_err());
+        assert!(parse_sha256sums(&format!("{h}  a/../../b")).is_err());
+    }
+
+    #[test]
+    fn sanitize_rel_path_allows_nested_rejects_escapes() {
+        assert_eq!(
+            sanitize_rel_path("Encoder.mlmodelc/weights/weight.bin").unwrap(),
+            PathBuf::from("Encoder.mlmodelc/weights/weight.bin")
+        );
+        assert!(sanitize_rel_path("").is_err());
+        assert!(sanitize_rel_path("../x").is_err());
+        assert!(sanitize_rel_path("/x").is_err());
+        assert!(sanitize_rel_path("a/../b").is_err());
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn stt_cdn_base_uses_shared_r2_host_and_pins_are_well_formed() {
+        assert!(STT_CDN_BASE.starts_with(r2_base!()));
+        for m in STT_MODELS {
+            assert_eq!(m.manifest_sha256.len(), 64, "{} hash len", m.folder);
+            assert!(
+                m.manifest_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{} hash hex",
+                m.folder
+            );
+            assert!(!m.prefix.is_empty(), "{} prefix", m.folder);
+        }
+    }
+
+    // Hits the network (downloads the STT models from R2). Excluded from the
+    // default run; invoke with `cargo test stt_r2_download_smoke -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: downloads the STT models (~900MB) from the R2 CDN"]
+    async fn stt_r2_download_smoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        download_stt(STT_CDN_BASE, tmp.path(), &|_| {})
+            .await
+            .unwrap();
+        for m in STT_MODELS {
+            assert!(tmp.path().join(m.folder).is_dir(), "missing {}", m.folder);
+        }
+        let enc = tmp
+            .path()
+            .join("parakeet-tdt-0.6b-v3/Encoder.mlmodelc/weights/weight.bin");
+        assert!(std::fs::metadata(enc).unwrap().len() > 400_000_000);
     }
 }
