@@ -574,7 +574,10 @@ pub(crate) fn open_waveform_window(
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
-        .inner_size(92.0, 284.0)
+        .inner_size(
+            crate::recorder_pill::PILL_W,
+            crate::recorder_pill::PILL_H,
+        )
         // Born visible even when the library's embedded strip is the real UI:
         // WebKit won't resolve getUserMedia for a hidden window, so the pill
         // must stay on screen until capture starts. The visibility watcher
@@ -592,23 +595,12 @@ pub(crate) fn open_waveform_window(
         .map_err(|e| e.to_string())?;
 
     // When the pill is the visible recording UI (the meetings window is hidden,
-    // minimized, or closed), dock it to the right edge of the primary screen,
-    // vertically centered, rather than leaving it at the OS default spot. When
-    // the meetings window owns the UI the pill is painted-empty, so its position
-    // doesn't matter.
+    // minimized, or closed), dock it to the right edge of the primary screen
+    // rather than leaving it at the OS default spot. When the meetings window
+    // owns the UI the pill is painted-empty, so its position doesn't matter —
+    // the watcher re-docks it later if the meetings window is minimized.
     if !pill_hidden {
-        if let Ok(Some(monitor)) = win.primary_monitor() {
-            let scale = monitor.scale_factor();
-            let msize = monitor.size();
-            let mpos = monitor.position();
-            // Window outer size is the fixed inner size (no decorations).
-            let win_w = (92.0 * scale).round() as i32;
-            let win_h = (284.0 * scale).round() as i32;
-            let margin = (16.0 * scale).round() as i32;
-            let x = mpos.x + msize.width as i32 - win_w - margin;
-            let y = mpos.y + (msize.height as i32 - win_h) / 2;
-            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-        }
+        crate::recorder_pill::dock_to_right_edge(&win);
     }
 
     let source = if auto {

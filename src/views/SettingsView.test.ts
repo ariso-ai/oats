@@ -85,6 +85,11 @@ vi.mock('../composables/useAutoRecord', () => ({
   setAutoRecordEnabled: vi.fn(),
   isAutoRecordSupported: () => Promise.resolve(true),
 }));
+const setSilenceDetectionEnabled = vi.fn(() => Promise.resolve());
+vi.mock('../composables/useSilenceDetection', () => ({
+  isSilenceDetectionEnabled: () => Promise.resolve(true),
+  setSilenceDetectionEnabled: (...a: unknown[]) => setSilenceDetectionEnabled(...a),
+}));
 
 import SettingsView from './SettingsView.vue';
 
@@ -353,5 +358,34 @@ describe('SettingsView account avatar', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SettingsView silence detection toggle', () => {
+  // Find the checkbox in the setting-row whose label is `label`.
+  function toggleFor(wrapper: ReturnType<typeof mount>, label: string) {
+    const row = wrapper
+      .findAll('.setting-row')
+      .find((r) => r.find('.setting-label').text() === label);
+    expect(row, `setting-row for "${label}"`).toBeDefined();
+    return row!.find('input.toggle-input');
+  }
+
+  it('renders the Silence detection toggle, checked by default', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Silence detection');
+    expect(input.exists()).toBe(true);
+    expect((input.element as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('persists the new value when toggled off', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Silence detection');
+    (input.element as HTMLInputElement).checked = false;
+    await input.trigger('change');
+    await flushPromises();
+    expect(setSilenceDetectionEnabled).toHaveBeenCalledWith(false);
   });
 });

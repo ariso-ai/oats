@@ -27,7 +27,7 @@ jobs:
       prs: ${{ steps.release.outputs.prs }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         id: release
         with:
           # The default GITHUB_TOKEN is sufficient: the release/publish jobs run
@@ -242,6 +242,9 @@ jobs:
     environment: release
     permissions:
       contents: write
+      # publish-homebrew-cask.sh opens a PR with the cask checksum update
+      # instead of pushing to the protected main branch.
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -288,7 +291,7 @@ jobs:
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
         run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
 
-      - name: Upload Homebrew DMG asset and update cask checksum
+      - name: Open Homebrew cask checksum PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}

@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.10.0](https://github.com/ariso-ai/oats/compare/v0.9.0...v0.10.0) (2026-06-21)
+
+
+### Features
+
+* new setting option for silence detection ([8cc68a1](https://github.com/ariso-ai/oats/commit/8cc68a1cbae3285b59a1d800286bec384314007c))
+* replace silence notification with an in-app prompt window ([b92b2b7](https://github.com/ariso-ai/oats/commit/b92b2b7252dab7ccd9f1d278da4492d263b65b23))
+* replace silence notification with an in-app prompt window ([2ee2f32](https://github.com/ariso-ai/oats/commit/2ee2f32216f4defb1f189f7ca7ac650cd845f9c6))
+* verify on-device STT model downloads from a pinned R2 mirror ([15c755f](https://github.com/ariso-ai/oats/commit/15c755ff0a778092355973b5d531b1ddf88cd4c9))
+* verify on-device STT model downloads from a pinned R2 mirror ([c62dc0b](https://github.com/ariso-ai/oats/commit/c62dc0b528978e25a5cc6940e15ae752e8a78626))
+
+
+### Bug Fixes
+
+* guard null device UID and validate tap format (GHSA-cvf3-62r6-ch7v) ([b80a621](https://github.com/ariso-ai/oats/commit/b80a621e3b00f685de220b6898819317e48c410a))
+* guard null device UID and validate tap format in system-audio capture ([b64a966](https://github.com/ariso-ai/oats/commit/b64a966b86df5a3b0aa7efa79b679728e37ee25d))
+* publish Homebrew cask checksum via PR, point cask at R2 ([f682c93](https://github.com/ariso-ai/oats/commit/f682c9330ee32fd44b66a6f8d485e0d242b89a34))
+* publish Homebrew cask checksum via PR, point cask at R2 ([1e10ef9](https://github.com/ariso-ai/oats/commit/1e10ef9bedf327df7b04d09dbac9fa6d5896c236)), closes [#147](https://github.com/ariso-ai/oats/issues/147)
+* verify on-device LLM model downloads with pinned SHA-256 ([c4af2d8](https://github.com/ariso-ai/oats/commit/c4af2d8e36875231c25f1cb6cf56c6f074c75b3a))
+
+## [0.9.0](https://github.com/ariso-ai/oats/compare/v0.8.1...v0.9.0) (2026-06-19)
+
+
+### Features
+
+* add Ari-join confirm composable and dialog ([64cc999](https://github.com/ariso-ai/oats/commit/64cc999a1b69936f06c3bf4f62f087fa3b73aa3f))
+* add arisoTruthy and shouldConfirmAriJoin helpers ([b1bc708](https://github.com/ariso-ai/oats/commit/b1bc708981d15c6c3de8d8f8c144ed9a56ab3c2c))
+* confirm Ari auto-join before recording from the library ([098cf09](https://github.com/ariso-ai/oats/commit/098cf09c29e2dcbc7bb0585ccc1fbad953a0d041))
+* confirm Ari auto-join before recording from the meeting picker ([4b4e0b1](https://github.com/ariso-ai/oats/commit/4b4e0b1b4901eb81858fb873f6e328a714b89201))
+* meeting prompt corner dismiss + Take notes split menu ([4cbcf81](https://github.com/ariso-ai/oats/commit/4cbcf81ad5c4cc443475aa92a8bf403914e81edc))
+* meeting-prompt URL-query parser ([25909e8](https://github.com/ariso-ai/oats/commit/25909e8634d789cb3bfa8c56bc31321d9de3a927))
+* meeting-start notification view + route ([41b3dd8](https://github.com/ariso-ai/oats/commit/41b3dd8597eb586d373ed752cf3498cd7a03d173))
+* meeting-start notification with countdown bar ([#121](https://github.com/ariso-ai/oats/issues/121)) ([61eafcf](https://github.com/ariso-ai/oats/commit/61eafcfce32d85f1b63683d937063c367ea609ad))
+* open custom meeting-start notification window in place of the UNC prompt ([0196509](https://github.com/ariso-ai/oats/commit/01965091d2505d5a4d79f51ba850d93880f5b88d))
+* plumb auto_join_scheduled flag into frontend meeting types ([7c2a29b](https://github.com/ariso-ai/oats/commit/7c2a29b51addc277c0c2ebd1bf6a8196ad39dd65))
+* polish meeting-start notification (icon, dismiss, live title) ([a2138f3](https://github.com/ariso-ai/oats/commit/a2138f31400528fe7b608c1dc1e755d19867938d))
+* show 'Ari will join' label on attendee lines ([19a4272](https://github.com/ariso-ai/oats/commit/19a4272dfcf9b7fa46eae78ee70bc9fcde26f009))
+
+
+### Bug Fixes
+
+* add checksum-backed Homebrew cask install ([abc974a](https://github.com/ariso-ai/oats/commit/abc974ae2ef04db2236789d3565d9c2a5336fd4f))
+* align meeting prompt view with the app design system ([0dc7b8d](https://github.com/ariso-ai/oats/commit/0dc7b8d0d377e7830d8614232ea3adcc559bf414))
+* align meeting prompt view with the app design system ([968e6fb](https://github.com/ariso-ai/oats/commit/968e6fb8f78a4db66405aa46be49adf7763463d9))
+* corner dismiss as a bordered circle straddling the card corner ([366abc3](https://github.com/ariso-ai/oats/commit/366abc3aa8b3dfc751326a51164b7e6d03915869))
+* dismiss as a secondary pill button + rectangular corner close ([8140e0f](https://github.com/ariso-ai/oats/commit/8140e0fd745e9ed787f2fe07f3060bdabe2ec8fe))
+* enlarge corner dismiss and match Dismiss width to Take notes ([50c6623](https://github.com/ariso-ai/oats/commit/50c6623c9837488b8572d714189265c7a360f90e))
+* make appdmg optional for installs ([0ce228c](https://github.com/ariso-ai/oats/commit/0ce228c84bdfe98bb9b0bffbdc3e199600559ceb))
+* make enabledPlugins a record to match settings schema ([11a49c9](https://github.com/ariso-ai/oats/commit/11a49c9dffdc8125d0eba2f29868b4ee29c0cab7))
+* make enabledPlugins a record to match settings schema ([53f604c](https://github.com/ariso-ai/oats/commit/53f604c459c743b8703f9add214d5e62eb43c839))
+* make meeting prompt fill its window and clip the countdown bar ([0c517ac](https://github.com/ariso-ai/oats/commit/0c517ac2b67f52b98a101034aedb23b48899672c))
+* notarize composed dmg ([8e3b08e](https://github.com/ariso-ai/oats/commit/8e3b08e24f5645a5d9a5c3b689d641976bb6ce0a))
+* **recorder:** derive elapsed time from wall-clock, not timer ticks ([6aadc54](https://github.com/ariso-ai/oats/commit/6aadc54559991f68c948aea6bff6dab7876bc70c))
+* shorten meeting prompt window with symmetric vertical padding ([f126a39](https://github.com/ariso-ai/oats/commit/f126a3904b27881cc90329a767b1da25150aa373))
+* show Google avatar in Settings account row ([4024c59](https://github.com/ariso-ai/oats/commit/4024c59303c1c29985d1e049ce0001c3d852dc9f))
+* tighten meeting prompt dismiss corner and dropdown placement ([007db3e](https://github.com/ariso-ai/oats/commit/007db3e2880aaa3aa8f73147d8e3c39c98a4c1c1))
+* UI tweaks — title width, transcript scrollbar, hide local front-matter ([7317f50](https://github.com/ariso-ai/oats/commit/7317f5045a4db144f9653e17b7b496288ce2a5ef))
+* widen editable title, slim transcript scrollbar, hide local front-matter ([182452a](https://github.com/ariso-ai/oats/commit/182452a9c864304c660738c1063d063797144890))
+
 ## [0.8.1](https://github.com/ariso-ai/oats/compare/v0.8.0...v0.8.1) (2026-06-18)
 
 

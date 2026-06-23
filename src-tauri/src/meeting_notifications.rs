@@ -483,12 +483,18 @@ fn prep_url(prep_id: i64) -> String {
 // through the `resolve_meeting_prompt` command into the `oneshot` below. The
 // user has 10 seconds to choose; if they don't, the caller's mode default
 // applies (record when auto-record is on, skip when it's off). The
-// UNUserNotificationCenter delegate in `macos_un` now handles only meeting-prep
-// deep-link clicks — it no longer carries the auto-record decision.
+// UNUserNotificationCenter delegate in `macos_un` no longer carries the
+// auto-record decision — it now handles only meeting-prep deep-link clicks and
+// the silence-stop prompt's Keep / Stop buttons.
 // ---------------------------------------------------------------------------
 
 /// How long the prompt stays actionable before the caller's mode default wins.
 const AUTO_RECORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Grace window (seconds) shown by the silence prompt's countdown bar before the
+/// recording auto-stops. Matches `SILENCE_GRACE_MS` in the frontend silence
+/// watch; the bar is cosmetic — the frontend grace timer drives the actual stop.
+const SILENCE_PROMPT_SECONDS: u64 = 60;
 
 /// Inner size of the meeting-start notification window (logical px). Compact
 /// single-row "native macOS mimic" layout from the design.
@@ -983,6 +989,122 @@ pub async fn stop_meeting_notifications(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Route + params for the silence-stop prompt window. `seconds` drives the
+/// countdown bar; `subtitle`, when present, is the live meeting's title (the
+/// view hides the subtitle line when it's absent). URL-encoded so titles with
+/// spaces/`&`/`#` survive the hash route.
+fn silence_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    ser.append_pair("seconds", &seconds.to_string());
+    if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
+        ser.append_pair("subtitle", s);
+    }
+    format!("/#/silence-prompt?{}", ser.finish())
+}
+
+/// Build (or replace) the borderless top-right silence prompt window. A sibling
+/// of the meeting-start prompt — same chrome (no decorations, transparent,
+/// always-on-top, never focused). Must run on the main thread.
+fn open_silence_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Only one silence prompt is live per recording; replace any stale window.
+    if let Some(existing) = app.get_webview_window("silence-prompt") {
+        let _ = existing.close();
+    }
+    let win = WebviewWindowBuilder::new(
+        app,
+        "silence-prompt",
+        WebviewUrl::App(silence_prompt_url(SILENCE_PROMPT_SECONDS, subtitle).into()),
+    )
+    .title("")
+    .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .shadow(false)
+    .focused(false)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    // Dock to the top-right of the primary monitor — the macOS notification corner.
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let msize = monitor.size();
+        let mpos = monitor.position();
+        let win_w = (MEETING_PROMPT_W * scale).round() as i32;
+        let margin = (16.0 * scale).round() as i32;
+        let x = mpos.x + msize.width as i32 - win_w - margin;
+        let y = mpos.y + margin;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    Ok(())
+}
+
+/// Close the silence prompt window if it is still up.
+fn close_silence_prompt_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("silence-prompt") {
+        let _ = win.close();
+    }
+}
+
+/// Show the silence-stop prompt as a borderless window (replaces the old native
+/// notification). `subtitle`, when present, is the live meeting's title. Window
+/// creation must happen on the main thread, so dispatch there.
+#[tauri::command]
+pub fn show_silence_prompt(app: AppHandle, subtitle: Option<String>) {
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(e) = open_silence_prompt_window(&app_main, subtitle.as_deref()) {
+            eprintln!("silence-prompt: failed to open prompt window: {e}");
+        }
+    });
+}
+
+/// Close the silence prompt window (audio resumed, paused, or recording ended).
+#[tauri::command]
+pub fn dismiss_silence_prompt(app: AppHandle) {
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_silence_prompt_window(&app_main));
+}
+
+/// The silence prompt view's choice: `stop` stops the recording, otherwise keep
+/// recording. Emits the event the recorder window listens for (its silence state
+/// machine acts on it), then closes the prompt window.
+#[tauri::command]
+pub fn resolve_silence_prompt(app: AppHandle, stop: bool) {
+    use tauri::Emitter;
+    let event = if stop {
+        "silence-prompt://stop"
+    } else {
+        "silence-prompt://keep"
+    };
+    let _ = app.emit(event, ());
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_silence_prompt_window(&app_main));
+}
+
+/// Grow/shrink the silence prompt window so the view can reveal the Dismiss menu
+/// below the card. Sizing must happen on the main thread; the top-left stays
+/// pinned so the window grows downward.
+#[tauri::command]
+pub async fn resize_silence_prompt(app: AppHandle, expanded: bool) -> Result<(), String> {
+    let height = if expanded {
+        MEETING_PROMPT_H_EXPANDED
+    } else {
+        MEETING_PROMPT_H
+    };
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(win) = app_main.get_webview_window("silence-prompt") {
+            let _ = win.set_size(tauri::LogicalSize::new(MEETING_PROMPT_W, height));
+        }
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,6 +1129,22 @@ mod tests {
         );
         // Empty subtitle is omitted entirely.
         assert_eq!(super::meeting_prompt_url(10, Some("")), "/#/meeting-prompt?seconds=10");
+    }
+
+    #[test]
+    fn silence_prompt_url_carries_the_grace_seconds() {
+        assert_eq!(super::silence_prompt_url(60, None), "/#/silence-prompt?seconds=60");
+    }
+
+    #[test]
+    fn silence_prompt_url_encodes_the_subtitle_and_omits_when_empty() {
+        assert_eq!(
+            super::silence_prompt_url(60, Some("Q3 Plan & Review")),
+            "/#/silence-prompt?seconds=60&subtitle=Q3+Plan+%26+Review"
+        );
+        // No meeting title → the subtitle is omitted (the view hides the line).
+        assert_eq!(super::silence_prompt_url(60, Some("")), "/#/silence-prompt?seconds=60");
+        assert_eq!(super::silence_prompt_url(60, None), "/#/silence-prompt?seconds=60");
     }
 
     #[test]

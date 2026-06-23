@@ -66,6 +66,10 @@ vi.mock('../composables/useBackend', () => ({
 vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
 }));
+const isSilenceDetectionEnabled = vi.fn(() => Promise.resolve(true));
+vi.mock('../composables/useSilenceDetection', () => ({
+  isSilenceDetectionEnabled: () => isSilenceDetectionEnabled(),
+}));
 
 const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
 vi.mock('../composables/useMeetingApi', () => ({
@@ -78,6 +82,7 @@ vi.mock('../tauri', () => ({
 }));
 
 import WaveformView from './WaveformView.vue';
+import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -88,6 +93,7 @@ beforeEach(() => {
   recorderDuration.value = 5;
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
+  isSilenceDetectionEnabled.mockResolvedValue(true);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -280,14 +286,106 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.status-icon.ok').exists()).toBe(false);
   });
 
-  it('auto-stops after the silence timeout elapses', async () => {
+  it('shows the silence prompt after 10 min of silence', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(16 * 60_000); // now well past lastSoundAt (0) + 15min
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // now past lastSoundAt (0) + 10 min
     finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    invoke.mockClear();
+    // One loop tick: should show the prompt but NOT stop.
     await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
+    expect(stopRecording).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('never shows the silence prompt when silence detection is disabled', async () => {
+    isSilenceDetectionEnabled.mockResolvedValue(false);
+    vi.useFakeTimers();
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // well past the 10-min threshold
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    invoke.mockClear();
+    // Advance well past both the prompt and grace windows — the timer must not
+    // even be running, so nothing is prompted and the recording is never stopped.
+    await vi.advanceTimersByTimeAsync(SILENCE_PROMPT_MS + SILENCE_GRACE_MS + 2_000);
+    await flushPromises();
+    expect(invoke.mock.calls.some(([cmd]) => cmd === 'show_silence_prompt')).toBe(false);
+    expect(stopRecording).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('auto-stops 60s after an unanswered silence prompt', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // past 10 min silence threshold
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    invoke.mockClear();
+    // First tick: shows the prompt (lastSoundAt stays 0, silence persists).
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
+    expect(stopRecording).not.toHaveBeenCalled();
+    // Advance past the 60s grace — still silent, prompt ignored → auto-stop.
+    await vi.advanceTimersByTimeAsync(SILENCE_GRACE_MS + 1_000);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('dismiss_silence_prompt');
+    expect(stopRecording).toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('silence-prompt://keep reseeds the silence clock so auto-stop is deferred', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // past 10-min silence threshold
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    invoke.mockClear();
+    stopRecording.mockClear();
+    // First tick: prompt fires (lastSoundAt is 0, silence window exceeded).
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
+    // User taps "Keep recording": reseeds lastSoundAt to fake-now
+    // (SILENCE_PROMPT_MS + 1_000 + 1_100ms). promptShownAt is also cleared.
+    await eventHandlers['silence-prompt://keep']?.({});
+    await flushPromises();
+    // Advance past what would have been the 60s auto-stop grace. Since keep
+    // reseeded lastSoundAt to ~now, silence hasn't accumulated for 10 min again
+    // — so the silence watcher should NOT fire stop within this window.
+    await vi.advanceTimersByTimeAsync(SILENCE_GRACE_MS + 1_000);
+    await flushPromises();
+    expect(stopRecording).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it('silence-prompt://stop immediately stops the recording', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(SILENCE_PROMPT_MS + 1_000); // past 10-min silence threshold
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    invoke.mockClear();
+    stopRecording.mockClear();
+    // Show prompt.
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
+    // User taps "Stop now": must trigger stopRecording immediately.
+    await eventHandlers['silence-prompt://stop']?.({});
     await flushPromises();
     expect(stopRecording).toHaveBeenCalled();
     vi.useRealTimers();

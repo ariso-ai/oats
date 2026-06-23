@@ -49,7 +49,11 @@ mod imp {
         AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
         CATapDescription, CATapMuteBehavior,
     };
-    use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp};
+    use objc2_core_audio_types::{
+        kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
+        kAudioFormatLinearPCM, kLinearPCMFormatFlagIsNonInterleaved, AudioBufferList,
+        AudioStreamBasicDescription, AudioTimeStamp,
+    };
     use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
     use std::ffi::{c_void, CStr};
@@ -165,6 +169,15 @@ mod imp {
         if status != 0 {
             return Err(format!("AudioObjectGetPropertyData({selector}) failed: {status}"));
         }
+        // Core Audio can return status 0 with a short read (e.g. 0 bytes for an
+        // absent property), which would leave the buffer uninitialized. Only
+        // `assume_init` once the written size matches `T` exactly.
+        let expected = std::mem::size_of::<T>() as u32;
+        if size != expected {
+            return Err(format!(
+                "AudioObjectGetPropertyData({selector}) returned {size} bytes; expected {expected}"
+            ));
+        }
         Ok(unsafe { value.assume_init() })
     }
 
@@ -221,6 +234,23 @@ mod imp {
         NSDictionary::from_slices(&keys, &values)
     }
 
+    /// Whether a tap stream format is the packed, little-endian, interleaved
+    /// 32-bit float LinearPCM layout that the IO block assumes when
+    /// `downmix_to_mono` reinterprets buffer bytes as `*const f32` (dividing
+    /// `mDataByteSize` by 4 bytes per sample). Any other layout — padded,
+    /// big-endian, non-interleaved, or a non-positive sample rate (which would
+    /// make the resampler step 0.0 and stall `Resampler::process` in an infinite
+    /// loop) — would be misread, so the caller must reject it.
+    fn is_supported_tap_format(asbd: &AudioStreamBasicDescription) -> bool {
+        asbd.mFormatID == kAudioFormatLinearPCM
+            && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            && asbd.mFormatFlags & kAudioFormatFlagIsPacked != 0
+            && asbd.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
+            && asbd.mFormatFlags & kLinearPCMFormatFlagIsNonInterleaved == 0
+            && asbd.mBitsPerChannel == 32
+            && asbd.mSampleRate > 0.0
+    }
+
     pub fn start(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
@@ -258,7 +288,18 @@ mod imp {
             };
             let output_uid_cf: CFRetained<CFString> =
                 match get_property::<*const CFString>(output_id, kAudioDevicePropertyDeviceUID) {
-                    Ok(ptr) => CFRetained::from_raw(NonNull::new(ptr as *mut CFString).unwrap()),
+                    // Core Audio can return status 0 with a null/absent UID for some
+                    // virtual or aggregate output devices. Guard the pointer instead of
+                    // unwrapping: a null here would panic, and handing a non-owned null to
+                    // `CFRetained::from_raw` (which assumes a +1 retained object) is the
+                    // start of a refcount/UAF bug, not just a crash.
+                    Ok(ptr) => match NonNull::new(ptr as *mut CFString) {
+                        Some(nn) => CFRetained::from_raw(nn),
+                        None => {
+                            AudioHardwareDestroyProcessTap(tap_id);
+                            return Err("default output device has no UID".into());
+                        }
+                    },
                     Err(e) => {
                         AudioHardwareDestroyProcessTap(tap_id);
                         return Err(e);
@@ -275,6 +316,17 @@ mod imp {
                         return Err(e);
                     }
                 };
+            // The IO block reinterprets buffer bytes as `*const f32` in
+            // `downmix_to_mono`, so the tap must actually deliver 32-bit float
+            // LinearPCM. Taps normally do, but verify before trusting the cast:
+            // a non-Float32 layout would otherwise be read as garbage samples.
+            if !is_supported_tap_format(&asbd) {
+                AudioHardwareDestroyProcessTap(tap_id);
+                return Err(format!(
+                    "unsupported tap stream format (id={}, flags={:#x}, bits={}); expected 32-bit float LinearPCM",
+                    asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel
+                ));
+            }
             let src_rate = asbd.mSampleRate;
 
             // 4. Private aggregate device wrapping the tap.
@@ -472,6 +524,86 @@ mod imp {
         }
         // Safety: base64 output is always valid UTF-8.
         unsafe { String::from_utf8_unchecked(out) }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2_core_audio_types::kAudioFormatFlagIsPacked;
+
+        /// A 32-bit float LinearPCM tap format like Core Audio actually delivers.
+        fn float32_pcm() -> AudioStreamBasicDescription {
+            AudioStreamBasicDescription {
+                mSampleRate: 48_000.0,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: 4,
+                mFramesPerPacket: 1,
+                mBytesPerFrame: 4,
+                mChannelsPerFrame: 1,
+                mBitsPerChannel: 32,
+                mReserved: 0,
+            }
+        }
+
+        #[test]
+        fn accepts_float32_linear_pcm() {
+            assert!(is_supported_tap_format(&float32_pcm()));
+        }
+
+        #[test]
+        fn rejects_non_linear_pcm_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatID = u32::from_be_bytes(*b"aac "); // compressed, not LinearPCM
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_integer_pcm_missing_float_flag() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags = kAudioFormatFlagIsPacked; // no float flag
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_32_bit_depth() {
+            let mut asbd = float32_pcm();
+            asbd.mBitsPerChannel = 16; // would be misread as f32
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_positive_sample_rate() {
+            // step = src_rate / 16_000 would be 0.0, stalling Resampler::process.
+            let mut zero = float32_pcm();
+            zero.mSampleRate = 0.0;
+            assert!(!is_supported_tap_format(&zero));
+
+            let mut negative = float32_pcm();
+            negative.mSampleRate = -48_000.0;
+            assert!(!is_supported_tap_format(&negative));
+        }
+
+        #[test]
+        fn rejects_unpacked_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags = kAudioFormatFlagIsFloat; // padded, not tightly packed
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_big_endian_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags |= kAudioFormatFlagIsBigEndian;
+            assert!(!is_supported_tap_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_interleaved_format() {
+            let mut asbd = float32_pcm();
+            asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
+            assert!(!is_supported_tap_format(&asbd));
+        }
     }
 }
 

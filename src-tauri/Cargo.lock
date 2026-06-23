@@ -2623,11 +2623,12 @@ dependencies = [
 
 [[package]]
 name = "oats"
-version = "0.8.1"
+version = "0.10.0"
 dependencies = [
  "block2",
  "chrono",
  "futures-util",
+ "hex",
  "objc2",
  "objc2-app-kit",
  "objc2-core-audio",
@@ -2638,6 +2639,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-mcp",
