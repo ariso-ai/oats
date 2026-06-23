@@ -3,24 +3,21 @@ import { setupPluginListeners } from 'tauri-plugin-mcp';
 import { createApp } from 'vue';
 import { createRouter, createWebHashHistory } from 'vue-router';
 import App from './App.vue';
-import WaveformView from './views/WaveformView.vue';
-import SettingsView from './views/SettingsView.vue';
-import UpdateView from './views/UpdateView.vue';
-import BootstrapView from './views/BootstrapView.vue';
-import MeetingPickerView from './views/MeetingPickerView.vue';
-import LibraryView from './views/LibraryView.vue';
-import OnboardingView from './views/OnboardingView.vue';
 
+// Routes are lazy-loaded so each window only fetches the view it renders, and a
+// broken import in one view stays contained to its own route instead of taking
+// down the whole app.
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', name: 'Bootstrap', component: BootstrapView },
-    { path: '/onboarding', name: 'Onboarding', component: OnboardingView },
-    { path: '/waveform', name: 'Waveform', component: WaveformView },
-    { path: '/settings', name: 'Settings', component: SettingsView },
-    { path: '/update', name: 'Update', component: UpdateView },
-    { path: '/meeting-picker', name: 'MeetingPicker', component: MeetingPickerView },
-    { path: '/library', name: 'Library', component: LibraryView },
+    { path: '/', name: 'Bootstrap', component: () => import('./views/BootstrapView.vue') },
+    { path: '/onboarding', name: 'Onboarding', component: () => import('./views/OnboardingView.vue') },
+    { path: '/waveform', name: 'Waveform', component: () => import('./views/WaveformView.vue') },
+    { path: '/settings', name: 'Settings', component: () => import('./views/SettingsView.vue') },
+    { path: '/update', name: 'Update', component: () => import('./views/UpdateView.vue') },
+    { path: '/meeting-picker', name: 'MeetingPicker', component: () => import('./views/MeetingPickerView.vue') },
+    { path: '/meeting-prompt', name: 'MeetingPrompt', component: () => import('./views/MeetingPromptView.vue') },
+    { path: '/library', name: 'Library', component: () => import('./views/LibraryView.vue') },
   ],
 });
 

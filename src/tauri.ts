@@ -78,6 +78,12 @@ export const api = {
   ): Promise<number> {
     return invoke<number>('put_presigned', { url, data, contentType });
   },
+
+  /** Raw audio bytes for an Ariso meeting. Rejects with a message prefixed
+   *  by the HTTP status (e.g. "404: …") when the server has no audio. */
+  async fetchMeetingAudio(meetingId: string | number): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('fetch_meeting_audio', { meetingId: String(meetingId) });
+  },
 };
 
 export interface DesktopConfig {
@@ -168,6 +174,17 @@ export interface RecordingSummary {
   hasTranscript: boolean;
 }
 
+export type NotesStatus = 'pending' | 'ready' | 'failed';
+
+/** Mirrors the Rust `RecordingStatusView`. Drives the detail panel's local
+ *  generation poller (tab enable/disable + the inline status chip). */
+export interface RecordingStatusView {
+  status: RecordingSummary['status'];
+  hasTranscript: boolean;
+  hasNote: boolean;
+  notesStatus: NotesStatus;
+}
+
 export interface LocalFinalizeResult {
   backend: 'local';
   id: string;
@@ -199,6 +216,18 @@ export const local = {
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
   },
+  /** Cheap single-recording status for the detail panel's generation poller. */
+  recordingStatus(id: string): Promise<RecordingStatusView> {
+    return invoke<RecordingStatusView>('local_recording_status', { id });
+  },
+  /** Re-run transcription (and notes) for a failed recording from saved audio. */
+  retryTranscription(id: string): Promise<LocalFinalizeResult> {
+    return invoke<LocalFinalizeResult>('retry_local_transcription', { id });
+  },
+  /** Regenerate AI notes from the existing transcript (no STT re-run). */
+  retryNotes(id: string): Promise<void> {
+    return invoke('retry_local_notes', { id });
+  },
   readRecordingAudio(id: string): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('read_recording_audio', { id });
   },
@@ -208,6 +237,13 @@ export const local = {
   },
   writeRecordingNote(id: string, markdown: string): Promise<void> {
     return invoke('write_recording_note', { id, markdown });
+  },
+  /** Reads the local `user-note-title.txt` sidecar holding the My-note title. */
+  readRecordingNoteTitle(id: string): Promise<string> {
+    return invoke<string>('read_recording_note_title', { id });
+  },
+  writeRecordingNoteTitle(id: string, title: string): Promise<void> {
+    return invoke('write_recording_note_title', { id, title });
   },
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
@@ -235,6 +271,37 @@ export const local = {
   },
 };
 
+/** Metadata persisted next to a buffered Ariso upload, mirrors the Rust
+ *  `PendingUploadMeta`. Lets the Library resume a failed upload after restart. */
+export interface PendingUploadMeta {
+  createdAt: string;
+  startAt: string | null;
+  endAt: string;
+  durationSeconds: number;
+  meetingId?: number;
+}
+
+/** Disk buffer for Ariso uploads: audio + metadata are persisted before the
+ *  upload attempt and removed once the server confirms (or the user
+ *  dismisses). Keyed by the recording's ISO `createdAt`; Rust derives the id. */
+export const pending = {
+  bufferAudio(audio: number[], meta: PendingUploadMeta): Promise<string> {
+    return invoke<string>('buffer_pending_audio', { audio, meta });
+  },
+  /** Idempotent — missing buffer files are not an error. */
+  discardAudio(createdAt: string): Promise<void> {
+    return invoke('discard_pending_audio', { createdAt });
+  },
+  /** Buffered uploads awaiting resume, oldest-first. */
+  list(): Promise<PendingUploadMeta[]> {
+    return invoke<PendingUploadMeta[]>('list_pending_uploads');
+  },
+  /** Concatenate the given buffers (chronological keys) into one mp3's bytes. */
+  combine(createdAtKeys: string[]): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('combine_pending_audio', { createdAtKeys });
+  },
+};
+
 export async function getBackendSetting(): Promise<'ariso' | 'local'> {
   const store = await load('settings.json', { autoSave: true });
   const v = await store.get<string>('backend');
@@ -254,6 +321,17 @@ export async function isOnboarded(): Promise<boolean> {
 export async function setOnboarded(value: boolean): Promise<void> {
   const store = await load('settings.json', { autoSave: true });
   await store.set('onboarded', value);
+}
+
+/** Whether the first-time "download local models?" dialog has been confirmed. */
+export async function hasPromptedLocalModels(): Promise<boolean> {
+  const store = await load('settings.json', { autoSave: true });
+  return (await store.get<boolean>('localModelsPrompted')) === true;
+}
+
+export async function setPromptedLocalModels(value: boolean): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('localModelsPrompted', value);
 }
 
 /** Open (or focus) the first-run onboarding window. */

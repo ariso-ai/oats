@@ -3,13 +3,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const listMeetings = vi.fn();
+const searchMeetings = vi.fn();
 const getMeetingDetail = vi.fn();
 const backendId = vi.fn(() => 'local');
 const usesMeetingPicker = vi.fn(() => false);
+const supportsSearch = vi.fn(() => false);
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
 const readRecordingNote = vi.fn();
+const readRecordingNoteTitle = vi.fn();
 const writeRecordingNote = vi.fn();
+const writeRecordingNoteTitle = vi.fn();
+const recordingStatus = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
@@ -47,7 +52,9 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
       Promise.resolve({
         id: backendId(),
         usesMeetingPicker: usesMeetingPicker(),
+        supportsSearch: supportsSearch(),
         listMeetings: () => listMeetings(),
+        searchMeetings: (query: string) => searchMeetings(query),
         getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
       }),
   };
@@ -57,16 +64,24 @@ vi.mock('../composables/useMeetingNotifications', () => ({
 }));
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
+// pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
 vi.mock('../tauri', () => ({
   local: {
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
     readRecordingNote: (id: string) => readRecordingNote(id),
+    readRecordingNoteTitle: (id: string) => readRecordingNoteTitle(id),
     writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
+    writeRecordingNoteTitle: (id: string, title: string) => writeRecordingNoteTitle(id, title),
+    recordingStatus: (id: string) => recordingStatus(id),
+  },
+  pending: {
+    list: () => Promise.resolve([]),
   },
 }));
 
 import LibraryView from './LibraryView.vue';
+import UpNextCard from './UpNextCard.vue';
 
 function item(over: Record<string, unknown>) {
   return {
@@ -86,6 +101,12 @@ enableAutoUnmount(afterEach);
 beforeEach(() => {
   vi.clearAllMocks();
   eventHandlers.clear();
+  // ProseMirror asks the browser which element sits under the editor viewport;
+  // jsdom has no layout engine, so return the body to let editor mounts settle.
+  Object.defineProperty(document, 'elementFromPoint', {
+    configurable: true,
+    value: vi.fn(() => document.body),
+  });
   getAllWebviewWindows.mockResolvedValue([]);
   getMeetingDetail.mockImplementation((meeting) =>
     Promise.resolve({
@@ -101,9 +122,14 @@ beforeEach(() => {
   );
   invoke.mockResolvedValue(undefined);
   readRecordingNote.mockResolvedValue('');
+  readRecordingNoteTitle.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
+  writeRecordingNoteTitle.mockResolvedValue(undefined);
+  recordingStatus.mockResolvedValue({ phase: 'closed' });
   backendId.mockReturnValue('local');
   usesMeetingPicker.mockReturnValue(false);
+  supportsSearch.mockReturnValue(true);
+  searchMeetings.mockResolvedValue([]);
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -136,6 +162,272 @@ describe('LibraryView', () => {
     mount(LibraryView);
     await flushPromises();
     expect(emitNotificationsSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the search palette from the sidebar trigger for searchable backends', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Synced' })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+
+    expect(document.body.querySelector<HTMLInputElement>('.palette-input')?.placeholder).toBe('Search');
+    expect(document.body.textContent).not.toContain('Search notes');
+    expect(document.body.querySelector('.palette-panel')).not.toBeNull();
+  });
+
+  it('shows the search trigger for local backend and opens the shared palette', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Local' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+
+    expect(document.body.querySelector('.palette-panel')).not.toBeNull();
+  });
+
+  it('hides the search trigger when the backend does not support search', async () => {
+    supportsSearch.mockReturnValue(false);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Local' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.find('.search-trigger').exists()).toBe(false);
+  });
+
+  it('opens search with Ctrl+K but not Alt+K on non-Mac platforms', async () => {
+    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+
+    mount(LibraryView);
+    await flushPromises();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', altKey: true }));
+    await flushPromises();
+    expect(document.body.querySelector('.palette-panel')).toBeNull();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }));
+    await flushPromises();
+    expect(document.body.querySelector('.palette-panel')).not.toBeNull();
+  });
+
+  it('searches remotely from the palette and renders returned rows', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings.mockResolvedValue([
+      item({
+        id: 's1',
+        title: 'Search Note',
+        timestamp: '2026-06-07T10:00:00Z',
+        endTimestamp: '2026-06-07T10:01:00Z',
+        snippet: 'Discussed note search',
+        files: undefined,
+      }),
+    ]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input');
+    expect(input).not.toBeNull();
+    input!.value = 'note';
+    input!.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+
+    expect(searchMeetings).toHaveBeenCalledWith('note');
+    expect(document.body.textContent).toContain('Search Note');
+    expect(document.body.textContent).toContain('Jun 7');
+    expect(document.body.textContent).toContain('1min');
+    expect(document.body.textContent).toContain('Discussed note search');
+    vi.useRealTimers();
+  });
+
+  it('resets the search query when the backend changes', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+    input.value = 'note';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+    expect(document.body.querySelector<HTMLInputElement>('.palette-input')!.value).toBe('note');
+
+    // Switch backends via the focus-driven reload; the palette is keyed by the
+    // active backend, so it remounts and the previous query is discarded.
+    backendId.mockReturnValue('local');
+    window.dispatchEvent(new Event('focus'));
+    await flushPromises();
+
+    const inputs = [...document.body.querySelectorAll<HTMLInputElement>('.palette-input')];
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(inputs.every((el) => el.value === '')).toBe(true);
+  });
+
+  it('clears stale search rows as soon as the query changes', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings
+      .mockResolvedValueOnce([item({ id: 'alpha', title: 'Alpha Result', files: undefined })])
+      .mockResolvedValueOnce([item({ id: 'beta', title: 'Beta Result', files: undefined })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+
+    input.value = 'alpha';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).toContain('Alpha Result');
+
+    input.value = 'beta';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+
+    expect(document.body.textContent).not.toContain('Alpha Result');
+    expect(document.body.textContent).toContain('Searching');
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).toContain('Beta Result');
+    vi.useRealTimers();
+  });
+
+  it('shows Home only when the search query matches it', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+
+    expect(document.body.textContent).not.toContain('Home');
+    input.value = 'note';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).not.toContain('Home');
+
+    input.value = 'home';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    expect(document.body.textContent).toContain('Home');
+    vi.useRealTimers();
+  });
+
+  it('the Home search command clears the selected meeting', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Existing');
+
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+    input.value = 'home';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+
+    document.body.querySelector<HTMLButtonElement>('.command-row')!.click();
+    await flushPromises();
+
+    expect(document.body.querySelector('.palette-panel')).toBeNull();
+    expect(wrapper.text()).toContain('Ready for the next meet?');
+    vi.useRealTimers();
+  });
+
+  it('ignores stale search responses in the palette', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    let resolveFirst: (value: unknown) => void = () => {};
+    searchMeetings
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          })
+      )
+      .mockResolvedValueOnce([item({ id: 'new', title: 'New Result', files: undefined })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+
+    input.value = 'old';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    input.value = 'new';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    resolveFirst([item({ id: 'old', title: 'Old Result', files: undefined })]);
+    await flushPromises();
+
+    expect(document.body.textContent).toContain('New Result');
+    expect(document.body.textContent).not.toContain('Old Result');
+    vi.useRealTimers();
+  });
+
+  it('selecting a search result closes the palette and opens that meeting', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    searchMeetings.mockResolvedValue([item({ id: '42', title: 'Found Meeting', files: undefined })]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+    input.value = 'found';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+
+    document.body.querySelector<HTMLButtonElement>('.result-row')!.click();
+    await flushPromises();
+
+    expect(document.body.querySelector('.palette-panel')).toBeNull();
+    expect(getMeetingDetail).toHaveBeenLastCalledWith(expect.objectContaining({ id: '42' }));
+    vi.useRealTimers();
   });
 
   it('auto-selects the first meeting item', async () => {
@@ -223,12 +515,13 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
   });
 
-  it('hides the sidebar (and add button) while a recording (waveform window) is active', async () => {
+  it('hides the sidebar while a recording (waveform window) is active', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(true);
   });
 
   it('hides the sidebar immediately after clicking the add button', async () => {
@@ -238,7 +531,8 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').exists()).toBe(true);
     await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(true);
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
@@ -250,6 +544,31 @@ describe('LibraryView', () => {
     window.dispatchEvent(new Event('focus'));
     await flushPromises();
     expect(listMeetings).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-select a meeting on window focus once the user is on the Up Next view', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'a', title: 'Standup' }),
+      item({ id: 'b', title: 'Planning' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    // Initial mount lands on the first meeting.
+    expect(wrapper.find('.meeting-item').attributes('aria-pressed')).toBe('true');
+
+    // User closes the detail → the Up Next greeting/card view is shown.
+    await wrapper.find('.btn-close').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.up-next').exists()).toBe(true);
+    expect(wrapper.findAll('.meeting-item').every((r) => r.attributes('aria-pressed') === 'false')).toBe(true);
+
+    // Regaining focus (e.g. switching back to the window, or clicking to move it)
+    // reloads the list but must NOT yank the user back into a meeting.
+    window.dispatchEvent(new Event('focus'));
+    await flushPromises();
+    expect(listMeetings).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('.up-next').exists()).toBe(true);
+    expect(wrapper.findAll('.meeting-item').every((r) => r.attributes('aria-pressed') === 'false')).toBe(true);
   });
 
   it('shows a distinct error message (not the empty state) when loading fails', async () => {
@@ -303,7 +622,7 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
   });
 
-  it('starts recording against the selected scheduled meeting id', async () => {
+  it('always opens the picker from the Meetings view, even with a meeting selected', async () => {
     backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
     listMeetings.mockResolvedValue([
@@ -312,12 +631,69 @@ describe('LibraryView', () => {
     ]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-
+    // Meetings is the default view; the first row auto-selects (id 42).
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  });
 
-    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  it('Today view records the in-progress meeting when nothing today is selected', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    listMeetings.mockResolvedValue([
+      // meetings[0] auto-selects but is NOT today, so it can't override.
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
     expect(invoke).not.toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('Today view opens the picker when no meeting is live and none is selected today', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
+  });
+
+  it('Today view records a deliberately selected today meeting (override beats the live one)', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    const earlierToday = new Date(new Date().setHours(7, 0, 0, 0)).toISOString();
+    listMeetings.mockResolvedValue([
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z', files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+      item({ id: '50', title: 'Pick Me', timestamp: earlierToday, files: undefined }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await flushPromises();
+    // Deliberately select the non-live today meeting (id 50).
+    const target = wrapper.findAll('.meeting-item').find((r) => r.text().includes('Pick Me'))!;
+    await target.trigger('click');
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 50 });
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
   });
 
   it('falls back to the meeting picker when the selected scheduled meeting id is not numeric', async () => {
@@ -359,29 +735,62 @@ describe('LibraryView', () => {
     expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
   });
 
+  it('hides the red dot once the recording stops, even if the failed pill lingers', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan' }),
+      item({ id: '7', title: 'Other Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'recording',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(true);
+
+    // Upload failed: the pill stays open and keeps heartbeating 'failed', but the
+    // recording has stopped — the row must no longer pulse.
+    emitEvent('recorder://state', {
+      bars: [0, 0, 0],
+      durationSeconds: 1,
+      isPaused: false,
+      meetingId: 42,
+      phase: 'failed',
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')[0].find('.mi-rec-dot').exists()).toBe(false);
+  });
+
   it('selects the picked meeting in the detail panel when a recording starts', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
 
     emitEvent('recording://started', { meetingId: 42 });
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
     // The recording transition also collapses the sidebar immediately.
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(true);
   });
 
   it('leaves the detail panel unchanged when a recording starts without a meeting', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
 
     emitEvent('recording://started', { meetingId: null });
     await flushPromises();
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').exists()).toBe(true);
   });
 
   it('reloads the meeting list when the picked meeting is not loaded yet', async () => {
@@ -395,7 +804,7 @@ describe('LibraryView', () => {
     emitEvent('recording://started', { meetingId: 42 });
     await flushPromises();
     expect(listMeetings).toHaveBeenCalledTimes(2);
-    expect(wrapper.find('.empty-card').exists()).toBe(false);
+    expect(wrapper.find('.up-next').exists()).toBe(false);
   });
 
   // A local recording has no list row until finalize; the library synthesizes
@@ -424,10 +833,11 @@ describe('LibraryView', () => {
 
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
-    // Synthetic row (14:30) sorts above Standup (10:00) on the same date.
-    expect(rows[0].text()).toContain('Recording 2026-06-02');
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
-    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    // Within a date, rows sort earliest-first: Standup (10:00) then the
+    // synthetic recording row (14:30).
+    expect(rows[1].text()).toContain('Jun 2 @');
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
     // The embedded strip shows for the recorded meeting…
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
@@ -440,13 +850,15 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
 
+    // rows[0] is Standup (10:00); rows[1] is the recording (14:30). Click the
+    // other meeting (Standup) to move selection off the recording.
     const rows = wrapper.findAll('.meeting-item');
-    await rows[1].trigger('click');
+    await rows[0].trigger('click');
     await flushPromises();
 
-    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
     expect(wrapper.find('.strip').exists()).toBe(false);
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(true);
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(true);
   });
 
   it('reloads when the recording closes so the finalized row replaces the synthetic one', async () => {
@@ -473,9 +885,10 @@ describe('LibraryView', () => {
     expect(listMeetings).toHaveBeenCalledTimes(2);
     const rows = wrapper.findAll('.meeting-item');
     expect(rows).toHaveLength(2);
-    // The finalized recording keeps the selection under the same id.
-    expect(rows[0].attributes('aria-pressed')).toBe('true');
-    expect(rows[0].find('.mi-rec-dot').exists()).toBe(false);
+    // Earliest-first within the date keeps Standup (10:00) at rows[0] and the
+    // finalized recording (14:30) at rows[1]; selection stays on the same id.
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].find('.mi-rec-dot').exists()).toBe(false);
   });
 
   it('falls back to the first meeting when a discarded recording leaves no row', async () => {
@@ -484,7 +897,9 @@ describe('LibraryView', () => {
     await flushPromises();
     emitEvent('recorder://state', localRecorderState());
     await flushPromises();
-    expect(wrapper.findAll('.meeting-item')[0].attributes('aria-pressed')).toBe('true');
+    // The synthetic recording row (14:30) sorts after Standup (10:00) and holds
+    // the selection at rows[1].
+    expect(wrapper.findAll('.meeting-item')[1].attributes('aria-pressed')).toBe('true');
 
     emitEvent('recorder://state', localRecorderState({ phase: 'closed' }));
     await flushPromises();
@@ -594,5 +1009,60 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('renders the PendingUploads section inside the sidebar', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.pending-stub').exists()).toBe(true);
+  });
+
+  it('confirms before recording an ariso auto-join meeting, and records only on confirm', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    const upNext = wrapper.findComponent(UpNextCard);
+    expect(upNext.exists()).toBe(true);
+
+    // Emit "Start Meeting Early" for a flagged ariso meeting (numeric id).
+    upNext.vm.$emit('start', item({ id: '42', autoJoinScheduled: true }));
+    await flushPromises();
+
+    // Dialog is shown; recording has NOT started yet.
+    expect(wrapper.text()).toContain('Ari is scheduled to join this meeting');
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+
+    // "Record anyway" proceeds.
+    const buttons = wrapper.findAll('.ari-confirm__actions button');
+    const recordBtn = buttons.find((b) => b.text() === 'Record anyway');
+    expect(recordBtn).toBeTruthy();
+    await recordBtn!.trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 42 });
+  });
+
+  it('records an unflagged ariso meeting immediately, no dialog', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    const upNext = wrapper.findComponent(UpNextCard);
+    upNext.vm.$emit('start', item({ id: '7', autoJoinScheduled: false }));
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain('Ari is scheduled to join this meeting');
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 7 });
   });
 });

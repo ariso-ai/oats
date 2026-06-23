@@ -6,7 +6,7 @@
 //! closed. Tauri emits no minimize/restore events, so a watcher task polls
 //! and exits once the waveform window is gone.
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -17,7 +17,7 @@ fn pill_should_show(library_exists: bool, library_minimized: bool) -> bool {
 }
 
 /// Whether the pill should be visible for the app's current window state.
-fn should_show_now(app: &AppHandle) -> bool {
+pub(crate) fn should_show_now(app: &AppHandle) -> bool {
     let lib = app.get_webview_window("library");
     let minimized = lib
         .as_ref()
@@ -41,6 +41,10 @@ fn visibility_action(should_show: bool, capture_active: bool, is_visible: bool) 
 /// lifetime of the recording. Spawned when the waveform window is created.
 pub(crate) fn spawn_watcher(app: &AppHandle) {
     let app = app.clone();
+    // The waveform window was born painting itself iff it should currently show
+    // (see `waveform_url`'s pillHidden flag); mirror that so we only push paint
+    // changes when the desired state actually flips.
+    let mut last_desired = should_show_now(&app);
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -52,6 +56,14 @@ pub(crate) fn spawn_watcher(app: &AppHandle) {
                 .state::<crate::recording_state::RecordingState>()
                 .capture_active();
             let desired = should_show_now(&app);
+            // Tell the waveform window whether to paint the pill. Decoupled from
+            // show()/hide() (which waits on capture): painting an off-screen or
+            // hidden window is a no-op, but it must be painted the instant the
+            // window is shown again, so the paint state tracks `desired` directly.
+            if desired != last_desired {
+                let _ = app.emit_to("waveform", "recorder://pill-visible", desired);
+                last_desired = desired;
+            }
             let visible = wave.is_visible().unwrap_or(desired);
             match visibility_action(desired, capture, visible) {
                 Some(true) => {

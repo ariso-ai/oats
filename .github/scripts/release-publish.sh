@@ -3,7 +3,7 @@
 # Build the Tauri updater manifest (latest.json) and publish the release
 # artifacts (updater tarball, DMG, manifest) to Cloudflare R2.
 #
-# Invoked by the publish job in .github/workflows/desktop.yaml after the
+# Invoked by the publish job in .github/workflows/release.yaml after the
 # release job has uploaded the bundler outputs (restored under
 # src-tauri/target/release/bundle/).
 #
@@ -93,11 +93,18 @@ else
   MANDATORY="false"
 fi
 
+# release-please appends a markdown link to the specific commit on every
+# changelog entry, e.g. "... ([9553cd9](https://github.com/.../commit/<sha>))".
+# These are noise in the in-app updater dialog, so strip the trailing commit
+# links while leaving the version-compare header link intact.
+NOTES=$(printf '%s' "${RELEASE_BODY:-}" \
+  | sed -E 's/ \(\[[0-9a-f]+\]\([^)]*\/commit\/[^)]*\)\)//g')
+
 # Build the manifest using jq to ensure valid JSON escaping of the
 # (possibly multi-line) release body.
 jq -n \
   --arg version "$VERSION" \
-  --arg notes "${RELEASE_BODY:-}" \
+  --arg notes "$NOTES" \
   --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson mandatory "$MANDATORY" \
   --arg signature "$SIG" \

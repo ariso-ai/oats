@@ -1,5 +1,19 @@
 <template>
   <div class="settings">
+    <div v-if="showDownloadConfirm" class="download-confirm" role="dialog" aria-modal="true" aria-labelledby="download-confirm-title">
+      <div class="download-confirm__card">
+        <h2 id="download-confirm-title" class="download-confirm__title">Download on-device models?</h2>
+        <p class="download-confirm__body">
+          Local transcription needs the speech and language models (~750&nbsp;MB).
+          They download once and run entirely on your device.
+        </p>
+        <div class="download-confirm__actions">
+          <button class="secondary-btn download-confirm__cancel" @click="cancelDownloadModels">Cancel</button>
+          <button class="primary-btn download-confirm__confirm" @click="confirmDownloadModels">Download</button>
+        </div>
+      </div>
+    </div>
+
     <h1 class="title">Settings</h1>
 
     <div v-if="signInPrompt && !isSignedIn" class="signin-banner">
@@ -90,8 +104,8 @@
     <section v-if="backend === 'local'" class="section">
       <h2 class="section-title">On-device models</h2>
       <div class="card">
-        <div v-if="modelPrompt && !sttInstalled" class="signin-banner">
-          Download the models to record on your device.
+        <div v-if="showModelBanner" class="signin-banner">
+          Both on-device models must finish downloading before you can record.
         </div>
         <div class="setting-row">
           <span class="setting-label">Speech voice model</span>
@@ -129,7 +143,15 @@
       <h2 class="section-title">Account</h2>
       <div class="card">
         <div v-if="isSignedIn" class="account-info">
-          <div class="avatar">{{ initials }}</div>
+          <img
+            v-if="avatarUrl"
+            class="avatar"
+            :src="avatarUrl"
+            :alt="displayName || email"
+            referrerpolicy="no-referrer"
+            @error="avatarUrl = ''"
+          />
+          <div v-else class="avatar">{{ initials }}</div>
           <div class="account-details">
             <span class="account-name">{{ displayName }}</span>
             <span class="account-email">{{ email }}</span>
@@ -302,8 +324,8 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, local, type ModelStatus } from '../tauri';
-import { shouldAutoDownload, rowStatusText, type Busy } from './settingsDownload';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, type ModelStatus } from '../tauri';
+import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import {
   loadRecordingEnabled,
@@ -311,7 +333,6 @@ import {
   setSystemAudioEnabled,
   ensureMicPermission,
   ensureSystemAudioPermission,
-  checkSystemAudioPermission,
   openMicSettings,
   openSystemAudioSettings,
 } from '../composables/useRecordingPermissions';
@@ -333,6 +354,7 @@ const isSigningIn = ref(false);
 const errorMessage = ref('');
 const displayName = ref('');
 const email = ref('');
+const avatarUrl = ref('');
 const micEnabled = ref(true);
 const systemAudioEnabled = ref(true);
 const autoRecordEnabled = ref(true);
@@ -354,6 +376,7 @@ const appVersion = __APP_VERSION__;
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
 const modelPrompt = ref(false);
+const showDownloadConfirm = ref(false);
 
 // Per-model download UI state — the STT and LLM Install buttons are independent.
 const sttBusy = ref<Busy>('idle');
@@ -457,11 +480,36 @@ async function selectBackend(next: 'ariso' | 'local') {
   });
   if (next === 'local') {
     await refreshModelStatus();
-    // Auto-start the STT download (needed to record). The LLM is opt-in via its button.
-    if (shouldAutoDownload(next, modelStatus.value.state)) {
-      void onInstallStt();
+    // First time only: ask before fetching the (large) on-device models.
+    const prompted = await hasPromptedLocalModels().catch(() => true);
+    if (shouldPromptDownload(next, prompted, modelStatus.value.state)) {
+      showDownloadConfirm.value = true;
+    } else {
+      // Already confirmed once before (or STT already installed): skip the
+      // modal and start any still-missing downloads right away, so the models
+      // are ready by the time the user records.
+      startMissingDownloads();
     }
   }
+}
+
+async function confirmDownloadModels() {
+  showDownloadConfirm.value = false;
+  // Best-effort flag write; downloads proceed regardless.
+  await setPromptedLocalModels(true).catch((e) =>
+    console.warn('Failed to persist localModelsPrompted', e),
+  );
+  // Per-target Rust guards allow STT and LLM to download in parallel.
+  void onInstallStt();
+  void onInstallLlm();
+}
+
+async function cancelDownloadModels() {
+  showDownloadConfirm.value = false;
+  // Local is unusable without models — fall back to Ariso. Do NOT set the
+  // prompted flag, so a later switch to Local will ask again.
+  backend.value = 'ariso';
+  await setBackendSetting('ariso');
 }
 
 async function onInstallStt() {
@@ -490,11 +538,31 @@ async function onInstallLlm() {
   }
 }
 
+// Kick off downloads for whichever on-device models are still missing. Shared
+// by the backend switch and the recording-gate prompt. Reads the current
+// modelStatus, so callers refresh it first. The Rust per-target guards de-dupe,
+// so calling this while a download is already in progress is a safe no-op.
+function startMissingDownloads() {
+  const pending = pendingInstalls(modelStatus.value, sttBusy.value, llmBusy.value);
+  if (pending.stt) void onInstallStt();
+  if (pending.llm) void onInstallLlm();
+}
+
 const unsupported = computed(() => modelStatus.value.state === 'unsupported');
 const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
 const anyDownloading = computed(
   () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
+);
+
+// Hide the banner on unsupported platforms (neither model can install there) so
+// it doesn't linger forever; otherwise show it while either model is incomplete.
+const showModelBanner = computed(() =>
+  modelBannerVisible(
+    modelPrompt.value,
+    unsupported.value || sttInstalled.value,
+    unsupported.value || llmInstalled.value,
+  ),
 );
 
 const sttStatusText = computed(() =>
@@ -688,6 +756,44 @@ async function fetchUserProfile() {
   } catch {
     // profile fetch failed — leave fields empty
   }
+  // Avatar is fetched separately and is non-critical: a failure here must not
+  // disturb the name/email above, and the UI falls back to initials.
+  try {
+    const res = await api.request('GET', '/users/google-avatar');
+    const data = res.data as { avatar?: string | null };
+    // Preload before binding to the <img>: WKWebView drops the very first
+    // request for a freshly-rendered <img> during the post-sign-in churn and
+    // never retries it, leaving a broken "?". Loading it through a detached
+    // Image first (which is not affected) warms the cache, so the bound <img>
+    // resolves instantly. Falls back to initials if it truly can't load.
+    avatarUrl.value = data.avatar ? await preloadAvatar(data.avatar) : '';
+  } catch {
+    avatarUrl.value = '';
+  }
+}
+
+// Resolves to `url` once it loads in a detached Image (retrying a few times for
+// transient webview failures), or to '' so the caller falls back to initials.
+function preloadAvatar(url: string): Promise<string> {
+  return new Promise((resolve) => {
+    const MAX_ATTEMPTS = 4;
+    let attempts = 0;
+    const attempt = () => {
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => resolve(url);
+      img.onerror = () => {
+        attempts += 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          resolve('');
+        } else {
+          setTimeout(attempt, 300 * attempts);
+        }
+      };
+      img.src = url;
+    };
+    attempt();
+  });
 }
 
 let unlistenSignInPrompt: UnlistenFn | null = null;
@@ -707,11 +813,13 @@ async function refreshSignedInAccount() {
     } else {
       displayName.value = '';
       email.value = '';
+      avatarUrl.value = '';
     }
   } catch (e) {
     isSignedIn.value = false;
     displayName.value = '';
     email.value = '';
+    avatarUrl.value = '';
     console.warn('Failed to refresh signed-in account', e);
   }
 }
@@ -728,12 +836,10 @@ onMounted(async () => {
     systemAudioEnabled.value = enabled.systemAudio;
     autoRecordSupported.value = await isAutoRecordSupported();
     autoRecordEnabled.value = await isAutoRecordEnabled();
-    // Reflect the current Screen Recording status without prompting. (Mic status
-    // is intentionally left blank on load — there's no silent mic preflight as
-    // clean as CGPreflightScreenCaptureAccess, and getUserMedia would prompt.)
-    if (enabled.systemAudio) {
-      systemAudioStatus.value = (await checkSystemAudioPermission()) ? 'granted' : 'denied';
-    }
+    // Both mic and system-audio status are left blank on load: there's no
+    // silent preflight for either (getUserMedia prompts; the system-audio
+    // probe creates a process tap, which trips the TCC dialog on first use).
+    // The status fills in when the user toggles the row.
   } catch (e) {
     console.warn('Failed to initialize recording settings', e);
   }
@@ -782,8 +888,12 @@ onMounted(async () => {
   const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
     llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
-  const unModelPrompt = await listen('tray://show-model-prompt', () => {
+  const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
+    // The recording gate fired because a model isn't ready — auto-start the
+    // missing download(s).
+    await refreshModelStatus();
+    startMissingDownloads();
   });
   unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
 });
@@ -834,6 +944,7 @@ async function handleSignOut() {
   isSignedIn.value = false;
   displayName.value = '';
   email.value = '';
+  avatarUrl.value = '';
   void emitNotificationsSync().catch((err) => {
     console.warn('Failed to sync notifications after sign-out', err);
   });
@@ -846,7 +957,21 @@ async function handleSignOut() {
   font-family: 'Polymath', -apple-system, system-ui, sans-serif;
   background: #f7f6f4;
   color: #1c1c1c;
-  min-height: 100vh;
+  /* Own the full window height and scroll internally so a tall settings stack
+     (Local models + Account + Recording + Notifications + About) is reachable
+     on short windows instead of being clipped. */
+  height: 100vh;
+  box-sizing: border-box;
+  overflow-y: auto;
+  /* Keep scrolling functional but hide the scrollbar chrome so no persistent
+     bar shows at rest. */
+  scrollbar-width: none; /* Firefox */
+}
+
+/* WebKit (the Tauri webview on macOS): hide the scrollbar track/thumb. */
+.settings::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .title {
@@ -925,6 +1050,8 @@ async function handleSignOut() {
   font-size: 13px;
   font-weight: 600;
   color: white;
+  flex-shrink: 0;
+  object-fit: cover;
 }
 
 .account-details {
@@ -1122,8 +1249,10 @@ async function handleSignOut() {
   color: #ffffff;
 }
 
-.backend-option--active:hover {
+.backend-option--active:hover,
+.backend-option--active:focus-visible {
   background: #1c1c1c;
+  color: #ffffff;
 }
 
 .about-header {
@@ -1242,5 +1371,45 @@ async function handleSignOut() {
 .toggle-input:focus-visible + .toggle-track {
   outline: 2px solid #1c1c1c;
   outline-offset: 2px;
+}
+
+.download-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 24px;
+}
+
+.download-confirm__card {
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 360px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+
+.download-confirm__title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: #1c1c1c;
+}
+
+.download-confirm__body {
+  font-size: 13px;
+  color: #6f6f6f;
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.download-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

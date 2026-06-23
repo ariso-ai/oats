@@ -93,6 +93,27 @@ pub(crate) fn active_backend(app: &tauri::AppHandle) -> String {
         .unwrap_or_else(|| "ariso".to_string())
 }
 
+/// Whether both on-device models are downloaded for the Local backend. Resolves
+/// the models root; treats an unresolvable root as "not ready" so recording is
+/// gated rather than crashing.
+pub(crate) fn local_models_ready() -> bool {
+    match crate::storage::ariso_root() {
+        Ok(root) => crate::model_manager::local_models_ready(&root),
+        Err(_) => false,
+    }
+}
+
+/// Surface the (pre-created) Settings window and emit `tray://show-model-prompt`
+/// so its on-device-models section auto-starts the missing downloads. Shared by
+/// every recording entry point that gates on Local model readiness.
+pub(crate) fn surface_model_download(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit("tray://show-model-prompt", ());
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SignInResult {
     pub success: Option<bool>,
@@ -506,6 +527,26 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
+/// Build the waveform window's route, appending the optional `auto` and
+/// `pillHidden` query flags. Kept pure so the flag wiring is unit-testable.
+fn waveform_url(meeting_id: Option<i64>, auto: bool, pill_hidden: bool) -> String {
+    let mut url = match meeting_id {
+        Some(id) => format!("/#/waveform?meetingId={id}"),
+        None => "/#/waveform".to_string(),
+    };
+    let mut push = |flag: &str| {
+        url.push_str(if url.contains('?') { "&" } else { "?" });
+        url.push_str(flag);
+    };
+    if auto {
+        push("auto=1");
+    }
+    if pill_hidden {
+        push("pillHidden=1");
+    }
+    url
+}
+
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
@@ -524,13 +565,11 @@ pub(crate) fn open_waveform_window(
         let _ = existing.set_focus();
         return Ok(());
     }
-    let mut url = match meeting_id {
-        Some(id) => format!("/#/waveform?meetingId={id}"),
-        None => "/#/waveform".to_string(),
-    };
-    if auto {
-        url.push_str(if url.contains('?') { "&auto=1" } else { "?auto=1" });
-    }
+    // Born hidden (painted-empty) when the meetings window already owns the
+    // recorder UI, so the pill never flashes over it. The window is still
+    // created visible for getUserMedia; only its painting is suppressed.
+    let pill_hidden = !crate::recorder_pill::should_show_now(app);
+    let url = waveform_url(meeting_id, auto, pill_hidden);
     let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
@@ -551,6 +590,26 @@ pub(crate) fn open_waveform_window(
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
+
+    // When the pill is the visible recording UI (the meetings window is hidden,
+    // minimized, or closed), dock it to the right edge of the primary screen,
+    // vertically centered, rather than leaving it at the OS default spot. When
+    // the meetings window owns the UI the pill is painted-empty, so its position
+    // doesn't matter.
+    if !pill_hidden {
+        if let Ok(Some(monitor)) = win.primary_monitor() {
+            let scale = monitor.scale_factor();
+            let msize = monitor.size();
+            let mpos = monitor.position();
+            // Window outer size is the fixed inner size (no decorations).
+            let win_w = (92.0 * scale).round() as i32;
+            let win_h = (284.0 * scale).round() as i32;
+            let margin = (16.0 * scale).round() as i32;
+            let x = mpos.x + msize.width as i32 - win_w - margin;
+            let y = mpos.y + (msize.height as i32 - win_h) / 2;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
 
     let source = if auto {
         crate::recording_state::RecordingSource::Auto
@@ -588,6 +647,35 @@ pub(crate) fn open_waveform_window(
     Ok(())
 }
 
+/// Gate recording on a valid session for the Ariso backend. The Local backend
+/// needs no auth but is gated on both on-device models being downloaded;
+/// otherwise the Settings window is surfaced and the attempt aborts. When the
+/// Ariso user is signed out, surface the (pre-created) Settings window and emit
+/// `tray://show-sign-in-prompt` so its sign-in banner appears, then report
+/// `false` so the caller aborts. Mirrors the tray's session gate so every
+/// recording entry point behaves identically.
+async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
+    if active_backend(app) == "local" {
+        // Local needs no auth, but both on-device models must be ready. When
+        // they aren't, surface Settings (which auto-starts the downloads) and
+        // abort this recording attempt.
+        if local_models_ready() {
+            return true;
+        }
+        surface_model_download(app);
+        return false;
+    }
+    if is_session_valid(app).await {
+        return true;
+    }
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit("tray://show-sign-in-prompt", ());
+    false
+}
+
 /// Open the waveform recording window, optionally attaching to an existing
 /// meeting id. Closes the meeting-picker window if present and flips the
 /// tray menu to the recording state.
@@ -596,6 +684,9 @@ pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
 ) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
     open_waveform_window(&app, meeting_id, false)
 }
 
@@ -625,6 +716,9 @@ pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), S
 /// start-recording button for picker-using backends.
 #[tauri::command]
 pub async fn open_meeting_picker(app: tauri::AppHandle) -> Result<(), String> {
+    if !ensure_recording_allowed(&app).await {
+        return Err("sign-in required".to_string());
+    }
     open_meeting_picker_window(&app)
 }
 
@@ -671,6 +765,64 @@ pub fn get_desktop_config() -> DesktopConfig {
 pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
     let root = crate::storage::ariso_root()?;
     crate::storage::list_recordings(&root)
+}
+
+/// Lightweight status for a single local recording, used by the detail panel's
+/// generation poller. Reads only that recording's `meta.json` and probes its
+/// two artifact files, deriving the AI-notes state the list summary omits.
+#[tauri::command]
+pub fn local_recording_status(
+    id: String,
+) -> Result<crate::storage::RecordingStatusView, String> {
+    crate::storage::validate_recording_id(&id)?;
+    let dir = recording_dir(&id)?;
+    let meta = crate::storage::read_meta(&dir)?;
+    let has_note = dir.join("ari-note.md").is_file();
+    let has_transcript = dir.join("transcript.md").is_file();
+    let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+    Ok(crate::storage::RecordingStatusView {
+        status: meta.status,
+        has_transcript,
+        has_note,
+        notes_status,
+    })
+}
+
+/// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
+/// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
+#[tauri::command]
+pub fn buffer_pending_audio(
+    audio: Vec<u8>,
+    meta: crate::storage::PendingUploadMeta,
+) -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::write_pending_audio(&root, &meta, &audio)
+}
+
+/// Remove the buffered mp3 for `created_at` (idempotent). Called after a
+/// confirmed upload and on explicit dismiss of a failed one.
+#[tauri::command]
+pub fn discard_pending_audio(created_at: String) -> Result<(), String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::discard_pending_audio(&root, &created_at)
+}
+
+/// List buffered pending uploads (oldest-first) for the Library's resume UI.
+#[tauri::command]
+pub fn list_pending_uploads() -> Result<Vec<crate::storage::PendingUploadMeta>, String> {
+    let root = crate::storage::ariso_root()?;
+    crate::storage::list_pending_uploads(&root)
+}
+
+/// Concatenate the given pending uploads (chronological key order) into a
+/// single mp3, returned as raw bytes for re-upload. Bounded by MAX_AUDIO_BYTES.
+#[tauri::command]
+pub fn combine_pending_audio(
+    created_at_keys: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let root = crate::storage::ariso_root()?;
+    let bytes = crate::storage::combine_pending_audio(&root, &created_at_keys, MAX_AUDIO_BYTES)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
@@ -720,6 +872,61 @@ pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> 
         return Err(format!("recording audio too large to play: {size} bytes"));
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Meeting ids are numeric on the Ariso backend; rejecting anything else also
+/// keeps the id from smuggling path segments into the URL below.
+fn validate_meeting_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("invalid meeting id: {id}"));
+    }
+    Ok(())
+}
+
+/// Fetch a meeting's recorded audio from the Ariso API as raw bytes (the
+/// endpoint streams the file directly). Non-200 responses become an error
+/// whose message is prefixed with the HTTP status so the frontend can map
+/// 404 to a "no audio" state.
+#[tauri::command]
+pub async fn fetch_meeting_audio(
+    app: tauri::AppHandle,
+    meeting_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    validate_meeting_id(&meeting_id)?;
+    let token = get_session_token(&app).unwrap_or_default();
+    let client = http_client();
+    let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
+
+    // Bound the request so a stalled upstream/TCP connection can't hang the
+    // command indefinitely; reqwest's builder has no default timeout.
+    let mut response = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("{status}: audio fetch failed"));
+    }
+    if let Some(len) = response.content_length() {
+        if len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {len} bytes"));
+        }
+    }
+    // Stream the body and enforce MAX_AUDIO_BYTES as we go — buffering the
+    // whole response first can blow memory if content_length is absent or wrong.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_AUDIO_BYTES {
+            return Err(format!("meeting audio too large to play: {next_len} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -826,6 +1033,30 @@ pub fn write_recording_note(id: String, markdown: String) -> Result<(), String> 
     let dir = recording_dir(&id)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
     crate::storage::write_atomic(&dir.join("user-note.md"), markdown.as_bytes())
+}
+
+/// Read the user-authored My-note title sidecar (`user-note-title.txt`). Kept in
+/// its own artifact beside `user-note.md` so the editable title round-trips
+/// without touching the hand-written `meta` format. Missing files return an
+/// empty string, matching `read_recording_note` for fresh recordings.
+#[tauri::command]
+pub fn read_recording_note_title(id: String) -> Result<String, String> {
+    let path = recording_dir(&id)?.join("user-note-title.txt");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read recording note title: {e}")),
+    }
+}
+
+/// Persist the user-authored My-note title to `user-note-title.txt` beside the
+/// recording, mirroring `write_recording_note` so title and body share the same
+/// autosave path.
+#[tauri::command]
+pub fn write_recording_note_title(id: String, title: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording note dir: {e}"))?;
+    crate::storage::write_atomic(&dir.join("user-note-title.txt"), title.as_bytes())
 }
 
 /// Return the meeting id the active recording is attached to, if any. The
@@ -951,6 +1182,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn waveform_url_appends_flags_with_correct_separators() {
+        assert_eq!(waveform_url(None, false, false), "/#/waveform");
+        assert_eq!(waveform_url(Some(42), false, false), "/#/waveform?meetingId=42");
+        // First flag uses `?`, the second uses `&`.
+        assert_eq!(waveform_url(None, true, true), "/#/waveform?auto=1&pillHidden=1");
+        assert_eq!(waveform_url(None, false, true), "/#/waveform?pillHidden=1");
+        assert_eq!(
+            waveform_url(Some(7), true, true),
+            "/#/waveform?meetingId=7&auto=1&pillHidden=1"
+        );
+    }
+
+    #[test]
     fn note_or_transcript_filename_maps_known_kinds() {
         assert_eq!(note_or_transcript_filename("note").unwrap(), "ari-note.md");
         assert_eq!(
@@ -1066,6 +1310,15 @@ mod tests {
     }
 
     #[test]
+    fn meeting_id_must_be_digits_only() {
+        assert!(validate_meeting_id("123").is_ok());
+        assert!(validate_meeting_id("").is_err());
+        assert!(validate_meeting_id("12/audio").is_err());
+        assert!(validate_meeting_id("abc").is_err());
+        assert!(validate_meeting_id("12 ").is_err());
+    }
+
+    #[test]
     fn recording_note_roundtrips_markdown() {
         let tmp = tempfile::tempdir().unwrap();
         // Note commands resolve through ARISO_ROOT, so this test follows the
@@ -1081,6 +1334,30 @@ mod tests {
         let saved = read_recording_note(id.into()).unwrap();
         assert_eq!(saved, "# Note\n- point");
         assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn recording_note_title_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+
+        let id = "2026-06-02T14-30-05Z";
+        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        // Missing sidecar reads as empty so a fresh recording has no title yet.
+        assert_eq!(read_recording_note_title(id.into()).unwrap(), "");
+        write_recording_note_title(id.into(), "Kickoff sync".into()).unwrap();
+        let saved = read_recording_note_title(id.into()).unwrap();
+        assert_eq!(saved, "Kickoff sync");
+        assert!(crate::storage::recordings_dir(tmp.path())
+            .join(id)
+            .join("user-note-title.txt")
+            .is_file());
 
         unsafe {
             std::env::remove_var("ARISO_ROOT");
@@ -1128,6 +1405,57 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+
+    #[test]
+    fn local_recording_status_reports_derived_notes_status() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let mut meta = crate::storage::RecordingMeta {
+            id: id.into(),
+            title: "T".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 5,
+            status: crate::storage::RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+        };
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"t").unwrap();
+
+        // Transcript present, note absent, no error -> notes pending.
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.status, crate::storage::RecordingStatus::Done);
+        assert!(view.has_transcript);
+        assert!(!view.has_note);
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Pending);
+
+        // Record a notes failure -> notes failed.
+        meta.notes_error = Some("boom".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Failed);
+
+        // Write the note file -> notes ready (note presence wins over the error).
+        std::fs::write(dir.join("ari-note.md"), b"n").unwrap();
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert!(view.has_note);
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Ready);
+
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn local_recording_status_rejects_bad_id() {
+        assert!(local_recording_status("../escape".to_string()).is_err());
     }
 }
 

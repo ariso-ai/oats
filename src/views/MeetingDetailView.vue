@@ -85,11 +85,12 @@
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
         </span>
+        <AriWillJoinTag v-if="detail?.autoJoinScheduled" class="meta-ari" />
       </div>
 
       <div v-else class="divider" />
 
-      <!-- Tabs + Chat -->
+      <!-- Tabs + generation status -->
       <div v-if="availableTabs.length" class="card-tabs">
         <div class="segment">
           <button
@@ -98,10 +99,33 @@
             class="seg-btn"
             :class="{ 'seg-btn--active': activeTab === t.key }"
             type="button"
-            @click="activeTab = t.key"
+            :disabled="t.disabled"
+            @click="t.disabled || (activeTab = t.key)"
           >{{ t.label }}</button>
         </div>
-        <!-- add chat with meeting button later -->
+        <div v-if="showStatusChip" class="tab-status">
+          <span v-if="statusGenerating" class="spinner spinner--sm" />
+          <span class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
+            {{ statusLabel }}
+          </span>
+          <button
+            v-if="!statusGenerating"
+            class="tab-retry"
+            type="button"
+            :disabled="progress.retrying.value"
+            @click="onRetry"
+          >Retry</button>
+        </div>
+        <button
+          v-if="showRegenerate"
+          class="tab-regen"
+          type="button"
+          title="Regenerate AI Notes from the transcript"
+          @click="onRegenerate"
+        >
+          <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+          Regenerate notes
+        </button>
       </div>
 
       <!-- Content -->
@@ -112,7 +136,7 @@
 
         <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
-          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(detail.note)" />
+          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
 
           <!-- Ariso rich content -->
           <template v-if="!detail.isLocal">
@@ -145,41 +169,54 @@
                 <div v-if="showFullNotes" class="acc-body"><div class="md" v-html="renderMarkdown(detail.summary)" /></div>
               </div>
             </section>
-
-            <section v-if="detail.score !== undefined" class="sec">
-              <h3 class="sec-h">Meeting Assessment</h3>
-              <div class="assess-score">
-                <div class="score-circle" :style="{ background: scoreBadge?.bg, color: scoreBadge?.text, boxShadow: `0 0 0 4px ${scoreBadge?.ring}` }">{{ detail.score }}</div>
-                <div>
-                  <div class="score-label">{{ scoreBadge?.label }}</div>
-                  <div class="score-sub">out of 5</div>
-                </div>
-              </div>
-              <div v-if="detail.rationale" class="assess-block"><div class="assess-h">Why this score</div><p>{{ detail.rationale }}</p></div>
-              <div v-if="detail.recommendation" class="assess-block"><div class="assess-h">Recommendation</div><p>{{ detail.recommendation }}</p></div>
-            </section>
-
-            <section v-if="hasCoaching" class="sec">
-              <div class="coaching">
-                <h3 class="sec-h">Your Coaching</h3>
-                <div v-if="detail.coaching?.strengths?.length" class="coach-block">
-                  <div class="coach-h coach-h--green">Strengths</div>
-                  <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.strengths" :key="i"><span class="bullet bullet--green">•</span>{{ s }}</li></ul>
-                </div>
-                <div v-if="detail.coaching?.improvements?.length" class="coach-block">
-                  <div class="coach-h coach-h--amber">Areas to Grow</div>
-                  <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.improvements" :key="i"><span class="bullet bullet--amber">•</span>{{ s }}</li></ul>
-                </div>
-                <div v-if="detail.coaching?.patterns" class="coach-block coach-pattern">
-                  <div class="coach-h coach-h--purple">Pattern Observed</div>
-                  <p>{{ detail.coaching!.patterns }}</p>
-                </div>
-              </div>
-            </section>
           </template>
         </div>
 
+        <div v-show="activeTab === 'assessment'" class="tab-pane">
+          <section v-if="detail.score !== undefined" class="sec">
+            <h3 class="sec-h">Meeting Assessment</h3>
+            <div class="assess-score">
+              <div class="score-circle" :style="{ background: scoreBadge?.bg, color: scoreBadge?.text, boxShadow: `0 0 0 4px ${scoreBadge?.ring}` }">{{ detail.score }}</div>
+              <div>
+                <div class="score-label">{{ scoreBadge?.label }}</div>
+                <div class="score-sub">out of 5</div>
+              </div>
+            </div>
+            <div v-if="detail.rationale" class="assess-block"><div class="assess-h">Why this score</div><p>{{ detail.rationale }}</p></div>
+            <div v-if="detail.recommendation" class="assess-block"><div class="assess-h">Recommendation</div><p>{{ detail.recommendation }}</p></div>
+          </section>
+
+          <section v-if="hasCoaching" class="sec">
+            <div class="coaching">
+              <h3 class="sec-h">Your Coaching</h3>
+              <div v-if="detail.coaching?.strengths?.length" class="coach-block">
+                <div class="coach-h coach-h--green">Strengths</div>
+                <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.strengths" :key="i"><span class="bullet bullet--green">•</span>{{ s }}</li></ul>
+              </div>
+              <div v-if="detail.coaching?.improvements?.length" class="coach-block">
+                <div class="coach-h coach-h--amber">Areas to Grow</div>
+                <ul class="coach-list"><li v-for="(s, i) in detail.coaching!.improvements" :key="i"><span class="bullet bullet--amber">•</span>{{ s }}</li></ul>
+              </div>
+              <div v-if="detail.coaching?.patterns" class="coach-block coach-pattern">
+                <div class="coach-h coach-h--purple">Pattern Observed</div>
+                <p>{{ detail.coaching!.patterns }}</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
         <div v-show="activeTab === 'transcript'" class="tab-pane">
+          <!-- Audio playback sits right under the tabs, surfaced only while the
+               Transcript tab is active; keyed by meeting id so switching selection
+               remounts the player instead of leaking the previous blob URL. Both
+               backends resolve their bytes lazily through loadAudio -> the backend's
+               getMeetingAudio (Ariso fetches /meeting-notes/{id}/audio, local reads
+               read_recording_audio off disk), and the player shows "No audio" when
+               that resolves to null. -->
+          <div v-if="activeTab === 'transcript'" class="card-audio">
+            <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+          </div>
+
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
           <ol v-else-if="transcriptChunks" class="transcript">
@@ -193,7 +230,31 @@
 
         <div v-show="activeTab === 'mynote'" class="tab-pane tab-pane--editor">
           <div class="notes-head">
-            <h2 v-if="individualNote?.title" class="notes-title">{{ individualNote.title }}</h2>
+            <input
+              v-if="editingNoteTitle"
+              ref="noteTitleInput"
+              v-model="noteTitleDraft"
+              class="notes-title notes-title--input"
+              type="text"
+              placeholder="Untitled note"
+              aria-label="Note title"
+              @keydown.enter.prevent="commitNoteTitle"
+              @keydown.esc.prevent="commitNoteTitle"
+              @blur="commitNoteTitle"
+            />
+            <h2
+              v-else
+              class="notes-title"
+              :class="{
+                'notes-title--placeholder': !noteTitleDraft.trim(),
+                'notes-title--editable': notesCanEdit,
+              }"
+              :role="notesCanEdit ? 'button' : undefined"
+              :tabindex="notesCanEdit ? 0 : undefined"
+              :title="notesCanEdit ? 'Click to rename' : undefined"
+              @click="startEditNoteTitle"
+              @keydown.enter="startEditNoteTitle"
+            >{{ noteTitleDraft.trim() || 'Untitled note' }}</h2>
           </div>
           <div v-if="loadingIndividualNote" class="card-state"><span class="spinner" /><span>Loading note…</span></div>
           <MeetingNotesEditor
@@ -210,8 +271,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
-import { renderMarkdown } from '../utils/markdown';
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue';
+import { renderMarkdown, stripFrontmatter } from '../utils/markdown';
 import type { TranscriptChunk } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
 import {
@@ -222,10 +283,13 @@ import {
   type MeetingActionItem,
   type MeetingCoaching,
 } from '../composables/useBackend';
+import AriWillJoinTag from './AriWillJoinTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
-import { shareTextNative } from '../tauri';
+import { shareTextNative, local } from '../tauri';
+import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
 const emit = defineEmits<{
@@ -237,7 +301,7 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
-const activeTab = ref<'note' | 'transcript' | 'mynote'>('note');
+const activeTab = ref<'note' | 'transcript' | 'mynote' | 'assessment'>('note');
 
 // Inline title editing. Both backends rename through Backend.renameMeeting
 // (ariso PATCHes the server; local rewrites meta.json). Local titles are
@@ -290,7 +354,7 @@ async function shareLocal(d: MeetingDetail): Promise<void> {
   const rect = shareBtn.value?.getBoundingClientRect();
   let personalNote = '';
   try {
-    personalNote = (await notesPersistence.load(props.item)) ?? '';
+    personalNote = (await notesPersistence.load(props.item))?.content ?? '';
   } catch {
     personalNote = '';
   }
@@ -315,10 +379,15 @@ const transcriptLoaded = ref(false);
 const loadingTranscript = ref(false);
 
 // Individual ("My note") — lazily loaded from /meeting-notes/{id}/individual-note.
-const individualNote = ref<{ content: string; title: string | null } | null>(null);
+const individualNote = ref<{ content: string; title: string } | null>(null);
 const individualNoteLoaded = ref(false);
 const loadingIndividualNote = ref(false);
 const notesMarkdown = ref('');
+// The My-note title is editable inline (like the meeting title) but autosaves on
+// the same debounce as the body rather than committing through renameMeeting.
+const noteTitleDraft = ref('');
+const editingNoteTitle = ref(false);
+const noteTitleInput = ref<HTMLInputElement | null>(null);
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 const notesPersistence = useMeetingNotesPersistence();
 
@@ -327,6 +396,8 @@ let noteReqId = 0;
 let saveReqId = 0;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressAutoSave = false;
+let noteDirty = false;
+let loadedNoteItem: MeetingListItem | null = null;
 
 const notesCanEdit = computed(() => !!props.item && notesPersistence.canEdit(props.item));
 const notesPlaceholder = computed(() =>
@@ -338,7 +409,98 @@ const notesPlaceholder = computed(() =>
 // the other backend.
 let detailBackend: Backend | null = null;
 
+// Local recordings generate their transcript + AI notes asynchronously after
+// recording stops. This poller drives the inline status chip and tab enabling.
+const progress = useLocalRecordingProgress(() => (detail.value?.isLocal ? detail.value.id : null));
+
+const showStatusChip = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed'].includes(progress.stage.value)
+);
+const statusGenerating = computed(
+  () => progress.stage.value === 'transcribing' || progress.stage.value === 'notes-pending'
+);
+const statusLabel = computed(() => {
+  switch (progress.stage.value) {
+    case 'transcribing':
+      return 'Generating Transcript';
+    case 'notes-pending':
+      return 'Generating AI Notes';
+    case 'transcript-failed':
+      return 'Transcript failed';
+    case 'notes-failed':
+      return 'AI Notes failed';
+    default:
+      return '';
+  }
+});
+function onRetry(): void {
+  if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
+  else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
+}
+
+// Local AI Notes can be regenerated from the transcript on demand. Shown only on
+// the AI Notes tab once a note already exists and nothing is in flight (the
+// status chip owns the row's right slot while generating/failed). Clicking
+// reuses the notes-retry path, which re-runs generation from transcript.md.
+const showRegenerate = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    activeTab.value === 'note' &&
+    !!detail.value?.note &&
+    !!detail.value?.hasTranscript &&
+    !showStatusChip.value
+);
+function onRegenerate(): void {
+  void progress.retryNotes();
+}
+
+// When the poller reports a newly-ready artifact, read it into `detail` so the
+// now-enabled tab renders its content. Guarded by reqId so a meeting switch
+// mid-read drops the stale result.
+async function reloadLocalArtifact(kind: 'note' | 'transcript'): Promise<void> {
+  const d = detail.value;
+  if (!d?.isLocal) return;
+  const my = reqId;
+  try {
+    const text = await local.readRecordingFile(d.id, kind);
+    if (my !== reqId || !detail.value) return;
+    if (kind === 'transcript') {
+      detail.value.transcript = text ?? undefined;
+      detail.value.hasTranscript = !!text;
+    } else {
+      detail.value.note = text ?? undefined;
+    }
+  } catch (e) {
+    console.error('reload local artifact failed', e);
+  }
+}
+
+watch(
+  () => progress.hasTranscript.value,
+  (now, prev) => {
+    if (now && !prev && detail.value?.isLocal) void reloadLocalArtifact('transcript');
+  }
+);
+watch(
+  () => progress.hasNote.value,
+  (now, prev) => {
+    if (now && !prev && detail.value?.isLocal) void reloadLocalArtifact('note');
+  }
+);
+
+// Lazy audio loader pinned to the backend that loaded the detail (a Settings
+// backend flip mid-view must not route the fetch through the other backend).
+function loadAudio(): Promise<ArrayBuffer | null> {
+  const i = props.item;
+  const backend = detailBackend;
+  if (!i || !backend) return Promise.resolve(null);
+  return backend.getMeetingAudio(i);
+}
+
 async function load(item: MeetingListItem | null): Promise<void> {
+  await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
   const my = ++reqId;
@@ -354,6 +516,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
+  progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
   loadingIndividualNote.value = false;
@@ -361,7 +524,10 @@ async function load(item: MeetingListItem | null): Promise<void> {
   // Clearing view state during a meeting switch is not a user edit. Keep
   // autosave suppressed until the selected note has loaded or the user types.
   suppressAutoSave = true;
+  loadedNoteItem = null;
   notesMarkdown.value = '';
+  noteTitleDraft.value = '';
+  editingNoteTitle.value = false;
   saveState.value = 'idle';
   if (saveTimer) {
     clearTimeout(saveTimer);
@@ -379,6 +545,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
     }
+    if (d.isLocal) progress.begin();
   } catch (e) {
     if (my !== reqId) return;
     console.error('Failed to load meeting detail', e);
@@ -462,12 +629,31 @@ function onTitleBlur(): void {
   void commitTitle();
 }
 
+// Enter edit mode for the My-note title and select the text for quick replace.
+async function startEditNoteTitle(): Promise<void> {
+  if (!notesCanEdit.value || editingNoteTitle.value) return;
+  editingNoteTitle.value = true;
+  await nextTick();
+  noteTitleInput.value?.focus();
+  noteTitleInput.value?.select();
+}
+
+// Leave edit mode and flush the current draft now. Autosave already debounced the
+// change, but committing on Enter/Esc/blur makes the save feel immediate.
+function commitNoteTitle(): void {
+  if (!editingNoteTitle.value) return;
+  editingNoteTitle.value = false;
+  void saveNotesNow();
+}
+
 // Local recordings carry their transcript as markdown on the detail; Ariso
 // loads structured chunks lazily into `transcript`. The Transcript tab renders
 // whichever is present.
-const transcriptMarkdown = computed<string | null>(() =>
-  detail.value?.isLocal ? detail.value?.transcript ?? null : null
-);
+const transcriptMarkdown = computed<string | null>(() => {
+  if (!detail.value?.isLocal) return null;
+  const md = detail.value?.transcript;
+  return md ? stripFrontmatter(md) : null;
+});
 const transcriptChunks = computed<TranscriptChunk[] | null>(() => {
   if (detail.value?.isLocal) return null;
   return Array.isArray(transcript.value) ? transcript.value : null;
@@ -487,30 +673,49 @@ function coachingPresent(c?: MeetingCoaching | null): boolean {
   return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
 }
 function notesPresent(d: MeetingDetail): boolean {
+  // The assessment (score/coaching) lives in its own "AI Assessment" tab, so it
+  // no longer counts toward the AI Notes tab's content.
   return d.isLocal
     ? !!d.note
-    : !!(d.digest || d.summary || d.actionItems.length || d.score !== undefined || coachingPresent(d.coaching));
+    : !!(d.digest || d.summary || d.actionItems.length);
+}
+function assessmentPresent(d: MeetingDetail): boolean {
+  return !d.isLocal && (d.score !== undefined || coachingPresent(d.coaching));
 }
 // The initial tab follows available content, but editable personal notes count
 // as available even before the first note has been saved.
-function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' {
+function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' | 'assessment' {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
   if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
+  if (assessmentPresent(d)) return 'assessment';
   return 'note';
 }
 
-// Tabs appear only when their content exists: AI Notes (generated/shared
-// meeting notes), Transcript, then My Notes (the user's editable note).
-const availableTabs = computed<{ key: 'note' | 'transcript' | 'mynote'; label: string }[]>(() => {
+// Tabs appear when their content exists. For local recordings the AI Notes and
+// Transcript tabs are always present (disabled until their content is ready) so
+// the row stays stable while generation runs; the inline status chip reports
+// progress. Ariso meetings keep the content-gated behavior.
+const availableTabs = computed<
+  { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[]
+>(() => {
   const d = detail.value;
   if (!d) return [];
-  const out: { key: 'note' | 'transcript' | 'mynote'; label: string }[] = [];
-  if (notesPresent(d)) out.push({ key: 'note', label: "AI Notes" });
+  const out: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[] = [];
+  if (d.isLocal) {
+    out.push({ key: 'note', label: 'AI Notes', disabled: !d.note });
+    out.push({ key: 'transcript', label: 'Transcript', disabled: !d.hasTranscript });
+    if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
+      out.push({ key: 'mynote', label: 'My Notes' });
+    }
+    return out;
+  }
+  if (notesPresent(d)) out.push({ key: 'note', label: 'AI Notes' });
   if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
   }
+  if (assessmentPresent(d)) out.push({ key: 'assessment', label: 'AI Assessment' });
   return out;
 });
 
@@ -543,22 +748,30 @@ async function loadTranscript(): Promise<void> {
 async function loadIndividualNote(): Promise<void> {
   if (!props.item || individualNoteLoaded.value || loadingIndividualNote.value) return;
   const my = ++noteReqId;
+  const item = props.item;
   loadingIndividualNote.value = true;
   saveState.value = 'idle';
   suppressAutoSave = true;
   try {
-    const item = props.item;
-    const content = await notesPersistence.load(item);
+    const note = await notesPersistence.load(item);
     if (my !== noteReqId || props.item?.id !== item.id) return;
-    notesMarkdown.value = content;
-    individualNote.value = { content, title: null };
+    notesMarkdown.value = note.content;
+    noteTitleDraft.value = note.title;
+    editingNoteTitle.value = false;
+    individualNote.value = { content: note.content, title: note.title };
     individualNoteLoaded.value = true;
+    loadedNoteItem = item;
+    noteDirty = false;
   } catch (e) {
     if (my !== noteReqId) return;
     console.error('Failed to load individual note', e);
     individualNote.value = null;
     notesMarkdown.value = '';
+    noteTitleDraft.value = '';
+    editingNoteTitle.value = false;
     individualNoteLoaded.value = true;
+    loadedNoteItem = item;
+    noteDirty = false;
     saveState.value = 'error';
   } finally {
     if (my === noteReqId) {
@@ -571,22 +784,25 @@ async function loadIndividualNote(): Promise<void> {
 // Save the editable note target currently selected in the detail pane. The
 // parent calls this before changing selection, and the editor calls it on blur.
 async function saveNotesNow(): Promise<void> {
-  const item = props.item;
+  const item = loadedNoteItem ?? props.item;
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   const my = ++saveReqId;
   const markdown = notesMarkdown.value;
+  const title = noteTitleDraft.value;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
   saveState.value = 'saving';
   try {
-    await notesPersistence.save(item, markdown);
-    if (my !== saveReqId || props.item?.id !== item.id) return;
+    await notesPersistence.save(item, { content: markdown, title });
+    const stillViewingSavedItem = props.item?.id === item.id;
+    if (my === saveReqId) noteDirty = false;
+    if (my !== saveReqId || !stillViewingSavedItem) return;
     if (detail.value) {
       detail.value.hasIndividualNote = markdown.trim().length > 0;
     }
-    individualNote.value = { content: markdown, title: individualNote.value?.title ?? null };
+    individualNote.value = { content: markdown, title };
     individualNoteLoaded.value = true;
     saveState.value = 'saved';
   } catch (e) {
@@ -598,12 +814,22 @@ async function saveNotesNow(): Promise<void> {
 
 defineExpose({ saveNotesNow });
 
+// Flushes the loaded note before the detail pane clears local draft state.
+// This protects quick tab/meeting/window changes where the 700ms debounce has
+// not fired yet, while keeping saves attached to the meeting that supplied the draft.
+async function flushPendingNoteBeforeReset(): Promise<void> {
+  if (!noteDirty) return;
+  await saveNotesNow();
+}
+
 watch(activeTab, (t) => {
   if (t === 'transcript') void loadTranscript();
   else if (t === 'mynote') void loadIndividualNote();
 });
 
-watch(notesMarkdown, () => {
+// Debounced autosave shared by the note body and its title so an edit to either
+// persists both together. Suppressed while a meeting switch resets the drafts.
+function scheduleNoteAutoSave(): void {
   if (
     suppressAutoSave ||
     loadingIndividualNote.value ||
@@ -611,14 +837,19 @@ watch(notesMarkdown, () => {
     !props.item ||
     !notesPersistence.canEdit(props.item)
   ) return;
+  noteDirty = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     void saveNotesNow();
   }, 700);
-});
+}
 
-onUnmounted(() => {
+watch(notesMarkdown, scheduleNoteAutoSave);
+watch(noteTitleDraft, scheduleNoteAutoSave);
+
+onBeforeUnmount(() => {
   if (saveTimer) clearTimeout(saveTimer);
+  void flushPendingNoteBeforeReset();
 });
 
 const subtitle = computed(() => {
@@ -642,7 +873,7 @@ const hasCoaching = computed(() => {
 // The meta band (duration · attendees · category) renders only when at least
 // one of its fields is present; otherwise a plain divider separates header and tabs.
 const hasMeta = computed(
-  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType)
+  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType || detail.value?.autoJoinScheduled)
 );
 
 const otesEmpty = computed(() => {
@@ -744,7 +975,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Header */
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; border-bottom: 1px solid #e5e6e3; }
-.head-titles { min-width: 0; }
+.head-titles { flex: 1; min-width: 0; }
 .head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
 .head-title--editable { cursor: text; }
 .head-title--input {
@@ -775,6 +1006,8 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
+.meta-ari { margin-left: auto; }
+.card-audio { display: flex; padding: 0 0 12px; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
@@ -812,13 +1045,42 @@ const durationLabel = computed<string | null>(() => {
   font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
 }
 .btn-chat:hover { background: #1a1a1a; }
+.tab-status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; color: #6f6f6f; }
+.tab-status-label { white-space: nowrap; }
+.tab-status-label--err { color: #dc2626; }
+.tab-retry {
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-retry:hover:not(:disabled) { background: #fbfbfb; }
+.tab-retry:disabled { opacity: 0.6; cursor: default; }
+.spinner--sm { width: 14px; height: 14px; }
+.tab-regen {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-regen:hover { background: #fbfbfb; }
+.tab-regen .ic { width: 15px; height: 15px; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
+.card-content::-webkit-scrollbar { width: 6px; }
+.card-content::-webkit-scrollbar-thumb { background: #d6d6d6; border-radius: 3px; }
 .tab-pane { min-height: 100%; }
 .tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
-.notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; }
+.notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; line-height: 1.2; }
+.notes-title--editable { cursor: text; }
+.notes-title--placeholder { color: #9a9a9a; }
+.notes-title--input {
+  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
+  font-family: inherit; font-size: 20px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
+  border: none; background: transparent; outline: none; appearance: none;
+}
+.notes-title--input::placeholder { color: #9a9a9a; font-weight: 700; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
 

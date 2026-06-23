@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activation;
 mod audio_capture;
 mod commands;
 mod meeting_notifications;
@@ -110,21 +111,33 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::local_recording_status,
             commands::create_library_window,
             commands::get_active_recording_meeting_id,
             commands::read_recording_audio,
             commands::read_recording_file,
             commands::read_recording_note,
             commands::write_recording_note,
+            commands::read_recording_note_title,
+            commands::write_recording_note_title,
             commands::open_recording_file,
             commands::rename_local_recording,
+            commands::buffer_pending_audio,
+            commands::discard_pending_audio,
+            commands::list_pending_uploads,
+            commands::combine_pending_audio,
+            commands::fetch_meeting_audio,
             commands::share_text_native,
             transcribe::local_finalize_recording,
+            transcribe::retry_local_transcription,
+            transcribe::retry_local_notes,
             model_manager::local_model_status,
             model_manager::download_local_stt,
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            meeting_notifications::resolve_meeting_prompt,
+            meeting_notifications::resize_meeting_prompt,
             tray_meeting::sync_tray_meeting,
             mic_monitor::sync_auto_record,
             mic_monitor::auto_record_supported,
@@ -213,6 +226,9 @@ fn main() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = settings_clone.hide();
+                    // Settings hides rather than closes, so the global
+                    // Destroyed hook never fires — demote here once it's gone.
+                    activation::refresh(&settings_clone.app_handle());
                 }
             });
 
@@ -269,14 +285,29 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_app, _event| {
-            // macOS: clicking the Dock icon re-activates the app (Reopen).
-            // Surface the meetings window — every other window is a hidden
-            // utility (bootstrap, settings) or transient (recorder pill).
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                if let Err(e) = commands::open_library_window(_app) {
-                    eprintln!("Failed to open meetings window on dock reopen: {e}");
+            match &_event {
+                // Clicking the Dock icon re-activates the app (Reopen).
+                // Surface the meetings window — every other window is a hidden
+                // utility (bootstrap, settings) or transient (recorder pill).
+                tauri::RunEvent::Reopen { .. } => {
+                    if let Err(e) = commands::open_library_window(_app) {
+                        eprintln!("Failed to open meetings window on dock reopen: {e}");
+                    }
                 }
+                // Keep the Dock / Stage Manager presence in sync with the
+                // visible windows: promote to Regular while a real window is up,
+                // demote to Accessory once they're all gone. Focused covers
+                // show()/set_focus(); Destroyed covers transient closes.
+                tauri::RunEvent::WindowEvent { event, .. } => {
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Destroyed
+                    ) {
+                        activation::refresh(_app);
+                    }
+                }
+                _ => {}
             }
         });
 }

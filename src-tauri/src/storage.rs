@@ -16,6 +16,31 @@ pub enum RecordingStatus {
     Failed,
 }
 
+/// AI-notes generation state, derived from on-disk artifacts. Notes run as a
+/// best-effort background task after the transcript completes, so the
+/// recording's own `RecordingStatus` stays `Done` regardless; this captures
+/// whether the note itself succeeded, is still pending, or failed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NotesStatus {
+    Pending,
+    Ready,
+    Failed,
+}
+
+/// Classify AI-notes generation from the note file's presence and any recorded
+/// `notes_error`. A present `ari-note.md` always means success (a stale error
+/// from a prior attempt is ignored).
+pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
+    if has_note {
+        NotesStatus::Ready
+    } else if notes_error.is_some() {
+        NotesStatus::Failed
+    } else {
+        NotesStatus::Pending
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Participant {
     pub id: u32,
@@ -66,6 +91,36 @@ pub struct RecordingSummary {
     pub has_transcript: bool,
 }
 
+/// Lightweight per-recording status for the detail panel's generation poller.
+/// Cheaper than `list_recordings` (no directory scan) and carries the derived
+/// `notes_status` the list summary omits.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStatusView {
+    pub status: RecordingStatus,
+    pub has_transcript: bool,
+    pub has_note: bool,
+    pub notes_status: NotesStatus,
+}
+
+/// Metadata persisted next to a buffered pending upload (`<id>.json`), so a
+/// failed Ariso upload can be resumed after the recorder window closes or the
+/// app restarts. Keyed on disk by `sanitize_iso_to_pending_id(created_at)`,
+/// which preserves sub-second precision so distinct recordings stopped in the
+/// same second do not collide.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUploadMeta {
+    /// Raw ISO timestamp used as the buffer key (`startAt ?? endAt`).
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<String>,
+    pub end_at: String,
+    pub duration_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_id: Option<u64>,
+}
+
 /// Resolve the `~/.ariso` root. `ARISO_ROOT` overrides (used by tests/dev);
 /// otherwise `$HOME/.ariso`. Errors if neither is available.
 pub fn ariso_root() -> Result<PathBuf, String> {
@@ -86,6 +141,131 @@ pub fn recordings_dir(root: &Path) -> PathBuf {
     root.join("recordings")
 }
 
+/// Where Ariso recordings are buffered between "stop" and a confirmed upload.
+/// Files here are plain playable mp3s; an orphan left by a crash can be
+/// recovered manually from this folder.
+pub fn pending_uploads_dir(root: &Path) -> PathBuf {
+    root.join("pending-uploads")
+}
+
+/// Reject ids that could escape the pending-uploads dir. Mirrors the guard in
+/// `commands::recording_dir`; the sanitizer strips `:` but passes `/` and `\`
+/// through, so a hostile timestamp must be caught here.
+fn validate_pending_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || id.contains("..")
+    {
+        return Err(format!("invalid pending audio id: {id}"));
+    }
+    Ok(())
+}
+
+fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
+    let id = sanitize_iso_to_pending_id(created_at);
+    validate_pending_id(&id)?;
+    Ok(pending_uploads_dir(root).join(format!("{id}.mp3")))
+}
+
+fn pending_meta_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
+    let id = sanitize_iso_to_pending_id(created_at);
+    validate_pending_id(&id)?;
+    Ok(pending_uploads_dir(root).join(format!("{id}.json")))
+}
+
+/// Delete a file, treating "already gone" as success.
+fn remove_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("discard pending file: {e}")),
+    }
+}
+
+/// Buffer a stopped recording's mp3 under `pending-uploads/<id>.mp3` and its
+/// metadata under `pending-uploads/<id>.json`, where the id is the sanitized
+/// `meta.created_at`. Audio is written first so a sidecar is never observed
+/// without its audio. Returns the id. Re-buffering the same timestamp
+/// overwrites both files (the retry path).
+pub fn write_pending_audio(
+    root: &Path,
+    meta: &PendingUploadMeta,
+    bytes: &[u8],
+) -> Result<String, String> {
+    let audio_path = pending_audio_path(root, &meta.created_at)?;
+    let meta_path = pending_meta_path(root, &meta.created_at)?;
+    fs::create_dir_all(pending_uploads_dir(root))
+        .map_err(|e| format!("create pending-uploads dir: {e}"))?;
+    write_atomic(&audio_path, bytes)?;
+    let json = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+    write_atomic(&meta_path, &json)?;
+    Ok(sanitize_iso_to_pending_id(&meta.created_at))
+}
+
+/// Delete the buffered mp3 and its sidecar for `created_at`. Missing files are
+/// not an error — the success path and an explicit dismiss both call this
+/// unconditionally.
+pub fn discard_pending_audio(root: &Path, created_at: &str) -> Result<(), String> {
+    remove_if_exists(&pending_audio_path(root, created_at)?)?;
+    remove_if_exists(&pending_meta_path(root, created_at)?)?;
+    Ok(())
+}
+
+/// Read a buffered pending upload's mp3 bytes (used to combine for resume).
+fn read_pending_audio_bytes(root: &Path, created_at: &str) -> Result<Vec<u8>, String> {
+    let path = pending_audio_path(root, created_at)?;
+    fs::read(&path).map_err(|e| format!("read pending audio: {e}"))
+}
+
+/// Concatenate the mp3 bytes for `created_at_keys` in the order given (the
+/// caller passes them chronologically). Errors if any key has no buffered
+/// audio, or if the running total would exceed `max_bytes`. All clips come
+/// from the same in-app encoder, so byte concatenation decodes cleanly.
+pub fn combine_pending_audio(
+    root: &Path,
+    created_at_keys: &[String],
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let mut combined: Vec<u8> = Vec::new();
+    for key in created_at_keys {
+        let bytes = read_pending_audio_bytes(root, key)?;
+        if combined.len() as u64 + bytes.len() as u64 > max_bytes {
+            return Err(format!("combined pending audio exceeds {max_bytes} bytes"));
+        }
+        combined.extend_from_slice(&bytes);
+    }
+    Ok(combined)
+}
+
+/// List buffered pending uploads, chronological (oldest-first). A sidecar is
+/// included only when its sibling `.mp3` still exists; unpaired or unparseable
+/// files are skipped (an orphan left by a crash stays for manual recovery).
+pub fn list_pending_uploads(root: &Path) -> Result<Vec<PendingUploadMeta>, String> {
+    let dir = pending_uploads_dir(root);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read pending-uploads dir: {e}"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(meta) = serde_json::from_slice::<PendingUploadMeta>(&bytes) else { continue };
+        let has_audio = pending_audio_path(root, &meta.created_at)
+            .map(|p| p.is_file())
+            .unwrap_or(false);
+        if has_audio {
+            out.push(meta);
+        }
+    }
+    out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(out)
+}
+
 /// Turn a UTC ISO-8601 instant into a filesystem-safe, sortable folder id.
 /// "2026-06-02T14:30:05.123Z" -> "2026-06-02T14-30-05Z"
 ///
@@ -101,6 +281,18 @@ pub fn sanitize_iso_to_id(iso: &str) -> String {
     format!("{}Z", head.replace(':', "-"))
 }
 
+/// Filesystem-safe id for buffered pending uploads. Differs from
+/// `sanitize_iso_to_id` by preserving sub-second precision so two recordings
+/// stopped within the same second produce distinct keys, while a retry of the
+/// same recording (same `created_at`) stays deterministic.
+/// "2026-06-02T14:30:05.123Z" -> "2026-06-02T14-30-05.123Z"
+/// "2026-06-02T14:30:05Z"     -> "2026-06-02T14-30-05Z"
+pub fn sanitize_iso_to_pending_id(iso: &str) -> String {
+    let iso = iso.split('+').next().unwrap_or(iso);
+    let trimmed = iso.trim_end_matches('Z');
+    format!("{}Z", trimmed.replace(':', "-"))
+}
+
 /// Format seconds as HH:MM:SS.
 pub fn format_hms(secs: f64) -> String {
     let total = secs.max(0.0) as u64;
@@ -108,6 +300,22 @@ pub fn format_hms(secs: f64) -> String {
     let m = (total % 3600) / 60;
     let s = total % 60;
     format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Reject recording ids that could escape the recordings dir. Ids are normally
+/// sanitized timestamps (e.g. `2026-06-02T14-30-05Z`); this mirrors the guard
+/// in `commands::recording_dir` so retry/status commands can validate ids that
+/// arrive from the frontend.
+pub fn validate_recording_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains(':')
+        || id.contains("..")
+    {
+        return Err(format!("invalid recording id: {id}"));
+    }
+    Ok(())
 }
 
 pub fn create_recording_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
@@ -231,6 +439,16 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pmeta(created_at: &str) -> PendingUploadMeta {
+        PendingUploadMeta {
+            created_at: created_at.into(),
+            start_at: Some(created_at.into()),
+            end_at: created_at.into(),
+            duration_seconds: 1,
+            meeting_id: None,
+        }
+    }
 
     #[test]
     fn dirs_derive_from_root() {
@@ -383,6 +601,148 @@ mod tests {
         write_notes(dir, "# Notes\n- point").unwrap();
         let body = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert_eq!(body, "# Notes\n- point");
+    }
+
+    #[test]
+    fn pending_audio_write_and_discard_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = write_pending_audio(root, &pmeta("2026-06-12T10:00:00.000Z"), b"mp3bytes").unwrap();
+        assert_eq!(id, "2026-06-12T10-00-00.000Z");
+        let audio = pending_uploads_dir(root).join("2026-06-12T10-00-00.000Z.mp3");
+        let sidecar = pending_uploads_dir(root).join("2026-06-12T10-00-00.000Z.json");
+        assert_eq!(std::fs::read(&audio).unwrap(), b"mp3bytes");
+        assert!(sidecar.is_file());
+
+        discard_pending_audio(root, "2026-06-12T10:00:00.000Z").unwrap();
+        assert!(!audio.exists());
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn pending_audio_distinct_subsecond_keys_do_not_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Two distinct recordings within the same wall-clock second must not
+        // overwrite each other.
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00.123Z"), b"first").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00.456Z"), b"second").unwrap();
+        let a = pending_uploads_dir(root).join("2026-06-12T10-00-00.123Z.mp3");
+        let b = pending_uploads_dir(root).join("2026-06-12T10-00-00.456Z.mp3");
+        assert_eq!(std::fs::read(&a).unwrap(), b"first");
+        assert_eq!(std::fs::read(&b).unwrap(), b"second");
+    }
+
+    #[test]
+    fn pending_audio_overwrite_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00Z"), b"first").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T10:00:00Z"), b"second").unwrap();
+        let path = pending_uploads_dir(root).join("2026-06-12T10-00-00Z.mp3");
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    }
+
+    #[test]
+    fn discard_pending_audio_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No pending-uploads dir, no file — still Ok.
+        discard_pending_audio(tmp.path(), "2026-06-12T10:00:00.000Z").unwrap();
+    }
+
+    #[test]
+    fn pending_audio_rejects_traversal_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(write_pending_audio(tmp.path(), &pmeta("a/b"), b"x").is_err());
+        assert!(write_pending_audio(tmp.path(), &pmeta("\\evil"), b"x").is_err());
+        assert!(discard_pending_audio(tmp.path(), "a/b").is_err());
+    }
+
+    #[test]
+    fn lists_pending_uploads_paired_sorted_and_skips_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Two well-formed pending uploads (written out of order).
+        write_pending_audio(root, &pmeta("2026-06-12T11:00:00Z"), b"b").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"a").unwrap();
+        // Orphan mp3 with no sidecar — must be skipped.
+        std::fs::write(pending_uploads_dir(root).join("2026-06-12T08-00-00Z.mp3"), b"x").unwrap();
+        // Orphan sidecar with no mp3 — must be skipped.
+        std::fs::write(pending_uploads_dir(root).join("2026-06-12T07-00-00Z.json"), b"{}").unwrap();
+
+        let list = list_pending_uploads(root).unwrap();
+        assert_eq!(list.len(), 2);
+        // Chronological ascending.
+        assert_eq!(list[0].created_at, "2026-06-12T09:00:00Z");
+        assert_eq!(list[1].created_at, "2026-06-12T11:00:00Z");
+    }
+
+    #[test]
+    fn lists_pending_uploads_empty_when_no_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(list_pending_uploads(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn combines_pending_audio_in_key_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"AAA").unwrap();
+        write_pending_audio(root, &pmeta("2026-06-12T11:00:00Z"), b"BB").unwrap();
+
+        let keys = vec![
+            "2026-06-12T09:00:00Z".to_string(),
+            "2026-06-12T11:00:00Z".to_string(),
+        ];
+        let combined = combine_pending_audio(root, &keys, 1024).unwrap();
+        assert_eq!(combined, b"AAABB");
+    }
+
+    #[test]
+    fn combine_pending_audio_errors_on_missing_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = vec!["2026-06-12T09:00:00Z".to_string()];
+        assert!(combine_pending_audio(tmp.path(), &keys, 1024).is_err());
+    }
+
+    #[test]
+    fn combine_pending_audio_rejects_over_max() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pending_audio(root, &pmeta("2026-06-12T09:00:00Z"), b"toolong").unwrap();
+        let keys = vec!["2026-06-12T09:00:00Z".to_string()];
+        assert!(combine_pending_audio(root, &keys, 3).is_err());
+    }
+
+    #[test]
+    fn derive_notes_status_ready_when_note_present() {
+        assert_eq!(derive_notes_status(true, None), NotesStatus::Ready);
+        // A present note wins even if a stale error lingers.
+        assert_eq!(derive_notes_status(true, Some("boom")), NotesStatus::Ready);
+    }
+
+    #[test]
+    fn derive_notes_status_failed_when_error_and_no_note() {
+        assert_eq!(derive_notes_status(false, Some("boom")), NotesStatus::Failed);
+    }
+
+    #[test]
+    fn derive_notes_status_pending_when_no_note_no_error() {
+        assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+    }
+
+    #[test]
+    fn validate_recording_id_accepts_sanitized_timestamp() {
+        assert!(validate_recording_id("2026-06-02T14-30-05Z").is_ok());
+    }
+
+    #[test]
+    fn validate_recording_id_rejects_traversal() {
+        assert!(validate_recording_id("").is_err());
+        assert!(validate_recording_id("../etc").is_err());
+        assert!(validate_recording_id("a/b").is_err());
+        assert!(validate_recording_id("a\\b").is_err());
+        assert!(validate_recording_id("C:foo").is_err());
     }
 
     #[test]

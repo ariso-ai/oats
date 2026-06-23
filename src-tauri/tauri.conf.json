@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/main/tauri.schema.json",
   "productName": "oats",
-  "version": "0.4.0",
+  "version": "0.8.1",
   "identifier": "ai.ariso.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -34,8 +34,24 @@
       "icons/icon.png"
     ],
     "macOS": {
+      "dmg": {
+        "background": "assets/dmg-background.png",
+        "windowSize": {
+          "width": 820,
+          "height": 500
+        },
+        "appPosition": {
+          "x": 210,
+          "y": 270
+        },
+        "applicationFolderPosition": {
+          "x": 645,
+          "y": 280
+        }
+      },
       "entitlements": "entitlements.plist",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "minimumSystemVersion": "14.4"
     },
     "createUpdaterArtifacts": true
   },

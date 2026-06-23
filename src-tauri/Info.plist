@@ -6,7 +6,7 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>oats needs microphone access to record meeting audio for transcription.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>oats needs screen recording permission to capture system audio from video calls.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>oats needs system audio recording permission to capture audio from video calls.</string>
 </dict>
 </plist>

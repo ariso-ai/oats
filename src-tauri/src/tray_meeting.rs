@@ -1,10 +1,10 @@
-//! Next-meeting tray orchestrator (native).
+//! Current-or-next meeting tray orchestrator (native).
 //!
-//! Fetches today's scheduled meetings from the Ariso API, features the next
-//! strictly-upcoming one in the menu-bar tray (countdown title + menu rows),
-//! and promotes the following meeting once it starts. Lives in the Rust
-//! process for the same reason as `meeting_notifications`: macOS suspends
-//! hidden webviews, so a webview timer would freeze in the background.
+//! Fetches today's scheduled meetings from the Ariso API, features an
+//! overlapping current meeting before falling back to the next upcoming one,
+//! and keeps the menu-bar tray title/menu rows fresh. Lives in the Rust process
+//! for the same reason as `meeting_notifications`: macOS suspends hidden
+//! webviews, so a webview timer would freeze in the background.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -160,29 +160,12 @@ async fn run_loop(app: AppHandle) {
         ticks_until_fetch -= 1;
 
         let now = Utc::now();
-        let featured = match pick_next_upcoming(&meetings, now) {
-            Some(m) => {
-                let end_at = match end_cache.get(&m.id) {
-                    Some(cached) => *cached,
-                    None => {
-                        match cache_end_lookup(&mut end_cache, m.id, fetch_end_at(&app, m.id).await)
-                        {
-                            Ok(end) => end,
-                            Err(FetchError::Auth) => break,
-                            Err(FetchError::Other(_)) => unreachable!(
-                                "cache_end_lookup converts transient end_at failures into a retryable None"
-                            ),
-                        }
-                    }
-                };
-                Some(FeaturedMeeting {
-                    id: m.id,
-                    title: m.title.clone(),
-                    start_at: m.start_at,
-                    end_at,
-                })
-            }
-            None => None,
+        let featured = match pick_current_or_next(&app, &meetings, &mut end_cache, now).await {
+            Ok(featured) => featured,
+            Err(FetchError::Auth) => break,
+            Err(FetchError::Other(_)) => unreachable!(
+                "pick_current_or_next converts transient end_at failures into a retryable None"
+            ),
         };
 
         let menu_changed = {
@@ -224,6 +207,55 @@ fn cache_end_lookup(
             Ok(None)
         }
     }
+}
+
+/// Read a meeting end time from the per-loop cache, falling back to the detail
+/// endpoint only when the tray selection logic actually needs overlap data.
+async fn cached_end_at(
+    app: &AppHandle,
+    end_cache: &mut HashMap<i64, Option<DateTime<Utc>>>,
+    meeting_id: i64,
+) -> Result<Option<DateTime<Utc>>, FetchError> {
+    match end_cache.get(&meeting_id) {
+        Some(cached) => Ok(*cached),
+        None => cache_end_lookup(end_cache, meeting_id, fetch_end_at(app, meeting_id).await),
+    }
+}
+
+/// Choose the meeting the tray should surface: an overlapping current meeting
+/// wins so the menu bar matches what the user is already in; otherwise we keep
+/// the previous next-upcoming behavior. This owns the detail lookups because
+/// the list endpoint does not provide end times.
+async fn pick_current_or_next(
+    app: &AppHandle,
+    meetings: &[ScheduledMeeting],
+    end_cache: &mut HashMap<i64, Option<DateTime<Utc>>>,
+    now: DateTime<Utc>,
+) -> Result<Option<FeaturedMeeting>, FetchError> {
+    let started: Vec<&ScheduledMeeting> = meetings.iter().filter(|m| m.start_at <= now).collect();
+    for meeting in started {
+        let _ = cached_end_at(app, end_cache, meeting.id).await?;
+    }
+
+    if let Some((meeting, end_at)) = pick_current_overlapping(meetings, end_cache, now) {
+        return Ok(Some(FeaturedMeeting {
+            id: meeting.id,
+            title: meeting.title.clone(),
+            start_at: meeting.start_at,
+            end_at,
+        }));
+    }
+
+    let Some(meeting) = pick_next_upcoming(meetings, now) else {
+        return Ok(None);
+    };
+    let end_at = cached_end_at(app, end_cache, meeting.id).await?;
+    Ok(Some(FeaturedMeeting {
+        id: meeting.id,
+        title: meeting.title.clone(),
+        start_at: meeting.start_at,
+        end_at,
+    }))
 }
 
 /// GET /meetings?startDate&endDate (local-day bounds) → parsed list.
@@ -325,13 +357,15 @@ pub(crate) fn truncate_title(title: Option<&str>) -> String {
     out
 }
 
-/// Relative countdown to a future start time: `in 12min`, `in 1h39min`, or
-/// `in <1min` under a minute. Callers only pass strictly-upcoming meetings; a
-/// stale (already-started) one reads `in <1min` until the next tick drops it.
+/// Relative tray status from the featured meeting's start time. Upcoming
+/// meetings keep the countdown wording; already-started meetings read `now`
+/// because they were selected through the current-overlap path.
 pub(crate) fn format_countdown(start: DateTime<Utc>, now: DateTime<Utc>) -> String {
     // num_minutes truncates toward zero == floor for positive durations.
     let mins = (start - now).num_minutes();
-    if mins >= 60 {
+    if start <= now {
+        "now".to_string()
+    } else if mins >= 60 {
         let hours = mins / 60;
         let minutes = mins % 60;
         if minutes == 0 {
@@ -379,10 +413,26 @@ where
     }
 }
 
+/// The overlapping meeting with the latest start time. It relies on caller-
+/// provided end times because the list endpoint only carries starts, and it
+/// ignores missing ends rather than treating old meetings as current forever.
+pub(crate) fn pick_current_overlapping<'a>(
+    meetings: &'a [ScheduledMeeting],
+    end_times: &HashMap<i64, Option<DateTime<Utc>>>,
+    now: DateTime<Utc>,
+) -> Option<(&'a ScheduledMeeting, Option<DateTime<Utc>>)> {
+    meetings
+        .iter()
+        .filter_map(|m| match end_times.get(&m.id).copied().flatten() {
+            Some(end_at) if m.start_at <= now && end_at > now => Some((m, Some(end_at))),
+            _ => None,
+        })
+        .max_by_key(|(m, _)| m.start_at)
+}
+
 /// The soonest meeting with `start_at` strictly after `now`. Computes the min
-/// explicitly so it is order-independent (mirrors the TS `pickDefaultMeeting`
-/// `next` arm; the "current meeting" arm is intentionally absent — only
-/// strictly-upcoming meetings are featured in the tray).
+/// explicitly so the future fallback is order-independent once current
+/// overlapping meetings have been ruled out.
 pub(crate) fn pick_next_upcoming(
     meetings: &[ScheduledMeeting],
     now: DateTime<Utc>,
@@ -530,6 +580,14 @@ mod tests {
     }
 
     #[test]
+    fn countdown_started_meeting_reads_now() {
+        assert_eq!(
+            format_countdown(t("2026-06-11T09:55:00Z"), t("2026-06-11T10:00:00Z")),
+            "now"
+        );
+    }
+
+    #[test]
     fn countdown_over_an_hour_includes_hours_and_minutes() {
         assert_eq!(
             format_countdown(t("2026-06-11T11:39:00Z"), t("2026-06-11T10:00:00Z")),
@@ -624,6 +682,50 @@ mod tests {
             title: None,
             start_at: t(start),
         }
+    }
+
+    #[test]
+    fn pick_current_overlapping_prefers_latest_started_meeting() {
+        let ms = [
+            meeting(1, "2026-06-11T09:00:00Z"),
+            meeting(2, "2026-06-11T09:45:00Z"),
+            meeting(3, "2026-06-11T11:00:00Z"),
+        ];
+        let ends = HashMap::from([
+            (1, Some(t("2026-06-11T10:30:00Z"))),
+            (2, Some(t("2026-06-11T10:15:00Z"))),
+        ]);
+
+        let (picked, end_at) =
+            pick_current_overlapping(&ms, &ends, t("2026-06-11T10:00:00Z")).unwrap();
+
+        assert_eq!(picked.id, 2);
+        assert_eq!(end_at, Some(t("2026-06-11T10:15:00Z")));
+    }
+
+    #[test]
+    fn pick_current_overlapping_ignores_missing_or_finished_end_times() {
+        let ms = [
+            meeting(1, "2026-06-11T09:00:00Z"),
+            meeting(2, "2026-06-11T09:30:00Z"),
+        ];
+        let ends = HashMap::from([(1, Some(t("2026-06-11T09:45:00Z"))), (2, None)]);
+
+        assert!(pick_current_overlapping(&ms, &ends, t("2026-06-11T10:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn pick_current_overlapping_includes_meeting_starting_exactly_now() {
+        let ms = [meeting(1, "2026-06-11T10:00:00Z")];
+        let ends = HashMap::from([(1, Some(t("2026-06-11T10:30:00Z")))]);
+
+        assert_eq!(
+            pick_current_overlapping(&ms, &ends, t("2026-06-11T10:00:00Z"))
+                .unwrap()
+                .0
+                .id,
+            1
+        );
     }
 
     #[test]

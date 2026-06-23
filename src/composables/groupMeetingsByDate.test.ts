@@ -3,6 +3,9 @@ import {
   groupMeetingsByDate,
   groupTodaysMeetings,
   dateLabel,
+  dayLabelWithDate,
+  todayLabel,
+  nextDaySection,
   upcomingRelLabel,
   isMeetingInProgress,
 } from './groupMeetingsByDate';
@@ -28,8 +31,59 @@ describe('dateLabel', () => {
   });
 });
 
+describe('dayLabelWithDate', () => {
+  it('appends the calendar date to the relative day labels', () => {
+    expect(dayLabelWithDate('2026-06-10', NOW)).toBe('TODAY · JUN 10');
+    expect(dayLabelWithDate('2026-06-11', NOW)).toBe('TOMORROW · JUN 11');
+    expect(dayLabelWithDate('2026-06-09', NOW)).toBe('YESTERDAY · JUN 9');
+  });
+
+  it('leaves other days as-is since they already carry the date', () => {
+    expect(dayLabelWithDate('2026-06-07', NOW)).toBe('SUN, JUN 7');
+  });
+
+  it('todayLabel labels the current day with its date', () => {
+    expect(todayLabel(NOW)).toBe('TODAY · JUN 10');
+  });
+});
+
+describe('nextDaySection', () => {
+  it('returns the earliest future day that has meetings, earliest-first', () => {
+    const meetings = [
+      m('today', '2026-06-10T18:00:00'),
+      m('tom-late', '2026-06-11T16:00:00'),
+      m('tom-early', '2026-06-11T09:00:00'),
+      m('far', '2026-06-13T10:00:00'),
+    ];
+    const section = nextDaySection(meetings, NOW);
+    expect(section?.key).toBe('2026-06-11');
+    expect(section?.label).toBe('TOMORROW · JUN 11');
+    expect(section?.items.map((x) => x.id)).toEqual(['tom-early', 'tom-late']);
+  });
+
+  it('skips empty days and lands on the next day that has meetings', () => {
+    // Nothing tomorrow (the 11th); the next meetings are on the 13th.
+    const section = nextDaySection([m('far', '2026-06-13T10:00:00')], NOW);
+    expect(section?.key).toBe('2026-06-13');
+    expect(section?.label).toBe('SAT, JUN 13');
+  });
+
+  it('ignores today and past meetings', () => {
+    const meetings = [
+      m('today', '2026-06-10T18:00:00'),
+      m('past', '2026-06-09T09:00:00'),
+    ];
+    expect(nextDaySection(meetings, NOW)).toBeNull();
+  });
+
+  it('returns null when there are no future meetings', () => {
+    expect(nextDaySection([], NOW)).toBeNull();
+    expect(nextDaySection([m('bad', 'nope')], NOW)).toBeNull();
+  });
+});
+
 describe('groupMeetingsByDate', () => {
-  it('buckets history by calendar date newest-first, with UPCOMING last', () => {
+  it('buckets every meeting by calendar date, newest date first, earliest-first within a date', () => {
     const meetings = [
       m('past1', '2026-06-09T09:00:00'),
       m('today1', '2026-06-10T09:00:00'),
@@ -38,28 +92,31 @@ describe('groupMeetingsByDate', () => {
       m('future', '2026-06-12T10:00:00'),
     ];
     const sections = groupMeetingsByDate(meetings, NOW);
-    expect(sections.map((s) => s.label)).toEqual(['TODAY', 'YESTERDAY', 'UPCOMING']);
-    expect(sections[0].items.map((x) => x.id)).toEqual(['today2', 'today1']);
-    expect(sections[2].items.map((x) => x.id)).toEqual(['soon', 'future']);
+    // No UPCOMING section: future meetings live under their own date header.
+    expect(sections.map((s) => s.label)).toEqual(['FRI, JUN 12', 'TODAY', 'YESTERDAY']);
+    // Within a date, earliest-first (ascending).
+    expect(sections[1].items.map((x) => x.id)).toEqual(['today1', 'today2', 'soon']);
+    expect(sections[0].items.map((x) => x.id)).toEqual(['future']);
   });
 
   it('returns an empty array for no meetings', () => {
     expect(groupMeetingsByDate([], NOW)).toEqual([]);
   });
 
-  it('keeps NaN-timestamp meetings under an UNDATED bucket at the end of history', () => {
+  it('keeps NaN-timestamp meetings under an UNDATED bucket at the end', () => {
     const sections = groupMeetingsByDate([m('bad', 'not-a-date'), m('t', '2026-06-10T09:00:00')], NOW);
     const labels = sections.map((s) => s.label);
     expect(labels).toContain('UNDATED');
     expect(labels.indexOf('UNDATED')).toBeGreaterThan(labels.indexOf('TODAY'));
   });
 
-  it('treats an in-progress meeting (not yet ended) as UPCOMING, not history', () => {
+  it('places an in-progress meeting under its date bucket in start order', () => {
     const sections = groupMeetingsByDate(
       [m('live', '2026-06-10T14:30:00', '2026-06-10T15:30:00'), m('past', '2026-06-10T09:00:00')],
       NOW
     );
-    expect(sections.find((s) => s.label === 'UPCOMING')?.items.map((x) => x.id)).toEqual(['live']);
+    expect(sections.map((s) => s.label)).toEqual(['TODAY']);
+    expect(sections[0].items.map((x) => x.id)).toEqual(['past', 'live']);
   });
 });
 
