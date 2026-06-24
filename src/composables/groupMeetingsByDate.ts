@@ -104,8 +104,8 @@ export function nextDaySection(meetings: MeetingListItem[], now: Date): MeetingS
   return { key: nextKey, label: dayLabelWithDate(nextKey, now), items };
 }
 
-/** Bucket every meeting under per-calendar-date headers, newest date first, and
- *  within each date ordered earliest-first (ascending by start time). */
+/** Bucket every meeting under per-calendar-date headers in a meeting-list order:
+ *  today and future dates read nearest-first, while past dates read newest-first. */
 export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): MeetingSection[] {
   const buckets = new Map<string, MeetingListItem[]>();
   for (const meeting of meetings) {
@@ -117,10 +117,14 @@ export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): Mee
   }
 
   const sections: MeetingSection[] = [];
-  // Lexical sort == chronological because keys are zero-padded YYYY-MM-DD;
-  // .reverse() then puts the newest date first.
-  const datedKeys = [...buckets.keys()].filter((k) => k !== 'unknown').sort().reverse();
-  for (const key of datedKeys) {
+  const today = localDateKey(now);
+  // Lexical sort == chronological because keys are zero-padded YYYY-MM-DD. The
+  // split keeps upcoming days from being pushed below farther-future meetings.
+  const datedKeys = [...buckets.keys()].filter((k) => k !== 'unknown');
+  const futureAndTodayKeys = datedKeys.filter((key) => key >= today).sort();
+  const pastKeys = datedKeys.filter((key) => key < today).sort().reverse();
+
+  for (const key of [...futureAndTodayKeys, ...pastKeys]) {
     const items = [...buckets.get(key)!].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );

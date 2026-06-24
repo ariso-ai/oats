@@ -419,9 +419,9 @@ function setRecording(next: boolean): void {
 let loadMeetingsRequest = 0;
 
 // `autoSelectFirst` is only set for the initial mount load: opening the window
-// lands on the most recent meeting. Refresh-driven reloads (window focus/move,
-// upload completion) pass false so they never yank the user off the Up Next
-// greeting/card view back into a meeting detail.
+// lands on the first visible grouped row, not the backend's raw list order.
+// Refresh-driven reloads (window focus/move, upload completion) pass false so
+// they never yank the user off the Up Next greeting/card view back into detail.
 async function loadMeetings(autoSelectFirst = false): Promise<void> {
   const requestId = ++loadMeetingsRequest;
   loading.value = true;
@@ -446,7 +446,7 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
     if (autoSelectFirst && !selectedItem.value && meetings.value.length > 0) {
-      await selectMeeting(meetings.value[0]);
+      await selectMeeting(displayedSections.value[0]?.items[0] ?? meetings.value[0]);
     } else if (selectedItem.value) {
       selectedItem.value =
         meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
