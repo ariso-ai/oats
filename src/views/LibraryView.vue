@@ -88,7 +88,7 @@
             class="meeting-item"
             :class="{ selected: selectedItem?.id === m.id }"
             :aria-pressed="selectedItem?.id === m.id"
-            @click="selectMeeting(m)"
+            @click="selectMeeting(m, { userSelected: true })"
           >
             <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
@@ -135,7 +135,7 @@
           v-else
           :meetings="displayMeetings"
           :now="now"
-          @select="selectMeeting"
+          @select="(m) => selectMeeting(m, { userSelected: true })"
           @start="startRecordingFor"
           @record="startRecording"
         />
@@ -196,6 +196,9 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
+// Tracks the row the user intentionally selected; auto-load and recorder-driven
+// selections must not override Today's "record the live meeting" behavior.
+const userSelectedMeetingId = ref<string | null>(null);
 const ariConfirm = useAriJoinConfirm();
 const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
@@ -329,7 +332,9 @@ function itemSub(m: MeetingListItem): string {
 // slow autosave from the previous meeting cannot land after the row changed.
 let selectionReqId = 0;
 
-async function selectMeeting(m: MeetingListItem): Promise<void> {
+async function selectMeeting(m: MeetingListItem, options: { userSelected?: boolean } = {}): Promise<void> {
+  if (options.userSelected) userSelectedMeetingId.value = m.id;
+  else if (userSelectedMeetingId.value !== m.id) userSelectedMeetingId.value = null;
   if (selectedItem.value?.id === m.id) return;
   const my = ++selectionReqId;
   await detailView.value?.saveNotesNow?.();
@@ -342,6 +347,7 @@ async function clearSelection(): Promise<void> {
   await detailView.value?.saveNotesNow?.();
   if (my !== selectionReqId) return;
   selectedItem.value = null;
+  userSelectedMeetingId.value = null;
 }
 
 // Re-dock the recorder strip: pull the in-progress recording's meeting back
@@ -350,7 +356,7 @@ async function showRecordingMeeting(): Promise<void> {
   const id = recordingMeetingId.value;
   if (!id) return;
   const m = displayMeetings.value.find((x) => x.id === id);
-  if (m) await selectMeeting(m);
+  if (m) await selectMeeting(m, { userSelected: false });
 }
 
 function openSearchPalette(): void {
@@ -369,7 +375,7 @@ async function searchMeetings(query: string): Promise<MeetingListItem[]> {
 
 async function onSearchResultSelected(meeting: MeetingListItem): Promise<void> {
   searchPaletteOpen.value = false;
-  await selectMeeting(meeting);
+  await selectMeeting(meeting, { userSelected: true });
 }
 
 // The palette's Home command returns the Library to its neutral detail state:
@@ -446,7 +452,9 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
     if (autoSelectFirst && !selectedItem.value && meetings.value.length > 0) {
-      await selectMeeting(displayedSections.value[0]?.items[0] ?? meetings.value[0]);
+      await selectMeeting(displayedSections.value[0]?.items[0] ?? meetings.value[0], {
+        userSelected: false,
+      });
     } else if (selectedItem.value) {
       selectedItem.value =
         meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
@@ -549,7 +557,10 @@ async function startRecording(): Promise<void> {
     const backend = await getActiveBackend();
     const usesPicker = backend.usesMeetingPicker;
     const selectedTodayId =
-      usesPicker && activeView.value === 'today' && isTodayItem(selectedItem.value)
+      usesPicker &&
+      activeView.value === 'today' &&
+      selectedItem.value?.id === userSelectedMeetingId.value &&
+      isTodayItem(selectedItem.value)
         ? numericMeetingId(selectedItem.value)
         : undefined;
     const nowMeetingId = usesPicker ? numericMeetingId(currentNowItem()) : undefined;
@@ -630,7 +641,7 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
     await pinRecordedMeeting(idStr);
     m = displayMeetings.value.find((x) => x.id === idStr);
   }
-  if (m) await selectMeeting(m);
+  if (m) await selectMeeting(m, { userSelected: false });
 }
 
 // Keep the detail panel on the recorded meeting: surface its row when the
@@ -643,7 +654,7 @@ watch(recordingMeetingId, async (id, prevId) => {
     // Ariso meeting the calendar list doesn't carry.
     await pinRecordedMeeting(id);
     const m = displayMeetings.value.find((x) => x.id === id);
-    if (m && selectedItem.value?.id !== id) await selectMeeting(m);
+    if (m && selectedItem.value?.id !== id) await selectMeeting(m, { userSelected: false });
     return;
   }
   await loadMeetings();
@@ -652,6 +663,7 @@ watch(recordingMeetingId, async (id, prevId) => {
     // Discarded/crashed recording — its row is gone (and nothing pinned it);
     // fall back to the first available meeting.
     selectedItem.value = displayMeetings.value[0] ?? null;
+    userSelectedMeetingId.value = null;
   }
 });
 
