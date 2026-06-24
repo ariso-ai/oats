@@ -20,21 +20,31 @@
         </button>
       </div>
     </div>
-    <p v-if="error" class="pending-error">Upload failed — try again.</p>
+    <p v-if="error" class="pending-error">{{ error }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { pending, type PendingUploadMeta } from '../tauri';
+import { auth, pending, type PendingUploadMeta } from '../tauri';
 import { combineAndUpload, discardAll } from '../composables/usePendingUploads';
 
 const emit = defineEmits<{ uploaded: [] }>();
 
 const items = ref<PendingUploadMeta[]>([]);
 const busy = ref(false);
-const error = ref(false);
+const error = ref<string | null>(null);
 const confirmingDiscard = ref(false);
+
+// Keep pending-upload failures specific enough to explain auth/session states,
+// while preserving a short generic fallback for transient network or S3 errors.
+function uploadErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  if (/\b(401|403)\b|unauthori[sz]ed|forbidden|session|sign(?:ed)? in|login|auth/i.test(message)) {
+    return 'Upload failed — sign in to Ari again, then retry.';
+  }
+  return 'Upload failed — try again.';
+}
 
 async function refresh(): Promise<void> {
   try {
@@ -58,17 +68,24 @@ function durationFor(it: PendingUploadMeta): string {
   return `${mins}:${secs}`;
 }
 
+// Retry is only useful when desktop has an Ari session to attach to the upload
+// request. Checking first lets the UI explain a signed-out state before the
+// native API proxy collapses it into a generic network/backend failure.
 async function onUpload(): Promise<void> {
   busy.value = true;
-  error.value = false;
+  error.value = null;
   confirmingDiscard.value = false;
   try {
+    if (!(await auth.checkSession())) {
+      error.value = 'Upload failed — sign in to Ari again, then retry.';
+      return;
+    }
     await combineAndUpload(items.value);
     await refresh();
     emit('uploaded');
   } catch (e) {
     console.error('Pending upload failed', e);
-    error.value = true;
+    error.value = uploadErrorMessage(e);
   } finally {
     busy.value = false;
   }
