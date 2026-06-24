@@ -687,6 +687,28 @@ describe('LibraryView', () => {
     expect(invoke).not.toHaveBeenCalledWith('open_meeting_picker', {});
   });
 
+  it('Today view ignores an auto-selected earlier today row when a meeting is live', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    const earlierToday = new Date(new Date().setHours(7, 0, 0, 0)).toISOString();
+    const start = new Date(Date.now() - 30 * 60_000).toISOString();
+    const end = new Date(Date.now() + 30 * 60_000).toISOString();
+    listMeetings.mockResolvedValue([
+      item({ id: '50', title: 'Earlier Today', timestamp: earlierToday, files: undefined }),
+      item({ id: '99', title: 'Live Standup', timestamp: start, endTimestamp: end, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(wrapper.find('.meeting-item').text()).toContain('Earlier Today');
+
+    await wrapper.get('button[title="Today"]').trigger('click');
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 50 });
+  });
+
   it('Today view opens the picker when no meeting is live and none is selected today', async () => {
     backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
