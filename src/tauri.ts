@@ -96,6 +96,23 @@ export async function getDesktopConfig(): Promise<DesktopConfig> {
   return invoke<DesktopConfig>('get_desktop_config');
 }
 
+export type PlatformOs = 'macos' | 'windows' | 'linux';
+export type LocalBackendEngine = 'swift-mlx' | 'cpp-sidecar' | null;
+
+export interface PlatformCapabilities {
+  os: PlatformOs;
+  localBackend: { supported: boolean; engine: LocalBackendEngine };
+  systemAudio: { supported: boolean; settingsUrl: string | null };
+  autoRecord: { supported: boolean };
+  nativeShare: { supported: boolean };
+  notificationSettingsUrl: string | null;
+  microphoneSettingsUrl: string | null;
+}
+
+export function getPlatformCapabilities(): Promise<PlatformCapabilities> {
+  return invoke<PlatformCapabilities>('platform_capabilities');
+}
+
 export interface ShareAnchor {
   x: number;
   y: number;

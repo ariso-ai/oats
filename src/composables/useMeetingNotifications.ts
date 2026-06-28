@@ -5,6 +5,7 @@ import {
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
 import { emit } from '@tauri-apps/api/event';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 
 // The Pusher connection + notification dispatch live natively in Rust
 // (see src-tauri/src/meeting_notifications.rs) because macOS suspends hidden
@@ -50,12 +51,9 @@ export async function ensureNotificationPermission(): Promise<boolean> {
 
 /**
  * Open the OS notification settings so the user can grant permission manually.
- * Used when a permission request can't surface a prompt (e.g. macOS has already
- * recorded a decision). macOS only — a no-op on other platforms.
+ * Used when a permission request can't surface a prompt.
  */
 export async function openNotificationSettings(): Promise<void> {
-  if (!navigator.userAgent.includes('Mac')) return;
-  await openUrl(
-    'x-apple.systempreferences:com.apple.Notifications-Settings.extension'
-  );
+  const url = (await loadPlatformCapabilities()).notificationSettingsUrl;
+  if (url) await openUrl(url);
 }

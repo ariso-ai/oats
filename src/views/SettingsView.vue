@@ -211,7 +211,7 @@
               type="checkbox"
               class="toggle-input"
               :checked="systemAudioEnabled"
-              :disabled="recordingToggleBusy"
+              :disabled="recordingToggleBusy || !systemAudioSupported"
               @change="onToggleSystemAudio"
             />
             <span class="toggle-track">
@@ -224,6 +224,9 @@
         </p>
         <p v-else-if="systemAudioStatus === 'denied'" class="notif-status notif-status--err">
           Permission not granted
+        </p>
+        <p v-else-if="!systemAudioSupported" class="notif-status notif-status--err">
+          System audio capture is not available on this platform yet.
         </p>
 
         <div class="setting-row" style="margin-top: 16px">
@@ -344,6 +347,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, type ModelStatus } from '../tauri';
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
+import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import {
   loadRecordingEnabled,
@@ -395,6 +399,7 @@ const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
 const appVersion = __APP_VERSION__;
+const platformCapabilities = ref(defaultPlatformCapabilities());
 
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
@@ -408,6 +413,10 @@ const sttProgress = ref<number | null>(null);
 const llmProgress = ref<number | null>(null);
 
 async function refreshModelStatus() {
+  if (!platformCapabilities.value.localBackend.supported) {
+    modelStatus.value = { state: 'unsupported' };
+    return;
+  }
   try {
     modelStatus.value = await local.modelStatus();
   } catch {
@@ -572,6 +581,7 @@ function startMissingDownloads() {
 }
 
 const unsupported = computed(() => modelStatus.value.state === 'unsupported');
+const systemAudioSupported = computed(() => platformCapabilities.value.systemAudio.supported);
 const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
 const anyDownloading = computed(
@@ -589,10 +599,10 @@ const showModelBanner = computed(() =>
 );
 
 const sttStatusText = computed(() =>
-  unsupported.value ? 'Unsupported on this device' : rowStatusText(sttBusy.value, sttProgress.value),
+  unsupported.value ? 'Unsupported on this platform' : rowStatusText(sttBusy.value, sttProgress.value),
 );
 const llmStatusText = computed(() =>
-  unsupported.value ? 'Unsupported on this device' : rowStatusText(llmBusy.value, llmProgress.value),
+  unsupported.value ? 'Unsupported on this platform' : rowStatusText(llmBusy.value, llmProgress.value),
 );
 
 const checking = ref(false);
@@ -859,6 +869,7 @@ async function refreshSignedInAccount() {
 }
 
 onMounted(async () => {
+  platformCapabilities.value = await loadPlatformCapabilities();
   await refreshSignedInAccount();
 
   // Bootstrap recording toggles in its own try/catch so a settings-store or

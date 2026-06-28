@@ -2,6 +2,7 @@ import { ref, type Ref } from 'vue';
 import lamejs from '@breezystack/lamejs';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
@@ -20,7 +21,7 @@ export function useRecorder() {
   const error: Ref<string | null> = ref(null);
   const durationSeconds: Ref<number> = ref(0);
   const startedAt: Ref<string | null> = ref(null);
-  const systemAudioSupported: Ref<boolean> = ref(hasTauri);
+  const systemAudioSupported: Ref<boolean> = ref(false);
   // Wall-clock of the last frame that carried real sound, for the silence
   // backstop. Seeded on start and reset on resume so paused gaps don't count.
   const lastSoundAt: Ref<number> = ref(Date.now());
@@ -123,7 +124,10 @@ export function useRecorder() {
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
 
-    const useSystemAudio = (mode === 'mic_and_system' || mode === 'system') && hasTauri;
+    const caps = await loadPlatformCapabilities();
+    systemAudioSupported.value = hasTauri && caps.systemAudio.supported;
+    const useSystemAudio =
+      (mode === 'mic_and_system' || mode === 'system') && systemAudioSupported.value;
     const useMic = mode !== 'system';
     // Outside Tauri, system-audio-only collapses to no usable input; fail fast
     // rather than building a silent graph and recording zeroes.

@@ -52,11 +52,11 @@ body:
       required: true
 
   - type: input
-    id: macos-version
+    id: platform-version
     attributes:
-      label: macOS version
-      description: Apple menu →  About This Mac.
-      placeholder: macOS 15.1 (Apple Silicon)
+      label: OS / platform version
+      description: For macOS, include Apple Silicon/Intel. For Windows, include Windows 10/11 and build if known.
+      placeholder: macOS 15.1 (Apple Silicon) or Windows 11 23H2
     validations:
       required: true
 
@@ -67,6 +67,7 @@ body:
       options:
         - DMG from the Releases page
         - Homebrew cask
+        - Windows NSIS installer
         - Built from source
     validations:
       required: true

@@ -7,15 +7,16 @@
 
 # oats
 
-**Your meetings, written up for you — on macOS.**
+**Your meetings, written up for you on desktop.**
 
-*You talk. It listens. You get notes. Free in the cloud, or 100% offline on your own Mac.*
+*You talk. It listens. You get notes. Free in the cloud, or 100% offline on supported hardware.*
 
 [![Desktop App](https://github.com/ariso-ai/oats/actions/workflows/desktop.yaml/badge.svg)](https://github.com/ariso-ai/oats/actions/workflows/desktop.yaml)
 [![Release](https://github.com/ariso-ai/oats/actions/workflows/release.yaml/badge.svg)](https://github.com/ariso-ai/oats/actions/workflows/release.yaml)
 [![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&logo=apple&color=000000)](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](https://github.com/ariso-ai/oats/releases/latest)
+[![Windows in progress](https://img.shields.io/badge/Windows-11%20in%20progress-0078D4?logo=windows&logoColor=white)](docs/superpowers/specs/2026-06-27-windows-full-parity-design.md)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
@@ -36,7 +37,7 @@ oats lives in your menu bar and stays out of the way. Hit record, get back to yo
 You decide where the work happens:
 
 - ☁️ **Free, in the cloud** — sign in and let [Ariso](https://ariso.ai) do the heavy lifting. Real-time transcription, zero setup.
-- 🔒 **Private, on your Mac** — flip one switch and recording, transcription, speaker labels, and notes all run **offline**. No login. No upload. Nothing leaves your machine.
+- 🔒 **Private, on-device** — flip one switch and recording, transcription, speaker labels, and notes all run **offline**. No login. No upload. Nothing leaves your machine.
 
 ## ✨ Features
 
@@ -50,7 +51,11 @@ You decide where the work happens:
 
 ## 📥 Install
 
-> **Requires Apple Silicon (M-series) and macOS 14 or later.**
+| Platform | Public support | Notes |
+| --- | --- | --- |
+| macOS 14+ on Apple Silicon | Supported | Full Ariso and Local backend support. |
+| Windows 11 | In progress | CI and packaging scaffolding exist; public release is blocked on the native Windows Local sidecar and audio capture. |
+| Windows 10 | Planned smoke coverage | Not public-support ready. |
 
 ### 🍺 Homebrew
 
@@ -83,10 +88,10 @@ The default. Sign in, hit record. Audio streams to the Ariso backend, which tran
 
 ### 🔒 Local — private, 100% offline
 
-Sensitive conversation? Switch the backend to **Local** and oats does *everything* on your Mac:
+Sensitive conversation? Switch the backend to **Local** and oats does *everything* on-device:
 
 - **Recording** is captured and saved locally.
-- **Transcription** runs on the Apple Neural Engine ([Parakeet](https://github.com/FluidInference/FluidAudio) ASR + speaker diarization).
+- **Transcription** runs locally: Apple Neural Engine on macOS today; a Windows cpp sidecar is in progress.
 - **Notes** are written by an on-device language model — no API calls.
 
 No login, no upload — your audio, transcripts, and notes never leave your machine. There's a one-time download for the models: open **Settings → On-device models** and install the **speech voice model** and **language model** (each shows a green tick when ready). After that, oats works completely offline.
@@ -105,11 +110,11 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | --- | --- | --- |
 | **Cost** | Free | Free |
 | **Account / login** | Required | None |
-| **Audio leaves your Mac** | Your account (encrypted with your key) | **Never** |
-| **Transcription** | Ariso backend (no model training) | Apple Neural Engine |
+| **Audio leaves your device** | Your account (encrypted with your key) | **Never** |
+| **Transcription** | Ariso backend (no model training) | Apple Neural Engine on macOS; Windows local sidecar in progress |
 | **Summary notes** | Ariso backend (no model training) | On-device LLM |
 | **Works offline** | No | **Yes** |
-| **Best for** | Convenience, sharing, any Mac | Confidential meetings, air-gapped use |
+| **Best for** | Convenience and sharing | Confidential meetings, air-gapped use |
 
 ## 🤝 Contributing
 

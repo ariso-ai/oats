@@ -6,6 +6,7 @@ mod audio_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
+mod platform;
 mod recorder_pill;
 mod storage;
 mod transcribe;
@@ -136,6 +137,7 @@ fn main() {
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            platform::platform_capabilities,
             meeting_notifications::show_silence_prompt,
             meeting_notifications::dismiss_silence_prompt,
             meeting_notifications::resolve_silence_prompt,

@@ -36,7 +36,11 @@ pub fn sidecar_path() -> Result<PathBuf, String> {
     }
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let dir = exe.parent().ok_or("no parent dir for current_exe")?;
-    Ok(dir.join("ariso-stt"))
+    Ok(dir.join(if cfg!(target_os = "windows") {
+        "ariso-stt.exe"
+    } else {
+        "ariso-stt"
+    }))
 }
 
 /// Run the sidecar in transcribe mode and parse its JSON stdout.
@@ -291,24 +295,83 @@ pub async fn local_finalize_recording(
         .map(|(res, _notes)| res)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
 
     // SAFETY (all set_var/remove_var below): tests run with `--test-threads=1`,
     // so there is no concurrent env mutation while these calls execute.
 
     /// Write an executable stub script and point ARISO_STT_BIN at it.
     fn write_stub(dir: &Path, body: &str) -> PathBuf {
-        let path = dir.join("stub-stt.sh");
+        let path = if cfg!(target_os = "windows") {
+            dir.join("stub-stt.cmd")
+        } else {
+            dir.join("stub-stt.sh")
+        };
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/bin/sh\n{body}").unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        write!(f, "{}", platform_stub_body(body)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
         path
+    }
+
+    #[cfg(unix)]
+    fn platform_stub_body(body: &str) -> String {
+        format!("#!/bin/sh\n{body}\n")
+    }
+
+    #[cfg(windows)]
+    fn platform_stub_body(body: &str) -> String {
+        fn extract_json(body: &str) -> Option<&str> {
+            let start = body.find("cat <<'EOF'\n")? + "cat <<'EOF'\n".len();
+            let rest = &body[start..];
+            let end = rest.find("\nEOF")?;
+            Some(&rest[..end])
+        }
+
+        fn echo_line(out: &mut String, line: &str) {
+            out.push_str("echo ");
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+
+        let mut out = String::from("@echo off\r\n");
+        if body.contains("if [ \"$1\" = notes ]") {
+            out.push_str("if \"%1\"==\"notes\" (\r\n");
+            if body.contains("notes boom") {
+                out.push_str("echo notes boom 1>&2\r\nexit /b 1\r\n");
+            } else if body.contains("echo 'boom' >&2") {
+                out.push_str("echo boom 1>&2\r\nexit /b 1\r\n");
+            } else {
+                echo_line(&mut out, "# Notes");
+                if body.contains("- did a thing") {
+                    echo_line(&mut out, "- did a thing");
+                }
+                if body.contains("- point") {
+                    echo_line(&mut out, "- point");
+                }
+                out.push_str("exit /b 0\r\n");
+            }
+            out.push_str(")\r\n");
+        }
+        if let Some(json) = extract_json(body) {
+            for line in json.lines() {
+                echo_line(&mut out, line);
+            }
+            out.push_str("exit /b 0\r\n");
+        } else if body.contains("boom") {
+            out.push_str("echo boom 1>&2\r\nexit /b 1\r\n");
+        } else {
+            out.push_str("exit /b 1\r\n");
+        }
+        out
     }
 
     #[tokio::test]

@@ -119,6 +119,13 @@ impl Drop for DownloadGuard<'_> {
 
 #[tauri::command]
 pub fn local_model_status() -> Result<ModelStatus, String> {
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        return Ok(ModelStatus {
+            state: "unsupported".into(),
+            version: None,
+            llm_ready: Some(false),
+        });
+    }
     let root = crate::storage::ariso_root()?;
     Ok(status(&root))
 }
@@ -128,6 +135,18 @@ pub fn local_model_status() -> Result<ModelStatus, String> {
 /// serializes against a concurrent STT download.
 #[tauri::command]
 pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        let msg = "Windows local STT model download is waiting for the cpp-sidecar model bundle"
+            .to_string();
+        let _ = app.emit("model://stt/error", msg.clone());
+        return Err(msg);
+    }
+    if !cfg!(target_os = "macos") {
+        let msg = "Local STT is not supported on this platform".to_string();
+        let _ = app.emit("model://stt/error", msg.clone());
+        return Err(msg);
+    }
+
     let _guard = DownloadGuard::acquire(&STT_DOWNLOAD_IN_PROGRESS)
         .ok_or_else(|| "a model download is already in progress".to_string())?;
 

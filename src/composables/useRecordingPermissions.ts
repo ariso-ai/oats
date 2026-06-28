@@ -2,15 +2,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
 import { deriveEnabledFromLegacy, type RecordingEnabled } from '../views/recordingSettings';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 
 const SETTINGS_PATH = 'settings.json';
 const MIC_KEY = 'recordMicEnabled';
 const SYS_KEY = 'recordSystemAudioEnabled';
 const LEGACY_KEY = 'recordingMode';
-
-function isMac(): boolean {
-  return typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
-}
 
 /**
  * Load both recording-source flags, migrating from the legacy `recordingMode`
@@ -81,18 +78,17 @@ export async function checkSystemAudioPermission(): Promise<boolean> {
   }
 }
 
-/** Open System Settings → Privacy → Microphone. macOS only; no-op elsewhere. */
+/** Open the OS microphone permission pane when the platform exposes one. */
 export async function openMicSettings(): Promise<void> {
-  if (!isMac()) return;
-  await openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
+  const url = (await loadPlatformCapabilities()).microphoneSettingsUrl;
+  if (url) await openUrl(url);
 }
 
 /**
- * Open System Settings → Privacy → Screen & System Audio Recording. The
- * "System Audio Recording Only" entries live in a section of this same pane.
- * macOS only; no-op elsewhere.
+ * Open the OS system-audio settings pane when the platform exposes one. On
+ * macOS this is Privacy & Security; on Windows this is the Sound settings page.
  */
 export async function openSystemAudioSettings(): Promise<void> {
-  if (!isMac()) return;
-  await openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+  const url = (await loadPlatformCapabilities()).systemAudio.settingsUrl;
+  if (url) await openUrl(url);
 }
