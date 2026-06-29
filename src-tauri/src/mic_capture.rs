@@ -17,6 +17,12 @@ mod imp {
     pub fn stop() -> Result<(), String> {
         Ok(())
     }
+    pub fn check_permission() -> bool {
+        false
+    }
+    pub fn request_permission() -> bool {
+        false
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -25,6 +31,8 @@ mod imp {
         base64_encode, downmix_to_mono, get_property, AudioObjectID, Resampler,
     };
     use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
     use objc2_core_audio::{
         kAudioDevicePropertyStreamFormat, kAudioHardwarePropertyDefaultInputDevice,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
@@ -191,6 +199,46 @@ mod imp {
         Ok(())
     }
 
+    /// Returns `true` if the app is already authorized for microphone access.
+    pub fn check_permission() -> bool {
+        unsafe {
+            let audio_type = AVMediaTypeAudio.expect("AVMediaTypeAudio must be non-null");
+            AVCaptureDevice::authorizationStatusForMediaType(audio_type)
+                == AVAuthorizationStatus::Authorized
+        }
+    }
+
+    /// Requests microphone access from the user if not yet determined.
+    ///
+    /// - Already `Authorized`: returns `true` immediately.
+    /// - `NotDetermined`: presents the TCC prompt and blocks until the user
+    ///   responds, then returns the result.
+    /// - `Denied` / `Restricted`: returns `false` immediately.
+    pub fn request_permission() -> bool {
+        unsafe {
+            let audio_type = AVMediaTypeAudio.expect("AVMediaTypeAudio must be non-null");
+            let status = AVCaptureDevice::authorizationStatusForMediaType(audio_type);
+            match status {
+                AVAuthorizationStatus::Authorized => true,
+                AVAuthorizationStatus::NotDetermined => {
+                    // requestAccessForMediaType:completionHandler: is async; block
+                    // on the result with a channel so the command returns a
+                    // definite bool rather than racing with the prompt.
+                    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+                    let handler = RcBlock::new(move |granted: Bool| {
+                        let _ = tx.send(granted.as_bool());
+                    });
+                    AVCaptureDevice::requestAccessForMediaType_completionHandler(
+                        audio_type,
+                        &*handler,
+                    );
+                    rx.recv().unwrap_or(false)
+                }
+                _ => false, // Denied or Restricted
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -246,4 +294,22 @@ pub fn start_microphone_capture(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn stop_microphone_capture() -> Result<(), String> {
     imp::stop()
+}
+
+/// Prompt for (or verify) the macOS microphone TCC permission.
+///
+/// Returns `true` if the user granted (or had already granted) access,
+/// `false` otherwise. On non-macOS platforms always returns `false`.
+#[tauri::command]
+pub fn request_microphone_permission() -> bool {
+    imp::request_permission()
+}
+
+/// Current microphone TCC permission status.
+///
+/// Returns `true` if access is already authorized, `false` in all other
+/// states (not-determined, denied, restricted, or non-macOS).
+#[tauri::command]
+pub fn check_microphone_permission() -> bool {
+    imp::check_permission()
 }
