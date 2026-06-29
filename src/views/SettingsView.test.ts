@@ -90,6 +90,11 @@ vi.mock('../composables/useSilenceDetection', () => ({
   isSilenceDetectionEnabled: () => Promise.resolve(true),
   setSilenceDetectionEnabled: (...a: unknown[]) => setSilenceDetectionEnabled(...a),
 }));
+const setMeetingEndReminderEnabled = vi.fn(() => Promise.resolve());
+vi.mock('../composables/useMeetingEndReminder', () => ({
+  isMeetingEndReminderEnabled: () => Promise.resolve(true),
+  setMeetingEndReminderEnabled: (...a: unknown[]) => setMeetingEndReminderEnabled(...a),
+}));
 
 import SettingsView from './SettingsView.vue';
 
@@ -387,5 +392,34 @@ describe('SettingsView silence detection toggle', () => {
     await input.trigger('change');
     await flushPromises();
     expect(setSilenceDetectionEnabled).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('SettingsView meeting stop reminder toggle', () => {
+  // Find the checkbox in the setting-row whose label is `label`.
+  function toggleFor(wrapper: ReturnType<typeof mount>, label: string) {
+    const row = wrapper
+      .findAll('.setting-row')
+      .find((r) => r.find('.setting-label').text() === label);
+    expect(row, `setting-row for "${label}"`).toBeDefined();
+    return row!.find('input.toggle-input');
+  }
+
+  it('renders the Meeting stop reminder toggle, checked by default', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Meeting stop reminder');
+    expect(input.exists()).toBe(true);
+    expect((input.element as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('persists the new value when toggled off', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Meeting stop reminder');
+    (input.element as HTMLInputElement).checked = false;
+    await input.trigger('change');
+    await flushPromises();
+    expect(setMeetingEndReminderEnabled).toHaveBeenCalledWith(false);
   });
 });

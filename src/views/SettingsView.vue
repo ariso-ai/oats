@@ -295,6 +295,25 @@
         >
           Permission not granted
         </p>
+        <div class="setting-row" style="margin-top: 16px">
+          <span id="meeting-end-reminder-label" class="setting-label">Meeting stop reminder</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              aria-labelledby="meeting-end-reminder-label"
+              :checked="meetingEndReminder"
+              @change="onToggleMeetingEndReminder"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p class="setting-hint">
+          Prompts you to keep or stop recording once a calendar meeting's
+          scheduled end has passed.
+        </p>
       </div>
     </section>
 
@@ -370,6 +389,10 @@ import {
   isSilenceDetectionEnabled,
   setSilenceDetectionEnabled,
 } from '../composables/useSilenceDetection';
+import {
+  isMeetingEndReminderEnabled,
+  setMeetingEndReminderEnabled,
+} from '../composables/useMeetingEndReminder';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
@@ -382,6 +405,7 @@ const systemAudioEnabled = ref(true);
 const autoRecordEnabled = ref(true);
 const autoRecordSupported = ref(true);
 const silenceDetectionEnabled = ref(true);
+const meetingEndReminder = ref(true);
 const micStatus = ref<PermissionStatus>('');
 const systemAudioStatus = ref<PermissionStatus>('');
 const micToggling = ref(false);
@@ -762,6 +786,17 @@ async function onToggleSilenceDetection(e: Event) {
   }
 }
 
+async function onToggleMeetingEndReminder(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = meetingEndReminder.value;
+  meetingEndReminder.value = checked;
+  try {
+    await setMeetingEndReminderEnabled(checked);
+  } catch {
+    meetingEndReminder.value = previous;
+  }
+}
+
 async function onToggleSystemAudio(e: Event) {
   if (recordingToggleBusy.value) return;
   systemAudioToggling.value = true;
@@ -871,6 +906,7 @@ onMounted(async () => {
     autoRecordSupported.value = await isAutoRecordSupported();
     autoRecordEnabled.value = await isAutoRecordEnabled();
     silenceDetectionEnabled.value = await isSilenceDetectionEnabled();
+    meetingEndReminder.value = await isMeetingEndReminderEnabled();
     // Both mic and system-audio status are left blank on load: there's no
     // silent preflight for either (getUserMedia prompts; the system-audio
     // probe creates a process tap, which trips the TCC dialog on first use).
