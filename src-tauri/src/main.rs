@@ -4,6 +4,7 @@
 mod activation;
 mod audio_util;
 mod audio_capture;
+mod mic_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
