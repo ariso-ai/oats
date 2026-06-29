@@ -4,10 +4,10 @@
 //! (AUVoiceIO), so it does not trigger macOS audio ducking of system audio.
 //!
 //! Flow: query the default input device → read its native stream format (input
-//! scope) → verify it is 32-bit float interleaved LinearPCM → install an IO
-//! block that receives Float32 PCM at the device's native rate → downmix to
-//! mono, resample to 44.1 kHz, convert to Int16, and emit as `mic-audio-data`
-//! (base64) for the recorder frontend.
+//! scope) → verify it is 32-bit float LinearPCM (interleaved, or non-interleaved
+//! mono) → install an IO block that receives Float32 PCM at the device's native
+//! rate → downmix to mono, resample to 44.1 kHz, convert to Int16, and emit as
+//! `mic-audio-data` (base64) for the recorder frontend.
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
@@ -22,8 +22,7 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use crate::audio_util::{
-        base64_encode, downmix_to_mono, get_property, is_supported_pcm_format,
-        AudioObjectID, Resampler,
+        base64_encode, downmix_to_mono, get_property, AudioObjectID, Resampler,
     };
     use block2::RcBlock;
     use objc2_core_audio::{
@@ -32,7 +31,11 @@ mod imp {
         kAudioObjectSystemObject, AudioDeviceCreateIOProcIDWithBlock,
         AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
     };
-    use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp};
+    use objc2_core_audio_types::{
+        kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
+        kAudioFormatLinearPCM, kLinearPCMFormatFlagIsNonInterleaved, AudioBufferList,
+        AudioStreamBasicDescription, AudioTimeStamp,
+    };
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex};
     use tauri::Emitter;
@@ -49,6 +52,24 @@ mod imp {
     }
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
+
+    /// Like `audio_util::is_supported_pcm_format`, but tolerant of the
+    /// non-interleaved flag for a single-channel device. HAL hardware inputs
+    /// (including the built-in mic) commonly report a non-interleaved native
+    /// format even for mono, where interleaving is a no-op and `downmix_to_mono`
+    /// handles it correctly. Non-interleaved *multi*-channel is still rejected:
+    /// `downmix_to_mono` would concatenate rather than mix those channels.
+    fn is_supported_input_format(asbd: &AudioStreamBasicDescription) -> bool {
+        let interleaved_ok = asbd.mFormatFlags & kLinearPCMFormatFlagIsNonInterleaved == 0
+            || asbd.mChannelsPerFrame == 1;
+        asbd.mFormatID == kAudioFormatLinearPCM
+            && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            && asbd.mFormatFlags & kAudioFormatFlagIsPacked != 0
+            && asbd.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
+            && interleaved_ok
+            && asbd.mBitsPerChannel == 32
+            && asbd.mSampleRate > 0.0
+    }
 
     pub fn start(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
@@ -78,10 +99,10 @@ mod imp {
             // `downmix_to_mono`, so the device must deliver 32-bit float
             // LinearPCM. Built-in mics do; non-float devices are out of scope
             // and must error rather than be misread as garbage.
-            if !is_supported_pcm_format(&asbd) {
+            if !is_supported_input_format(&asbd) {
                 return Err(format!(
                     "unsupported input stream format (id={}, flags={:#x}, bits={}); \
-                     expected 32-bit float interleaved LinearPCM",
+                     expected 32-bit float LinearPCM (interleaved, or non-interleaved mono)",
                     asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel
                 ));
             }
@@ -168,6 +189,48 @@ mod imp {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn interleaved_mono_f32() -> AudioStreamBasicDescription {
+            AudioStreamBasicDescription {
+                mSampleRate: 48_000.0,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: 4,
+                mFramesPerPacket: 1,
+                mBytesPerFrame: 4,
+                mChannelsPerFrame: 1,
+                mBitsPerChannel: 32,
+                mReserved: 0,
+            }
+        }
+
+        #[test]
+        fn accepts_interleaved_mono_float32() {
+            assert!(is_supported_input_format(&interleaved_mono_f32()));
+        }
+
+        #[test]
+        fn accepts_non_interleaved_mono_float32() {
+            // macOS commonly reports the built-in mic as non-interleaved mono.
+            let mut asbd = interleaved_mono_f32();
+            asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
+            assert!(is_supported_input_format(&asbd));
+        }
+
+        #[test]
+        fn rejects_non_interleaved_stereo_float32() {
+            // Non-interleaved multi-channel would be mishandled by downmix_to_mono
+            // (it concatenates rather than mixes channels in that layout).
+            let mut asbd = interleaved_mono_f32();
+            asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
+            asbd.mChannelsPerFrame = 2;
+            assert!(!is_supported_input_format(&asbd));
+        }
     }
 }
 
