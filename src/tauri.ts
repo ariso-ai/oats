@@ -343,3 +343,23 @@ export async function openOnboardingWindow(): Promise<void> {
 export async function openSettingsWindow(): Promise<void> {
   await invoke('create_settings_window');
 }
+
+/** Start native microphone capture. */
+export async function startMicrophoneCapture(): Promise<void> {
+  await invoke('start_microphone_capture');
+}
+
+/** Stop native microphone capture. */
+export async function stopMicrophoneCapture(): Promise<void> {
+  await invoke('stop_microphone_capture');
+}
+
+/** Prompt the user for microphone permission via the native OS dialog. */
+export async function requestMicrophonePermission(): Promise<boolean> {
+  return invoke<boolean>('request_microphone_permission');
+}
+
+/** Return the current microphone permission state without prompting. */
+export async function checkMicrophonePermission(): Promise<boolean> {
+  return invoke<boolean>('check_microphone_permission');
+}
