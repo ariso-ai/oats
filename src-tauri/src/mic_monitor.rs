@@ -4,6 +4,7 @@
 //! sustained mic-off it emits `auto-record://stop`.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -166,6 +167,22 @@ mod tests {
         assert_eq!(m.tick(6_000, &pids(&[42]), false), None); // -> Recording
         assert_eq!(m.tick(20_000, &pids(&[42]), false), None); // stays recording
     }
+
+    #[test]
+    fn reset_machine_rearms_for_next_back_to_back_call() {
+        let mut m = Machine::new();
+        m.tick(0, &pids(&[42]), false);
+        assert_eq!(m.tick(3_000, &pids(&[42]), false), Some(Action::Start)); // Recording
+        // Same app holds the mic across the call boundary: no stop fires, and the
+        // machine is stuck in Recording.
+        assert_eq!(m.tick(4_000, &pids(&[42]), false), None);
+        // request_mic_monitor_rearm replaces the machine with a fresh one while the
+        // recorder is now stopped (recording_active == false). It re-arms on the
+        // still-held mic and starts a SEPARATE recording for call B.
+        m = Machine::new();
+        assert_eq!(m.tick(5_000, &pids(&[42]), false), None); // Idle -> Arming
+        assert_eq!(m.tick(8_000, &pids(&[42]), false), Some(Action::Start));
+    }
 }
 
 /// PIDs (excluding our own) currently running audio input, via CoreAudio.
@@ -197,10 +214,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SETTINGS_PATH: &str = "settings.json";
 const ENABLED_KEY: &str = "autoRecordEnabled";
 
-/// Holds the running monitor task (if any). Mirrors `NotificationManager`.
+/// Holds the running monitor task (if any) plus a re-arm request flag. The flag
+/// is set by `request_mic_monitor_rearm` and consumed by `run_loop` to reset the
+/// state machine — needed because a continuous-mic back-to-back transition never
+/// releases the trigger PIDs, so the machine would otherwise stay stuck in
+/// `Recording` and never start the next call.
 #[derive(Default)]
 pub struct MicMonitorManager {
     handle: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    rearm: AtomicBool,
 }
 
 impl MicMonitorManager {
@@ -249,6 +271,16 @@ async fn run_loop(app: AppHandle) {
     let mut machine = Machine::new();
     let mut elapsed: u64 = 0;
     loop {
+        // A re-arm request (e.g. after a meeting-end stop) resets the machine so
+        // it can start a fresh recording for the next call even when the mic was
+        // never released.
+        if app
+            .state::<MicMonitorManager>()
+            .rearm
+            .swap(false, Ordering::SeqCst)
+        {
+            machine = Machine::new();
+        }
         let external = external_input_pids();
         let recording_active = app
             .state::<crate::recording_state::RecordingState>()
@@ -326,6 +358,15 @@ pub async fn sync_auto_record(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn auto_record_supported() -> bool {
     is_supported()
+}
+
+/// Reset the mic monitor so it re-arms for the next call. Called by the recorder
+/// window after a meeting-end "Stop" so a back-to-back call records separately.
+#[tauri::command]
+pub fn request_mic_monitor_rearm(app: AppHandle) {
+    app.state::<MicMonitorManager>()
+        .rearm
+        .store(true, Ordering::SeqCst);
 }
 
 #[cfg(target_os = "macos")]

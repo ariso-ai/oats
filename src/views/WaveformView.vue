@@ -111,6 +111,11 @@ import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
 import { deriveRecordingMode } from './recordingSettings';
 import { centerWeightedBars } from './waveformBars';
 import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/silenceWatch';
+import {
+  shouldPromptMeetingEnd,
+  findMeetingEndAt,
+  MEETING_END_PROMPT_TIMEOUT_MS,
+} from '../composables/meetingEndWatch';
 import { localRecordingIdFromStart } from '../composables/localRecordingId';
 import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
@@ -209,6 +214,8 @@ watch(
   [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
   () => broadcastState(),
 );
+// Re-resolve the scheduled end whenever the attached meeting changes.
+watch(effectiveMeetingId, () => void resolveMeetingEnd());
 // Heartbeat so the strip can detect a dead recorder (no events ≈ crashed):
 // frame/duration watchers go quiet during upload and after stop.
 const stateHeartbeat = setInterval(() => broadcastState(), 1_000);
@@ -258,6 +265,18 @@ let unlistenSilenceStop: UnlistenFn | null = null;
 let promptShownAt: number | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
 let silenceTimer: ReturnType<typeof setInterval> | null = null;
+
+let unlistenMeetingEndKeep: UnlistenFn | null = null;
+let unlistenMeetingEndStop: UnlistenFn | null = null;
+let meetingEndTimer: ReturnType<typeof setInterval> | null = null;
+// Scheduled end of the attached meeting (epoch ms), or null when the watch is
+// disabled (local / unattached / non-Ariso / no end_at). Meeting title for the
+// card subtitle.
+const meetingEndAt = ref<number | null>(null);
+const meetingEndSubtitle = ref<string | undefined>(undefined);
+let meetingEndPromptShownAt: number | null = null;
+let meetingEndPromptsShown = 0;
+let meetingEndLastPromptAt: number | null = null;
 
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
@@ -345,6 +364,14 @@ async function discardRecording() {
     promptShownAt = null;
     void invoke('dismiss_silence_prompt');
   }
+  if (meetingEndTimer) {
+    clearInterval(meetingEndTimer);
+    meetingEndTimer = null;
+  }
+  if (meetingEndPromptShownAt !== null) {
+    meetingEndPromptShownAt = null;
+    void invoke('dismiss_meeting_end_prompt');
+  }
   waveform.stop();
   try {
     await recorder.stopRecording();
@@ -373,6 +400,14 @@ async function handleStop() {
   if (promptShownAt !== null) {
     promptShownAt = null;
     void invoke('dismiss_silence_prompt');
+  }
+  if (meetingEndTimer) {
+    clearInterval(meetingEndTimer);
+    meetingEndTimer = null;
+  }
+  if (meetingEndPromptShownAt !== null) {
+    meetingEndPromptShownAt = null;
+    void invoke('dismiss_meeting_end_prompt');
   }
   collapse();
   isUploading.value = true;
@@ -422,6 +457,29 @@ async function resolveSilenceSubtitle(): Promise<string | undefined> {
   }
 }
 
+// Resolve the attached meeting's scheduled end (Ariso only). end_at lives on the
+// scheduled-meetings list, NOT /desktop/meetings/{id}, so fetch the ±2h window
+// and match by id. Any failure leaves meetingEndAt null → the watch stays off.
+async function resolveMeetingEnd() {
+  if (backend.value?.id !== 'ariso' || effectiveMeetingId.value === null) {
+    meetingEndAt.value = null;
+    meetingEndSubtitle.value = undefined;
+    return;
+  }
+  try {
+    const now = new Date();
+    const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const meetings = await useMeetingApi().listScheduledMeetings(start, end);
+    const info = findMeetingEndAt(meetings, effectiveMeetingId.value);
+    meetingEndAt.value = info.endAt;
+    meetingEndSubtitle.value = info.title ?? undefined;
+  } catch (e) {
+    console.error('Failed to resolve meeting end; meeting-end watch disabled', e);
+    meetingEndAt.value = null;
+  }
+}
+
 // User chose "Keep recording": reset the silence clock (same mechanism as
 // resume) so the prompt naturally re-fires after another 10 min of silence.
 // The tap auto-dismisses the notification, so no explicit dismiss is needed.
@@ -434,6 +492,29 @@ function handleSilenceKeep() {
 async function handleSilenceStop() {
   promptShownAt = null;
   await handleStop();
+}
+
+// User chose "Keep recording" (or ignored/timed-out): return to idle. The watch
+// re-prompts once more after MEETING_END_REPROMPT_MS, then stops asking.
+function handleMeetingEndKeep() {
+  meetingEndPromptShownAt = null;
+}
+
+// User chose "Stop": stop this recording, then re-arm the mic monitor so a
+// back-to-back next call records as a fresh, separately-attached session.
+async function handleMeetingEndStop() {
+  meetingEndPromptShownAt = null;
+  // Start stop (which includes upload/finalize) but re-arm the mic monitor
+  // immediately — before waiting for the upload — so a back-to-back call can
+  // be detected without delay. request_mic_monitor_rearm is a simple atomic
+  // flag store in Rust and is safe to call before finalize completes.
+  const stopTask = handleStop();
+  try {
+    await invoke('request_mic_monitor_rearm');
+  } catch (e) {
+    console.error('Failed to re-arm mic monitor after meeting-end stop', e);
+  }
+  await stopTask;
 }
 
 // Upload the stopped recording. Shared by the stop flow and the failed pill's
@@ -598,6 +679,46 @@ onMounted(async () => {
   unlistenSilenceKeep = await listen('silence-prompt://keep', handleSilenceKeep);
   unlistenSilenceStop = await listen('silence-prompt://stop', handleSilenceStop);
   unlistenAutoStop = await listen('auto-record://stop', handleStop);
+
+  // Resolve the attached meeting's end now (covers the manual param path; the
+  // watcher covers the async auto path).
+  void resolveMeetingEnd();
+
+  // Meeting-end watch: independent of the silence setting. Prompts when the
+  // attached meeting's scheduled end has passed; ignoring it keeps recording.
+  meetingEndTimer = setInterval(() => {
+    if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
+    const now = Date.now();
+    if (meetingEndPromptShownAt === null) {
+      if (
+        shouldPromptMeetingEnd(
+          meetingEndAt.value,
+          now,
+          recorder.isPaused.value,
+          meetingEndPromptsShown,
+          meetingEndLastPromptAt,
+        )
+      ) {
+        meetingEndPromptShownAt = now;
+        meetingEndLastPromptAt = now;
+        meetingEndPromptsShown += 1;
+        void invoke(
+          'show_meeting_end_prompt',
+          meetingEndSubtitle.value ? { subtitle: meetingEndSubtitle.value } : {},
+        );
+      }
+      return;
+    }
+    // Prompt is showing: dismiss on pause or after the timeout (= keep recording).
+    if (recorder.isPaused.value || now - meetingEndPromptShownAt >= MEETING_END_PROMPT_TIMEOUT_MS) {
+      meetingEndPromptShownAt = null;
+      void invoke('dismiss_meeting_end_prompt');
+    }
+  }, 1_000);
+
+  unlistenMeetingEndKeep = await listen('meeting-end-prompt://keep', handleMeetingEndKeep);
+  unlistenMeetingEndStop = await listen('meeting-end-prompt://stop', handleMeetingEndStop);
+
   if (isAuto) {
     void resolveAuto();
   }
@@ -616,6 +737,13 @@ onUnmounted(() => {
   if (promptShownAt !== null) {
     promptShownAt = null;
     void invoke('dismiss_silence_prompt');
+  }
+  if (meetingEndTimer) clearInterval(meetingEndTimer);
+  unlistenMeetingEndKeep?.();
+  unlistenMeetingEndStop?.();
+  if (meetingEndPromptShownAt !== null) {
+    meetingEndPromptShownAt = null;
+    void invoke('dismiss_meeting_end_prompt');
   }
 });
 </script>

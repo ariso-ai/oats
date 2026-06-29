@@ -42,3 +42,19 @@ export function parseSilencePromptParams(search: string): SilencePromptParams {
     Number.isFinite(rawSeconds) && rawSeconds > 0 ? rawSeconds : SILENCE_DEFAULT_SECONDS;
   return { seconds, subtitle: params.get('subtitle') || '' };
 }
+
+/** Cosmetic countdown for the meeting-end prompt; mirrors the FE timeout. */
+const MEETING_END_DEFAULT_SECONDS = 30;
+
+/**
+ * Params for the meeting-end stop prompt window. Same shape as the silence
+ * prompt (fixed title in the view; subtitle blank when absent), but a 30s
+ * default countdown.
+ */
+export function parseMeetingEndPromptParams(search: string): SilencePromptParams {
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  const rawSeconds = Number(params.get('seconds'));
+  const seconds =
+    Number.isFinite(rawSeconds) && rawSeconds > 0 ? rawSeconds : MEETING_END_DEFAULT_SECONDS;
+  return { seconds, subtitle: params.get('subtitle') || '' };
+}
