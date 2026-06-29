@@ -7,14 +7,41 @@ use tauri::{
 
 // The menu-bar icon is a macOS template image: AppKit uses the PNG alpha mask
 // and tints it for the current menu-bar material, matching system status items.
+#[cfg(not(target_os = "windows"))]
 const TRAY_ICON_TEMPLATE: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
+// Windows does not reliably template-tint tray icons, so use concrete color
+// assets and swap them on theme changes.
+#[cfg(target_os = "windows")]
+const TRAY_ICON_WINDOWS_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
+#[cfg(target_os = "windows")]
+const TRAY_ICON_WINDOWS_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
+
+fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
+    #[cfg(target_os = "windows")]
+    {
+        let bytes = match theme {
+            tauri::Theme::Dark => TRAY_ICON_WINDOWS_DARK,
+            _ => TRAY_ICON_WINDOWS_LIGHT,
+        };
+        return Image::from_bytes(bytes);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = theme;
+        Image::from_bytes(TRAY_ICON_TEMPLATE)
+    }
+}
 
 /// Re-apply the template tray icon after startup and theme notifications. The
 /// icon bytes stay constant; macOS owns the actual light/dark tint.
-pub fn apply_theme(app: &AppHandle, _theme: tauri::Theme) {
+pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
     let Some(tray) = app.tray_by_id("main") else { return };
-    if let Ok(icon) = Image::from_bytes(TRAY_ICON_TEMPLATE) {
+    if let Ok(icon) = tray_icon(theme) {
+        #[cfg(target_os = "macos")]
         let _ = tray.set_icon_with_as_template(Some(icon), true);
+        #[cfg(not(target_os = "macos"))]
+        let _ = tray.set_icon(Some(icon));
     }
 }
 
@@ -80,11 +107,8 @@ pub fn refresh_tray_title(app: &AppHandle) {
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_idle_menu(app, None)?;
 
-    TrayIconBuilder::with_id("main")
-        // Mark it as a template so AppKit tints it alongside the other menu-bar
-        // status icons instead of preserving the brand colors.
-        .icon(Image::from_bytes(TRAY_ICON_TEMPLATE)?)
-        .icon_as_template(true)
+    let builder = TrayIconBuilder::with_id("main")
+        .icon(tray_icon(tauri::Theme::Light)?)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
@@ -229,8 +253,15 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
                 _ => {}
             }
-        })
-        .build(app)?;
+        });
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        // Mark it as a template so AppKit tints it alongside the other menu-bar
+        // status icons instead of preserving the brand colors.
+        .icon_as_template(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.icon_as_template(false);
+    builder.build(app)?;
 
     Ok(())
 }

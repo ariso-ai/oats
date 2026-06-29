@@ -21,7 +21,7 @@ describe('usePlatformCapabilities', () => {
   it('loads capabilities from the backend once', async () => {
     const caps = {
       os: 'windows',
-      localBackend: { supported: true, engine: 'cpp-sidecar' },
+      localBackend: { supported: false, engine: 'cpp-sidecar' },
       systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
       autoRecord: { supported: false },
       nativeShare: { supported: false },

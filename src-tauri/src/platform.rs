@@ -50,7 +50,7 @@ fn local_backend() -> LocalBackendCapability {
         }
     } else if cfg!(target_os = "windows") {
         LocalBackendCapability {
-            supported: true,
+            supported: false,
             engine: Some("cpp-sidecar"),
         }
     } else {
@@ -131,6 +131,15 @@ mod tests {
             assert_eq!(caps.microphone_settings_url, Some("ms-settings:privacy-microphone"));
             assert_eq!(caps.notification_settings_url, Some("ms-settings:notifications"));
             assert_eq!(caps.system_audio.settings_url, Some("ms-settings:sound"));
+        }
+    }
+
+    #[test]
+    fn windows_local_backend_is_pending_not_supported() {
+        let caps = capabilities();
+        if cfg!(target_os = "windows") {
+            assert!(!caps.local_backend.supported);
+            assert_eq!(caps.local_backend.engine, Some("cpp-sidecar"));
         }
     }
 }

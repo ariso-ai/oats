@@ -299,7 +299,7 @@ fn finish_check<R: Runtime>(app: &AppHandle<R>, force: bool, result: Result<(), 
 /// Open the update window if it doesn't already exist; focus it if it does.
 /// Mandatory updates intercept the close button.
 fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
-    use tauri::{TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     if let Some(win) = app.get_webview_window("update") {
         let _ = win.show();
@@ -313,18 +313,27 @@ fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
         s.latest_known.as_ref().map(|i| i.mandatory).unwrap_or(false)
     };
 
-    let result = WebviewWindowBuilder::new(
+    #[cfg(target_os = "macos")]
+    let builder = WebviewWindowBuilder::new(
         app,
         "update",
         WebviewUrl::App("/#/update".into()),
     )
     .title("")
-    .title_bar_style(TitleBarStyle::Overlay)
-    .inner_size(450.0, 600.0)
-    .resizable(false)
-    .center()
-    .skip_taskbar(true)
-    .build();
+    .title_bar_style(tauri::TitleBarStyle::Overlay);
+    #[cfg(not(target_os = "macos"))]
+    let builder = WebviewWindowBuilder::new(
+        app,
+        "update",
+        WebviewUrl::App("/#/update".into()),
+    )
+    .title("");
+    let result = builder
+        .inner_size(450.0, 600.0)
+        .resizable(false)
+        .center()
+        .skip_taskbar(true)
+        .build();
 
     if let Ok(win) = result {
         if mandatory {

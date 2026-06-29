@@ -968,6 +968,7 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
 /// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
 /// `view_height` is the content view's height in points; `y`/`height` are the
 /// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
+#[cfg(target_os = "macos")]
 fn flip_y(view_height: f64, y: f64, height: f64) -> f64 {
     view_height - (y + height)
 }
@@ -1069,7 +1070,7 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
 /// Open (or focus) the meetings library window. Shared by the
 /// `create_library_window` command and the macOS dock-icon Reopen handler.
 pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
@@ -1080,13 +1081,20 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
         win.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
     // the same row, just to the right of them.
-    WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
-        .title("Meetings")
-        .title_bar_style(TitleBarStyle::Overlay)
-        .hidden_title(true)
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings")
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings");
+    builder
         .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
@@ -1097,6 +1105,7 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
 }
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct ShareAnchor {
     pub x: f64,
     pub y: f64,
@@ -1451,7 +1460,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod share_tests {
     use super::flip_y;
     #[test]

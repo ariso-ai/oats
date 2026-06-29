@@ -119,7 +119,7 @@ impl Drop for DownloadGuard<'_> {
 
 #[tauri::command]
 pub fn local_model_status() -> Result<ModelStatus, String> {
-    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+    if !cfg!(target_os = "macos") {
         return Ok(ModelStatus {
             state: "unsupported".into(),
             version: None,
@@ -136,7 +136,7 @@ pub fn local_model_status() -> Result<ModelStatus, String> {
 #[tauri::command]
 pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     if cfg!(target_os = "windows") {
-        let msg = "Windows local STT model download is waiting for the cpp-sidecar model bundle"
+        let msg = "Windows local speech models are not published yet; the cpp-sidecar model bundle is still pending"
             .to_string();
         let _ = app.emit("model://stt/error", msg.clone());
         return Err(msg);
@@ -310,6 +310,18 @@ fn verify_pinned(file: &str, actual_hex: &str) -> Result<(), String> {
 /// retry), otherwise it is re-downloaded.
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        let msg = "Windows local language models are not published yet; the cpp-sidecar model bundle is still pending"
+            .to_string();
+        let _ = app.emit("model://llm/error", msg.clone());
+        return Err(msg);
+    }
+    if !cfg!(target_os = "macos") {
+        let msg = "Local LLM is not supported on this platform".to_string();
+        let _ = app.emit("model://llm/error", msg.clone());
+        return Err(msg);
+    }
+
     let _guard = DownloadGuard::acquire(&LLM_DOWNLOAD_IN_PROGRESS)
         .ok_or_else(|| "a model download is already in progress".to_string())?;
 
@@ -784,6 +796,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".complete"), b"1").unwrap();
         assert!(!local_models_ready(root));
+    }
+
+    #[test]
+    fn local_model_status_is_unsupported_off_macos() {
+        if !cfg!(target_os = "macos") {
+            assert_eq!(local_model_status().unwrap().state, "unsupported");
+        }
     }
 
     #[test]
