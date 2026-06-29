@@ -296,11 +296,12 @@
           Permission not granted
         </p>
         <div class="setting-row" style="margin-top: 16px">
-          <span class="setting-label">Meeting stop reminder</span>
+          <span id="meeting-end-reminder-label" class="setting-label">Meeting stop reminder</span>
           <label class="toggle">
             <input
               type="checkbox"
               class="toggle-input"
+              aria-labelledby="meeting-end-reminder-label"
               :checked="meetingEndReminder"
               @change="onToggleMeetingEndReminder"
             />
