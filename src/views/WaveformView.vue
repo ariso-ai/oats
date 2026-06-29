@@ -469,7 +469,7 @@ async function resolveMeetingEnd() {
   try {
     const now = new Date();
     const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-    const end = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const meetings = await useMeetingApi().listScheduledMeetings(start, end);
     const info = findMeetingEndAt(meetings, effectiveMeetingId.value);
     meetingEndAt.value = info.endAt;
@@ -504,12 +504,17 @@ function handleMeetingEndKeep() {
 // back-to-back next call records as a fresh, separately-attached session.
 async function handleMeetingEndStop() {
   meetingEndPromptShownAt = null;
-  await handleStop();
+  // Start stop (which includes upload/finalize) but re-arm the mic monitor
+  // immediately — before waiting for the upload — so a back-to-back call can
+  // be detected without delay. request_mic_monitor_rearm is a simple atomic
+  // flag store in Rust and is safe to call before finalize completes.
+  const stopTask = handleStop();
   try {
     await invoke('request_mic_monitor_rearm');
   } catch (e) {
     console.error('Failed to re-arm mic monitor after meeting-end stop', e);
   }
+  await stopTask;
 }
 
 // Upload the stopped recording. Shared by the stop flow and the failed pill's
