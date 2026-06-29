@@ -18,6 +18,7 @@ const router = createRouter({
     { path: '/meeting-picker', name: 'MeetingPicker', component: () => import('./views/MeetingPickerView.vue') },
     { path: '/meeting-prompt', name: 'MeetingPrompt', component: () => import('./views/MeetingPromptView.vue') },
     { path: '/silence-prompt', name: 'SilencePrompt', component: () => import('./views/SilencePromptView.vue') },
+    { path: '/meeting-end-prompt', name: 'MeetingEndPrompt', component: () => import('./views/MeetingEndPromptView.vue') },
     { path: '/library', name: 'Library', component: () => import('./views/LibraryView.vue') },
   ],
 });
