@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// Capture every Int16Array passed to encodeBuffer so tests can assert that
+// real mic data reached the encoder.  Hoisted so the mock factory can close
+// over it before any import resolves.
+const encodeCalls = vi.hoisted((): Int16Array[] => []);
+
 // lamejs does real MP3 work we don't need here; stub the encoder.
-// Return a non-empty buffer from encodeBuffer so we can detect that the
-// encoder was actually fed PCM data (blob.size > 0 after stop).
+// encodeBuffer records its argument and returns a non-empty buffer so that
+// blob.size > 0 after stop (and so the recorded samples are inspectable).
 vi.mock('@breezystack/lamejs', () => ({
   default: {
     Mp3Encoder: class {
-      encodeBuffer(): Int8Array {
+      encodeBuffer(left: Int16Array): Int8Array {
+        encodeCalls.push(new Int16Array(left));
         return new Int8Array([0x01]);
       }
       flush(): Int8Array {
@@ -94,15 +100,12 @@ function pushMicFrame(peak: number, n = 4096): void {
 
 beforeEach(() => {
   lastProcessor = null;
-  // Clear captured listeners and mock call counts from previous tests.
+  // Clear captured listeners, encoder call records, and mock call counts.
   for (const k in listeners) delete listeners[k];
+  encodeCalls.length = 0;
   vi.clearAllMocks();
   (globalThis as unknown as { AudioContext: unknown }).AudioContext =
     FakeAudioContext;
-  Object.defineProperty(navigator, 'mediaDevices', {
-    configurable: true,
-    value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [] })) },
-  });
 });
 
 afterEach(() => {
@@ -198,7 +201,13 @@ describe('useRecorder mic native capture', () => {
     // Trigger onaudioprocess, which drains micAudioBuffer and feeds the encoder.
     fireAudioFrame();
 
-    // Encoder was fed: blob is non-empty.
+    // Encoder was fed with the actual mic samples: at least one encodeBuffer
+    // call must contain a non-zero value, proving the native event →
+    // micAudioBuffer → drainMic → encodeBuffer path carried the 8000-valued
+    // samples (not just zero-filled silence).
+    expect(encodeCalls.some(buf => buf.some(v => v !== 0))).toBe(true);
+
+    // Blob is also non-empty (encoder returned a byte).
     const blob = await rec.stopRecording();
     expect(blob.size).toBeGreaterThan(0);
   });

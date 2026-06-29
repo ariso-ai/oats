@@ -231,7 +231,7 @@ export function useRecorder() {
         const micInt16 = new Int16Array(frame);
         if (useMic) {
           const micRaw = drainMic(frame);
-          if (micRaw) micInt16.set(micRaw.slice(0, frame));
+          if (micRaw) micInt16.set(micRaw);
           const out = e.outputBuffer.getChannelData(0);
           for (let i = 0; i < frame; i++) out[i] = micInt16[i] / 0x8000;
         }
