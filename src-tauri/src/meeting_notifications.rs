@@ -1105,6 +1105,127 @@ pub async fn resize_silence_prompt(app: AppHandle, expanded: bool) -> Result<(),
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Meeting-end stop prompt
+//
+// Sibling of the silence prompt. When a recording attached to a calendar meeting
+// runs past that meeting's scheduled end, the frontend watch shows this card
+// offering Stop / Keep. Same borderless top-right chrome; the click is forwarded
+// as `meeting-end-prompt://stop` | `://keep`. Ignoring it keeps recording.
+// ---------------------------------------------------------------------------
+
+/// Cosmetic countdown (seconds) on the card. MUST equal the frontend
+/// MEETING_END_PROMPT_TIMEOUT_MS (30_000) that actually returns the watch to idle.
+const MEETING_END_PROMPT_SECONDS: u64 = 30;
+
+/// Route + params for the meeting-end prompt window. `seconds` drives the
+/// cosmetic countdown bar; `subtitle`, when present, is the meeting title.
+fn meeting_end_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    ser.append_pair("seconds", &seconds.to_string());
+    if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
+        ser.append_pair("subtitle", s);
+    }
+    format!("/#/meeting-end-prompt?{}", ser.finish())
+}
+
+/// Build (or replace) the borderless top-right meeting-end prompt window. Same
+/// chrome as the silence prompt. Must run on the main thread.
+fn open_meeting_end_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(existing) = app.get_webview_window("meeting-end-prompt") {
+        let _ = existing.close();
+    }
+    let win = WebviewWindowBuilder::new(
+        app,
+        "meeting-end-prompt",
+        WebviewUrl::App(meeting_end_prompt_url(MEETING_END_PROMPT_SECONDS, subtitle).into()),
+    )
+    .title("")
+    .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .shadow(false)
+    .focused(false)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let msize = monitor.size();
+        let mpos = monitor.position();
+        let win_w = (MEETING_PROMPT_W * scale).round() as i32;
+        let margin = (16.0 * scale).round() as i32;
+        let x = mpos.x + msize.width as i32 - win_w - margin;
+        let y = mpos.y + margin;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    Ok(())
+}
+
+/// Close the meeting-end prompt window if it is still up.
+fn close_meeting_end_prompt_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("meeting-end-prompt") {
+        let _ = win.close();
+    }
+}
+
+/// Show the meeting-end prompt. `subtitle`, when present, is the meeting title.
+/// Window creation must happen on the main thread.
+#[tauri::command]
+pub fn show_meeting_end_prompt(app: AppHandle, subtitle: Option<String>) {
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(e) = open_meeting_end_prompt_window(&app_main, subtitle.as_deref()) {
+            eprintln!("meeting-end-prompt: failed to open prompt window: {e}");
+        }
+    });
+}
+
+/// Close the meeting-end prompt window (kept, ignored/timed-out, or recording ended).
+#[tauri::command]
+pub fn dismiss_meeting_end_prompt(app: AppHandle) {
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_meeting_end_prompt_window(&app_main));
+}
+
+/// The view's choice: `stop` stops the recording, otherwise keep. Emits the event
+/// the recorder window listens for, then closes the prompt window.
+#[tauri::command]
+pub fn resolve_meeting_end_prompt(app: AppHandle, stop: bool) {
+    use tauri::Emitter;
+    let event = if stop {
+        "meeting-end-prompt://stop"
+    } else {
+        "meeting-end-prompt://keep"
+    };
+    let _ = app.emit(event, ());
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_meeting_end_prompt_window(&app_main));
+}
+
+/// Grow/shrink the window so the view can reveal the "Keep recording" menu below
+/// the card. Sizing must happen on the main thread; the top-left stays pinned.
+#[tauri::command]
+pub async fn resize_meeting_end_prompt(app: AppHandle, expanded: bool) -> Result<(), String> {
+    let height = if expanded {
+        MEETING_PROMPT_H_EXPANDED
+    } else {
+        MEETING_PROMPT_H
+    };
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(win) = app_main.get_webview_window("meeting-end-prompt") {
+            let _ = win.set_size(tauri::LogicalSize::new(MEETING_PROMPT_W, height));
+        }
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1254,5 +1375,26 @@ mod tests {
     fn missing_or_empty_meetings_does_not_skip() {
         assert!(!current_meeting_auto_join_from(&json!({}), NOW_MS));
         assert!(!current_meeting_auto_join_from(&json!({ "meetings": [] }), NOW_MS));
+    }
+
+    #[test]
+    fn meeting_end_prompt_url_carries_the_seconds() {
+        assert_eq!(
+            super::meeting_end_prompt_url(30, None),
+            "/#/meeting-end-prompt?seconds=30"
+        );
+    }
+
+    #[test]
+    fn meeting_end_prompt_url_encodes_the_subtitle_and_omits_when_empty() {
+        assert_eq!(
+            super::meeting_end_prompt_url(30, Some("Q3 Plan & Review")),
+            "/#/meeting-end-prompt?seconds=30&subtitle=Q3+Plan+%26+Review"
+        );
+        assert_eq!(
+            super::meeting_end_prompt_url(30, Some("")),
+            "/#/meeting-end-prompt?seconds=30"
+        );
+        assert_eq!(super::meeting_end_prompt_url(30, None), "/#/meeting-end-prompt?seconds=30");
     }
 }
