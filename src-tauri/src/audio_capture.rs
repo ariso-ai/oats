@@ -32,6 +32,10 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use crate::audio_util::{
+        base64_encode, downmix_to_mono, get_property, is_supported_pcm_format, ns,
+        AudioObjectID, Resampler,
+    };
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::AllocAnyThread;
@@ -40,28 +44,24 @@ mod imp {
         kAudioAggregateDeviceNameKey, kAudioAggregateDeviceSubDeviceListKey,
         kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
         kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID,
-        kAudioHardwarePropertyDefaultSystemOutputDevice, kAudioObjectPropertyElementMain,
+        kAudioHardwarePropertyDefaultSystemOutputDevice,
         kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioSubDeviceUIDKey,
         kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
         AudioDeviceCreateIOProcIDWithBlock, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
         AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
         AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
-        AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
+        AudioHardwareDestroyProcessTap,
         CATapDescription, CATapMuteBehavior,
     };
     use objc2_core_audio_types::{
-        kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
-        kAudioFormatLinearPCM, kLinearPCMFormatFlagIsNonInterleaved, AudioBufferList,
+        AudioBufferList,
         AudioStreamBasicDescription, AudioTimeStamp,
     };
     use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
-    use std::ffi::{c_void, CStr};
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex};
     use tauri::Emitter;
-
-    type AudioObjectID = u32;
 
     /// Live capture resources, torn down in reverse creation order on stop.
     /// All fields are plain integers; the IO block is owned by Core Audio
@@ -75,111 +75,6 @@ mod imp {
     }
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
-
-    fn ns(c: &CStr) -> Retained<NSString> {
-        NSString::from_str(c.to_str().expect("Core Audio key is valid UTF-8"))
-    }
-
-    /// Streaming linear resampler from `src_rate` to 16 kHz, carrying fractional
-    /// position and the last input sample across IO callbacks so block
-    /// boundaries don't click.
-    struct Resampler {
-        step: f64,
-        pos: f64,
-        prev: f32,
-        primed: bool,
-    }
-
-    impl Resampler {
-        fn new(src_rate: f64) -> Self {
-            Self {
-                step: src_rate / 16_000.0,
-                pos: 0.0,
-                prev: 0.0,
-                primed: false,
-            }
-        }
-
-        /// Resample `input` (mono f32) into `out` as little-endian Int16 bytes.
-        fn process(&mut self, input: &[f32], out: &mut Vec<u8>) {
-            if input.is_empty() {
-                return;
-            }
-            if !self.primed {
-                // Seed `prev` with the first sample so the leading interpolation
-                // doesn't ramp up from silence.
-                self.prev = input[0];
-                self.primed = true;
-            }
-            let n = input.len();
-            // Position coordinate: 0 == `prev`, k == input[k-1] for k in 1..=n.
-            let sample_at = |j: f64| -> f32 {
-                let idx = j as isize;
-                if idx <= 0 {
-                    self.prev
-                } else {
-                    input[(idx - 1).min(n as isize - 1) as usize]
-                }
-            };
-            while self.pos < n as f64 {
-                let base = self.pos.floor();
-                let frac = (self.pos - base) as f32;
-                let a = sample_at(base);
-                let b = sample_at(base + 1.0);
-                let s = a + (b - a) * frac;
-                let clamped = s.clamp(-1.0, 1.0);
-                let v: i16 = if clamped < 0.0 {
-                    (clamped * 32768.0) as i16
-                } else {
-                    (clamped * 32767.0) as i16
-                };
-                out.extend_from_slice(&v.to_le_bytes());
-                self.pos += self.step;
-            }
-            // Carry the unused fraction into the next block, whose origin moves
-            // to input[n-1].
-            self.pos -= n as f64;
-            self.prev = input[n - 1];
-        }
-    }
-
-    fn prop_address(selector: u32) -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress {
-            mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain,
-        }
-    }
-
-    /// Read a fixed-size Core Audio property into `T`.
-    unsafe fn get_property<T>(object: AudioObjectID, selector: u32) -> Result<T, String> {
-        let addr = prop_address(selector);
-        let mut value = std::mem::MaybeUninit::<T>::uninit();
-        let mut size = std::mem::size_of::<T>() as u32;
-        let status = unsafe {
-            AudioObjectGetPropertyData(
-                object,
-                NonNull::from(&addr),
-                0,
-                std::ptr::null(),
-                NonNull::from(&mut size),
-                NonNull::new(value.as_mut_ptr() as *mut c_void).unwrap(),
-            )
-        };
-        if status != 0 {
-            return Err(format!("AudioObjectGetPropertyData({selector}) failed: {status}"));
-        }
-        // Core Audio can return status 0 with a short read (e.g. 0 bytes for an
-        // absent property), which would leave the buffer uninitialized. Only
-        // `assume_init` once the written size matches `T` exactly.
-        let expected = std::mem::size_of::<T>() as u32;
-        if size != expected {
-            return Err(format!(
-                "AudioObjectGetPropertyData({selector}) returned {size} bytes; expected {expected}"
-            ));
-        }
-        Ok(unsafe { value.assume_init() })
-    }
 
     /// Build the aggregate-device description dictionary (toll-free bridged to
     /// CFDictionary). Keys are the Core Audio C-string constants; values upcast
@@ -234,23 +129,6 @@ mod imp {
         NSDictionary::from_slices(&keys, &values)
     }
 
-    /// Whether a tap stream format is the packed, little-endian, interleaved
-    /// 32-bit float LinearPCM layout that the IO block assumes when
-    /// `downmix_to_mono` reinterprets buffer bytes as `*const f32` (dividing
-    /// `mDataByteSize` by 4 bytes per sample). Any other layout — padded,
-    /// big-endian, non-interleaved, or a non-positive sample rate (which would
-    /// make the resampler step 0.0 and stall `Resampler::process` in an infinite
-    /// loop) — would be misread, so the caller must reject it.
-    fn is_supported_tap_format(asbd: &AudioStreamBasicDescription) -> bool {
-        asbd.mFormatID == kAudioFormatLinearPCM
-            && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
-            && asbd.mFormatFlags & kAudioFormatFlagIsPacked != 0
-            && asbd.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
-            && asbd.mFormatFlags & kLinearPCMFormatFlagIsNonInterleaved == 0
-            && asbd.mBitsPerChannel == 32
-            && asbd.mSampleRate > 0.0
-    }
-
     pub fn start(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
@@ -279,6 +157,7 @@ mod imp {
             let output_id: AudioObjectID = match get_property(
                 kAudioObjectSystemObject as AudioObjectID,
                 kAudioHardwarePropertyDefaultSystemOutputDevice,
+                kAudioObjectPropertyScopeGlobal,
             ) {
                 Ok(v) => v,
                 Err(e) => {
@@ -287,7 +166,7 @@ mod imp {
                 }
             };
             let output_uid_cf: CFRetained<CFString> =
-                match get_property::<*const CFString>(output_id, kAudioDevicePropertyDeviceUID) {
+                match get_property::<*const CFString>(output_id, kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal) {
                     // Core Audio can return status 0 with a null/absent UID for some
                     // virtual or aggregate output devices. Guard the pointer instead of
                     // unwrapping: a null here would panic, and handing a non-owned null to
@@ -309,7 +188,7 @@ mod imp {
 
             // 3. Tap stream format → native sample rate for the resampler.
             let asbd: AudioStreamBasicDescription =
-                match get_property(tap_id, kAudioTapPropertyFormat) {
+                match get_property(tap_id, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal) {
                     Ok(v) => v,
                     Err(e) => {
                         AudioHardwareDestroyProcessTap(tap_id);
@@ -320,7 +199,7 @@ mod imp {
             // `downmix_to_mono`, so the tap must actually deliver 32-bit float
             // LinearPCM. Taps normally do, but verify before trusting the cast:
             // a non-Float32 layout would otherwise be read as garbage samples.
-            if !is_supported_tap_format(&asbd) {
+            if !is_supported_pcm_format(&asbd) {
                 AudioHardwareDestroyProcessTap(tap_id);
                 return Err(format!(
                     "unsupported tap stream format (id={}, flags={:#x}, bits={}); expected 32-bit float LinearPCM",
@@ -344,7 +223,7 @@ mod imp {
 
             // 5. IO block: downmix → resample → emit.
             let app = Arc::new(app);
-            let resampler = Arc::new(Mutex::new(Resampler::new(src_rate)));
+            let resampler = Arc::new(Mutex::new(Resampler::new(src_rate, 16_000.0)));
             let app_cb = app.clone();
             let block = RcBlock::new(
                 move |_now: NonNull<AudioTimeStamp>,
@@ -436,38 +315,6 @@ mod imp {
         Ok(())
     }
 
-    /// Average all channels of an interleaved Float32 `AudioBufferList` into a
-    /// mono Vec. Process taps deliver one buffer of interleaved floats.
-    unsafe fn downmix_to_mono(list: *const AudioBufferList) -> Vec<f32> {
-        let list = unsafe { &*list };
-        let n = list.mNumberBuffers as usize;
-        if n == 0 {
-            return Vec::new();
-        }
-        // mBuffers is a flexible array; index from its address.
-        let buffers = list.mBuffers.as_ptr();
-        let mut out: Vec<f32> = Vec::new();
-        for i in 0..n {
-            let buf = unsafe { &*buffers.add(i) };
-            if buf.mData.is_null() || buf.mDataByteSize == 0 {
-                continue;
-            }
-            let ch = buf.mNumberChannels.max(1);
-            let count = buf.mDataByteSize as usize / std::mem::size_of::<f32>();
-            let data = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, count) };
-            if ch <= 1 {
-                out.extend_from_slice(data);
-            } else {
-                // Interleaved: average each frame's channels.
-                for frame in data.chunks_exact(ch as usize) {
-                    let sum: f32 = frame.iter().copied().sum();
-                    out.push(sum / ch as f32);
-                }
-            }
-        }
-        out
-    }
-
     // macOS audio-capture (TCC) permission. There is no public API to preflight
     // or request the system-audio permission directly; the OS surfaces the
     // prompt the first time `AudioHardwareCreateProcessTap` actually taps audio.
@@ -501,110 +348,6 @@ mod imp {
         }
     }
 
-    fn base64_encode(data: &[u8]) -> String {
-        const CHARS: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
-        for chunk in data.chunks(3) {
-            let b0 = chunk[0];
-            let b1 = chunk.get(1).copied().unwrap_or(0);
-            let b2 = chunk.get(2).copied().unwrap_or(0);
-            out.push(CHARS[(b0 >> 2) as usize]);
-            out.push(CHARS[((b0 & 0x03) << 4 | b1 >> 4) as usize]);
-            out.push(if chunk.len() > 1 {
-                CHARS[((b1 & 0x0f) << 2 | b2 >> 6) as usize]
-            } else {
-                b'='
-            });
-            out.push(if chunk.len() > 2 {
-                CHARS[(b2 & 0x3f) as usize]
-            } else {
-                b'='
-            });
-        }
-        // Safety: base64 output is always valid UTF-8.
-        unsafe { String::from_utf8_unchecked(out) }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use objc2_core_audio_types::kAudioFormatFlagIsPacked;
-
-        /// A 32-bit float LinearPCM tap format like Core Audio actually delivers.
-        fn float32_pcm() -> AudioStreamBasicDescription {
-            AudioStreamBasicDescription {
-                mSampleRate: 48_000.0,
-                mFormatID: kAudioFormatLinearPCM,
-                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-                mBytesPerPacket: 4,
-                mFramesPerPacket: 1,
-                mBytesPerFrame: 4,
-                mChannelsPerFrame: 1,
-                mBitsPerChannel: 32,
-                mReserved: 0,
-            }
-        }
-
-        #[test]
-        fn accepts_float32_linear_pcm() {
-            assert!(is_supported_tap_format(&float32_pcm()));
-        }
-
-        #[test]
-        fn rejects_non_linear_pcm_format() {
-            let mut asbd = float32_pcm();
-            asbd.mFormatID = u32::from_be_bytes(*b"aac "); // compressed, not LinearPCM
-            assert!(!is_supported_tap_format(&asbd));
-        }
-
-        #[test]
-        fn rejects_integer_pcm_missing_float_flag() {
-            let mut asbd = float32_pcm();
-            asbd.mFormatFlags = kAudioFormatFlagIsPacked; // no float flag
-            assert!(!is_supported_tap_format(&asbd));
-        }
-
-        #[test]
-        fn rejects_non_32_bit_depth() {
-            let mut asbd = float32_pcm();
-            asbd.mBitsPerChannel = 16; // would be misread as f32
-            assert!(!is_supported_tap_format(&asbd));
-        }
-
-        #[test]
-        fn rejects_non_positive_sample_rate() {
-            // step = src_rate / 16_000 would be 0.0, stalling Resampler::process.
-            let mut zero = float32_pcm();
-            zero.mSampleRate = 0.0;
-            assert!(!is_supported_tap_format(&zero));
-
-            let mut negative = float32_pcm();
-            negative.mSampleRate = -48_000.0;
-            assert!(!is_supported_tap_format(&negative));
-        }
-
-        #[test]
-        fn rejects_unpacked_format() {
-            let mut asbd = float32_pcm();
-            asbd.mFormatFlags = kAudioFormatFlagIsFloat; // padded, not tightly packed
-            assert!(!is_supported_tap_format(&asbd));
-        }
-
-        #[test]
-        fn rejects_big_endian_format() {
-            let mut asbd = float32_pcm();
-            asbd.mFormatFlags |= kAudioFormatFlagIsBigEndian;
-            assert!(!is_supported_tap_format(&asbd));
-        }
-
-        #[test]
-        fn rejects_non_interleaved_format() {
-            let mut asbd = float32_pcm();
-            asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
-            assert!(!is_supported_tap_format(&asbd));
-        }
-    }
 }
 
 /// Start capturing system audio. Emits `system-audio-data` events carrying

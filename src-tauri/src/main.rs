@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activation;
+mod audio_util;
 mod audio_capture;
 mod commands;
 mod meeting_notifications;
