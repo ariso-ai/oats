@@ -145,6 +145,7 @@ fn main() {
             tray_meeting::sync_tray_meeting,
             mic_monitor::sync_auto_record,
             mic_monitor::auto_record_supported,
+            mic_monitor::request_mic_monitor_rearm,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
             audio_capture::request_screen_capture_permission,
