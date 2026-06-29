@@ -164,7 +164,10 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objc2_core_audio_types::kAudioFormatFlagIsPacked;
+    use objc2_core_audio_types::{
+        kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
+        kLinearPCMFormatFlagIsNonInterleaved,
+    };
 
     fn float32_pcm() -> AudioStreamBasicDescription {
         AudioStreamBasicDescription {
@@ -187,7 +190,46 @@ mod tests {
 
     #[test]
     fn rejects_non_positive_sample_rate() {
+        // step = src_rate / 16_000 would be 0.0, stalling Resampler::process.
         let mut z = float32_pcm(); z.mSampleRate = 0.0; assert!(!is_supported_pcm_format(&z));
+        let mut negative = float32_pcm();
+        negative.mSampleRate = -48_000.0;
+        assert!(!is_supported_pcm_format(&negative));
+    }
+
+    #[test]
+    fn rejects_non_linear_pcm_format() {
+        let mut asbd = float32_pcm();
+        asbd.mFormatID = u32::from_be_bytes(*b"aac "); // compressed, not LinearPCM
+        assert!(!is_supported_pcm_format(&asbd));
+    }
+
+    #[test]
+    fn rejects_integer_pcm_missing_float_flag() {
+        let mut asbd = float32_pcm();
+        asbd.mFormatFlags = kAudioFormatFlagIsPacked; // no float flag
+        assert!(!is_supported_pcm_format(&asbd));
+    }
+
+    #[test]
+    fn rejects_unpacked_format() {
+        let mut asbd = float32_pcm();
+        asbd.mFormatFlags = kAudioFormatFlagIsFloat; // padded, not tightly packed
+        assert!(!is_supported_pcm_format(&asbd));
+    }
+
+    #[test]
+    fn rejects_big_endian_format() {
+        let mut asbd = float32_pcm();
+        asbd.mFormatFlags |= kAudioFormatFlagIsBigEndian;
+        assert!(!is_supported_pcm_format(&asbd));
+    }
+
+    #[test]
+    fn rejects_non_interleaved_format() {
+        let mut asbd = float32_pcm();
+        asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
+        assert!(!is_supported_pcm_format(&asbd));
     }
 
     #[test]
