@@ -301,8 +301,10 @@ pub fn stop_microphone_capture() -> Result<(), String> {
 /// Returns `true` if the user granted (or had already granted) access,
 /// `false` otherwise. On non-macOS platforms always returns `false`.
 #[tauri::command]
-pub fn request_microphone_permission() -> bool {
-    imp::request_permission()
+pub async fn request_microphone_permission() -> bool {
+    tokio::task::spawn_blocking(|| imp::request_permission())
+        .await
+        .unwrap_or(false)
 }
 
 /// Current microphone TCC permission status.

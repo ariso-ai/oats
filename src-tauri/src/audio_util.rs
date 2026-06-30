@@ -49,7 +49,7 @@ impl Resampler {
         let n = input.len();
         let sample_at = |j: f64| -> f32 {
             let idx = j as isize;
-            if idx <= 0 { self.prev } else { input[(idx - 1).min(n as isize - 1) as usize] }
+            if idx < 0 { self.prev } else { input[(idx as usize).min(n - 1)] }
         };
         while self.pos < n as f64 {
             let base = self.pos.floor();
@@ -241,6 +241,23 @@ mod tests {
         assert_eq!(out.len(), 16); // 8 samples * 2 bytes
         let first = i16::from_le_bytes([out[0], out[1]]);
         assert!((first as i32 - 16383).abs() < 50, "leading sample should be ~0.5 full-scale, got {first}");
+    }
+
+    #[test]
+    fn resampler_downsamples_ramp_without_one_sample_lag() {
+        // 48 kHz → 16 kHz, step = 3. Output sample[1] spans source position 3,
+        // so it should read input[3] = 0.03, not input[2] = 0.02 (the old bug).
+        let mut rs = Resampler::new(48_000.0, 16_000.0);
+        let input: Vec<f32> = (0..10).map(|i| i as f32 / 100.0).collect();
+        let mut out = Vec::new();
+        rs.process(&input, &mut out);
+        let samples: Vec<i16> = out
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        assert_eq!(samples.len(), 4);
+        // source position 3 → input[3] = 0.03 → ~983 in i16
+        assert!((samples[1] as i32 - 983).abs() <= 2, "expected source position 3, got {}", samples[1]);
     }
 
     #[test]

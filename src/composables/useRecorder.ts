@@ -154,12 +154,9 @@ export function useRecorder() {
       analyserNode = audioContext.createAnalyser();
 
       if (useMic) {
-        // Start native mic capture (no getUserMedia — avoids macOS ducking
-        // system audio for ~2s and routing through Voice-Processing I/O).
-        await startMicrophoneCapture();
-        micAudioActive = true;
+        // Register the listener before starting capture so no early frames are dropped.
         micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
-          if (!isRecording.value || isPaused.value) return;
+          if (isPaused.value) return;
           // Decode base64 → raw bytes → Int16 PCM (LE, mono, 44.1kHz)
           const binary = atob(event.payload);
           const bytes = new Uint8Array(binary.length);
@@ -171,6 +168,10 @@ export function useRecorder() {
           merged.set(samples, micAudioBuffer.length);
           micAudioBuffer = merged;
         });
+        // Start native mic capture (no getUserMedia — avoids macOS ducking
+        // system audio for ~2s and routing through Voice-Processing I/O).
+        await startMicrophoneCapture();
+        micAudioActive = true;
       }
 
       if (useSystemAudio) {
