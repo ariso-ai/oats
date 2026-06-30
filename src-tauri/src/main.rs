@@ -2,7 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activation;
+mod audio_util;
 mod audio_capture;
+mod mic_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
@@ -154,6 +156,10 @@ fn main() {
             audio_capture::stop_system_audio_capture,
             audio_capture::request_screen_capture_permission,
             audio_capture::check_screen_capture_permission,
+            mic_capture::start_microphone_capture,
+            mic_capture::stop_microphone_capture,
+            mic_capture::request_microphone_permission,
+            mic_capture::check_microphone_permission,
             update_manager::update_check,
             update_manager::update_install_and_relaunch,
             update_manager::update_skip_version,

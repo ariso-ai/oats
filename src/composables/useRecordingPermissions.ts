@@ -2,6 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
 import { deriveEnabledFromLegacy, type RecordingEnabled } from '../views/recordingSettings';
+import {
+  requestMicrophonePermission,
+  checkMicrophonePermission,
+} from '../tauri';
 
 const SETTINGS_PATH = 'settings.json';
 const MIC_KEY = 'recordMicEnabled';
@@ -46,12 +50,19 @@ export async function setSystemAudioEnabled(enabled: boolean): Promise<void> {
   await store.set(SYS_KEY, enabled);
 }
 
-/** Prompt for / verify microphone permission by opening and closing a stream. */
+/** Prompt for / verify microphone permission via the native command. */
 export async function ensureMicPermission(): Promise<boolean> {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach((t) => t.stop());
-    return true;
+    return await requestMicrophonePermission();
+  } catch {
+    return false;
+  }
+}
+
+/** Current microphone permission status (best-effort). */
+export async function checkMicPermission(): Promise<boolean> {
+  try {
+    return await checkMicrophonePermission();
   } catch {
     return false;
   }
