@@ -1,0 +1,91 @@
+name: CodeQL (Swift)
+
+# Swift is the one CodeQL language that needs a *traced compile*: the extractor
+# wraps the Swift compiler as it builds. Under GitHub's managed "default setup"
+# that means autobuild recompiles the entire MLX / FluidAudio / HuggingFace
+# dependency tree from scratch on every run (~25 min of compile + extractor
+# overhead → ~1h), with no caching. This advanced-setup workflow scans Swift on
+# its own so we can cache the dependency build (DerivedData), turning steady-state
+# runs into minutes. The other languages (rust, js/ts, ruby, actions) need no
+# build and stay on the managed default setup — drop `swift` from its language
+# list (Settings → Code security → CodeQL → Default setup) so it doesn't also
+# analyze Swift and duplicate this job.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Weekly, matching the cadence the default setup used for Swift.
+    - cron: '19 19 * * 1'
+
+permissions:
+  contents: read
+
+# A superseded scan is wasted compute; cancel it like the other CI workflows.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze Swift
+    # macos-15 is a GitHub-hosted Apple Silicon runner, same as desktop.yaml.
+    runs-on: macos-15
+    permissions:
+      contents: read
+      # Required for github/codeql-action/analyze to upload results.
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496  # codeql-bundle-v2.25.6
+        with:
+          languages: swift
+          # We drive the compiler ourselves (cached xcodebuild) between init and
+          # analyze; "manual" makes CodeQL trace exactly that build.
+          build-mode: manual
+
+      # Key the build cache on the Xcode toolchain, same rationale as desktop.yaml:
+      # DerivedData from one toolchain must not be restored into another.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
+      # Cache the xcodebuild DerivedData so the heavy MLX dependency tree is
+      # compiled once, not every run. Unlike desktop.yaml's *artifact* cache
+      # (exact key, no restore-keys, because a partial restore would ship a
+      # mismatched binary), this is purely a build accelerator: xcodebuild
+      # rebuilds whatever is stale, so a partial restore on a Package.resolved
+      # change is safe and still skips most of the dependency compile.
+      - name: Cache ariso-stt DerivedData
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        with:
+          path: src-tauri/ariso-stt/.xcode
+          key: codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved') }}
+          restore-keys: |
+            codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-
+
+      # Build under CodeQL's tracer. `touch`-ing our own sources forces the
+      # ariso-stt target to recompile so the extractor always sees our code,
+      # while the cached DerivedData leaves the (unchanged) MLX dependency
+      # modules alone. Debug config compiles faster than Release and CodeQL
+      # doesn't need optimized output. -skipMacroValidation mirrors desktop.yaml.
+      - name: Build ariso-stt (traced)
+        working-directory: src-tauri/ariso-stt
+        run: |
+          touch Sources/ariso-stt/*.swift
+          xcodebuild build -scheme ariso-stt -configuration Debug \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496  # codeql-bundle-v2.25.6
+        with:
+          category: "/language:swift"
