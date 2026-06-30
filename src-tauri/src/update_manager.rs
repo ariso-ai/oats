@@ -37,7 +37,7 @@ pub struct UpdateInfo {
 ///
 /// Returns true iff:
 /// - auto-check is enabled, AND
-/// - no check has happened in the last 24h (or never), AND
+/// - no check has happened in the last 2h (or never), AND
 /// - we are not currently snoozed
 pub fn should_check(state: &UpdateState, now_unix: i64) -> bool {
     if !state.auto_check_enabled {
@@ -45,7 +45,7 @@ pub fn should_check(state: &UpdateState, now_unix: i64) -> bool {
     }
     let last_ok = match state.last_check_unix {
         None => true,
-        Some(t) => now_unix - t > 24 * 60 * 60,
+        Some(t) => now_unix - t > 2 * 60 * 60,
     };
     let snooze_ok = match state.snoozed_until_unix {
         None => true,
@@ -483,6 +483,24 @@ mod tests {
             ..Default::default()
         };
         assert!(!should_check(&s, NOW));
+    }
+
+    #[test]
+    fn should_not_check_when_check_is_90min_old() {
+        let s = UpdateState {
+            last_check_unix: Some(NOW - 90 * 60),
+            ..Default::default()
+        };
+        assert!(!should_check(&s, NOW));
+    }
+
+    #[test]
+    fn should_check_when_check_is_3h_old() {
+        let s = UpdateState {
+            last_check_unix: Some(NOW - 3 * 60 * 60),
+            ..Default::default()
+        };
+        assert!(should_check(&s, NOW));
     }
 
     #[test]
