@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.11.0](https://github.com/ariso-ai/oats/compare/v0.10.0...v0.11.0) (2026-06-30)
+
+
+### Features
+
+* Meeting stop reminder notification setting (on by default) ([3d11e65](https://github.com/ariso-ai/oats/commit/3d11e655c3dd275d463ef68c4639fbd4b9bdc35f))
+* Meeting stop reminder notification setting (on by default) ([88e0f7f](https://github.com/ariso-ai/oats/commit/88e0f7fd3ba1f922c6a8eed852f4d53e9fcd76dd))
+* meeting-end prompt window + commands ([#157](https://github.com/ariso-ai/oats/issues/157)) ([3560b10](https://github.com/ariso-ai/oats/commit/3560b1049a35f291b0d7cfd37417f57079ae8d5b))
+* meeting-end stop prompt for back-to-back calls ([#157](https://github.com/ariso-ai/oats/issues/157)) ([c63ece5](https://github.com/ariso-ai/oats/commit/c63ece570757be0275b1543d612ae137c85c8f20))
+* meeting-end stop watch wiring in WaveformView ([#157](https://github.com/ariso-ai/oats/issues/157)) ([f08e9ec](https://github.com/ariso-ai/oats/commit/f08e9ecc0f0f5c2a55a73a7125c6ae7e32c36a34))
+* meeting-end watch pure helpers ([#157](https://github.com/ariso-ai/oats/issues/157)) ([4f6774f](https://github.com/ariso-ai/oats/commit/4f6774f8fdcb47d7ad2bf377c02aa6688cc8f2ee))
+* MeetingEndPromptView + route ([#157](https://github.com/ariso-ai/oats/issues/157)) ([b7b68e7](https://github.com/ariso-ai/oats/commit/b7b68e754257f465f587fb54dd8705500474440b))
+* native microphone capture via Core Audio input (no voice-processing duck) ([aed1d6b](https://github.com/ariso-ai/oats/commit/aed1d6b229258c912472006849d0129f0d7561f9))
+* native microphone permission (AVCaptureDevice) ([1bc7ea9](https://github.com/ariso-ai/oats/commit/1bc7ea95c8f2f676f9c26ff8e02d191023e0eb9d))
+* native microphone permission + capture wrappers (frontend) ([f646477](https://github.com/ariso-ai/oats/commit/f646477884780f74ad2f25f451b243ad2d60fb4c))
+* parseMeetingEndPromptParams ([#157](https://github.com/ariso-ai/oats/issues/157)) ([5b636f0](https://github.com/ariso-ai/oats/commit/5b636f03b42965222613b4d8e2eeee2f78c8c522))
+* register microphone capture + permission commands ([d7dade9](https://github.com/ariso-ai/oats/commit/d7dade9ca2a17ff75d0c9be9242bacd07657d008))
+* request_mic_monitor_rearm to re-arm after meeting-end stop ([#157](https://github.com/ariso-ai/oats/issues/157)) ([6b217ec](https://github.com/ariso-ai/oats/commit/6b217ec8a97305a7518949eb64c0d39d32e0348a))
+* source microphone from native capture instead of getUserMedia (issue [#159](https://github.com/ariso-ai/oats/issues/159)) ([703408e](https://github.com/ariso-ai/oats/commit/703408efd49954304068bb9795e1e19e7fa924b5))
+
+
+### Bug Fixes
+
+* **#159:** native mic capture to eliminate startup system-audio ducking ([bc944eb](https://github.com/ariso-ai/oats/commit/bc944ebf22373bd3728c6193b85091ef737d3283))
+* accept non-interleaved mono mic format (issue [#159](https://github.com/ariso-ai/oats/issues/159)) ([beff37f](https://github.com/ariso-ai/oats/commit/beff37f353cd7496bbb8563d6cee9d328f030f78))
+* gate meeting-end lookup on reminder setting, not just the timer ([3256b39](https://github.com/ariso-ai/oats/commit/3256b392e1dee0ef6e6c82000d7cbd656038cb57))
+
 ## [0.10.0](https://github.com/ariso-ai/oats/compare/v0.9.0...v0.10.0) (2026-06-21)
 
 
