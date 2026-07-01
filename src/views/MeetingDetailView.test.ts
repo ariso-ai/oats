@@ -917,4 +917,56 @@ describe('MeetingDetailView per-clip delete', () => {
 
     expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
   });
+
+  it('surfaces an inline error and keeps the clip when deleteMeetingClip rejects', async () => {
+    getMeetingDetail.mockResolvedValue(hostDetail({ audioClips: twoClips }));
+    getMeetingTranscript.mockResolvedValue([]);
+    deleteMeetingClip.mockRejectedValue(new Error('network down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    await wrapper.findAll('.clip-del-btn')[0].trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).toHaveBeenCalledWith(item, 'c1');
+    // The dialog closed but the clip was NOT removed, and the failure is surfaced.
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(2);
+    expect(wrapper.find('.clip-delete-error').exists()).toBe(true);
+    expect(wrapper.find('.clip-delete-error').text()).toContain('Could not delete this recording');
+  });
+
+  it('preserves the active clip and its transcript when a non-active clip is deleted', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    getMeetingDetail
+      .mockResolvedValueOnce(hostDetail({ audioClips: twoClips }))
+      .mockResolvedValueOnce(
+        hostDetail({
+          audioClips: [{ transcript_id: 'c2', duration_ms: 1000, created_at: 't2', legacy: false }],
+        })
+      );
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    // Switch active clip to c2, then delete c1 (the non-active clip).
+    const rows = wrapper.findAll('.clip-row');
+    await rows[1].trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('from clip two');
+
+    await wrapper.findAll('.clip-del-btn')[0].trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).toHaveBeenCalledWith(item, 'c1');
+    // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
+    expect(wrapper.text()).toContain('from clip two');
+    expect(wrapper.text()).not.toContain('from clip one');
+  });
 });

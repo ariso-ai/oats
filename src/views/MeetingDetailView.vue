@@ -220,7 +220,10 @@
                 :key="clip.transcript_id"
                 class="clip-row"
                 :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
+                role="button"
+                tabindex="0"
                 @click="activeClipId = clip.transcript_id"
+                @keydown.enter="activeClipId = clip.transcript_id"
               >
                 <span class="clip-label">{{ clipLabel(clip, i) }}</span>
                 <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
@@ -237,6 +240,7 @@
               </div>
             </template>
             <RecordingAudioPlayer v-else :key="detail.id" :load="loadAudio" />
+            <p v-if="clipDeleteError" class="clip-delete-error" role="alert">⚠ {{ clipDeleteError }}</p>
           </div>
 
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
@@ -574,8 +578,13 @@ const showPerClipDelete = computed(
 const showClipDeleteConfirm = ref(false);
 const clipPendingDelete = ref<MeetingAudioClip | null>(null);
 const deletingClip = ref(false);
+// Surfaced inline near the clip players when a delete fails — the confirm
+// dialog has already closed by then, so this is the user's only signal that
+// the clip they were told "can't be undone" actually still exists.
+const clipDeleteError = ref<string | null>(null);
 
 function askDeleteClip(clip: MeetingAudioClip): void {
+  clipDeleteError.value = null;
   clipPendingDelete.value = clip;
   showClipDeleteConfirm.value = true;
 }
@@ -597,6 +606,7 @@ async function confirmDeleteClip(): Promise<void> {
     await refreshAfterClipDelete();
   } catch (e) {
     console.error('Failed to delete recording clip', e);
+    clipDeleteError.value = 'Could not delete this recording. Please try again.';
   } finally {
     deletingClip.value = false;
     clipPendingDelete.value = null;
@@ -604,14 +614,22 @@ async function confirmDeleteClip(): Promise<void> {
 }
 
 // Re-pull the detail so the clip list + transcript reflect the deletion, then
-// reset the active clip and reload the transcript if that tab is open.
+// reload the transcript if that tab is open. Guarded by reqId (same pattern as
+// load()/loadTranscript()) so a meeting switch mid-refetch drops the stale
+// result instead of clobbering the newly-selected meeting's detail.
 async function refreshAfterClipDelete(): Promise<void> {
   const item = props.item;
   const backend = detailBackend;
   if (!item || !backend) return;
+  const my = reqId;
   const d = await backend.getMeetingDetail(item);
+  if (my !== reqId) return;
   detail.value = d;
-  activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
+  // Keep the currently active clip selected if it survived the delete;
+  // otherwise fall back to the first remaining clip (or none).
+  activeClipId.value = d.audioClips.some((c) => c.transcript_id === activeClipId.value)
+    ? activeClipId.value
+    : (d.audioClips[0]?.transcript_id ?? null);
   transcript.value = null;
   transcriptLoaded.value = false;
   if (activeTab.value === 'transcript') void loadTranscript();
@@ -635,6 +653,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
   activeClipId.value = null;
+  clipDeleteError.value = null;
   progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
@@ -1135,6 +1154,7 @@ const durationLabel = computed<string | null>(() => {
 }
 .clip-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
 .clip-del-btn:disabled { opacity: 0.6; cursor: default; }
+.clip-delete-error { margin: 4px 8px 0; font-size: 12px; color: #dc2626; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
