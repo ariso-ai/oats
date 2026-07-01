@@ -615,6 +615,38 @@ describe('MeetingDetailView audio player', () => {
     expect(wrapper.text()).not.toContain('from clip one');
   });
 
+  it('activates a clip row on Space and reflects the selection via aria-pressed', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    const rows = wrapper.findAll('.clip-row');
+    // Default: first clip active, and aria-pressed mirrors the active row.
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].attributes('aria-pressed')).toBe('false');
+
+    // role="button" must activate on Space, not just Enter/click.
+    await rows[1].trigger('keydown', { key: ' ' });
+    await flushPromises();
+
+    expect(rows[1].classes()).toContain('clip-row--active');
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[0].attributes('aria-pressed')).toBe('false');
+    expect(wrapper.text()).toContain('from clip two');
+    expect(wrapper.text()).not.toContain('from clip one');
+  });
+
   it("fetches a clip's audio via its transcript id when Play is clicked", async () => {
     getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
     const wrapper = await mountWith(

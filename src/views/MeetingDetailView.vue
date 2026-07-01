@@ -222,8 +222,10 @@
                 :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
                 role="button"
                 tabindex="0"
+                :aria-pressed="clip.transcript_id === activeClipId"
                 @click="activeClipId = clip.transcript_id"
                 @keydown.enter="activeClipId = clip.transcript_id"
+                @keydown.space.prevent="activeClipId = clip.transcript_id"
               >
                 <span class="clip-label">{{ clipLabel(clip, i) }}</span>
                 <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
