@@ -876,6 +876,34 @@ fn validate_meeting_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Clip transcript ids are `randomUUID()`s (or the sentinel `"legacy"`, which
+/// callers route to the no-arg endpoint instead). Allow only ascii-alphanumerics
+/// and dashes so a caller can't smuggle path segments or a query string into the
+/// URL below.
+fn validate_transcript_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("invalid transcript id: {id}"));
+    }
+    Ok(())
+}
+
+/// Build the meeting-audio URL, validating ids first. `None` transcript id →
+/// the whole-meeting/legacy endpoint; `Some(id)` → the per-clip endpoint.
+fn meeting_audio_url(
+    base: &str,
+    meeting_id: &str,
+    transcript_id: Option<&str>,
+) -> Result<String, String> {
+    validate_meeting_id(meeting_id)?;
+    match transcript_id {
+        Some(tid) => {
+            validate_transcript_id(tid)?;
+            Ok(format!("{base}/meeting-notes/{meeting_id}/audio/{tid}"))
+        }
+        None => Ok(format!("{base}/meeting-notes/{meeting_id}/audio")),
+    }
+}
+
 /// Fetch a meeting's recorded audio from the Ariso API as raw bytes (the
 /// endpoint streams the file directly). Non-200 responses become an error
 /// whose message is prefixed with the HTTP status so the frontend can map
@@ -884,11 +912,11 @@ fn validate_meeting_id(id: &str) -> Result<(), String> {
 pub async fn fetch_meeting_audio(
     app: tauri::AppHandle,
     meeting_id: String,
+    transcript_id: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
-    validate_meeting_id(&meeting_id)?;
+    let url = meeting_audio_url(&api_base_url(), &meeting_id, transcript_id.as_deref())?;
     let token = get_session_token(&app).unwrap_or_default();
     let client = http_client();
-    let url = format!("{}/meeting-notes/{}/audio", api_base_url(), meeting_id);
 
     // Bound the request so a stalled upstream/TCP connection can't hang the
     // command indefinitely; reqwest's builder has no default timeout.
@@ -1308,6 +1336,28 @@ mod tests {
         assert!(validate_meeting_id("12/audio").is_err());
         assert!(validate_meeting_id("abc").is_err());
         assert!(validate_meeting_id("12 ").is_err());
+    }
+
+    #[test]
+    fn meeting_audio_url_builds_legacy_and_per_clip() {
+        let base = "https://api.example.com";
+        assert_eq!(
+            meeting_audio_url(base, "42", None).unwrap(),
+            "https://api.example.com/meeting-notes/42/audio"
+        );
+        assert_eq!(
+            meeting_audio_url(base, "42", Some("3f8c1e2a-0000-4aaa-8bbb-1234567890ab")).unwrap(),
+            "https://api.example.com/meeting-notes/42/audio/3f8c1e2a-0000-4aaa-8bbb-1234567890ab"
+        );
+    }
+
+    #[test]
+    fn meeting_audio_url_rejects_injection() {
+        let base = "https://api.example.com";
+        assert!(meeting_audio_url(base, "42", Some("../secret")).is_err());
+        assert!(meeting_audio_url(base, "42", Some("a/b")).is_err());
+        assert!(meeting_audio_url(base, "42", Some("a?x=1")).is_err());
+        assert!(meeting_audio_url(base, "not-numeric", None).is_err());
     }
 
     #[test]

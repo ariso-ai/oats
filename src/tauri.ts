@@ -81,8 +81,14 @@ export const api = {
 
   /** Raw audio bytes for an Ariso meeting. Rejects with a message prefixed
    *  by the HTTP status (e.g. "404: …") when the server has no audio. */
-  async fetchMeetingAudio(meetingId: string | number): Promise<ArrayBuffer> {
-    return invoke<ArrayBuffer>('fetch_meeting_audio', { meetingId: String(meetingId) });
+  async fetchMeetingAudio(
+    meetingId: string | number,
+    transcriptId?: string
+  ): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('fetch_meeting_audio', {
+      meetingId: String(meetingId),
+      transcriptId: transcriptId ?? null,
+    });
   },
 };
 
