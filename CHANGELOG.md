@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0](https://github.com/ariso-ai/oats/compare/v0.11.0...v0.12.0) (2026-06-30)
+
+
+### Features
+
+* check for updates every 2h while running ([d23f789](https://github.com/ariso-ai/oats/commit/d23f7897408337d0c3ca708e5cd03b6a8b4c6349))
+* check for updates every 2h while running ([5133f23](https://github.com/ariso-ai/oats/commit/5133f2313921ea88ea35f60a64b96f6f4744f52c))
+
 ## [0.11.0](https://github.com/ariso-ai/oats/compare/v0.10.0...v0.11.0) (2026-06-30)
 
 
