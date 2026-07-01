@@ -214,13 +214,25 @@
                read_recording_audio off disk), and the player shows "No audio" when
                that resolves to null. -->
           <div v-if="activeTab === 'transcript'" class="card-audio">
-            <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+            <template v-if="audioClips.length > 1">
+              <div
+                v-for="(clip, i) in audioClips"
+                :key="clip.transcript_id"
+                class="clip-row"
+                :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
+                @click="activeClipId = clip.transcript_id"
+              >
+                <span class="clip-label">{{ clipLabel(clip, i) }}</span>
+                <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
+              </div>
+            </template>
+            <RecordingAudioPlayer v-else :key="detail.id" :load="loadAudio" />
           </div>
 
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
-          <ol v-else-if="transcriptChunks" class="transcript">
-            <li v-for="c in transcriptChunks" :key="c.chunk_index" class="transcript-line">
+          <ol v-else-if="displayedChunks" class="transcript">
+            <li v-for="c in displayedChunks" :key="c.chunk_index" class="transcript-line">
               <span class="transcript-ts">{{ formatTimestamp(c.start_ms) }}</span>
               <span class="transcript-content">{{ c.content }}</span>
             </li>
@@ -273,7 +285,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue';
 import { renderMarkdown, stripFrontmatter } from '../utils/markdown';
-import type { TranscriptChunk } from '../composables/useMeetingApi';
+import type { TranscriptChunk, MeetingAudioClip } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
 import {
   getActiveBackend,
@@ -499,6 +511,42 @@ function loadAudio(): Promise<ArrayBuffer | null> {
   return backend.getMeetingAudio(i);
 }
 
+// Meetings recorded across multiple sessions surface one clip per session
+// (oldest-first); legacy and imported-transcript meetings surface none/one.
+// A single clip (legacy or not) keeps today's single-player behavior via the
+// `loadAudio` fallback below, rather than routing through `loadClipAudio`.
+const activeClipId = ref<string | null>(null);
+const audioClips = computed<MeetingAudioClip[]>(() => detail.value?.audioClips ?? []);
+
+// Chunks shown in the transcript pane. With <=1 clip we show everything; with
+// several, we show only the active clip's chunks (partitioned client-side from
+// the already clip-tagged transcript — no extra fetch, no async race).
+const displayedChunks = computed<TranscriptChunk[] | null>(() => {
+  const t = transcript.value;
+  if (!Array.isArray(t)) return null;
+  if (audioClips.value.length <= 1 || !activeClipId.value) return t;
+  return t.filter((c) => c.transcript_id === activeClipId.value);
+});
+
+// Resolve a single clip's audio bytes. Legacy clips use the whole-meeting
+// endpoint (no transcript id).
+function loadClipAudio(clip: MeetingAudioClip): Promise<ArrayBuffer | null> {
+  const i = props.item;
+  const backend = detailBackend;
+  if (!i || !backend) return Promise.resolve(null);
+  return backend.getMeetingAudio(i, clip.legacy ? undefined : clip.transcript_id);
+}
+
+// "Recording N · Mm SSs" (drops the duration when unknown).
+function clipLabel(clip: MeetingAudioClip, index: number): string {
+  const n = index + 1;
+  if (clip.duration_ms == null) return `Recording ${n}`;
+  const total = Math.round(clip.duration_ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `Recording ${n} · ${m}m ${String(s).padStart(2, '0')}s`;
+}
+
 async function load(item: MeetingListItem | null): Promise<void> {
   await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
@@ -516,6 +564,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
+  activeClipId.value = null;
   progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
@@ -541,6 +590,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (my !== reqId) return;
     detail.value = d;
     detailBackend = backend;
+    activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
     activeTab.value = firstTabFor(d, item); // default to the first available tab
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
@@ -653,10 +703,6 @@ const transcriptMarkdown = computed<string | null>(() => {
   if (!detail.value?.isLocal) return null;
   const md = detail.value?.transcript;
   return md ? stripFrontmatter(md) : null;
-});
-const transcriptChunks = computed<TranscriptChunk[] | null>(() => {
-  if (detail.value?.isLocal) return null;
-  return Array.isArray(transcript.value) ? transcript.value : null;
 });
 
 // Render a chunk's `start_ms` offset as M:SS (or H:MM:SS past an hour).
@@ -1007,7 +1053,10 @@ const durationLabel = computed<string | null>(() => {
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
 .meta-ari { margin-left: auto; }
-.card-audio { display: flex; padding: 0 0 12px; }
+.card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
+.clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.clip-row--active { background: #f7f6f4; }
+.clip-label { flex-shrink: 0; min-width: 120px; font-size: 13px; font-weight: 500; color: #535353; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }

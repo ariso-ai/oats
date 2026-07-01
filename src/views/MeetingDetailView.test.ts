@@ -43,6 +43,7 @@ vi.mock('../tauri', () => ({
 
 import MeetingDetailView from './MeetingDetailView.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
 function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
   return {
@@ -52,6 +53,7 @@ function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
     participants: [],
     actionItems: [],
     isLocal: false,
+    audioClips: [],
     ...over,
   };
 }
@@ -74,7 +76,7 @@ beforeEach(() => {
     getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
     getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
-    getMeetingAudio: (i: MeetingListItem) => getMeetingAudio(i),
+    getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue({ content: '', title: '' });
@@ -559,6 +561,95 @@ describe('MeetingDetailView audio player', () => {
     await wrapper.find('.card-audio .play-btn').trigger('click');
     await flushPromises();
     expect(wrapper.find('.card-audio .play-btn').text()).toContain('No audio');
+  });
+
+  it('renders one player per clip and filters transcript to the active clip', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(2);
+    // Active defaults to the first clip -> only its chunk shows.
+    expect(wrapper.text()).toContain('from clip one');
+    expect(wrapper.text()).not.toContain('from clip two');
+  });
+
+  it('switches the displayed transcript when a different clip row is clicked', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    const rows = wrapper.findAll('.clip-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].classes()).toContain('clip-row--active');
+
+    await rows[1].trigger('click');
+    await flushPromises();
+
+    expect(rows[1].classes()).toContain('clip-row--active');
+    expect(wrapper.text()).toContain('from clip two');
+    expect(wrapper.text()).not.toContain('from clip one');
+  });
+
+  it("fetches a clip's audio via its transcript id when Play is clicked", async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    const rows = wrapper.findAll('.clip-row');
+    await rows[1].find('.play-btn').trigger('click');
+    await flushPromises();
+
+    expect(getMeetingAudio).toHaveBeenCalledWith(item, 'c2');
+  });
+
+  it('keeps the single-player fallback and whole-meeting audio for a legacy single clip', async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [{ transcript_id: 'legacy', duration_ms: null, created_at: 't0', legacy: true }],
+      })
+    );
+    await flushPromises();
+
+    expect(wrapper.find('.clip-row').exists()).toBe(false);
+    expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(1);
+
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+
+    expect(getMeetingAudio).toHaveBeenCalledWith(item);
   });
 });
 
