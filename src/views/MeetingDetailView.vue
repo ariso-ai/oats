@@ -636,6 +636,9 @@ async function refreshAfterClipDelete(): Promise<void> {
 }
 
 async function load(item: MeetingListItem | null): Promise<void> {
+  showClipDeleteConfirm.value = false;
+  clipPendingDelete.value = null;
+  clipDeleteError.value = null;
   await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
@@ -653,7 +656,6 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
   activeClipId.value = null;
-  clipDeleteError.value = null;
   progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;

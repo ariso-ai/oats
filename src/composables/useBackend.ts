@@ -361,7 +361,8 @@ export class ArisoBackend implements Backend {
 
   async getMeetingAudio(item: MeetingListItem, transcriptId?: string): Promise<ArrayBuffer | null> {
     try {
-      return await api.fetchMeetingAudio(item.id, transcriptId);
+      const clipId = transcriptId && transcriptId !== 'legacy' ? transcriptId : undefined;
+      return await api.fetchMeetingAudio(item.id, clipId);
     } catch (e) {
       // fetch_meeting_audio prefixes errors with the HTTP status; 404 means
       // the meeting simply has no recorded audio.
