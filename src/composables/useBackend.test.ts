@@ -17,6 +17,7 @@ const discardPendingAudio = vi.fn();
 const fetchMeetingAudio = vi.fn();
 const readRecordingAudio = vi.fn();
 const getMeetingNotes = vi.fn();
+const deleteMeetingRecordingClip = vi.fn();
 
 vi.mock('../tauri', () => ({
   local: {
@@ -46,6 +47,7 @@ vi.mock('./useMeetingApi', () => ({
     searchMeetings: (...a: unknown[]) => searchMeetings(...a),
     updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
     getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
+    deleteMeetingRecordingClip: (...a: unknown[]) => deleteMeetingRecordingClip(...a),
   }),
 }));
 
@@ -283,7 +285,7 @@ describe('ArisoBackend', () => {
     const buf = new ArrayBuffer(4);
     fetchMeetingAudio.mockResolvedValue(buf);
     expect(await b.getMeetingAudio(item)).toBe(buf);
-    expect(fetchMeetingAudio).toHaveBeenCalledWith('7');
+    expect(fetchMeetingAudio).toHaveBeenCalledWith('7', undefined);
 
     fetchMeetingAudio.mockRejectedValue('404: audio fetch failed');
     expect(await b.getMeetingAudio(item)).toBeNull();
@@ -312,6 +314,68 @@ describe('ArisoBackend', () => {
     expect(d.publicShareExpiresAt).toBe('2026-07-01T10:00:00Z');
     expect(d.shareMeetingNotesToPublic).toBe('host_only');
     expect(d.participants[0].id).toBe(11);
+  });
+});
+
+describe('ArisoBackend clips', () => {
+  it('getMeetingDetail surfaces audio_clips', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 42,
+      title: 'Sync',
+      start_at: '2026-06-01T10:00:00Z',
+      audio_clips: [
+        { transcript_id: 'c1', duration_ms: 1000, created_at: 't', legacy: false },
+      ],
+    });
+    const detail = await new ArisoBackend().getMeetingDetail({
+      id: '42',
+      title: 'Sync',
+      timestamp: '2026-06-01T10:00:00Z',
+    });
+    expect(detail.audioClips).toEqual([
+      { transcript_id: 'c1', duration_ms: 1000, created_at: 't', legacy: false },
+    ]);
+  });
+
+  it('getMeetingDetail defaults audioClips to an empty array when absent', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 42,
+      title: 'Sync',
+      start_at: '2026-06-01T10:00:00Z',
+    });
+    const detail = await new ArisoBackend().getMeetingDetail({
+      id: '42',
+      title: 'Sync',
+      timestamp: '2026-06-01T10:00:00Z',
+    });
+    expect(detail.audioClips).toEqual([]);
+  });
+
+  it('getMeetingAudio forwards a real transcriptId to the per-clip fetch', async () => {
+    fetchMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const item = { id: '42', title: 'T', timestamp: 't' };
+    await new ArisoBackend().getMeetingAudio(item, 'c1');
+    expect(fetchMeetingAudio).toHaveBeenCalledWith('42', 'c1');
+  });
+
+  it('deleteMeetingClip calls deleteMeetingRecordingClip', async () => {
+    deleteMeetingRecordingClip.mockResolvedValue(undefined);
+    const item = { id: '42', title: 'T', timestamp: 't' };
+    await new ArisoBackend().deleteMeetingClip(item, 'c1');
+    expect(deleteMeetingRecordingClip).toHaveBeenCalledWith('42', 'c1');
+  });
+});
+
+describe('LocalBackend clips', () => {
+  it('getMeetingDetail returns empty audioClips', async () => {
+    const item = { id: 'a', title: 'T', timestamp: 't' };
+    const detail = await new LocalBackend().getMeetingDetail(item);
+    expect(detail.audioClips).toEqual([]);
+  });
+
+  it('deleteMeetingClip rejects as unsupported', async () => {
+    const item = { id: 'a', title: 'T', timestamp: 't' };
+    await expect(new LocalBackend().deleteMeetingClip(item, 'x')).rejects.toThrow(/not supported/i);
   });
 });
 
