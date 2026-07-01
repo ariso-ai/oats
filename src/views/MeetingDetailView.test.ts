@@ -7,6 +7,7 @@ const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const getMeetingAudio = vi.fn();
+const deleteMeetingClip = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
@@ -77,6 +78,7 @@ beforeEach(() => {
     getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
     getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
+    deleteMeetingClip: (...a: [MeetingListItem, string]) => deleteMeetingClip(...a),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue({ content: '', title: '' });
@@ -838,5 +840,81 @@ describe('MeetingDetailView local generation progress', () => {
     // A note exists (old body) but notes are generating -> chip owns the row.
     expect(wrapper.find('.tab-status-label').text()).toBe('Generating AI Notes');
     expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+});
+
+describe('MeetingDetailView per-clip delete', () => {
+  const hostDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
+    detail({
+      hasTranscript: true,
+      participants: [{ role: 'host', self: true }],
+      ...over,
+    });
+  const twoClips = [
+    { transcript_id: 'c1', duration_ms: 1000, created_at: 't1', legacy: false },
+    { transcript_id: 'c2', duration_ms: 1000, created_at: 't2', legacy: false },
+  ];
+
+  it('shows a delete button per clip for a host with >1 clip, and deletes on confirm', async () => {
+    getMeetingDetail
+      .mockResolvedValueOnce(hostDetail({ audioClips: twoClips }))
+      .mockResolvedValueOnce(
+        hostDetail({
+          audioClips: [{ transcript_id: 'c2', duration_ms: 1000, created_at: 't2', legacy: false }],
+        })
+      );
+    getMeetingTranscript.mockResolvedValue([]);
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    const delButtons = wrapper.findAll('.clip-del-btn');
+    expect(delButtons).toHaveLength(2);
+
+    await delButtons[0].trigger('click');
+    expect(deleteMeetingClip).not.toHaveBeenCalled();
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).toHaveBeenCalledWith(item, 'c1');
+    // refetched -> one clip left -> per-clip delete no longer shown
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
+  });
+
+  it('cancels without deleting', async () => {
+    getMeetingDetail.mockResolvedValue(hostDetail({ audioClips: twoClips }));
+    getMeetingTranscript.mockResolvedValue([]);
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    await wrapper.findAll('.clip-del-btn')[0].trigger('click');
+    await wrapper.find('.secondary-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).not.toHaveBeenCalled();
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(2);
+  });
+
+  it('shows no per-clip delete for a non-host, even with >1 clip', async () => {
+    getMeetingDetail.mockResolvedValue(
+      hostDetail({ participants: [{ role: 'host', self: false }], audioClips: twoClips })
+    );
+    getMeetingTranscript.mockResolvedValue([]);
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
+  });
+
+  it('shows no per-clip delete for a host with a single (or legacy) clip', async () => {
+    getMeetingDetail.mockResolvedValue(
+      hostDetail({ audioClips: [{ transcript_id: 'legacy', duration_ms: null, created_at: 't0', legacy: true }] })
+    );
+    getMeetingTranscript.mockResolvedValue([]);
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
   });
 });

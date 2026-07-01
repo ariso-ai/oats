@@ -224,6 +224,16 @@
               >
                 <span class="clip-label">{{ clipLabel(clip, i) }}</span>
                 <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
+                <button
+                  v-if="showPerClipDelete"
+                  class="clip-del-btn"
+                  type="button"
+                  :disabled="deletingClip"
+                  title="Delete this recording"
+                  @click.stop="askDeleteClip(clip)"
+                >
+                  Delete
+                </button>
               </div>
             </template>
             <RecordingAudioPlayer v-else :key="detail.id" :load="loadAudio" />
@@ -278,6 +288,12 @@
           />
         </div>
       </div>
+
+      <RecordingDeleteConfirmDialog
+        :open="showClipDeleteConfirm"
+        @confirm="confirmDeleteClip"
+        @cancel="cancelDeleteClip"
+      />
     </template>
   </div>
 </template>
@@ -298,6 +314,7 @@ import {
 import AriWillJoinTag from './AriWillJoinTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
+import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative, local } from '../tauri';
@@ -545,6 +562,59 @@ function clipLabel(clip: MeetingAudioClip, index: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `Recording ${n} · ${m}m ${String(s).padStart(2, '0')}s`;
+}
+
+// Host-only, and only when there are >=2 real (non-legacy) clips to choose
+// between — oats has no whole-recording delete, so single-clip (or legacy)
+// meetings simply show no delete affordance.
+const showPerClipDelete = computed(
+  () => isHost.value && audioClips.value.filter((c) => !c.legacy).length > 1
+);
+
+const showClipDeleteConfirm = ref(false);
+const clipPendingDelete = ref<MeetingAudioClip | null>(null);
+const deletingClip = ref(false);
+
+function askDeleteClip(clip: MeetingAudioClip): void {
+  clipPendingDelete.value = clip;
+  showClipDeleteConfirm.value = true;
+}
+
+function cancelDeleteClip(): void {
+  showClipDeleteConfirm.value = false;
+  clipPendingDelete.value = null;
+}
+
+async function confirmDeleteClip(): Promise<void> {
+  const clip = clipPendingDelete.value;
+  const item = props.item;
+  const backend = detailBackend;
+  showClipDeleteConfirm.value = false;
+  if (!clip || !item || !backend || deletingClip.value) return;
+  deletingClip.value = true;
+  try {
+    await backend.deleteMeetingClip(item, clip.transcript_id);
+    await refreshAfterClipDelete();
+  } catch (e) {
+    console.error('Failed to delete recording clip', e);
+  } finally {
+    deletingClip.value = false;
+    clipPendingDelete.value = null;
+  }
+}
+
+// Re-pull the detail so the clip list + transcript reflect the deletion, then
+// reset the active clip and reload the transcript if that tab is open.
+async function refreshAfterClipDelete(): Promise<void> {
+  const item = props.item;
+  const backend = detailBackend;
+  if (!item || !backend) return;
+  const d = await backend.getMeetingDetail(item);
+  detail.value = d;
+  activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
+  transcript.value = null;
+  transcriptLoaded.value = false;
+  if (activeTab.value === 'transcript') void loadTranscript();
 }
 
 async function load(item: MeetingListItem | null): Promise<void> {
@@ -1057,6 +1127,14 @@ const durationLabel = computed<string | null>(() => {
 .clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .clip-row--active { background: #f7f6f4; }
 .clip-label { flex-shrink: 0; min-width: 120px; font-size: 13px; font-weight: 500; color: #535353; }
+.clip-del-btn {
+  margin-left: auto;
+  height: 26px; padding: 0 10px;
+  background: transparent; border: 1px solid #d6d6d6; border-radius: 6px;
+  font-family: inherit; font-size: 12px; font-weight: 500; color: #6f6f6f; cursor: pointer;
+}
+.clip-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
+.clip-del-btn:disabled { opacity: 0.6; cursor: default; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
