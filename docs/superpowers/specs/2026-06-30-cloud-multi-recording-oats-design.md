@@ -105,12 +105,16 @@ behavior. The substantive work is making the consuming UI clip-aware.
   client-side**; the transcript pane renders the active clip's chunks. Clicking
   a clip sets it active. Client-side partitioning avoids web-ui's async
   request-sequence race entirely (no in-flight token needed).
-- **Host-only per-clip delete.** When there is more than one non-legacy clip
-  **and** `isHost` (already computed at `MeetingDetailView.vue:326`), render a
-  delete button per clip → existing `ConfirmDialog` → `deleteMeetingClip` →
+- **Host-only per-clip delete.** oats has **no delete UI today** (no
+  whole-recording delete, no generic confirm dialog — only
+  `AriJoinConfirmDialog`), so this introduces oats's first destructive action.
+  When there is more than one non-legacy clip **and** `isHost` (already computed
+  at `MeetingDetailView.vue:326`), render a delete button per clip → a new
+  confirm dialog modeled on `AriJoinConfirmDialog` → `deleteMeetingClip` →
   refetch detail. If the deleted clip was active, reset active to the first
-  remaining clip. The single whole-recording delete is suppressed in multi-clip
-  mode (mirrors web-ui `showPerClipDelete`).
+  remaining clip. Single-clip / legacy meetings show no delete (unchanged from
+  today) — this matches web-ui's `showPerClipDelete` gate (>1 clip) without
+  oats needing a whole-recording delete.
 - **Degradation.** 1 clip or legacy → identical to today (one player, whole
   transcript, single delete button). 0 clips but `hasTranscript` (imported
   transcript) → no players, whole transcript as now. Per-clip audio 404 → the
