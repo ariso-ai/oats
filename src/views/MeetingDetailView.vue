@@ -1116,13 +1116,50 @@ const durationLabel = computed<string | null>(() => {
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; border-bottom: 1px solid #e5e6e3; }
 .head-titles { flex: 1; min-width: 0; }
 .head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
-.head-title--editable { cursor: text; }
-.head-title--input {
-  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
-  position: relative; top: -1px;
-  font-family: inherit; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
-  border: none; background: transparent; outline: none; appearance: none;
+/* Editable heading: a rounded, hoverable box plus a persistent pencil cue so the
+   title clearly reads as "click to rename", not just selectable text. */
+.head-title--editable {
+  cursor: text;
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  margin: -3px -8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: background 0.12s, border-color 0.12s;
 }
+.head-title--editable::after {
+  content: "\270E"; /* ✎ */
+  margin-left: 8px;
+  font-size: 15px;
+  font-weight: 400;
+  color: #c4c4c0;
+  transition: color 0.12s;
+}
+.head-title--editable:hover,
+.head-title--editable:focus-visible {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: #e5e6e3;
+}
+/* Keyboard focus needs a clearly visible ring, not just the faint hover tint. */
+.head-title--editable:focus-visible {
+  border-color: #1c1c1c;
+  box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12);
+  outline: none;
+}
+.head-title--editable:hover::after,
+.head-title--editable:focus-visible::after { color: #6f6f6f; }
+/* Editing state: a distinctly boxed field (border + white fill + focus ring) so it
+   reads as "I'm editing", not merely highlighted text. Padding is offset by a
+   matching negative margin so the title text stays put when toggling edit on/off. */
+.head-title--input {
+  display: inline-block; width: calc(100% + 16px); height: calc(1.2em + 8px);
+  margin: -3px -8px; padding: 3px 8px; box-sizing: border-box; vertical-align: baseline;
+  font-family: inherit; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
+  border: 1px solid #9a9a96; border-radius: 8px; background: #ffffff; outline: none; appearance: none;
+}
+.head-title--input:focus { border-color: #1c1c1c; box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12); }
 .head-title--input:disabled { opacity: 0.6; }
 .head-title-error { margin: 4px 0 0; font-size: 12px; color: #dc2626; }
 .head-sub { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
@@ -1224,13 +1261,47 @@ const durationLabel = computed<string | null>(() => {
 .tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
 .notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; line-height: 1.2; }
-.notes-title--editable { cursor: text; }
+/* Same click-to-rename affordance as the meeting title (see .head-title--editable). */
+.notes-title--editable {
+  cursor: text;
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  margin: -3px -8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.notes-title--editable::after {
+  content: "\270E"; /* ✎ */
+  margin-left: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  color: #c4c4c0;
+  transition: color 0.12s;
+}
+.notes-title--editable:hover,
+.notes-title--editable:focus-visible {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: #e5e6e3;
+}
+/* Keyboard focus needs a clearly visible ring, not just the faint hover tint. */
+.notes-title--editable:focus-visible {
+  border-color: #1c1c1c;
+  box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12);
+  outline: none;
+}
+.notes-title--editable:hover::after,
+.notes-title--editable:focus-visible::after { color: #6f6f6f; }
 .notes-title--placeholder { color: #9a9a9a; }
 .notes-title--input {
-  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
+  display: inline-block; width: calc(100% + 16px); height: calc(1.2em + 8px);
+  margin: -3px -8px; padding: 3px 8px; box-sizing: border-box; vertical-align: baseline;
   font-family: inherit; font-size: 20px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
-  border: none; background: transparent; outline: none; appearance: none;
+  border: 1px solid #9a9a96; border-radius: 8px; background: #ffffff; outline: none; appearance: none;
 }
+.notes-title--input:focus { border-color: #1c1c1c; box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12); }
 .notes-title--input::placeholder { color: #9a9a9a; font-weight: 700; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
