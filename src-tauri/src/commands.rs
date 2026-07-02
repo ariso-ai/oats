@@ -1269,6 +1269,7 @@ mod tests {
             model_version: None,
             error: None,
             notes_error: None,
+            last_clip_end_at: None,
         }
     }
 
@@ -1469,6 +1470,7 @@ mod tests {
             model_version: None,
             error: None,
             notes_error: None,
+            last_clip_end_at: None,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();

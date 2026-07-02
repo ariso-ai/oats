@@ -1,14 +1,31 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 /// Upper bound on how long the notes sidecar may run before we kill it.
 /// Notes generation is best-effort and runs detached from `finalize_core`,
 /// so this only bounds the background task's lifetime.
 const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Per-recording mutex table. Serializes concurrent `append_recording_core`
+/// calls to the same target so two simultaneous finalizations cannot both
+/// see a `Done` target and race on writing audio/segments/meta.
+static APPEND_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> = OnceLock::new();
+
+fn get_append_lock(target_id: &str) -> Arc<TokioMutex<()>> {
+    let map = APPEND_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("append lock table poisoned");
+    guard
+        .entry(target_id.to_string())
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
 
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,6 +211,7 @@ async fn fresh_recording_core(
         model_version: None,
         error: None,
         notes_error: None,
+        last_clip_end_at: None,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -266,6 +284,7 @@ fn save_failed_clip(
                 model_version: None,
                 error: Some(err.to_string()),
                 notes_error: None,
+                last_clip_end_at: None,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -299,10 +318,18 @@ async fn append_recording_core(
     duration_seconds: u64,
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     let dir = storage::recordings_dir(root).join(target_id);
-    // If the target's meta or segments can't be read (missing OR corrupt), don't
-    // lose the clip — fall back to saving it as its own fresh recording.
+
+    // Serialize concurrent appends to the same target recording so two
+    // simultaneous finalize calls cannot both see Done status and race on
+    // writing audio/segments/meta.
+    let _append_guard = get_append_lock(target_id).lock_owned().await;
+
+    // Re-read meta/segments inside the lock. A concurrent append may have
+    // completed (and changed status) since finalize_core's
+    // most_recent_appendable check. Fall back to a fresh recording if the
+    // target's state is no longer suitable for an append.
     let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
-        (Ok(m), Ok(Some(s))) => (m, s),
+        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done => (m, s),
         _ => return fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
     };
 
@@ -347,6 +374,9 @@ async fn append_recording_core(
     if meta.language.is_none() {
         meta.language = Some(result.language.clone());
     }
+    // Record the true wall-clock end of this clip so subsequent append-window
+    // checks use it instead of the audio-only duration sum.
+    meta.last_clip_end_at = storage::clip_end_timestamp(&created_at, duration_seconds);
 
     // Content writes, in crash-safe order: audio, then structured segments,
     // then the rendered transcript.
@@ -658,6 +688,7 @@ mod tests {
             model_version: None,
             error: Some("old failure".into()),
             notes_error: None,
+            last_clip_end_at: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -691,6 +722,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -710,6 +742,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
+            last_clip_end_at: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -743,6 +776,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -951,6 +985,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -976,6 +1011,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T10:00:00Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 

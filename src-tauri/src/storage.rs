@@ -1,4 +1,4 @@
-use chrono::DateTime;
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,6 +92,12 @@ pub struct RecordingMeta {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_error: Option<String>,
+    /// Wall-clock end of the most recently appended clip. Set by
+    /// `append_recording_core` so that subsequent append-window checks use the
+    /// true end instead of the audio-only `created_at + duration_seconds` sum,
+    /// which lags behind reality when clips have inter-clip gaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clip_end_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -102,6 +108,8 @@ pub struct RecordingSummary {
     pub created_at: String,
     pub duration_seconds: u64,
     pub status: RecordingStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clip_end_at: Option<String>,
     /// Whether `recording.mp3` exists in the recording's directory.
     pub has_audio: bool,
     /// Whether `ari-note.md` exists in the recording's directory.
@@ -494,6 +502,7 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     created_at: m.created_at,
                     duration_seconds: m.duration_seconds,
                     status: m.status,
+                    last_clip_end_at: m.last_clip_end_at,
                     has_audio: recording_dir.join("recording.mp3").is_file(),
                     has_note: recording_dir.join("ari-note.md").is_file(),
                     has_transcript: recording_dir.join("transcript.md").is_file(),
@@ -508,17 +517,19 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
     Ok(out)
 }
 
+/// Compute the RFC3339 wall-clock end of a clip given its start timestamp and
+/// duration. Returns `None` if `created_at` cannot be parsed or the resulting
+/// timestamp is out of range.
+pub fn clip_end_timestamp(created_at: &str, duration_seconds: u64) -> Option<String> {
+    let dt = DateTime::parse_from_rfc3339(created_at).ok()?;
+    let end_ts = dt.timestamp() + duration_seconds as i64;
+    Utc.timestamp_opt(end_ts, 0).single().map(|d| d.to_rfc3339())
+}
+
 /// Whether a clip starting at `new_created_at` falls inside the append window of
 /// a prior recording that started at `prev_created_at` and ran
 /// `prev_duration_seconds`. The gap (new_start − prev_end) must be in
 /// `[0, window_seconds]`. Unparseable timestamps are never appendable.
-///
-/// Note: `prev_end = prev_created_at + prev_duration_seconds` sums only recorded
-/// audio, so it excludes any inter-clip gaps already folded into a prior append
-/// chain — over a chain of gapped appends this computed end lags true
-/// wall-clock time. The drift is in the safe direction: it can only make a
-/// resume look further outside the window than it really is (wrongly splitting
-/// it into a new recording), never pull in an unrelated later meeting.
 pub fn within_append_window(
     prev_created_at: &str,
     prev_duration_seconds: u64,
@@ -549,12 +560,15 @@ pub fn most_recent_appendable(root: &Path, new_created_at: &str) -> Result<Optio
     if newest.status != RecordingStatus::Done {
         return Ok(None);
     }
-    if within_append_window(
-        &newest.created_at,
-        newest.duration_seconds,
-        new_created_at,
-        APPEND_WINDOW_SECONDS,
-    ) {
+    // Use the stored last-clip end when available so chained appends with
+    // inter-clip gaps don't make the computed end lag behind the true
+    // wall-clock time. Passing it as the start with 0 duration gives
+    // prev_end = that timestamp exactly.
+    let (check_start, check_duration) = match newest.last_clip_end_at.as_deref() {
+        Some(end_at) => (end_at, 0u64),
+        None => (newest.created_at.as_str(), newest.duration_seconds),
+    };
+    if within_append_window(check_start, check_duration, new_created_at, APPEND_WINDOW_SECONDS) {
         Ok(Some(newest.id.clone()))
     } else {
         Ok(None)
@@ -609,6 +623,7 @@ mod tests {
             id: id.into(), title: format!("T {id}"), created_at: created.into(),
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         }
     }
 
@@ -738,6 +753,7 @@ mod tests {
             model_version: Some("parakeet-tdt-0.6b-v3".into()),
             error: None,
             notes_error: None,
+            last_clip_end_at: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -758,6 +774,7 @@ mod tests {
             id: "x".into(), title: "t".into(), created_at: "c".into(),
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -935,6 +952,7 @@ mod tests {
             model_version: None,
             error: None,
             notes_error: None,
+            last_clip_end_at: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();
