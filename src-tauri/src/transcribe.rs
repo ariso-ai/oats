@@ -144,6 +144,24 @@ pub async fn finalize_core(
     created_at: String,
     duration_seconds: u64,
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
+    match storage::most_recent_appendable(root, &created_at)? {
+        Some(target_id) => {
+            append_recording_core(root, &target_id, audio, title, created_at, duration_seconds).await
+        }
+        None => fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
+    }
+}
+
+/// Create a brand-new recording: persist audio, transcribe, write
+/// `segments.json` + `transcript.md`, mark `Done`, spawn notes. On STT failure
+/// the recording is marked `Failed` (audio retained).
+async fn fresh_recording_core(
+    root: &Path,
+    audio: Vec<u8>,
+    title: String,
+    created_at: String,
+    duration_seconds: u64,
+) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     let id = storage::sanitize_iso_to_id(&created_at);
     let dir = storage::create_recording_dir(root, &id)?;
 
@@ -203,6 +221,80 @@ pub async fn finalize_core(
             Err(e)
         }
     }
+}
+
+/// Append a clip to existing recording `target_id`: transcribe just the clip,
+/// offset it past the existing content, stitch into `segments.json`, concatenate
+/// the audio, update meta, re-render `transcript.md`, and regenerate notes. On
+/// STT failure the clip is saved as its own `Failed` recording (target
+/// untouched). If the target lacks `segments.json` (pre-feature recording), fall
+/// back to a fresh recording rather than corrupt it.
+async fn append_recording_core(
+    root: &Path,
+    target_id: &str,
+    audio: Vec<u8>,
+    title: String,
+    created_at: String,
+    duration_seconds: u64,
+) -> Result<(FinalizeResult, JoinHandle<()>), String> {
+    let dir = storage::recordings_dir(root).join(target_id);
+    let mut meta = storage::read_meta(&dir)?;
+    let Some(mut existing) = storage::read_segments(&dir)? else {
+        return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+    };
+
+    let models = storage::models_dir(root);
+    // Transcribe from a temp file so the target's audio is never touched on failure.
+    let clip_path = dir.join("append-clip.mp3");
+    std::fs::write(&clip_path, &audio).map_err(|e| format!("write clip: {e}"))?;
+    let result = match run_transcribe(&clip_path, &models).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = std::fs::remove_file(&clip_path);
+            // Save this clip as its own Failed recording; leave the target intact.
+            let _ = fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+            return Err(e);
+        }
+    };
+
+    // Stitch the clip past the existing content.
+    let time_offset = meta.duration_seconds as f64;
+    let speaker_offset = storage::next_speaker_offset(&existing);
+    let mut clip_segments = storage::offset_segments(&result.segments, time_offset, speaker_offset);
+    let mut clip_participants = storage::offset_participants(&result.participants, speaker_offset);
+    existing.segments.append(&mut clip_segments);
+    existing.participants.append(&mut clip_participants);
+    storage::write_segments(&dir, &existing)?;
+
+    // Concatenate audio (read + extend + atomic write for crash safety).
+    let mut combined = std::fs::read(dir.join("recording.mp3")).map_err(|e| format!("read audio: {e}"))?;
+    combined.extend_from_slice(&audio);
+    storage::write_atomic(&dir.join("recording.mp3"), &combined)?;
+    let _ = std::fs::remove_file(&clip_path);
+
+    // Accumulate meta; keep Done.
+    meta.duration_seconds += duration_seconds;
+    meta.participants = existing.participants.clone();
+    if meta.language.is_none() {
+        meta.language = Some(result.language.clone());
+    }
+    meta.status = RecordingStatus::Done;
+    storage::write_meta(&dir, &meta)?;
+
+    // Re-render the full transcript from the stitched segments.
+    let md = storage::render_markdown(&meta, &existing.segments);
+    storage::write_transcript(&dir, &md)?;
+
+    let notes_handle = tokio::spawn(process_notes(dir.clone(), models, meta.clone()));
+    Ok((
+        FinalizeResult {
+            backend: "local".to_string(),
+            id: target_id.to_string(),
+            title: meta.title.clone(),
+            status: RecordingStatus::Done,
+        },
+        notes_handle,
+    ))
 }
 
 /// Re-run the full pipeline (transcription + notes) for an existing recording,
@@ -591,6 +683,113 @@ mod tests {
             "stale note must be removed so regeneration is observable"
         );
         assert!(read_meta(&dir).unwrap().notes_error.is_some());
+    }
+
+    // Helper: a stub that prints notes for `notes`, else a single-segment JSON
+    // whose text is the first CLI arg's file contents is overkill — instead emit a
+    // fixed clip transcript. Each call yields one segment "clip".
+    fn clip_stub(dir: &Path) -> PathBuf {
+        let json = r#"{"language":"en","participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"clip text","start":0.0,"end":3.0}]}"#;
+        let body = format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        write_stub(dir, &body)
+    }
+
+    #[tokio::test]
+    async fn second_recording_within_window_appends_to_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        // First recording: 30s, ends 10:00:30.
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        // Second recording starts 10:01:00 (30s after end) → appends.
+        let (r2, h2) = finalize_core(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // Same recording id, no second directory.
+        assert_eq!(r2.id, r1.id);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
+        let seg = crate::storage::read_segments(&dir).unwrap().unwrap();
+        assert_eq!(seg.segments.len(), 2, "both clips stitched");
+        // Second clip offset past the first: start = prior duration (30s).
+        assert_eq!(seg.segments[1].start, 30.0);
+        // Speaker ids kept distinct.
+        assert_eq!(seg.segments[0].speaker, 0);
+        assert_eq!(seg.segments[1].speaker, 1);
+        // Meta duration summed; audio concatenated.
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.duration_seconds, 45);
+        assert_eq!(std::fs::read(dir.join("recording.mp3")).unwrap(), b"aaabbb");
+        // transcript.md re-rendered with both clips.
+        let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        assert_eq!(md.matches("clip text").count(), 2);
+        // Only one recording directory exists.
+        let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn second_recording_outside_window_is_separate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+        // 20 minutes later → separate recording.
+        let (r2, h2) = finalize_core(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:20:00.000Z".into(), 15,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_ne!(r2.id, r1.id);
+        let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn append_stt_failure_leaves_target_untouched_and_saves_failed_clip() {
+        let tmp = tempfile::tempdir().unwrap();
+        // First: success stub.
+        let ok_stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &ok_stub); }
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        // Second: failing stub → append must fall back to a separate Failed recording.
+        let fail_stub = write_stub(tmp.path(), "echo 'boom' >&2\nexit 1");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
+        let err = finalize_core(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+        ).await.unwrap_err();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert!(err.contains("boom"), "got: {err}");
+
+        // Target untouched: still one segment, 30s, audio "aaa".
+        let dir1 = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
+        assert_eq!(crate::storage::read_segments(&dir1).unwrap().unwrap().segments.len(), 1);
+        assert_eq!(crate::storage::read_meta(&dir1).unwrap().duration_seconds, 30);
+        assert_eq!(std::fs::read(dir1.join("recording.mp3")).unwrap(), b"aaa");
+
+        // The failed clip is its own recording, audio retained, status Failed.
+        let dir2 = crate::storage::recordings_dir(tmp.path()).join("2026-06-02T10-01-00Z");
+        assert!(dir2.join("recording.mp3").exists());
+        assert_eq!(crate::storage::read_meta(&dir2).unwrap().status, RecordingStatus::Failed);
+        assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
     }
 
     #[tokio::test]
