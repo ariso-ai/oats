@@ -404,6 +404,40 @@ pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
     out
 }
 
+/// Shift a clip's segments by `time_offset` seconds and `speaker_offset` ids so
+/// they stitch onto an existing recording without overlapping timestamps or
+/// colliding speaker ids.
+pub fn offset_segments(segments: &[Segment], time_offset: f64, speaker_offset: u32) -> Vec<Segment> {
+    segments
+        .iter()
+        .map(|s| Segment {
+            speaker: s.speaker + speaker_offset,
+            text: s.text.clone(),
+            start: s.start + time_offset,
+            end: s.end + time_offset,
+        })
+        .collect()
+}
+
+/// Shift a clip's participant ids by `speaker_offset` (labels unchanged).
+pub fn offset_participants(participants: &[Participant], speaker_offset: u32) -> Vec<Participant> {
+    participants
+        .iter()
+        .map(|p| Participant { id: p.id + speaker_offset, label: p.label.clone() })
+        .collect()
+}
+
+/// The next free speaker id (max existing id across participants and segments,
+/// plus one; 0 when empty), used to keep an appended clip's speakers distinct.
+pub fn next_speaker_offset(existing: &SegmentsFile) -> u32 {
+    let max_p = existing.participants.iter().map(|p| p.id).max();
+    let max_s = existing.segments.iter().map(|s| s.speaker).max();
+    match max_p.max(max_s) {
+        Some(m) => m + 1,
+        None => 0,
+    }
+}
+
 /// Write the rendered transcript atomically.
 pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("transcript.md"), markdown.as_bytes())
@@ -817,5 +851,35 @@ mod tests {
         };
         write_segments(dir, &sf).unwrap();
         assert_eq!(read_segments(dir).unwrap(), Some(sf));
+    }
+
+    #[test]
+    fn offsets_segments_and_participants_and_next_id() {
+        let existing = SegmentsFile {
+            language: Some("en".into()),
+            participants: vec![
+                Participant { id: 0, label: "Speaker 1".into() },
+                Participant { id: 1, label: "Speaker 2".into() },
+            ],
+            segments: vec![Segment { speaker: 1, text: "a".into(), start: 0.0, end: 2.0 }],
+        };
+        assert_eq!(next_speaker_offset(&existing), 2);
+
+        let clip = vec![Segment { speaker: 0, text: "b".into(), start: 0.0, end: 1.0 }];
+        let shifted = offset_segments(&clip, 10.0, 2);
+        assert_eq!(shifted[0].speaker, 2);
+        assert_eq!(shifted[0].start, 10.0);
+        assert_eq!(shifted[0].end, 11.0);
+
+        let parts = vec![Participant { id: 0, label: "Speaker 1".into() }];
+        let shifted_p = offset_participants(&parts, 2);
+        assert_eq!(shifted_p[0].id, 2);
+        assert_eq!(shifted_p[0].label, "Speaker 1");
+    }
+
+    #[test]
+    fn next_speaker_offset_zero_when_empty() {
+        let empty = SegmentsFile { language: None, participants: vec![], segments: vec![] };
+        assert_eq!(next_speaker_offset(&empty), 0);
     }
 }
