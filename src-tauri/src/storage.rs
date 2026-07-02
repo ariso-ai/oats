@@ -575,6 +575,14 @@ pub fn most_recent_appendable(root: &Path, new_created_at: &str) -> Result<Optio
     }
 }
 
+/// The recording id a new local recording starting at `created_at` will finalize
+/// into: the append target when it will merge into the recent recording, else
+/// the new recording's own id. Lets the recorder/library surface the correct row
+/// from the moment recording starts, matching what `finalize_core` will do.
+pub fn resolve_local_recording_id(root: &Path, created_at: &str) -> Result<String, String> {
+    Ok(most_recent_appendable(root, created_at)?.unwrap_or_else(|| sanitize_iso_to_id(created_at)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +743,36 @@ mod tests {
         failed.status = RecordingStatus::Failed;
         write_meta(&dir, &failed).unwrap();
         assert_eq!(most_recent_appendable(root, "2026-06-02T10:02:00.000Z").unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_local_recording_id_targets_recent_else_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // No recordings → the new recording's own sanitized id.
+        assert_eq!(
+            resolve_local_recording_id(root, "2026-06-02T10:00:00.000Z").unwrap(),
+            "2026-06-02T10-00-00Z"
+        );
+
+        // A recent Done recording (ended 10:01:00) → its id (append target).
+        let id = "2026-06-02T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut m = meta_with(id, "2026-06-02T10:00:00.000Z");
+        m.duration_seconds = 60;
+        m.status = RecordingStatus::Done;
+        write_meta(&dir, &m).unwrap();
+        assert_eq!(
+            resolve_local_recording_id(root, "2026-06-02T10:02:00.000Z").unwrap(),
+            id
+        );
+
+        // Outside the window → a fresh id, not the target.
+        assert_eq!(
+            resolve_local_recording_id(root, "2026-06-02T10:20:00.000Z").unwrap(),
+            "2026-06-02T10-20-00Z"
+        );
     }
 
     #[test]

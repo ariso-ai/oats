@@ -105,7 +105,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
-import { pending } from '../tauri';
+import { pending, local } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
 import { isMeetingEndReminderEnabled } from '../composables/useMeetingEndReminder';
@@ -188,6 +188,13 @@ function currentPhase(): RecorderPhase {
 // broadcast and the window's destruction would otherwise revive the strip.
 let closedSent = false;
 
+// The local recording id the current session will finalize into — the append
+// target when resuming the recent recording, or this session's own new id. Rust
+// owns the append decision (5-min window), so we resolve it once when recording
+// starts (the startedAt watcher) rather than deriving a new id from the start
+// time here. Null until resolved.
+const effectiveLocalRecordingId = ref<string | null>(null);
+
 function broadcastState(phase: RecorderPhase = currentPhase()): void {
   if (closedSent) return;
   // Don't announce "recording" while startRecording() is still awaiting
@@ -199,13 +206,14 @@ function broadcastState(phase: RecorderPhase = currentPhase()): void {
     durationSeconds: recorder.durationSeconds.value,
     isPaused: recorder.isPaused.value,
     meetingId: effectiveMeetingId.value,
-    // Local recordings have no meeting id, but their finalized recording id is
-    // deterministic from the start time — broadcast it so the library can pin
-    // the strip / red dot to the row the recording will land on.
+    // Local recordings have no meeting id. Broadcast the id the recording will
+    // finalize INTO — the append target when resuming the recent recording, else
+    // the new recording's own id — so the library pins the strip to the current
+    // meeting on a resume instead of spinning up a phantom new note. Null until
+    // resolved (see the startedAt watcher), which keeps the strip home-less for a
+    // beat rather than briefly selecting the wrong (new) row.
     localRecordingId:
-      backend.value?.id === 'local' && recorder.startedAt.value
-        ? localRecordingIdFromStart(recorder.startedAt.value)
-        : null,
+      backend.value?.id === 'local' ? effectiveLocalRecordingId.value : null,
     phase,
   }).catch(() => { /* no listeners / shutting down */ });
 }
@@ -217,6 +225,30 @@ watch(
 );
 // Re-resolve the scheduled end whenever the attached meeting changes.
 watch(effectiveMeetingId, () => void resolveMeetingEnd());
+// When a local recording starts, ask Rust which recording it will finalize into
+// (append target vs. new) and broadcast that id. Resolving once here — rather
+// than deriving a fresh id from the start time on every heartbeat — is what
+// keeps a resume docked to the current meeting instead of a phantom new note.
+// Depends on the backend too: `startedAt` is set once per session, but the
+// backend resolves asynchronously, so re-run once we know it's local.
+watch(
+  [() => recorder.startedAt.value, () => backend.value?.id],
+  async ([startAt, backendId]) => {
+    if (!startAt || backendId !== 'local') {
+      effectiveLocalRecordingId.value = null;
+      return;
+    }
+    try {
+      effectiveLocalRecordingId.value = await local.recordingIdForStart(startAt);
+    } catch (e) {
+      // Fall back to this session's own id so recording still works if the
+      // resolve fails (worst case: today's behavior, a new-recording row).
+      console.error('Failed to resolve local recording id; using new-recording id', e);
+      effectiveLocalRecordingId.value = localRecordingIdFromStart(startAt);
+    }
+  },
+  { immediate: true },
+);
 // Heartbeat so the strip can detect a dead recorder (no events ≈ crashed):
 // frame/duration watchers go quiet during upload and after stop.
 const stateHeartbeat = setInterval(() => broadcastState(), 1_000);

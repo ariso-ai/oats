@@ -77,8 +77,14 @@ vi.mock('../composables/useMeetingApi', () => ({
 }));
 
 const discardPendingAudio = vi.fn(() => Promise.resolve());
+// Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
+// i.e. a fresh recording. Tests that exercise the append case override this.
+const recordingIdForStart = vi.fn((createdAt: string) =>
+  Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
+);
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
+  local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
 }));
 
 import WaveformView from './WaveformView.vue';
@@ -444,6 +450,25 @@ describe('WaveformView vertical pill', () => {
       .at(-1);
     // Mirrors Rust sanitize_iso_to_id over the mocked startedAt.
     expect(state?.localRecordingId).toBe('2026-06-09T10-00-00Z');
+    vi.useRealTimers();
+  });
+
+  it('broadcasts the append-target id when resuming the recent recording', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    // Rust resolves this session to an EXISTING recording (append within window),
+    // so the strip must dock to that recording's row, not a new-session id.
+    recordingIdForStart.mockResolvedValueOnce('2026-06-02T10-00-00Z');
+    mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await vi.advanceTimersByTimeAsync(1_100); // heartbeat
+
+    const state = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => payload as { localRecordingId: string | null })
+      .at(-1);
+    expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z');
+    expect(state?.localRecordingId).toBe('2026-06-02T10-00-00Z');
     vi.useRealTimers();
   });
 

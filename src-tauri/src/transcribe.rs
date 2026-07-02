@@ -482,6 +482,17 @@ pub async fn retry_local_notes(id: String) -> Result<(), String> {
     retry_notes_core(&root, &id).await.map(|_handle| ())
 }
 
+/// Resolve the recording id a new local recording starting at `created_at` will
+/// finalize into — the append target (if it will merge into the recent
+/// recording) or the new recording's own id. The recorder calls this at start so
+/// the library shows the correct row (the current meeting on a resume, a new row
+/// otherwise) instead of a phantom new note that vanishes when the append lands.
+#[tauri::command]
+pub async fn local_recording_id_for_start(created_at: String) -> Result<String, String> {
+    let root = storage::ariso_root()?;
+    storage::resolve_local_recording_id(&root, &created_at)
+}
+
 #[tauri::command]
 pub async fn local_finalize_recording(
     audio: Vec<u8>,
