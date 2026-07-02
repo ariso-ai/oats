@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.13.0](https://github.com/ariso-ai/oats/compare/v0.12.0...v0.13.0) (2026-07-02)
+
+
+### Features
+
+* clearer editable-name affordances in MeetingDetailView ([b202710](https://github.com/ariso-ai/oats/commit/b202710a1052385dfaff90edb8c00aec130d3017))
+* clearer editable-name affordances in MeetingDetailView ([b76435d](https://github.com/ariso-ai/oats/commit/b76435d5c077b81a45a76f44d5894f4a570f53b7))
+* cloud multi-recording support in oats (stacked clips, per-clip transcript + delete) ([1f0b409](https://github.com/ariso-ai/oats/commit/1f0b409a9dba591f8581de9fb4c43694ddad104b))
+
+
+### Bug Fixes
+
+* activate clip rows on Space + aria-pressed (CodeRabbit) ([525997e](https://github.com/ariso-ai/oats/commit/525997e4835e976a48e228bc8d4e8b781c1c3632))
+* **deps:** enable reqwest "query" feature for 0.13 ([a173c93](https://github.com/ariso-ai/oats/commit/a173c93d3a48b257c1a1f5192aa4d304fb839fc7))
+* **deps:** unify on rustls + ring TLS under reqwest 0.13 ([5b92285](https://github.com/ariso-ai/oats/commit/5b92285abbe8ad1d310a4784d4e5eae7e014a6fc))
+* visible keyboard-focus ring on editable titles (CodeRabbit) ([196e49e](https://github.com/ariso-ai/oats/commit/196e49e66d564824f5df32f42eb0b7e36b2f061d))
+
 ## [0.12.0](https://github.com/ariso-ai/oats/compare/v0.11.0...v0.12.0) (2026-06-30)
 
 
