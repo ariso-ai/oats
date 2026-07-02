@@ -1141,6 +1141,11 @@ const durationLabel = computed<string | null>(() => {
 .head-title--editable:focus-visible {
   background: rgba(0, 0, 0, 0.04);
   border-color: #e5e6e3;
+}
+/* Keyboard focus needs a clearly visible ring, not just the faint hover tint. */
+.head-title--editable:focus-visible {
+  border-color: #1c1c1c;
+  box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12);
   outline: none;
 }
 .head-title--editable:hover::after,
@@ -1280,6 +1285,11 @@ const durationLabel = computed<string | null>(() => {
 .notes-title--editable:focus-visible {
   background: rgba(0, 0, 0, 0.04);
   border-color: #e5e6e3;
+}
+/* Keyboard focus needs a clearly visible ring, not just the faint hover tint. */
+.notes-title--editable:focus-visible {
+  border-color: #1c1c1c;
+  box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12);
   outline: none;
 }
 .notes-title--editable:hover::after,
