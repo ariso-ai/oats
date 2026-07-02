@@ -80,3 +80,31 @@ describe('share methods', () => {
     expect(apiRequest).toHaveBeenCalledWith('DELETE', '/meeting-notes/5/share-email?email=a%2Bb%40x.com');
   });
 });
+
+describe('multi-clip', () => {
+  it('deleteMeetingRecordingClip DELETEs the per-clip recording route', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: {} });
+    await useMeetingApi().deleteMeetingRecordingClip(42, 'clip-uuid');
+    expect(apiRequest).toHaveBeenCalledWith(
+      'DELETE',
+      '/meeting-notes/42/recording/clip-uuid'
+    );
+  });
+
+  it('getMeetingTranscript keeps transcript_id per chunk (legacy default)', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: {
+        transcript: [
+          { chunk_index: 0, start_ms: 0, content: 'a', transcript_id: 'clip-1' },
+          { chunk_index: 1, start_ms: 10, content: 'b' },
+        ],
+      },
+    });
+    const chunks = await useMeetingApi().getMeetingTranscript(7);
+    expect(chunks).toEqual([
+      { chunk_index: 0, start_ms: 0, content: 'a', transcript_id: 'clip-1' },
+      { chunk_index: 1, start_ms: 10, content: 'b', transcript_id: 'legacy' },
+    ]);
+  });
+});

@@ -4,6 +4,7 @@ import {
   type ScheduledMeeting,
   type MeetingSearchResult,
   type TranscriptChunk,
+  type MeetingAudioClip,
 } from './useMeetingApi';
 import { arisoTruthy } from './autoJoin';
 
@@ -104,6 +105,9 @@ export interface MeetingDetail {
   durationSeconds?: number;
   note?: string;
   transcript?: string;
+  /** Ariso: one entry per recorded clip (oldest-first). Empty for local
+   *  recordings and imported-transcript meetings. */
+  audioClips: MeetingAudioClip[];
 }
 
 export interface Backend {
@@ -130,8 +134,12 @@ export interface Backend {
   /** Rename a meeting. Ariso PATCHes the meeting-notes endpoint; local
    *  rewrites the title in the recording's meta.json. */
   renameMeeting(id: string, title: string): Promise<void>;
-  /** Fetch the meeting's recorded audio bytes; null when none exists. */
-  getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null>;
+  /** Fetch a meeting's recorded audio bytes; null when none exists. Pass a
+   *  clip's transcript_id for a specific clip (Ariso); omit for the whole
+   *  meeting / legacy audio. Local ignores transcriptId. */
+  getMeetingAudio(item: MeetingListItem, transcriptId?: string): Promise<ArrayBuffer | null>;
+  /** Delete a single recording clip by transcript_id. Ariso only; local throws. */
+  deleteMeetingClip(item: MeetingListItem, transcriptId: string): Promise<void>;
 }
 
 interface RawMeetingSummary {
@@ -330,6 +338,7 @@ export class ArisoBackend implements Backend {
       hasIndividualNote: !!data.individual_note?.content,
       isLocal: false,
       autoJoinScheduled: item.autoJoinScheduled ?? false,
+      audioClips: data.audio_clips ?? [],
     };
   }
 
@@ -350,15 +359,21 @@ export class ArisoBackend implements Backend {
     await updateMeetingNotesTitle(id, title);
   }
 
-  async getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null> {
+  async getMeetingAudio(item: MeetingListItem, transcriptId?: string): Promise<ArrayBuffer | null> {
     try {
-      return await api.fetchMeetingAudio(item.id);
+      const clipId = transcriptId && transcriptId !== 'legacy' ? transcriptId : undefined;
+      return await api.fetchMeetingAudio(item.id, clipId);
     } catch (e) {
       // fetch_meeting_audio prefixes errors with the HTTP status; 404 means
       // the meeting simply has no recorded audio.
       if (String(e).startsWith('404')) return null;
       throw e;
     }
+  }
+
+  async deleteMeetingClip(item: MeetingListItem, transcriptId: string): Promise<void> {
+    const { deleteMeetingRecordingClip } = useMeetingApi();
+    await deleteMeetingRecordingClip(item.id, transcriptId);
   }
 }
 
@@ -431,6 +446,7 @@ export class LocalBackend implements Backend {
       transcript: transcript ?? undefined,
       hasTranscript: !!item.files?.hasTranscript,
       autoJoinScheduled: false,
+      audioClips: [],
     };
   }
 
@@ -448,9 +464,13 @@ export class LocalBackend implements Backend {
     await local.renameRecording(id, title);
   }
 
-  async getMeetingAudio(item: MeetingListItem): Promise<ArrayBuffer | null> {
+  async getMeetingAudio(item: MeetingListItem, _transcriptId?: string): Promise<ArrayBuffer | null> {
     if (!item.files?.hasAudio) return null;
     return local.readRecordingAudio(item.id);
+  }
+
+  async deleteMeetingClip(): Promise<void> {
+    throw new Error('Deleting individual recordings is not supported for local meetings');
   }
 }
 

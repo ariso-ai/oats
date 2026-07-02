@@ -7,6 +7,7 @@ const getMeetingDetail = vi.fn();
 const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const getMeetingAudio = vi.fn();
+const deleteMeetingClip = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
@@ -43,6 +44,7 @@ vi.mock('../tauri', () => ({
 
 import MeetingDetailView from './MeetingDetailView.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
 function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
   return {
@@ -52,6 +54,7 @@ function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
     participants: [],
     actionItems: [],
     isLocal: false,
+    audioClips: [],
     ...over,
   };
 }
@@ -74,7 +77,8 @@ beforeEach(() => {
     getMeetingDetail: (i: MeetingListItem) => getMeetingDetail(i),
     getMeetingTranscript: (i: MeetingListItem) => getMeetingTranscript(i),
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
-    getMeetingAudio: (i: MeetingListItem) => getMeetingAudio(i),
+    getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
+    deleteMeetingClip: (...a: [MeetingListItem, string]) => deleteMeetingClip(...a),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue({ content: '', title: '' });
@@ -560,6 +564,127 @@ describe('MeetingDetailView audio player', () => {
     await flushPromises();
     expect(wrapper.find('.card-audio .play-btn').text()).toContain('No audio');
   });
+
+  it('renders one player per clip and filters transcript to the active clip', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(2);
+    // Active defaults to the first clip -> only its chunk shows.
+    expect(wrapper.text()).toContain('from clip one');
+    expect(wrapper.text()).not.toContain('from clip two');
+  });
+
+  it('switches the displayed transcript when a different clip row is clicked', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    const rows = wrapper.findAll('.clip-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].classes()).toContain('clip-row--active');
+
+    await rows[1].trigger('click');
+    await flushPromises();
+
+    expect(rows[1].classes()).toContain('clip-row--active');
+    expect(wrapper.text()).toContain('from clip two');
+    expect(wrapper.text()).not.toContain('from clip one');
+  });
+
+  it('activates a clip row on Space and reflects the selection via aria-pressed', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    const rows = wrapper.findAll('.clip-row');
+    // Default: first clip active, and aria-pressed mirrors the active row.
+    expect(rows[0].attributes('aria-pressed')).toBe('true');
+    expect(rows[1].attributes('aria-pressed')).toBe('false');
+
+    // role="button" must activate on Space, not just Enter/click.
+    await rows[1].trigger('keydown', { key: ' ' });
+    await flushPromises();
+
+    expect(rows[1].classes()).toContain('clip-row--active');
+    expect(rows[1].attributes('aria-pressed')).toBe('true');
+    expect(rows[0].attributes('aria-pressed')).toBe('false');
+    expect(wrapper.text()).toContain('from clip two');
+    expect(wrapper.text()).not.toContain('from clip one');
+  });
+
+  it("fetches a clip's audio via its transcript id when Play is clicked", async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [
+          { transcript_id: 'c1', duration_ms: 60000, created_at: 't1', legacy: false },
+          { transcript_id: 'c2', duration_ms: 30000, created_at: 't2', legacy: false },
+        ],
+      })
+    );
+    await flushPromises();
+
+    const rows = wrapper.findAll('.clip-row');
+    await rows[1].find('.play-btn').trigger('click');
+    await flushPromises();
+
+    expect(getMeetingAudio).toHaveBeenCalledWith(item, 'c2');
+  });
+
+  it('keeps the single-player fallback and whole-meeting audio for a legacy single clip', async () => {
+    getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = await mountWith(
+      detail({
+        hasTranscript: true,
+        audioClips: [{ transcript_id: 'legacy', duration_ms: null, created_at: 't0', legacy: true }],
+      })
+    );
+    await flushPromises();
+
+    expect(wrapper.find('.clip-row').exists()).toBe(false);
+    expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(1);
+
+    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await flushPromises();
+
+    expect(getMeetingAudio).toHaveBeenCalledWith(item);
+  });
 });
 
 describe('MeetingDetailView AI Assessment tab', () => {
@@ -747,5 +872,133 @@ describe('MeetingDetailView local generation progress', () => {
     // A note exists (old body) but notes are generating -> chip owns the row.
     expect(wrapper.find('.tab-status-label').text()).toBe('Generating AI Notes');
     expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+});
+
+describe('MeetingDetailView per-clip delete', () => {
+  const hostDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
+    detail({
+      hasTranscript: true,
+      participants: [{ role: 'host', self: true }],
+      ...over,
+    });
+  const twoClips = [
+    { transcript_id: 'c1', duration_ms: 1000, created_at: 't1', legacy: false },
+    { transcript_id: 'c2', duration_ms: 1000, created_at: 't2', legacy: false },
+  ];
+
+  it('shows a delete button per clip for a host with >1 clip, and deletes on confirm', async () => {
+    getMeetingDetail
+      .mockResolvedValueOnce(hostDetail({ audioClips: twoClips }))
+      .mockResolvedValueOnce(
+        hostDetail({
+          audioClips: [{ transcript_id: 'c2', duration_ms: 1000, created_at: 't2', legacy: false }],
+        })
+      );
+    getMeetingTranscript.mockResolvedValue([]);
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    const delButtons = wrapper.findAll('.clip-del-btn');
+    expect(delButtons).toHaveLength(2);
+
+    await delButtons[0].trigger('click');
+    expect(deleteMeetingClip).not.toHaveBeenCalled();
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).toHaveBeenCalledWith(item, 'c1');
+    // refetched -> one clip left -> per-clip delete no longer shown
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
+  });
+
+  it('cancels without deleting', async () => {
+    getMeetingDetail.mockResolvedValue(hostDetail({ audioClips: twoClips }));
+    getMeetingTranscript.mockResolvedValue([]);
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    await wrapper.findAll('.clip-del-btn')[0].trigger('click');
+    await wrapper.find('.secondary-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).not.toHaveBeenCalled();
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(2);
+  });
+
+  it('shows no per-clip delete for a non-host, even with >1 clip', async () => {
+    getMeetingDetail.mockResolvedValue(
+      hostDetail({ participants: [{ role: 'host', self: false }], audioClips: twoClips })
+    );
+    getMeetingTranscript.mockResolvedValue([]);
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
+  });
+
+  it('shows no per-clip delete for a host with a single (or legacy) clip', async () => {
+    getMeetingDetail.mockResolvedValue(
+      hostDetail({ audioClips: [{ transcript_id: 'legacy', duration_ms: null, created_at: 't0', legacy: true }] })
+    );
+    getMeetingTranscript.mockResolvedValue([]);
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(0);
+  });
+
+  it('surfaces an inline error and keeps the clip when deleteMeetingClip rejects', async () => {
+    getMeetingDetail.mockResolvedValue(hostDetail({ audioClips: twoClips }));
+    getMeetingTranscript.mockResolvedValue([]);
+    deleteMeetingClip.mockRejectedValue(new Error('network down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    await wrapper.findAll('.clip-del-btn')[0].trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).toHaveBeenCalledWith(item, 'c1');
+    // The dialog closed but the clip was NOT removed, and the failure is surfaced.
+    expect(wrapper.findAll('.clip-del-btn')).toHaveLength(2);
+    expect(wrapper.find('.clip-delete-error').exists()).toBe(true);
+    expect(wrapper.find('.clip-delete-error').text()).toContain('Could not delete this recording');
+  });
+
+  it('preserves the active clip and its transcript when a non-active clip is deleted', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+      { chunk_index: 1, start_ms: 0, content: 'from clip two', transcript_id: 'c2' },
+    ]);
+    getMeetingDetail
+      .mockResolvedValueOnce(hostDetail({ audioClips: twoClips }))
+      .mockResolvedValueOnce(
+        hostDetail({
+          audioClips: [{ transcript_id: 'c2', duration_ms: 1000, created_at: 't2', legacy: false }],
+        })
+      );
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    // Switch active clip to c2, then delete c1 (the non-active clip).
+    const rows = wrapper.findAll('.clip-row');
+    await rows[1].trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('from clip two');
+
+    await wrapper.findAll('.clip-del-btn')[0].trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeetingClip).toHaveBeenCalledWith(item, 'c1');
+    // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
+    expect(wrapper.text()).toContain('from clip two');
+    expect(wrapper.text()).not.toContain('from clip one');
   });
 });

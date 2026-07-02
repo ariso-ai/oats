@@ -30,4 +30,17 @@ describe('resolveAssociation', () => {
   it('ariso with no meetings falls back to confirm', () => {
     expect(resolveAssociation('ariso', [], now)).toEqual({ kind: 'confirm' });
   });
+
+  it('resolves the same meetingId across repeat recordings of one calendar meeting (resume)', () => {
+    const now = new Date('2026-06-30T10:15:00Z');
+    const meetings = [meeting(99, '2026-06-30T10:00:00Z')];
+    const first = resolveAssociation('ariso', meetings, now);
+    const second = resolveAssociation(
+      'ariso',
+      meetings,
+      new Date('2026-06-30T10:40:00Z') // stopped, restarted 25 min later, still current
+    );
+    expect(first).toEqual({ kind: 'matched', meetingId: 99 });
+    expect(second).toEqual({ kind: 'matched', meetingId: 99 });
+  });
 });
