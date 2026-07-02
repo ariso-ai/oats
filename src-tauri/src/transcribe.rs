@@ -223,12 +223,58 @@ async fn fresh_recording_core(
     }
 }
 
+/// Persist a clip that failed to transcribe as its own `Failed` recording so
+/// its audio is never lost. Best-effort: logs on error rather than masking the
+/// original transcription failure.
+fn save_failed_clip(
+    root: &Path,
+    audio: &[u8],
+    title: &str,
+    created_at: &str,
+    duration_seconds: u64,
+    err: &str,
+) {
+    let id = storage::sanitize_iso_to_id(created_at);
+    match storage::create_recording_dir(root, &id) {
+        Ok(dir) => {
+            if let Err(e) = std::fs::write(dir.join("recording.mp3"), audio) {
+                eprintln!("save failed clip audio: {e}");
+            }
+            let meta = RecordingMeta {
+                id: id.clone(),
+                title: title.to_string(),
+                created_at: created_at.to_string(),
+                duration_seconds,
+                status: RecordingStatus::Failed,
+                language: None,
+                participants: vec![],
+                model_version: None,
+                error: Some(err.to_string()),
+                notes_error: None,
+            };
+            let _ = storage::write_meta(&dir, &meta);
+        }
+        Err(e) => eprintln!("save failed clip dir: {e}"),
+    }
+}
+
 /// Append a clip to existing recording `target_id`: transcribe just the clip,
 /// offset it past the existing content, stitch into `segments.json`, concatenate
 /// the audio, update meta, re-render `transcript.md`, and regenerate notes. On
-/// STT failure the clip is saved as its own `Failed` recording (target
-/// untouched). If the target lacks `segments.json` (pre-feature recording), fall
-/// back to a fresh recording rather than corrupt it.
+/// STT failure the clip is saved as its own `Failed` recording via
+/// [`save_failed_clip`] (no re-transcribe; target untouched). If the target
+/// lacks `segments.json` (pre-feature recording), fall back to a fresh
+/// recording rather than corrupt it.
+///
+/// Crash/IO-error safety: once STT succeeds we are committed to merging, so the
+/// target is flipped to `Transcribing` and persisted *before* any of its real
+/// content files (`recording.mp3`, `segments.json`, `transcript.md`) are
+/// touched. A crash or IO error partway through then leaves the target
+/// observably incomplete rather than silently `Done` with a stale
+/// `duration_seconds` — and `storage::most_recent_appendable` (which requires
+/// `Done`) will never pick a mid-append target as the base for a further
+/// append, which would otherwise compound the offset bug. The final
+/// `write_meta` (status `Done`) is the commit record.
 async fn append_recording_core(
     root: &Path,
     target_id: &str,
@@ -243,6 +289,10 @@ async fn append_recording_core(
         return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
     };
 
+    // Capture the pre-append duration as the new clip's time offset before
+    // `meta` is mutated any further below.
+    let time_offset = meta.duration_seconds as f64;
+
     let models = storage::models_dir(root);
     // Transcribe from a temp file so the target's audio is never touched on failure.
     let clip_path = dir.join("append-clip.mp3");
@@ -251,39 +301,48 @@ async fn append_recording_core(
         Ok(r) => r,
         Err(e) => {
             let _ = std::fs::remove_file(&clip_path);
-            // Save this clip as its own Failed recording; leave the target intact.
-            let _ = fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+            // Save this clip as its own Failed recording (no re-transcribe: it
+            // would deterministically fail again); leave the target intact.
+            save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &e);
             return Err(e);
         }
     };
 
+    // Committed to merging: flip the target to in-progress and persist before
+    // touching any of its real content files (see doc comment above).
+    meta.status = RecordingStatus::Transcribing;
+    storage::write_meta(&dir, &meta)?;
+
     // Stitch the clip past the existing content.
-    let time_offset = meta.duration_seconds as f64;
     let speaker_offset = storage::next_speaker_offset(&existing);
     let mut clip_segments = storage::offset_segments(&result.segments, time_offset, speaker_offset);
     let mut clip_participants = storage::offset_participants(&result.participants, speaker_offset);
     existing.segments.append(&mut clip_segments);
     existing.participants.append(&mut clip_participants);
-    storage::write_segments(&dir, &existing)?;
 
-    // Concatenate audio (read + extend + atomic write for crash safety).
-    let mut combined = std::fs::read(dir.join("recording.mp3")).map_err(|e| format!("read audio: {e}"))?;
-    combined.extend_from_slice(&audio);
-    storage::write_atomic(&dir.join("recording.mp3"), &combined)?;
-    let _ = std::fs::remove_file(&clip_path);
-
-    // Accumulate meta; keep Done.
+    // Accumulate meta in memory (not yet persisted) so the transcript
+    // re-rendered below reflects the merged duration/participants.
     meta.duration_seconds += duration_seconds;
     meta.participants = existing.participants.clone();
     if meta.language.is_none() {
         meta.language = Some(result.language.clone());
     }
-    meta.status = RecordingStatus::Done;
-    storage::write_meta(&dir, &meta)?;
 
-    // Re-render the full transcript from the stitched segments.
+    // Content writes, in crash-safe order: audio, then structured segments,
+    // then the rendered transcript.
+    let mut combined = std::fs::read(dir.join("recording.mp3")).map_err(|e| format!("read audio: {e}"))?;
+    combined.extend_from_slice(&audio);
+    storage::write_atomic(&dir.join("recording.mp3"), &combined)?;
+    storage::write_segments(&dir, &existing)?;
     let md = storage::render_markdown(&meta, &existing.segments);
     storage::write_transcript(&dir, &md)?;
+
+    // Clear any stale notes_error from a prior failed attempt (mirrors
+    // `retry_notes_core`) and commit: status Done, written last.
+    meta.notes_error = None;
+    meta.status = RecordingStatus::Done;
+    storage::write_meta(&dir, &meta)?;
+    let _ = std::fs::remove_file(&clip_path);
 
     let notes_handle = tokio::spawn(process_notes(dir.clone(), models, meta.clone()));
     Ok((
@@ -790,6 +849,37 @@ mod tests {
         assert!(dir2.join("recording.mp3").exists());
         assert_eq!(crate::storage::read_meta(&dir2).unwrap().status, RecordingStatus::Failed);
         assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
+    }
+
+    #[tokio::test]
+    async fn append_clears_prior_notes_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        // First recording: 30s, ends 10:00:30.
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        // Seed a prior notes failure on the target, as if an earlier notes
+        // generation attempt had failed.
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
+        let mut meta = storage::read_meta(&dir).unwrap();
+        meta.notes_error = Some("prior notes failure".into());
+        storage::write_meta(&dir, &meta).unwrap();
+
+        // Second recording within window → appends and regenerates notes.
+        let (r2, h2) = finalize_core(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(r2.id, r1.id);
+        let meta = storage::read_meta(&dir).unwrap();
+        assert!(meta.notes_error.is_none(), "append must clear a stale notes_error");
     }
 
     #[tokio::test]
