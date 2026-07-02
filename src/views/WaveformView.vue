@@ -231,20 +231,23 @@ watch(effectiveMeetingId, () => void resolveMeetingEnd());
 // keeps a resume docked to the current meeting instead of a phantom new note.
 // Depends on the backend too: `startedAt` is set once per session, but the
 // backend resolves asynchronously, so re-run once we know it's local.
+let idResolveToken = 0;
 watch(
   [() => recorder.startedAt.value, () => backend.value?.id],
   async ([startAt, backendId]) => {
+    const token = ++idResolveToken;
     if (!startAt || backendId !== 'local') {
       effectiveLocalRecordingId.value = null;
       return;
     }
     try {
-      effectiveLocalRecordingId.value = await local.recordingIdForStart(startAt);
+      const id = await local.recordingIdForStart(startAt);
+      if (token === idResolveToken) effectiveLocalRecordingId.value = id;
     } catch (e) {
       // Fall back to this session's own id so recording still works if the
       // resolve fails (worst case: today's behavior, a new-recording row).
       console.error('Failed to resolve local recording id; using new-recording id', e);
-      effectiveLocalRecordingId.value = localRecordingIdFromStart(startAt);
+      if (token === idResolveToken) effectiveLocalRecordingId.value = localRecordingIdFromStart(startAt);
     }
   },
   { immediate: true },

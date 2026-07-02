@@ -76,12 +76,16 @@ vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
 }));
 
-const discardPendingAudio = vi.fn(() => Promise.resolve());
-// Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
-// i.e. a fresh recording. Tests that exercise the append case override this.
-const recordingIdForStart = vi.fn((createdAt: string) =>
-  Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
-);
+// vi.mock is hoisted before top-level consts, so shared mock handles that the
+// factory closes over must live in vi.hoisted() to avoid TDZ errors.
+const { discardPendingAudio, recordingIdForStart } = vi.hoisted(() => ({
+  discardPendingAudio: vi.fn(() => Promise.resolve()),
+  // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
+  // i.e. a fresh recording. Tests that exercise the append case override this.
+  recordingIdForStart: vi.fn((createdAt: string) =>
+    Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
+  ),
+}));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
   local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
