@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,6 +7,10 @@ use std::path::{Path, PathBuf};
 /// `meta.json` and the models `manifest.json`. Single source of truth so the
 /// per-recording `modelVersion` and the ready-marker can never drift apart.
 pub const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
+
+/// A new local recording that starts within this many seconds of the previous
+/// one finishing is appended to it rather than started as a separate recording.
+pub const APPEND_WINDOW_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -503,6 +508,52 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
     Ok(out)
 }
 
+/// Whether a clip starting at `new_created_at` falls inside the append window of
+/// a prior recording that started at `prev_created_at` and ran
+/// `prev_duration_seconds`. The gap (new_start − prev_end) must be in
+/// `[0, window_seconds]`. Unparseable timestamps are never appendable.
+pub fn within_append_window(
+    prev_created_at: &str,
+    prev_duration_seconds: u64,
+    new_created_at: &str,
+    window_seconds: i64,
+) -> bool {
+    let (Ok(prev), Ok(new)) = (
+        DateTime::parse_from_rfc3339(prev_created_at),
+        DateTime::parse_from_rfc3339(new_created_at),
+    ) else {
+        return false;
+    };
+    let prev_end = prev.timestamp() + prev_duration_seconds as i64;
+    let gap = new.timestamp() - prev_end;
+    (0..=window_seconds).contains(&gap)
+}
+
+/// The id of the recording a clip starting at `new_created_at` should append to,
+/// if any. Only the newest recording is eligible, and only when it is a
+/// different recording (not a same-id rewrite/retry), is `Done`, and ended
+/// within `APPEND_WINDOW_SECONDS` of the new start.
+pub fn most_recent_appendable(root: &Path, new_created_at: &str) -> Result<Option<String>, String> {
+    let recs = list_recordings(root)?; // newest-first
+    let Some(newest) = recs.first() else { return Ok(None) };
+    if newest.id == sanitize_iso_to_id(new_created_at) {
+        return Ok(None); // same recording being rewritten (retry), not an append
+    }
+    if newest.status != RecordingStatus::Done {
+        return Ok(None);
+    }
+    if within_append_window(
+        &newest.created_at,
+        newest.duration_seconds,
+        new_created_at,
+        APPEND_WINDOW_SECONDS,
+    ) {
+        Ok(Some(newest.id.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,6 +668,51 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let list = list_recordings(tmp.path()).unwrap();
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn within_append_window_bounds() {
+        // prev started 10:00:00, ran 60s → ends 10:01:00. Window 300s.
+        let prev = "2026-06-02T10:00:00.000Z";
+        assert!(within_append_window(prev, 60, "2026-06-02T10:01:30.000Z", 300)); // +30s
+        assert!(within_append_window(prev, 60, "2026-06-02T10:01:00.000Z", 300)); // exactly at end (0s)
+        assert!(within_append_window(prev, 60, "2026-06-02T10:06:00.000Z", 300)); // +300s edge
+        assert!(!within_append_window(prev, 60, "2026-06-02T10:06:01.000Z", 300)); // +301s → out
+        assert!(!within_append_window(prev, 60, "2026-06-02T10:00:30.000Z", 300)); // before end → negative
+        assert!(!within_append_window("nonsense", 60, "2026-06-02T10:01:30.000Z", 300)); // unparseable
+    }
+
+    #[test]
+    fn most_recent_appendable_picks_recent_done_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // No recordings → None.
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:10:00.000Z").unwrap(), None);
+
+        // Newest is Done, ended 10:01:00; a clip at 10:02:00 → append to it.
+        let id = "2026-06-02T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut m = meta_with(id, "2026-06-02T10:00:00.000Z");
+        m.duration_seconds = 60;
+        m.status = RecordingStatus::Done;
+        write_meta(&dir, &m).unwrap();
+        assert_eq!(
+            most_recent_appendable(root, "2026-06-02T10:02:00.000Z").unwrap(),
+            Some(id.to_string())
+        );
+
+        // Same clip 10 min later → outside window → None.
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:12:00.000Z").unwrap(), None);
+
+        // A same-id rewrite (retry) of the newest is not an append.
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:00:00.000Z").unwrap(), None);
+
+        // Newest not Done → None.
+        let mut failed = m.clone();
+        failed.status = RecordingStatus::Failed;
+        write_meta(&dir, &failed).unwrap();
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:02:00.000Z").unwrap(), None);
     }
 
     #[test]
