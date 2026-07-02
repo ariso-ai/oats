@@ -101,12 +101,25 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, Strin
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether the transcript's on-disk bytes differ between two reads. Used to
+/// detect that a later append/regeneration superseded an in-flight notes run.
+fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool {
+    before != after
+}
+
 /// Best-effort notes generation: runs the sidecar and writes either
 /// `ari-note.md` or `meta.notes_error`. Failures here never affect the
 /// recording's `Done` status.
 async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
-    match run_notes(&transcript_path, &models).await {
+    // Capture the transcript this run generates from; if it changes while notes
+    // run (a later append/regeneration), a newer run owns the result — discard.
+    let before = std::fs::read(&transcript_path).ok();
+    let outcome = run_notes(&transcript_path, &models).await;
+    if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
+        return;
+    }
+    match outcome {
         // Empty output is a silent failure: it would write a blank
         // ari-note.md with notes_error unset, reading as success. Record it.
         Ok(notes) if notes.trim().is_empty() => {
@@ -897,5 +910,41 @@ mod tests {
 
         let err = retry_notes_core(root, id).await.unwrap_err();
         assert!(err.contains("transcript"), "got: {err}");
+    }
+
+    #[test]
+    fn transcript_changed_detects_difference() {
+        assert!(!transcript_changed(&Some(b"a".to_vec()), &Some(b"a".to_vec())));
+        assert!(transcript_changed(&Some(b"a".to_vec()), &Some(b"b".to_vec())));
+        assert!(transcript_changed(&Some(b"a".to_vec()), &None));
+    }
+
+    #[tokio::test]
+    async fn notes_discarded_when_transcript_changes_midflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"original").unwrap();
+        let meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-02T10:00:00Z".into(),
+            duration_seconds: 5, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        // Notes stub REWRITES the transcript it was handed (simulating an append that
+        // landed while notes were generating), then prints notes. process_notes must
+        // then see the change and discard its output.
+        let body = "if [ \"$1\" = notes ]; then echo 'changed' > \"$3\"; echo '# Notes'; exit 0; fi\nexit 1";
+        let stub = write_stub(root, body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        // process_notes takes (dir, models, meta). $3 is the --transcript path arg.
+        process_notes(dir.clone(), storage::models_dir(root), meta.clone()).await;
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert!(!dir.join("ari-note.md").exists(), "superseded notes must be discarded");
+        assert!(storage::read_meta(&dir).unwrap().notes_error.is_none(), "no stale error written");
     }
 }
