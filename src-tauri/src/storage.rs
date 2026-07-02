@@ -55,6 +55,20 @@ pub struct Segment {
     pub end: f64,
 }
 
+/// Structured transcript persisted alongside `transcript.md`. `transcript.md`
+/// is a pure render of this + `meta.json`, so appended clips can be stitched in
+/// and the markdown re-rendered cleanly (no markdown surgery).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub participants: Vec<Participant>,
+    #[serde(default)]
+    pub segments: Vec<Segment>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingMeta {
@@ -398,6 +412,25 @@ pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
 /// Write the generated meeting overview atomically.
 pub fn write_notes(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("ari-note.md"), markdown.as_bytes())
+}
+
+/// Persist the structured transcript atomically.
+pub fn write_segments(dir: &Path, seg: &SegmentsFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(seg).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join("segments.json"), json.as_bytes())
+}
+
+/// Read the structured transcript. `Ok(None)` when the sidecar is absent
+/// (a recording made before this feature), distinct from a read/parse error.
+pub fn read_segments(dir: &Path) -> Result<Option<SegmentsFile>, String> {
+    let path = dir.join("segments.json");
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("parse segments: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read segments: {e}")),
+    }
 }
 
 /// List all recordings, newest-first by `created_at`. Folders without a
@@ -769,5 +802,20 @@ mod tests {
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();
         assert_eq!(read, meta);
+    }
+
+    #[test]
+    fn segments_write_read_roundtrip_and_absent_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // Absent → Ok(None)
+        assert_eq!(read_segments(dir).unwrap(), None);
+        let sf = SegmentsFile {
+            language: Some("en".into()),
+            participants: vec![Participant { id: 0, label: "Speaker 1".into() }],
+            segments: vec![Segment { speaker: 0, text: "hi".into(), start: 0.0, end: 1.0 }],
+        };
+        write_segments(dir, &sf).unwrap();
+        assert_eq!(read_segments(dir).unwrap(), Some(sf));
     }
 }

@@ -171,6 +171,11 @@ pub async fn finalize_core(
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
             meta.model_version = Some(storage::MODEL_VERSION.to_string());
+            storage::write_segments(&dir, &storage::SegmentsFile {
+                language: Some(result.language.clone()),
+                participants: result.participants.clone(),
+                segments: result.segments.clone(),
+            })?;
             let md = storage::render_markdown(&meta, &result.segments);
             storage::write_transcript(&dir, &md)?;
             meta.status = RecordingStatus::Done;
@@ -368,6 +373,27 @@ mod tests {
         assert!(dir.join("recording.mp3").exists());
         assert!(dir.join("transcript.md").exists());
         assert_eq!(read_meta(&dir).unwrap().status, RecordingStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_segments_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        let seg = crate::storage::read_segments(&dir).unwrap().expect("segments.json written");
+        assert_eq!(seg.segments.len(), 1);
+        assert_eq!(seg.participants[0].label, "Speaker 1");
     }
 
     #[tokio::test]
