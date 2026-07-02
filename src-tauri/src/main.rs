@@ -92,6 +92,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
 }
 
 fn main() {
+    // reqwest 0.13, tokio-tungstenite, and the updater all use rustls 0.23. Install a
+    // single process-wide crypto provider (ring) before any TLS use, otherwise rustls
+    // cannot auto-select one and panics at connect time.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())

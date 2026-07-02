@@ -11,7 +11,11 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "query", "charset", "http2", "rustls-no-provider"] }
+# rustls without a baked-in provider so we can pick one explicitly (see main.rs).
+# ring is used because reqwest, tokio-tungstenite, and the updater all share it,
+# and it avoids aws-lc-rs's cmake/NASM build requirement (matters for Windows).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 sha2 = "0.11"
 hex = "0.4"
 tokio = { version = "1", features = ["full"] }
