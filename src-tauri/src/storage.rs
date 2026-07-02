@@ -512,6 +512,13 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
 /// a prior recording that started at `prev_created_at` and ran
 /// `prev_duration_seconds`. The gap (new_start − prev_end) must be in
 /// `[0, window_seconds]`. Unparseable timestamps are never appendable.
+///
+/// Note: `prev_end = prev_created_at + prev_duration_seconds` sums only recorded
+/// audio, so it excludes any inter-clip gaps already folded into a prior append
+/// chain — over a chain of gapped appends this computed end lags true
+/// wall-clock time. The drift is in the safe direction: it can only make a
+/// resume look further outside the window than it really is (wrongly splitting
+/// it into a new recording), never pull in an unrelated later meeting.
 pub fn within_append_window(
     prev_created_at: &str,
     prev_duration_seconds: u64,

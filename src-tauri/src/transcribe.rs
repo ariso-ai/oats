@@ -109,7 +109,9 @@ fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool
 
 /// Best-effort notes generation: runs the sidecar and writes either
 /// `ari-note.md` or `meta.notes_error`. Failures here never affect the
-/// recording's `Done` status.
+/// recording's `Done` status. A third outcome exists: if the transcript
+/// changes mid-run (superseded by a later append/regeneration), this writes
+/// neither file and silently discards its result.
 async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
     // Capture the transcript this run generates from; if it changes while notes
@@ -297,9 +299,11 @@ async fn append_recording_core(
     duration_seconds: u64,
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     let dir = storage::recordings_dir(root).join(target_id);
-    let mut meta = storage::read_meta(&dir)?;
-    let Some(mut existing) = storage::read_segments(&dir)? else {
-        return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+    // If the target's meta or segments can't be read (missing OR corrupt), don't
+    // lose the clip — fall back to saving it as its own fresh recording.
+    let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
+        (Ok(m), Ok(Some(s))) => (m, s),
+        _ => return fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
     };
 
     // Capture the pre-append duration as the new clip's time offset before
@@ -309,7 +313,10 @@ async fn append_recording_core(
     let models = storage::models_dir(root);
     // Transcribe from a temp file so the target's audio is never touched on failure.
     let clip_path = dir.join("append-clip.mp3");
-    std::fs::write(&clip_path, &audio).map_err(|e| format!("write clip: {e}"))?;
+    if let Err(e) = std::fs::write(&clip_path, &audio) {
+        save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &format!("write clip: {e}"));
+        return Err(format!("write clip: {e}"));
+    }
     let result = match run_transcribe(&clip_path, &models).await {
         Ok(r) => r,
         Err(e) => {
@@ -862,6 +869,45 @@ mod tests {
         assert!(dir2.join("recording.mp3").exists());
         assert_eq!(crate::storage::read_meta(&dir2).unwrap().status, RecordingStatus::Failed);
         assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
+    }
+
+    #[tokio::test]
+    async fn append_falls_back_to_fresh_when_target_segments_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        // First recording: 30s, ends 10:00:30.
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        // Corrupt the target's segments.json so `read_segments` returns Err,
+        // simulating on-disk corruption rather than a missing pre-feature sidecar.
+        let dir1 = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
+        std::fs::write(dir1.join("segments.json"), b"not json").unwrap();
+
+        // Second clip starts 10:01:00 (within the append window) — should fall
+        // back to a fresh recording rather than lose the clip's audio.
+        let (r2, h2) = finalize_core(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // Did NOT append: a second recording directory now exists, keyed by the
+        // clip's own created_at.
+        assert_ne!(r2.id, r1.id);
+        assert_eq!(r2.id, "2026-06-02T10-01-00Z");
+        let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(count, 2);
+
+        // The clip's audio is preserved as its own fresh recording.
+        let dir2 = crate::storage::recordings_dir(tmp.path()).join(&r2.id);
+        assert_eq!(std::fs::read(dir2.join("recording.mp3")).unwrap(), b"bbb");
+        assert_eq!(crate::storage::read_meta(&dir2).unwrap().status, RecordingStatus::Done);
     }
 
     #[tokio::test]
