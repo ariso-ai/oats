@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -542,9 +542,13 @@ pub fn within_append_window(
     ) else {
         return false;
     };
-    let prev_end = prev.timestamp() + prev_duration_seconds as i64;
-    let gap = new.timestamp() - prev_end;
-    (0..=window_seconds).contains(&gap)
+    // Compare DateTimes directly so subsecond precision survives: truncating to
+    // whole seconds (via timestamp()) could round a slightly-negative gap up to
+    // 0s and wrongly append a clip that started before the prior clip's true end
+    // (created_at carries millis).
+    let prev_end = prev + Duration::seconds(prev_duration_seconds as i64);
+    let gap = new.signed_duration_since(prev_end);
+    gap >= Duration::zero() && gap <= Duration::seconds(window_seconds)
 }
 
 /// The id of the recording a clip starting at `new_created_at` should append to,
