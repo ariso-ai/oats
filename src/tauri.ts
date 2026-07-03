@@ -222,6 +222,13 @@ export const local = {
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
   },
+  /** Resolve the recording id a new local recording (starting at `createdAt`)
+   *  will finalize into — the append target if it will merge into the recent
+   *  recording, else the new recording's own id. Lets the recorder surface the
+   *  right row up front instead of a phantom new note. */
+  recordingIdForStart(createdAt: string): Promise<string> {
+    return invoke<string>('local_recording_id_for_start', { createdAt });
+  },
   /** Cheap single-recording status for the detail panel's generation poller. */
   recordingStatus(id: string): Promise<RecordingStatusView> {
     return invoke<RecordingStatusView>('local_recording_status', { id });

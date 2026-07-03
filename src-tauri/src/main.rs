@@ -137,6 +137,7 @@ fn main() {
             commands::combine_pending_audio,
             commands::fetch_meeting_audio,
             commands::share_text_native,
+            transcribe::local_recording_id_for_start,
             transcribe::local_finalize_recording,
             transcribe::retry_local_transcription,
             transcribe::retry_local_notes,

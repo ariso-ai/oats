@@ -102,6 +102,29 @@ describe('LocalBackend', () => {
     );
   });
 
+  it('finalizeRecording surfaces the returned id (append reuses existing)', async () => {
+    localFinalize.mockResolvedValue({
+      backend: 'local',
+      id: '2026-06-02T10-00-00Z', // an existing recording's id (append case)
+      title: 'T',
+      status: 'done',
+    });
+    const res = await new LocalBackend().finalizeRecording(
+      new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }),
+      {
+        startAt: '2026-06-02T10:01:00.000Z',
+        endAt: '2026-06-02T10:01:15.000Z',
+        durationSeconds: 15,
+      }
+    );
+    expect(res).toEqual({
+      backend: 'local',
+      id: '2026-06-02T10-00-00Z',
+      title: 'T',
+      status: 'done',
+    });
+  });
+
   it('renameMeeting forwards to the rename_local_recording bridge', async () => {
     renameRecording.mockResolvedValue(undefined);
     await new LocalBackend().renameMeeting('2026-06-02T14-30-05Z', 'New title');

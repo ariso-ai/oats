@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,6 +7,10 @@ use std::path::{Path, PathBuf};
 /// `meta.json` and the models `manifest.json`. Single source of truth so the
 /// per-recording `modelVersion` and the ready-marker can never drift apart.
 pub const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
+
+/// A new local recording that starts within this many seconds of the previous
+/// one finishing is appended to it rather than started as a separate recording.
+pub const APPEND_WINDOW_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +60,20 @@ pub struct Segment {
     pub end: f64,
 }
 
+/// Structured transcript persisted alongside `transcript.md`. `transcript.md`
+/// is a pure render of this + `meta.json`, so appended clips can be stitched in
+/// and the markdown re-rendered cleanly (no markdown surgery).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub participants: Vec<Participant>,
+    #[serde(default)]
+    pub segments: Vec<Segment>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingMeta {
@@ -73,6 +92,12 @@ pub struct RecordingMeta {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_error: Option<String>,
+    /// Wall-clock end of the most recently appended clip. Set by
+    /// `append_recording_core` so that subsequent append-window checks use the
+    /// true end instead of the audio-only `created_at + duration_seconds` sum,
+    /// which lags behind reality when clips have inter-clip gaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clip_end_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +108,8 @@ pub struct RecordingSummary {
     pub created_at: String,
     pub duration_seconds: u64,
     pub status: RecordingStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clip_end_at: Option<String>,
     /// Whether `recording.mp3` exists in the recording's directory.
     pub has_audio: bool,
     /// Whether `ari-note.md` exists in the recording's directory.
@@ -390,6 +417,40 @@ pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
     out
 }
 
+/// Shift a clip's segments by `time_offset` seconds and `speaker_offset` ids so
+/// they stitch onto an existing recording without overlapping timestamps or
+/// colliding speaker ids.
+pub fn offset_segments(segments: &[Segment], time_offset: f64, speaker_offset: u32) -> Vec<Segment> {
+    segments
+        .iter()
+        .map(|s| Segment {
+            speaker: s.speaker + speaker_offset,
+            text: s.text.clone(),
+            start: s.start + time_offset,
+            end: s.end + time_offset,
+        })
+        .collect()
+}
+
+/// Shift a clip's participant ids by `speaker_offset` (labels unchanged).
+pub fn offset_participants(participants: &[Participant], speaker_offset: u32) -> Vec<Participant> {
+    participants
+        .iter()
+        .map(|p| Participant { id: p.id + speaker_offset, label: p.label.clone() })
+        .collect()
+}
+
+/// The next free speaker id (max existing id across participants and segments,
+/// plus one; 0 when empty), used to keep an appended clip's speakers distinct.
+pub fn next_speaker_offset(existing: &SegmentsFile) -> u32 {
+    let max_p = existing.participants.iter().map(|p| p.id).max();
+    let max_s = existing.segments.iter().map(|s| s.speaker).max();
+    match max_p.max(max_s) {
+        Some(m) => m + 1,
+        None => 0,
+    }
+}
+
 /// Write the rendered transcript atomically.
 pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("transcript.md"), markdown.as_bytes())
@@ -398,6 +459,25 @@ pub fn write_transcript(dir: &Path, markdown: &str) -> Result<(), String> {
 /// Write the generated meeting overview atomically.
 pub fn write_notes(dir: &Path, markdown: &str) -> Result<(), String> {
     write_atomic(&dir.join("ari-note.md"), markdown.as_bytes())
+}
+
+/// Persist the structured transcript atomically.
+pub fn write_segments(dir: &Path, seg: &SegmentsFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(seg).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join("segments.json"), json.as_bytes())
+}
+
+/// Read the structured transcript. `Ok(None)` when the sidecar is absent
+/// (a recording made before this feature), distinct from a read/parse error.
+pub fn read_segments(dir: &Path) -> Result<Option<SegmentsFile>, String> {
+    let path = dir.join("segments.json");
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("parse segments: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read segments: {e}")),
+    }
 }
 
 /// List all recordings, newest-first by `created_at`. Folders without a
@@ -422,6 +502,7 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     created_at: m.created_at,
                     duration_seconds: m.duration_seconds,
                     status: m.status,
+                    last_clip_end_at: m.last_clip_end_at,
                     has_audio: recording_dir.join("recording.mp3").is_file(),
                     has_note: recording_dir.join("ari-note.md").is_file(),
                     has_transcript: recording_dir.join("transcript.md").is_file(),
@@ -434,6 +515,76 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
     // is a consistently-formatted UTC ISO-8601 timestamp.
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(out)
+}
+
+/// Compute the RFC3339 wall-clock end of a clip given its start timestamp and
+/// duration. Returns `None` if `created_at` cannot be parsed or the resulting
+/// timestamp is out of range.
+pub fn clip_end_timestamp(created_at: &str, duration_seconds: u64) -> Option<String> {
+    let dt = DateTime::parse_from_rfc3339(created_at).ok()?;
+    let end_ts = dt.timestamp() + duration_seconds as i64;
+    Utc.timestamp_opt(end_ts, 0).single().map(|d| d.to_rfc3339())
+}
+
+/// Whether a clip starting at `new_created_at` falls inside the append window of
+/// a prior recording that started at `prev_created_at` and ran
+/// `prev_duration_seconds`. The gap (new_start − prev_end) must be in
+/// `[0, window_seconds]`. Unparseable timestamps are never appendable.
+pub fn within_append_window(
+    prev_created_at: &str,
+    prev_duration_seconds: u64,
+    new_created_at: &str,
+    window_seconds: i64,
+) -> bool {
+    let (Ok(prev), Ok(new)) = (
+        DateTime::parse_from_rfc3339(prev_created_at),
+        DateTime::parse_from_rfc3339(new_created_at),
+    ) else {
+        return false;
+    };
+    // Compare DateTimes directly so subsecond precision survives: truncating to
+    // whole seconds (via timestamp()) could round a slightly-negative gap up to
+    // 0s and wrongly append a clip that started before the prior clip's true end
+    // (created_at carries millis).
+    let prev_end = prev + Duration::seconds(prev_duration_seconds as i64);
+    let gap = new.signed_duration_since(prev_end);
+    gap >= Duration::zero() && gap <= Duration::seconds(window_seconds)
+}
+
+/// The id of the recording a clip starting at `new_created_at` should append to,
+/// if any. Only the newest recording is eligible, and only when it is a
+/// different recording (not a same-id rewrite/retry), is `Done`, and ended
+/// within `APPEND_WINDOW_SECONDS` of the new start.
+pub fn most_recent_appendable(root: &Path, new_created_at: &str) -> Result<Option<String>, String> {
+    let recs = list_recordings(root)?; // newest-first
+    let Some(newest) = recs.first() else { return Ok(None) };
+    if newest.id == sanitize_iso_to_id(new_created_at) {
+        return Ok(None); // same recording being rewritten (retry), not an append
+    }
+    if newest.status != RecordingStatus::Done {
+        return Ok(None);
+    }
+    // Use the stored last-clip end when available so chained appends with
+    // inter-clip gaps don't make the computed end lag behind the true
+    // wall-clock time. Passing it as the start with 0 duration gives
+    // prev_end = that timestamp exactly.
+    let (check_start, check_duration) = match newest.last_clip_end_at.as_deref() {
+        Some(end_at) => (end_at, 0u64),
+        None => (newest.created_at.as_str(), newest.duration_seconds),
+    };
+    if within_append_window(check_start, check_duration, new_created_at, APPEND_WINDOW_SECONDS) {
+        Ok(Some(newest.id.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The recording id a new local recording starting at `created_at` will finalize
+/// into: the append target when it will merge into the recent recording, else
+/// the new recording's own id. Lets the recorder/library surface the correct row
+/// from the moment recording starts, matching what `finalize_core` will do.
+pub fn resolve_local_recording_id(root: &Path, created_at: &str) -> Result<String, String> {
+    Ok(most_recent_appendable(root, created_at)?.unwrap_or_else(|| sanitize_iso_to_id(created_at)))
 }
 
 #[cfg(test)]
@@ -484,6 +635,7 @@ mod tests {
             id: id.into(), title: format!("T {id}"), created_at: created.into(),
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         }
     }
 
@@ -553,6 +705,81 @@ mod tests {
     }
 
     #[test]
+    fn within_append_window_bounds() {
+        // prev started 10:00:00, ran 60s → ends 10:01:00. Window 300s.
+        let prev = "2026-06-02T10:00:00.000Z";
+        assert!(within_append_window(prev, 60, "2026-06-02T10:01:30.000Z", 300)); // +30s
+        assert!(within_append_window(prev, 60, "2026-06-02T10:01:00.000Z", 300)); // exactly at end (0s)
+        assert!(within_append_window(prev, 60, "2026-06-02T10:06:00.000Z", 300)); // +300s edge
+        assert!(!within_append_window(prev, 60, "2026-06-02T10:06:01.000Z", 300)); // +301s → out
+        assert!(!within_append_window(prev, 60, "2026-06-02T10:00:30.000Z", 300)); // before end → negative
+        assert!(!within_append_window("nonsense", 60, "2026-06-02T10:01:30.000Z", 300)); // unparseable
+    }
+
+    #[test]
+    fn most_recent_appendable_picks_recent_done_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // No recordings → None.
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:10:00.000Z").unwrap(), None);
+
+        // Newest is Done, ended 10:01:00; a clip at 10:02:00 → append to it.
+        let id = "2026-06-02T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut m = meta_with(id, "2026-06-02T10:00:00.000Z");
+        m.duration_seconds = 60;
+        m.status = RecordingStatus::Done;
+        write_meta(&dir, &m).unwrap();
+        assert_eq!(
+            most_recent_appendable(root, "2026-06-02T10:02:00.000Z").unwrap(),
+            Some(id.to_string())
+        );
+
+        // Same clip 10 min later → outside window → None.
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:12:00.000Z").unwrap(), None);
+
+        // A same-id rewrite (retry) of the newest is not an append.
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:00:00.000Z").unwrap(), None);
+
+        // Newest not Done → None.
+        let mut failed = m.clone();
+        failed.status = RecordingStatus::Failed;
+        write_meta(&dir, &failed).unwrap();
+        assert_eq!(most_recent_appendable(root, "2026-06-02T10:02:00.000Z").unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_local_recording_id_targets_recent_else_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // No recordings → the new recording's own sanitized id.
+        assert_eq!(
+            resolve_local_recording_id(root, "2026-06-02T10:00:00.000Z").unwrap(),
+            "2026-06-02T10-00-00Z"
+        );
+
+        // A recent Done recording (ended 10:01:00) → its id (append target).
+        let id = "2026-06-02T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut m = meta_with(id, "2026-06-02T10:00:00.000Z");
+        m.duration_seconds = 60;
+        m.status = RecordingStatus::Done;
+        write_meta(&dir, &m).unwrap();
+        assert_eq!(
+            resolve_local_recording_id(root, "2026-06-02T10:02:00.000Z").unwrap(),
+            id
+        );
+
+        // Outside the window → a fresh id, not the target.
+        assert_eq!(
+            resolve_local_recording_id(root, "2026-06-02T10:20:00.000Z").unwrap(),
+            "2026-06-02T10-20-00Z"
+        );
+    }
+
+    #[test]
     fn renders_markdown_with_speaker_blocks() {
         let meta = RecordingMeta {
             id: "x".into(),
@@ -568,6 +795,7 @@ mod tests {
             model_version: Some("parakeet-tdt-0.6b-v3".into()),
             error: None,
             notes_error: None,
+            last_clip_end_at: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -588,6 +816,7 @@ mod tests {
             id: "x".into(), title: "t".into(), created_at: "c".into(),
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -765,9 +994,55 @@ mod tests {
             model_version: None,
             error: None,
             notes_error: None,
+            last_clip_end_at: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();
         assert_eq!(read, meta);
+    }
+
+    #[test]
+    fn segments_write_read_roundtrip_and_absent_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // Absent → Ok(None)
+        assert_eq!(read_segments(dir).unwrap(), None);
+        let sf = SegmentsFile {
+            language: Some("en".into()),
+            participants: vec![Participant { id: 0, label: "Speaker 1".into() }],
+            segments: vec![Segment { speaker: 0, text: "hi".into(), start: 0.0, end: 1.0 }],
+        };
+        write_segments(dir, &sf).unwrap();
+        assert_eq!(read_segments(dir).unwrap(), Some(sf));
+    }
+
+    #[test]
+    fn offsets_segments_and_participants_and_next_id() {
+        let existing = SegmentsFile {
+            language: Some("en".into()),
+            participants: vec![
+                Participant { id: 0, label: "Speaker 1".into() },
+                Participant { id: 1, label: "Speaker 2".into() },
+            ],
+            segments: vec![Segment { speaker: 1, text: "a".into(), start: 0.0, end: 2.0 }],
+        };
+        assert_eq!(next_speaker_offset(&existing), 2);
+
+        let clip = vec![Segment { speaker: 0, text: "b".into(), start: 0.0, end: 1.0 }];
+        let shifted = offset_segments(&clip, 10.0, 2);
+        assert_eq!(shifted[0].speaker, 2);
+        assert_eq!(shifted[0].start, 10.0);
+        assert_eq!(shifted[0].end, 11.0);
+
+        let parts = vec![Participant { id: 0, label: "Speaker 1".into() }];
+        let shifted_p = offset_participants(&parts, 2);
+        assert_eq!(shifted_p[0].id, 2);
+        assert_eq!(shifted_p[0].label, "Speaker 1");
+    }
+
+    #[test]
+    fn next_speaker_offset_zero_when_empty() {
+        let empty = SegmentsFile { language: None, participants: vec![], segments: vec![] };
+        assert_eq!(next_speaker_offset(&empty), 0);
     }
 }
