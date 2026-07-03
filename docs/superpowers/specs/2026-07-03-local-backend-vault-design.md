@@ -49,10 +49,11 @@ source-of-truth database. Adopting it gives users genuine data ownership and int
    id→attachment pointer. `meta.audio_file` stays private; it just names a file in the vault.
 7. **Respect deletions; no mirror.** If the user deletes the vault note, it stays deleted —
    oats has no spontaneous regeneration path (notes are only (re)written at finalize, on
-   append, or on an explicit retry), so a deleted note is respected by construction. A
-   `notes_written` timestamp in `meta.json` records that oats generated the note at least
-   once; it exists so `derive_notes_status` can tell "never generated (still pending)" from
-   "generated then deleted (show as absent, not a perpetual spinner)".
+   append, or on an explicit user-initiated retry), so a deleted note is respected **by
+   construction**, with or without a tombstone. A `notes_written` timestamp is recorded in
+   `meta.json` when oats writes the note, for future use (e.g. a status refinement that
+   distinguishes "never generated" from "generated then deleted", or a guard if an
+   auto-regeneration path is ever added). v1 records it but does not branch on it.
 8. **Cascade delete (forward requirement).** Deleting a recording inside oats must remove
    its vault note + audio attachment as well as the private `~/.ariso` folder. **Note:** the
    app has no local "delete recording" command today (only Ariso clip deletion exists), so
@@ -163,8 +164,9 @@ A new `src-tauri/src/vault.rs` module, mirroring `storage.rs` conventions (atomi
    vault presence by `oats_id` (legacy: `~/.ariso` `ari-note.md`); `has_audio` derives from
    `meta.audio_file` present + attachment exists (legacy: `~/.ariso` `recording.mp3`). The
    detail view reads the note body from the vault via `note_body` (or legacy).
-5. **Delete in Obsidian:** the next scan finds no note for the id; `notes_written` is set, so
-   `derive_notes_status` reports "absent" rather than "pending", and nothing regenerates.
+5. **Delete in Obsidian:** the next scan finds no note for the id; nothing regenerates it
+   (no spontaneous regeneration path). `has_note` becomes false; the meeting still shows in
+   the library from `meta.json`, without a note.
 6. **Delete recording in oats:** cascade removes the vault note + attachment and the
    `~/.ariso/recordings/<id>/` folder.
 
@@ -192,7 +194,7 @@ merged recording. Two consequences for the vault:
 
 | Trigger | Behavior |
 |---|---|
-| User deletes vault note (Obsidian) | Respected. `notes_written` set + note absent ⇒ never regenerate. Meeting remains in library without a note. |
+| User deletes vault note (Obsidian) | Respected by construction (no spontaneous regeneration). `has_note` false; meeting remains in library without a note. |
 | User deletes recording (oats library) | Cascade: remove vault note + attachment + `~/.ariso` folder. *No local delete command exists yet — `delete_recording_artifacts` is provided and tested for when one is added.* |
 | User deletes audio attachment only | `has_audio` becomes false via fallback/scan; playback unavailable; note unaffected. |
 
@@ -241,8 +243,6 @@ Pure-function unit tests with tempdir + `ARISO_ROOT`, matching `storage.rs`:
 - `render_note` + `note_body` roundtrip (front-matter + embed + body → body), and `oats_id`
   extraction by `scan_vault`.
 - `scan_vault` builds the correct `oats_id → path` map and skips junk files.
-- `derive_notes_status` with the new `notes_written` arg: absent note + `notes_written` set ⇒
-  not `Pending`; absent note + `notes_written` None ⇒ `Pending`.
 - `write_audio`/`read_audio` roundtrip and `delete_recording_artifacts` cascade (note +
   attachment removed).
 - Legacy fallback: `meta.audio_file` None ⇒ audio resolves to `~/.ariso` `recording.mp3`;
