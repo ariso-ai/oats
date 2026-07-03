@@ -32,22 +32,34 @@ source-of-truth database. Adopting it gives users genuine data ownership and int
 3. **Fixed vault location:** `~/.ariso/vault`. A user-configurable path is deferred.
 4. **oats owns the vault.** oats bootstraps a minimal `.obsidian/` so the folder opens
    cleanly in Obsidian.
-5. **Split of truth:**
-   - **Canonical in the vault:** the note (`<meeting>.md`) and audio
-     (`Attachments/<meeting>.mp3`). Each written once.
+5. **Split of truth (Option A — vault is the sole home for both note and audio):**
+   - **Canonical in the vault:** the note (`<basename>.md`) and audio
+     (`Attachments/<basename>.mp3`). The audio lives *only* here — new recordings do not
+     keep a `recording.mp3` under `~/.ariso`. The whole recording pipeline (fresh write,
+     STT input, append-concatenation, retry, playback) reads and writes audio at the vault
+     attachment path.
    - **Canonical in `~/.ariso/recordings/<id>/`:** `meta.json`, `segments.json`,
-     `transcript.md` — unchanged, oats-private machine state.
-6. **Link by `oats_id`.** The note's front-matter carries `oats_id` equal to the recording
-   folder id. oats locates a note by scanning front-matter, so renames/moves in Obsidian
-   never break the link (path-independent).
-7. **Respect deletions; no mirror.** If the user deletes the vault note, it stays deleted.
-   A `notes_written` timestamp in `meta.json` records that oats already generated the note;
-   its presence + an absent vault note ⇒ user deletion ⇒ never regenerate. That flag is the
-   tombstone (no separate file).
-8. **Cascade delete.** Deleting a recording inside oats removes its vault note + audio
-   attachment as well as the private `~/.ariso` folder.
-9. **Migration = fallback (option B).** Existing local recordings are not migrated. Reads
-   check the vault first (by `oats_id`) and fall back to the legacy
+     `transcript.md` — oats-private machine state. `meta.json` gains two pointer/marker
+     fields (below).
+6. **Link by `oats_id`; resolve audio by `meta.audio_file`.** The note's front-matter
+   carries `oats_id` equal to the recording folder id, so oats locates a note by scanning
+   front-matter (renames/moves in Obsidian never break it). The attachment filename is
+   title-derived, so the pipeline can't guess it from the id — `meta.json` stores
+   `audio_file` (the attachment's basename, e.g. `2026-06-02 Team Standup.mp3`) as the
+   id→attachment pointer. `meta.audio_file` stays private; it just names a file in the vault.
+7. **Respect deletions; no mirror.** If the user deletes the vault note, it stays deleted —
+   oats has no spontaneous regeneration path (notes are only (re)written at finalize, on
+   append, or on an explicit retry), so a deleted note is respected by construction. A
+   `notes_written` timestamp in `meta.json` records that oats generated the note at least
+   once; it exists so `derive_notes_status` can tell "never generated (still pending)" from
+   "generated then deleted (show as absent, not a perpetual spinner)".
+8. **Cascade delete (forward requirement).** Deleting a recording inside oats must remove
+   its vault note + audio attachment as well as the private `~/.ariso` folder. **Note:** the
+   app has no local "delete recording" command today (only Ariso clip deletion exists), so
+   there is nothing to build in v1. `vault::delete_recording_artifacts` is provided so that
+   whoever adds local deletion later wires in the cascade; a unit test covers it.
+9. **Migration = fallback, no backfill.** Existing local recordings are not migrated. Reads
+   check the vault first (by `oats_id` / `meta.audio_file`) and fall back to the legacy
    `~/.ariso/recordings/<id>/ari-note.md` and `recording.mp3`. Only new recordings use the
    vault.
 
@@ -61,15 +73,31 @@ source-of-truth database. Adopting it gives users genuine data ownership and int
     2026-06-02 Team Standup.mp3              # audio — canonical, lives only here
   2026-06-02 Team Standup.md                 # note — canonical, lives only here
 
-~/.ariso/recordings/2026-06-02T14-30-05Z/    # unchanged, oats-private
-  meta.json
+~/.ariso/recordings/2026-06-02T14-30-05Z/    # oats-private
+  meta.json                                  # + audio_file, notes_written
   segments.json
   transcript.md
+  append-clip.mp3                            # transient scratch during an append only
 ```
 
 New recordings no longer write `recording.mp3` or `ari-note.md` under
-`~/.ariso/recordings/<id>/`; those artifacts live in the vault. Legacy recordings keep
-their old files (see Legacy fallback).
+`~/.ariso/recordings/<id>/`; those artifacts live in the vault. The only audio ever written
+under `~/.ariso` is the transient `append-clip.mp3` scratch file (a single clip being
+transcribed mid-append; deleted when the append commits). Legacy recordings keep their old
+files (see Legacy fallback).
+
+`RecordingMeta` gains two optional fields:
+
+```rust
+/// Basename of this recording's audio attachment in the vault
+/// (`<vault>/Attachments/<audio_file>`). None for legacy recordings, whose audio
+/// still lives at `~/.ariso/recordings/<id>/recording.mp3`.
+pub audio_file: Option<String>,
+/// RFC3339 time oats last wrote this recording's note into the vault. None means
+/// never generated. Set means generated at least once; an absent vault note then
+/// signals a user deletion rather than "still pending".
+pub notes_written: Option<String>,
+```
 
 ### Note format
 
@@ -99,34 +127,44 @@ A new `src-tauri/src/vault.rs` module, mirroring `storage.rs` conventions (atomi
 - `ensure_vault()` — first-use bootstrap: create the vault dir, `Attachments/`, and a
   minimal `.obsidian/app.json` (sets `attachmentFolderPath: "Attachments"`). Idempotent.
 - `note_basename(date, title) -> String` — `YYYY-MM-DD <title>`, sanitized (strip path
-  separators, `:`, `..`, reserved chars), collision-suffixed with a numeric counter.
-- `write_note(meta, notes_md)` — render front-matter + audio embed + body; atomic
-  temp-then-rename; called **once**, at notes-generation time.
-- `move_audio_into_vault(meta, bytes|path)` — place the recording's audio in
-  `Attachments/<basename>.mp3` at finalize.
-- `scan_vault() -> HashMap<oats_id, PathBuf>` — read each top-level `.md` file's
-  front-matter head, index by `oats_id`; skip files with no/invalid `oats_id` (same "skip
-  junk" tolerance as `list_recordings`).
-- `find_note(oats_id)`, `read_note(oats_id)`, `delete_note(oats_id)` — the last removes the
-  note and its referenced attachment (cascade).
-
-`meta.json` gains a `notes_written: Option<String>` (RFC3339) field, written when the vault
-note is first created.
+  separators, `:`, `..`, reserved chars). The caller collision-suffixes against existing
+  files with a numeric counter (`(2)`, `(3)`, …); `note_basename` is the pure derivation and
+  a `unique_basename(dir, base)` helper does the suffixing.
+- `audio_path(audio_file) -> PathBuf` / `note_path(basename) -> PathBuf` — resolve
+  `<vault>/Attachments/<audio_file>` and `<vault>/<basename>.md`.
+- `write_audio(audio_file, bytes)` — atomic write into `Attachments/`; used by the whole
+  pipeline (fresh write, append-concat result, retry, save-failed-clip) as the audio's only
+  home.
+- `read_audio(audio_file) -> Vec<u8>` — read the attachment (STT input, append-concat source,
+  retry, playback all go through this).
+- `render_note(meta, notes_md) -> String` — pure: front-matter (`oats_id`, `title`, `date`,
+  `duration`, `participants`) + `![[Attachments/<audio_file>]]` embed + body.
+- `note_body(contents) -> String` — pure inverse: strip front-matter and the leading audio
+  embed, returning just the notes body for in-app rendering.
+- `write_note(basename, contents)` — atomic write of a note `.md`; called by
+  `process_notes`, which then sets `meta.notes_written`.
+- `scan_vault() -> HashMap<oats_id, PathBuf>` — read each top-level `.md` file's front-matter
+  head, index by `oats_id`; skip files with no/invalid `oats_id` (same "skip junk" tolerance
+  as `list_recordings`).
+- `find_note(oats_id)`, `read_note(oats_id)`, `delete_recording_artifacts(oats_id, audio_file)`
+  — the last removes the vault note (by scan) and its attachment (cascade).
 
 ## Data flow
 
-1. **Finalize** (new recording): audio → `vault/Attachments/`; `meta/segments/transcript` →
-   `~/.ariso`; the row appears in the library from `meta.json` as today.
-2. **Notes generation completes:** `write_note` to the vault once, then set
+1. **Fresh recording:** derive `audio_file = unique_basename(...) + ".mp3"`, store it in
+   `meta.audio_file`, `write_audio` into the vault; STT transcribes by reading the attachment
+   back via `read_audio`; `segments`/`transcript`/`meta` → `~/.ariso`. The library row comes
+   from `meta.json` as today.
+2. **Notes generation completes:** `render_note` + `write_note` into the vault, then set
    `notes_written` in `meta.json`.
-3. **Obsidian:** user opens `~/.ariso/vault`, sees the note with inline audio, edits
-   freely. oats never rewrites the body.
-4. **`list_recordings`:** build the `scan_vault` map once per call; `has_note` / `has_audio`
-   derive from vault presence keyed by `oats_id`, falling back to legacy paths. The detail
-   view reads the note from the vault (or legacy).
-5. **Delete in Obsidian:** the next scan finds no note for the id, but `notes_written` is
-   set ⇒ respected, never regenerated. The meeting still shows in the library from
-   `meta.json`, with no note (equivalent to notes-removed).
+3. **Obsidian:** user opens `~/.ariso/vault`, sees the note with inline audio, edits freely.
+   oats never rewrites the body.
+4. **`list_recordings`:** build the `scan_vault` map once per call; `has_note` derives from
+   vault presence by `oats_id` (legacy: `~/.ariso` `ari-note.md`); `has_audio` derives from
+   `meta.audio_file` present + attachment exists (legacy: `~/.ariso` `recording.mp3`). The
+   detail view reads the note body from the vault via `note_body` (or legacy).
+5. **Delete in Obsidian:** the next scan finds no note for the id; `notes_written` is set, so
+   `derive_notes_status` reports "absent" rather than "pending", and nothing regenerates.
 6. **Delete recording in oats:** cascade removes the vault note + attachment and the
    `~/.ariso/recordings/<id>/` folder.
 
@@ -138,22 +176,27 @@ Thereafter the vault is the user's. No mirror, no reconciliation of edits.
 
 Local multi-recording lets a clip that starts within the append window (`APPEND_WINDOW_SECONDS`)
 merge into the prior recording, re-stitching `segments.json` and regenerating notes for the
-merged recording. Because that regeneration must reach the vault, the note may be (re)written
-more than once **while the recording is still appendable**. `notes_written` records the most
-recent write; the recording is only considered "final" (and thus off-limits to further oats
-writes) once the append window has elapsed. User edits made in Obsidian during an active,
-still-appendable recording session are an accepted edge case — appends occur within minutes of
-recording, before a user would normally open and edit the note.
+merged recording. Two consequences for the vault:
+
+- **Audio concatenation reads/writes the vault attachment.** `append_recording_core` reads
+  the target's audio via `read_audio(target.audio_file)`, concatenates the new clip's bytes,
+  and `write_audio`s the result back to the same attachment. The per-clip scratch file
+  (`append-clip.mp3`, used only to transcribe the isolated clip) stays in `~/.ariso` and is
+  deleted when the append commits — it is never the canonical audio.
+- **The note may be (re)written while the recording is still appendable.** `notes_written`
+  records the most recent write. User edits made in Obsidian during an active, still-appendable
+  session are an accepted edge case — appends occur within minutes of recording, before a user
+  would normally open and edit the note.
 
 ## Deletion semantics
 
 | Trigger | Behavior |
 |---|---|
 | User deletes vault note (Obsidian) | Respected. `notes_written` set + note absent ⇒ never regenerate. Meeting remains in library without a note. |
-| User deletes recording (oats library) | Cascade: remove vault note + attachment + `~/.ariso` folder. |
+| User deletes recording (oats library) | Cascade: remove vault note + attachment + `~/.ariso` folder. *No local delete command exists yet — `delete_recording_artifacts` is provided and tested for when one is added.* |
 | User deletes audio attachment only | `has_audio` becomes false via fallback/scan; playback unavailable; note unaffected. |
 
-## Legacy fallback (migration option B)
+## Legacy fallback (no backfill)
 
 No migration runs. Per-recording resolution order for notes and audio:
 
@@ -177,10 +220,13 @@ with no data movement.
 
 ## Security & privacy (`oats-security`)
 
-- A Tauri capability must allow reading `~/.ariso/vault/Attachments/*` for audio playback via
-  the asset protocol / `convertFileSrc`.
+- **No new Tauri capability needed.** Audio plays through the existing `read_recording_audio`
+  command, which returns bytes over IPC (the frontend builds a Blob URL) — it is not the
+  asset protocol, so relocating the file to the vault needs no capability change. The command
+  just resolves the vault attachment (via `meta.audio_file`) with a legacy fallback.
 - Filename sanitization from user-controlled titles guards against path traversal and
-  reserved names.
+  reserved names. `note_basename` strips `/`, `\`, `:`, `..`, and leading dots; a title that
+  sanitizes to empty falls back to the recording id.
 - **Privacy shift:** notes *and audio* now live in the vault. If the user syncs
   `~/.ariso/vault` (iCloud, Obsidian Sync, git), that content leaves the machine — a real
   departure from the offline-mode guarantee. Surface this clearly in the UI. (v1 keeps the
@@ -190,17 +236,25 @@ with no data movement.
 
 Pure-function unit tests with tempdir + `ARISO_ROOT`, matching `storage.rs`:
 
-- `note_basename` derivation and collision suffixing.
-- Front-matter render/parse roundtrip (including `oats_id` extraction).
+- `note_basename` derivation/sanitization (traversal chars, empty→id fallback) and
+  `unique_basename` collision suffixing.
+- `render_note` + `note_body` roundtrip (front-matter + embed + body → body), and `oats_id`
+  extraction by `scan_vault`.
 - `scan_vault` builds the correct `oats_id → path` map and skips junk files.
-- Respect-deletion logic: `notes_written` set + absent note ⇒ skip regeneration.
-- Cascade delete removes note + attachment.
-- Legacy fallback: vault-miss resolves to the old `~/.ariso` paths.
+- `derive_notes_status` with the new `notes_written` arg: absent note + `notes_written` set ⇒
+  not `Pending`; absent note + `notes_written` None ⇒ `Pending`.
+- `write_audio`/`read_audio` roundtrip and `delete_recording_artifacts` cascade (note +
+  attachment removed).
+- Legacy fallback: `meta.audio_file` None ⇒ audio resolves to `~/.ariso` `recording.mp3`;
+  no vault note ⇒ note resolves to `~/.ariso` `ari-note.md`.
+- `finalize_core` / `append_recording_core` / `retry_transcription_core` integration
+  (tempdir + `ARISO_ROOT`): audio ends up in the vault, append concatenates the vault
+  attachment, and no `recording.mp3` is written under `~/.ariso`.
 
 ## Non-goals / deferred (YAGNI)
 
 - User-configurable vault path.
-- Migrating existing recordings' notes/audio into the vault (option A backfill).
+- Migrating existing recordings' notes/audio into the vault (one-time backfill).
 - Putting `transcript.md`, `segments.json`, or `meta.json` in the vault.
 - Wikilinks/backlinks between meetings.
 - Cloud-backend meetings in the vault.
