@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.14.0](https://github.com/ariso-ai/oats/compare/v0.13.0...v0.14.0) (2026-07-03)
+
+
+### Features
+
+* local (offline) multi-recording — append resumed clips to the recent recording ([1cbf40a](https://github.com/ariso-ai/oats/commit/1cbf40abf46f22704e281aed4daf29169bf638ed))
+* **local:** 5-min append-window decision ([d8f1402](https://github.com/ariso-ai/oats/commit/d8f1402c81c23b007b5c16efa9a141f38b642a46))
+* **local:** append a resumed clip to the recent recording ([0bfc83d](https://github.com/ariso-ai/oats/commit/0bfc83db30262e733e74f44cb0e5bb862527b6b4))
+* **local:** persist structured segments.json per recording ([cf3ea77](https://github.com/ariso-ai/oats/commit/cf3ea77a5f7c9f6ef0098dcb684bad477e1c937a))
+* **local:** pure offset helpers for stitching clips ([8a276af](https://github.com/ariso-ai/oats/commit/8a276afa21761a5607ab1c9e3a650a8464b6c84c))
+
+
+### Bug Fixes
+
+* **local:** crash-safe append ordering + explicit failed-clip save + clear notes_error ([3f60ddc](https://github.com/ariso-ai/oats/commit/3f60ddcd09119f7a71380c9bfeed86ad6ba5d707))
+* **local:** discard superseded notes output on append ([01b15f8](https://github.com/ariso-ai/oats/commit/01b15f88a80e56187ebf9db805c9b1daf87c2e2b))
+* **local:** dock resume to the current meeting instead of a phantom new note ([b432bd6](https://github.com/ariso-ai/oats/commit/b432bd6d5dc6e604ffeb46ddffb6df912c09aed8))
+* **local:** fall back to fresh recording when target unreadable + doc clarifications ([7e30577](https://github.com/ariso-ai/oats/commit/7e305770dc2a38f1d874674e63ea041566157ace))
+
 ## [0.13.0](https://github.com/ariso-ai/oats/compare/v0.12.0...v0.13.0) (2026-07-02)
 
 
