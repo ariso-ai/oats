@@ -135,6 +135,11 @@
             </button>
           </div>
         </div>
+        <p class="setting-hint">
+          Your notes and recordings are saved as a local Obsidian vault at
+          <code>~/.ariso/vault</code>. If you sync that folder (iCloud, Obsidian
+          Sync, etc.), those notes and audio leave this device.
+        </p>
       </div>
     </section>
 
