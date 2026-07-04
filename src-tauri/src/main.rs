@@ -16,6 +16,7 @@ mod recording_state;
 mod tray;
 mod tray_meeting;
 mod update_manager;
+mod vault;
 
 /// Build the macOS application menu. Mirrors Tauri's default menu (so the
 /// standard Edit/Window/View items and their shortcuts still work) but injects
