@@ -851,20 +851,33 @@ fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
 /// meeting recording (mp3 at this app's bitrate is well under 1 MB/min).
 const MAX_AUDIO_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Read the raw bytes of a recording's `recording.mp3`, returned as a raw
-/// binary IPC response so the frontend can build a Blob URL for an `<audio>`
-/// element (avoids JSON-array bloat from a `Vec<u8>` return).
-#[tauri::command]
-pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> {
-    let path = recording_dir(&id)?.join("recording.mp3");
+/// Resolve and read a recording's audio bytes. New recordings store audio in
+/// the vault (`meta.audio_file` names the attachment); legacy recordings
+/// (pre-vault, `audio_file: None`) keep it at `<recording_dir>/recording.mp3`.
+/// Bounded by `MAX_AUDIO_BYTES` to avoid loading a pathologically large file.
+fn read_recording_audio_bytes(id: &str) -> Result<Vec<u8>, String> {
+    crate::storage::validate_recording_id(id)?;
+    let dir = recording_dir(id)?;
+    let meta = crate::storage::read_meta(&dir)?;
+    let path = match meta.audio_file {
+        Some(audio_file) => crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file),
+        None => dir.join("recording.mp3"),
+    };
     let size = std::fs::metadata(&path)
         .map_err(|e| format!("read recording audio: {e}"))?
         .len();
     if size > MAX_AUDIO_BYTES {
         return Err(format!("recording audio too large to play: {size} bytes"));
     }
-    let bytes = std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))?;
-    Ok(tauri::ipc::Response::new(bytes))
+    std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))
+}
+
+/// Read the raw bytes of a recording's audio, returned as a raw binary IPC
+/// response so the frontend can build a Blob URL for an `<audio>` element
+/// (avoids JSON-array bloat from a `Vec<u8>` return).
+#[tauri::command]
+pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> {
+    Ok(tauri::ipc::Response::new(read_recording_audio_bytes(&id)?))
 }
 
 /// Meeting ids are numeric on the Ariso backend; rejecting anything else also
@@ -1273,6 +1286,35 @@ mod tests {
             audio_file: None,
             notes_written: None,
         }
+    }
+
+    #[test]
+    fn read_recording_audio_resolves_vault_then_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+
+        // New recording: audio in the vault via meta.audio_file.
+        let id_new = "2026-06-02T10-00-00Z";
+        let dir_new = crate::storage::create_recording_dir(root, id_new).unwrap();
+        let mut meta_new = test_meta(id_new);
+        meta_new.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir_new, &meta_new).unwrap();
+        crate::vault::write_audio("clip.mp3", b"newbytes").unwrap();
+        assert_eq!(read_recording_audio_bytes(id_new).unwrap(), b"newbytes");
+        // The public command wraps the same resolution logic; smoke-test it too.
+        assert!(read_recording_audio(id_new.into()).is_ok());
+
+        // Legacy recording: no audio_file, audio in ~/.ariso.
+        let id_old = "2026-06-01T10-00-00Z";
+        let dir_old = crate::storage::create_recording_dir(root, id_old).unwrap();
+        crate::storage::write_meta(&dir_old, &test_meta(id_old)).unwrap();
+        std::fs::write(dir_old.join("recording.mp3"), b"oldbytes").unwrap();
+        assert_eq!(read_recording_audio_bytes(id_old).unwrap(), b"oldbytes");
+        assert!(read_recording_audio(id_old.into()).is_ok());
+
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[test]
