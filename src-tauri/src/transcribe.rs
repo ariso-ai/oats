@@ -496,13 +496,15 @@ pub async fn retry_transcription_core(
 }
 
 /// Regenerate AI notes for a recording from its existing `transcript.md`,
-/// without re-running STT. Clears any prior `notes_error` and removes any
-/// existing `ari-note.md` first — readiness is signaled by that file's
+/// without re-running STT. Clears any prior `notes_error`/`notes_written` and
+/// removes the existing note first — readiness is signaled by a note's
 /// presence, so leaving a stale note in place would make the poller report the
 /// recording as "ready" the instant polling resumes, finishing the regeneration
-/// silently in the background. Removing it makes the regeneration observable
-/// (`hasNote` false → generating → true when the new note lands). Then spawns
-/// `process_notes` detached (it writes `ari-note.md` or a fresh `notes_error`).
+/// silently in the background. Removes the vault note (new recordings, note-only
+/// — the audio attachment is preserved) and any legacy `~/.ariso/ari-note.md`
+/// (pre-feature recordings), making the regeneration observable (`hasNote`
+/// false → generating → true when the new note lands). Then spawns
+/// `process_notes` detached (it writes a fresh note or a fresh `notes_error`).
 /// Returns the handle so tests can await completion; the command drops it.
 ///
 /// Trade-off: a failed regeneration leaves the recording note-less (surfaced as
@@ -515,9 +517,11 @@ pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, S
     }
     let mut meta = storage::read_meta(&dir)?;
     meta.notes_error = None;
+    meta.notes_written = None;
     storage::write_meta(&dir, &meta)?;
-    // Clear the stale note so regeneration is observable (see doc comment).
-    // A missing file is fine — only surface real removal errors.
+    // Clear the stale note so regeneration is observable. Remove the vault note
+    // (new recordings) and any legacy `~/.ariso/ari-note.md` (pre-feature ones).
+    crate::vault::delete_recording_artifacts(id, None)?;
     match std::fs::remove_file(dir.join("ari-note.md")) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -873,6 +877,9 @@ mod tests {
     async fn retry_notes_regenerates_from_existing_transcript() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        // Isolate the vault lookup `retry_notes_core` now performs so it can't
+        // touch the real ~/.ariso.
+        unsafe { std::env::set_var("ARISO_ROOT", root); }
         let id = "2026-06-02T14-30-05Z";
         let dir = storage::create_recording_dir(root, id).unwrap();
         std::fs::write(dir.join("transcript.md"), b"# Transcript\nhi").unwrap();
@@ -894,9 +901,11 @@ mod tests {
         handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
+        // Legacy recording (no audio_file): the note still lands in ari-note.md.
         let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert!(notes.contains("# Notes"), "got: {notes}");
         assert!(read_meta(&dir).unwrap().notes_error.is_none(), "notes_error must be cleared");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -907,6 +916,9 @@ mod tests {
         // the regeneration would finish in the background, never surfacing.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        // Isolate the vault lookup `retry_notes_core` now performs so it can't
+        // touch the real ~/.ariso.
+        unsafe { std::env::set_var("ARISO_ROOT", root); }
         let id = "2026-06-02T14-30-05Z";
         let dir = storage::create_recording_dir(root, id).unwrap();
         std::fs::write(dir.join("transcript.md"), b"# Transcript\nhi").unwrap();
@@ -935,6 +947,83 @@ mod tests {
             "stale note must be removed so regeneration is observable"
         );
         assert!(read_meta(&dir).unwrap().notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn retry_notes_replaces_vault_note() {
+        // For a vault-backed recording (has `meta.audio_file`), regeneration must
+        // remove the *vault* note, not just the legacy `ari-note.md`, so
+        // `process_notes` observably writes a fresh vault note rather than
+        // silently leaving the stale one in place.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+
+        let json = r#"{"language":"en","durationSeconds":1.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!("if [ \"$1\" = notes ]; then echo '# first'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub = write_stub(&root, &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, h) = finalize_core(
+            &root, b"a".to_vec(), "N".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# first"));
+
+        // Sidecar now emits new notes: re-stub and re-set ARISO_STT_BIN so
+        // regeneration sees different output the second time.
+        let body2 = format!("if [ \"$1\" = notes ]; then echo '# second'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub2 = write_stub(&root, &body2);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub2); }
+
+        let h2 = retry_notes_core(&root, &res.id).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# second"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn retry_notes_failure_leaves_vault_note_removed() {
+        // Mirrors `retry_notes_removes_stale_note_so_regeneration_is_observable`
+        // but for a vault-backed recording: a *failed* regeneration must not
+        // leave the old vault note in place (which `write_note`'s in-place
+        // overwrite on success would otherwise mask) — the poller's readiness
+        // signal is the vault note's presence.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+
+        let json = r#"{"language":"en","durationSeconds":1.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!("if [ \"$1\" = notes ]; then echo '# first'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub = write_stub(&root, &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, h) = finalize_core(
+            &root, b"a".to_vec(), "N".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# first"));
+
+        // Regeneration now fails outright.
+        let fail_stub = write_stub(&root, "if [ \"$1\" = notes ]; then echo 'boom' >&2; exit 1; fi\nexit 1");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
+
+        let h2 = retry_notes_core(&root, &res.id).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert!(
+            crate::vault::read_note(&res.id).unwrap().is_none(),
+            "stale vault note must be removed so a failed regeneration is observable"
+        );
+        let dir = storage::recordings_dir(&root).join(&res.id);
+        assert!(storage::read_meta(&dir).unwrap().notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     // Helper: a stub that prints notes for `notes`, else a single-segment JSON
