@@ -513,7 +513,8 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     duration_seconds: m.duration_seconds,
                     status: m.status,
                     last_clip_end_at: m.last_clip_end_at,
-                    has_audio: recording_dir.join("recording.mp3").is_file(),
+                    has_audio: m.audio_file.is_some()
+                        || recording_dir.join("recording.mp3").is_file(),
                     has_note: recording_dir.join("ari-note.md").is_file(),
                     has_transcript: recording_dir.join("transcript.md").is_file(),
                 });
@@ -705,6 +706,19 @@ mod tests {
         assert!(!list[1].has_audio);
         assert!(!list[1].has_note);
         assert!(!list[1].has_transcript);
+    }
+
+    #[test]
+    fn list_has_audio_true_when_audio_file_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut m = meta_with(id, "2026-06-02T10:00:00Z");
+        m.audio_file = Some("clip.mp3".into()); // audio lives in the vault, not here
+        write_meta(&dir, &m).unwrap();
+        let list = list_recordings(root).unwrap();
+        assert!(list[0].has_audio, "audio_file set ⇒ has_audio");
     }
 
     #[test]

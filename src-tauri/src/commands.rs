@@ -756,7 +756,16 @@ pub fn get_desktop_config() -> DesktopConfig {
 #[tauri::command]
 pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
     let root = crate::storage::ariso_root()?;
-    crate::storage::list_recordings(&root)
+    let mut summaries = crate::storage::list_recordings(&root)?;
+    // Overlay vault note presence (a user may have deleted a vault note; a new
+    // recording's note lives only in the vault, not as ari-note.md).
+    let vault_notes = crate::vault::scan_vault()?;
+    for s in &mut summaries {
+        if vault_notes.contains_key(&s.id) {
+            s.has_note = true;
+        }
+    }
+    Ok(summaries)
 }
 
 /// Lightweight status for a single local recording, used by the detail panel's
@@ -769,7 +778,8 @@ pub fn local_recording_status(
     crate::storage::validate_recording_id(&id)?;
     let dir = recording_dir(&id)?;
     let meta = crate::storage::read_meta(&dir)?;
-    let has_note = dir.join("ari-note.md").is_file();
+    let has_note =
+        dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
     let has_transcript = dir.join("transcript.md").is_file();
     let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
     Ok(crate::storage::RecordingStatusView {
@@ -1645,6 +1655,25 @@ mod tests {
     #[test]
     fn local_recording_status_rejects_bad_id() {
         assert!(local_recording_status("../escape".to_string()).is_err());
+    }
+
+    #[test]
+    fn list_local_recordings_marks_has_note_from_vault() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "b").unwrap();
+
+        let list = list_local_recordings().unwrap();
+        assert!(list.iter().find(|s| s.id == id).unwrap().has_note);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }
 
