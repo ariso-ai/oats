@@ -212,6 +212,8 @@ async fn fresh_recording_core(
         error: None,
         notes_error: None,
         last_clip_end_at: None,
+        audio_file: None,
+        notes_written: None,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -285,6 +287,8 @@ fn save_failed_clip(
                 error: Some(err.to_string()),
                 notes_error: None,
                 last_clip_end_at: None,
+                audio_file: None,
+                notes_written: None,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -700,6 +704,8 @@ mod tests {
             error: Some("old failure".into()),
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -733,7 +739,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -753,7 +759,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -787,7 +793,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -996,7 +1002,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1022,7 +1028,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T10:00:00Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 

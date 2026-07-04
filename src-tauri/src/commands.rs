@@ -1270,6 +1270,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         }
     }
 
@@ -1471,6 +1473,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();

@@ -98,6 +98,16 @@ pub struct RecordingMeta {
     /// which lags behind reality when clips have inter-clip gaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_clip_end_at: Option<String>,
+    /// Basename of this recording's audio attachment in the vault
+    /// (`<vault>/Attachments/<audio_file>`). `None` for legacy recordings, whose
+    /// audio still lives at `~/.ariso/recordings/<id>/recording.mp3`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_file: Option<String>,
+    /// RFC3339 time oats last wrote this recording's note into the vault. `None`
+    /// means never generated. Recorded for future use (status refinement / an
+    /// auto-regeneration guard); v1 does not branch on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_written: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -635,7 +645,7 @@ mod tests {
             id: id.into(), title: format!("T {id}"), created_at: created.into(),
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         }
     }
 
@@ -796,6 +806,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -816,7 +828,7 @@ mod tests {
             id: "x".into(), title: "t".into(), created_at: "c".into(),
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -995,6 +1007,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();
