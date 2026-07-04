@@ -760,10 +760,17 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     // Overlay vault note presence (a user may have deleted a vault note; a new
     // recording's note lives only in the vault, not as ari-note.md).
     let vault_notes = crate::vault::scan_vault()?;
+    let vault_root = crate::vault::vault_root()?;
     for s in &mut summaries {
         if vault_notes.contains_key(&s.id) {
             s.has_note = true;
         }
+        if let Some(af) = &s.audio_file {
+            // New recording: audio lives in the vault; reflect real existence
+            // (a user may have deleted the attachment in Obsidian).
+            s.has_audio = crate::vault::audio_path(&vault_root, af).is_file();
+        }
+        // Legacy (audio_file None): has_audio already reflects recording.mp3.
     }
     Ok(summaries)
 }
@@ -1673,6 +1680,37 @@ mod tests {
 
         let list = list_local_recordings().unwrap();
         assert!(list.iter().find(|s| s.id == id).unwrap().has_note);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_local_recordings_reflects_vault_audio_deletion() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        // No attachment written yet: the vault attachment does not exist, so
+        // has_audio must reflect that even though meta.audio_file is set.
+        let list = list_local_recordings().unwrap();
+        assert!(
+            !list.iter().find(|s| s.id == id).unwrap().has_audio,
+            "attachment missing ⇒ has_audio should be false"
+        );
+
+        // Write the attachment: has_audio should flip to true.
+        crate::vault::write_audio("clip.mp3", b"bytes").unwrap();
+        let list = list_local_recordings().unwrap();
+        assert!(
+            list.iter().find(|s| s.id == id).unwrap().has_audio,
+            "attachment present ⇒ has_audio should be true"
+        );
+
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }

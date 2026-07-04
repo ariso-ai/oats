@@ -120,12 +120,23 @@ pub struct RecordingSummary {
     pub status: RecordingStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_clip_end_at: Option<String>,
-    /// Whether `recording.mp3` exists in the recording's directory.
+    /// Whether this recording's audio exists: for vault recordings, the vault
+    /// attachment named by `meta.audio_file`; for legacy recordings, whether
+    /// `recording.mp3` exists in the recording's directory. This layer sets
+    /// an optimistic value from `meta.audio_file.is_some()` alone (it is
+    /// vault-agnostic); the command layer overlays the real vault check.
     pub has_audio: bool,
-    /// Whether `ari-note.md` exists in the recording's directory.
+    /// Whether the recording has a note. This layer only checks the legacy
+    /// `ari-note.md` file; the command layer overlays real vault note
+    /// presence (a new recording's note lives only in the vault).
     pub has_note: bool,
     /// Whether `transcript.md` exists in the recording's directory.
     pub has_transcript: bool,
+    /// The recording's vault audio attachment name (from meta), used by the
+    /// command layer to verify the attachment still exists. Not serialized to
+    /// the frontend.
+    #[serde(skip)]
+    pub audio_file: Option<String>,
 }
 
 /// Lightweight per-recording status for the detail panel's generation poller.
@@ -517,6 +528,7 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                         || recording_dir.join("recording.mp3").is_file(),
                     has_note: recording_dir.join("ari-note.md").is_file(),
                     has_transcript: recording_dir.join("transcript.md").is_file(),
+                    audio_file: m.audio_file.clone(),
                 });
             }
             Err(_) => continue,
