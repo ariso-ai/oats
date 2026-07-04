@@ -124,11 +124,16 @@ fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool
     before != after
 }
 
-/// Best-effort notes generation: runs the sidecar and writes either
-/// `ari-note.md` or `meta.notes_error`. Failures here never affect the
-/// recording's `Done` status. A third outcome exists: if the transcript
-/// changes mid-run (superseded by a later append/regeneration), this writes
-/// neither file and silently discards its result.
+/// Current instant as an RFC3339 string.
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Best-effort notes generation: runs the sidecar and writes either the vault
+/// note or `meta.notes_error`. Failures here never affect the recording's
+/// `Done` status. A third outcome exists: if the transcript changes mid-run
+/// (superseded by a later append/regeneration), this writes neither file and
+/// silently discards its result.
 async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
     // Capture the transcript this run generates from; if it changes while notes
@@ -139,19 +144,37 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         return;
     }
     match outcome {
-        // Empty output is a silent failure: it would write a blank
-        // ari-note.md with notes_error unset, reading as success. Record it.
+        // Empty output is a silent failure: it would write a blank note with
+        // notes_error unset, reading as success. Record it.
         Ok(notes) if notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
             let _ = storage::write_meta(&dir, &meta);
         }
         Ok(notes) => {
-            if let Err(e) = storage::write_notes(&dir, &notes) {
-                eprintln!("write notes: {e}");
+            let audio_file = match &meta.audio_file {
+                Some(a) => a.clone(),
+                // Legacy recording with no vault audio: keep the old location so
+                // its note stays alongside its audio.
+                None => {
+                    if let Err(e) = storage::write_notes(&dir, &notes) {
+                        eprintln!("write notes: {e}");
+                        meta.notes_error = Some(e);
+                        let _ = storage::write_meta(&dir, &meta);
+                    }
+                    return;
+                }
+            };
+            let basename = audio_file.strip_suffix(".mp3").unwrap_or(audio_file.as_str());
+            if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &notes) {
+                eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
                 let _ = storage::write_meta(&dir, &meta);
+                return;
             }
+            meta.notes_error = None;
+            meta.notes_written = Some(now_rfc3339());
+            let _ = storage::write_meta(&dir, &meta);
         }
         Err(e) => {
             eprintln!("notes generation: {e}");
@@ -692,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_writes_ari_note_md_when_notes_succeed() {
+    async fn finalize_writes_vault_note_when_notes_succeed() {
         let tmp = tempfile::tempdir().unwrap();
         let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
         // Stub: `notes` subcommand prints markdown; otherwise print transcript JSON.
@@ -709,13 +732,46 @@ mod tests {
         ).await.unwrap();
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
-        unsafe { std::env::remove_var("ARISO_ROOT"); }
 
         assert_eq!(res.status, RecordingStatus::Done);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
-        let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
-        assert!(notes.contains("# Notes"), "got: {notes}");
-        assert!(crate::storage::read_meta(&dir).unwrap().notes_error.is_none());
+        // Note lands in the vault (resolvable by oats_id), not ~/.ariso.
+        let notes = crate::vault::read_note(&res.id).unwrap();
+        assert!(notes.as_deref().unwrap_or("").contains("# Notes"), "got: {notes:?}");
+        assert!(!dir.join("ari-note.md").exists());
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert!(meta.notes_error.is_none());
+        assert!(meta.notes_written.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_vault_note_not_ari_note_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo '# Vault note'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // Note is in the vault, resolvable by oats_id; NOT in ~/.ariso.
+        let id = storage::sanitize_iso_to_id("2026-06-02T10:00:00Z");
+        assert_eq!(crate::vault::read_note(&id).unwrap().as_deref(), Some("# Vault note"));
+        let dir = storage::recordings_dir(tmp.path()).join(&id);
+        assert!(!dir.join("ari-note.md").exists());
+        // notes_written stamped.
+        assert!(storage::read_meta(&dir).unwrap().notes_written.is_some());
+        assert_eq!(res.id, id);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -736,15 +792,16 @@ mod tests {
         ).await.unwrap();
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
-        unsafe { std::env::remove_var("ARISO_ROOT"); }
 
         assert_eq!(res.status, RecordingStatus::Done);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         assert!(dir.join("transcript.md").exists());
         assert!(!dir.join("ari-note.md").exists());
+        assert!(crate::vault::read_note(&res.id).unwrap().is_none(), "no vault note on notes failure");
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
         assert!(meta.notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
