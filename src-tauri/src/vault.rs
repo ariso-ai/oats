@@ -133,6 +133,37 @@ pub fn note_body(contents: &str) -> String {
     body.to_string()
 }
 
+/// Reject an attachment filename that could escape `Attachments/`.
+fn validate_audio_file(audio_file: &str) -> Result<(), String> {
+    if audio_file.is_empty()
+        || audio_file.contains('/')
+        || audio_file.contains('\\')
+        || audio_file.contains("..")
+    {
+        return Err(format!("invalid audio filename: {audio_file}"));
+    }
+    Ok(())
+}
+
+/// Path to an audio attachment in the vault.
+pub fn audio_path(root: &Path, audio_file: &str) -> PathBuf {
+    attachments_dir(root).join(audio_file)
+}
+
+/// Atomically write an audio attachment, creating `Attachments/` if needed.
+pub fn write_audio(audio_file: &str, bytes: &[u8]) -> Result<(), String> {
+    validate_audio_file(audio_file)?;
+    let root = ensure_vault()?;
+    crate::storage::write_atomic(&audio_path(&root, audio_file), bytes)
+}
+
+/// Read an audio attachment's bytes.
+pub fn read_audio(audio_file: &str) -> Result<Vec<u8>, String> {
+    validate_audio_file(audio_file)?;
+    let root = vault_root()?;
+    std::fs::read(audio_path(&root, audio_file)).map_err(|e| format!("read vault audio: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +288,25 @@ mod tests {
         let body = "\nLeading blank line body";
         let md = render_note(&meta_for_note(), "a.mp3", body);
         assert_eq!(note_body(&md), body);
+    }
+
+    #[test]
+    fn write_and_read_audio_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        write_audio("2026-06-02 Standup.mp3", b"mp3bytes").unwrap();
+        assert_eq!(read_audio("2026-06-02 Standup.mp3").unwrap(), b"mp3bytes");
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn audio_file_rejects_traversal() {
+        assert!(write_audio("../evil.mp3", b"x").is_err());
+        assert!(write_audio("a/b.mp3", b"x").is_err());
     }
 
     #[test]
