@@ -310,22 +310,35 @@ fn save_failed_clip(
     let id = storage::sanitize_iso_to_id(created_at);
     match storage::create_recording_dir(root, &id) {
         Ok(dir) => {
-            let audio_file = format!(
-                "{}.mp3",
-                match crate::vault::ensure_vault() {
-                    Ok(root) => crate::vault::unique_basename(
-                        &root,
-                        &crate::vault::note_basename(created_at, title, &id),
-                    ),
-                    Err(e) => {
-                        eprintln!("save failed clip: ensure vault: {e}");
-                        return;
+            // Persist the audio, preferring the vault. If the vault is
+            // unavailable, fall back to the legacy local `recording.mp3`
+            // (`audio_file: None`) so the clip stays recoverable and — crucially
+            // — the `Failed` record below is still written. Bailing here would
+            // drop the whole record, defeating this function's "never lost"
+            // guarantee. Audio resolution in commands.rs reads `recording.mp3`
+            // when `audio_file` is `None`.
+            let audio_file = match crate::vault::ensure_vault() {
+                Ok(vault_root) => {
+                    let name = format!(
+                        "{}.mp3",
+                        crate::vault::unique_basename(
+                            &vault_root,
+                            &crate::vault::note_basename(created_at, title, &id),
+                        )
+                    );
+                    if let Err(e) = crate::vault::write_audio(&name, audio) {
+                        eprintln!("save failed clip audio: {e}");
                     }
+                    Some(name)
                 }
-            );
-            if let Err(e) = crate::vault::write_audio(&audio_file, audio) {
-                eprintln!("save failed clip audio: {e}");
-            }
+                Err(e) => {
+                    eprintln!("save failed clip: ensure vault: {e}; falling back to local dir");
+                    if let Err(e) = std::fs::write(dir.join("recording.mp3"), audio) {
+                        eprintln!("save failed clip audio (fallback): {e}");
+                    }
+                    None
+                }
+            };
             let meta = RecordingMeta {
                 id: id.clone(),
                 title: title.to_string(),
@@ -338,7 +351,7 @@ fn save_failed_clip(
                 error: Some(err.to_string()),
                 notes_error: None,
                 last_clip_end_at: None,
-                audio_file: Some(audio_file.clone()),
+                audio_file,
                 notes_written: None,
             };
             let _ = storage::write_meta(&dir, &meta);
@@ -1143,6 +1156,31 @@ mod tests {
         assert_eq!(crate::vault::read_audio(meta2.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
         assert_eq!(meta2.status, RecordingStatus::Failed);
         assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn save_failed_clip_falls_back_to_local_dir_when_vault_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        // Block the vault: make `<ariso_root>/vault` a file so ensure_vault's
+        // create_dir_all(vault/Attachments) fails, while the recording dir (a
+        // sibling under recordings/) is still created fine.
+        std::fs::write(crate::vault::vault_root().unwrap(), b"x").unwrap();
+
+        save_failed_clip(tmp.path(), b"clipbytes", "T", "2026-06-02T10:00:00.000Z", 15, "boom");
+
+        // The Failed record is still written despite the vault being unavailable
+        // — bailing early here would lose the clip entirely.
+        let dir = crate::storage::recordings_dir(tmp.path()).join("2026-06-02T10-00-00Z");
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Failed);
+        assert_eq!(meta.error.as_deref(), Some("boom"));
+        // Audio falls back to the legacy local path (audio_file: None → read from
+        // `<dir>/recording.mp3`).
+        assert!(meta.audio_file.is_none(), "vault-less clip must use legacy audio path");
+        assert_eq!(std::fs::read(dir.join("recording.mp3")).unwrap(), b"clipbytes");
+
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
