@@ -25,9 +25,9 @@
     "@tiptap/extension-task-item": "^3.27.1",
     "@tiptap/extension-task-list": "^3.27.1",
     "@tiptap/extension-typography": "^3.27.1",
+    "@tiptap/markdown": "^3.27.1",
     "@tiptap/starter-kit": "^3.27.1",
     "@tiptap/vue-3": "^3.27.1",
-    "tiptap-markdown": "^0.9.0",
     "vue": "^3.5.39",
     "vue-router": "^5.1.0"
   },
