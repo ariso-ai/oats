@@ -6,7 +6,7 @@ import Placeholder from '@tiptap/extension-placeholder';
 import Typography from '@tiptap/extension-typography';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
-import { Markdown } from 'tiptap-markdown';
+import { Markdown } from '@tiptap/markdown';
 
 // Compact TipTap surface for in-meeting notes. It speaks Markdown at the
 // boundary so local `user-note.md` files and future backend notes share one format.
@@ -32,11 +32,7 @@ const emit = defineEmits<{
 const editor = useEditor({
   extensions: [
     StarterKit.configure({ heading: { levels: [2, 3] } }),
-    Markdown.configure({
-      html: false,
-      transformPastedText: true,
-      transformCopiedText: true,
-    }),
+    Markdown,
     Placeholder.configure({ placeholder: props.placeholder }),
     Typography,
     TaskList,
@@ -52,7 +48,7 @@ const editor = useEditor({
   onUpdate: ({ editor: ed }) => {
     // Emit markdown rather than HTML so the editor stays compatible with the
     // local `user-note.md` artifact and Agents' existing Tiptap markdown convention.
-    emit('update:modelValue', ed.storage.markdown.getMarkdown());
+    emit('update:modelValue', ed.getMarkdown());
   },
   onCreate: ({ editor: ed }) => {
     if (props.modelValue) {
@@ -66,7 +62,7 @@ watch(
   () => props.modelValue,
   (value) => {
     const ed = editor.value;
-    if (!ed || value === ed.storage.markdown.getMarkdown()) return;
+    if (!ed || value === ed.getMarkdown()) return;
     ed.commands.setContent(value || '', { contentType: 'markdown' });
   }
 );
@@ -133,6 +129,21 @@ onBeforeUnmount(() => {
   padding-left: 24px;
 }
 
+/* Tailwind's preflight resets list markers to `none`; restore them so the
+   editing surface shows bullets and numbers as the user types. */
+.meeting-notes-editor :deep(.meeting-notes-prosemirror ul) {
+  list-style-type: disc;
+}
+
+.meeting-notes-editor :deep(.meeting-notes-prosemirror ol) {
+  list-style-type: decimal;
+}
+
+.meeting-notes-editor :deep(.meeting-notes-prosemirror li) {
+  display: list-item;
+  list-style-position: outside;
+}
+
 .meeting-notes-editor :deep(.meeting-notes-prosemirror ul[data-type="taskList"]) {
   list-style: none;
   padding-left: 0;
@@ -140,7 +151,26 @@ onBeforeUnmount(() => {
 
 .meeting-notes-editor :deep(.meeting-notes-prosemirror ul[data-type="taskList"] li) {
   display: flex;
+  align-items: flex-start;
   gap: 8px;
+}
+
+/* Keep the checkbox inline with the first line of its text: pin the label,
+   nudge it to the text's optical center, and drop the paragraph's block
+   margin so the item stays a single tight line. */
+.meeting-notes-editor :deep(.meeting-notes-prosemirror ul[data-type="taskList"] li > label) {
+  flex: 0 0 auto;
+  margin-top: 0;
+  user-select: none;
+}
+
+.meeting-notes-editor :deep(.meeting-notes-prosemirror ul[data-type="taskList"] li > div) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.meeting-notes-editor :deep(.meeting-notes-prosemirror ul[data-type="taskList"] li > div > p) {
+  margin: 0;
 }
 
 .meeting-notes-editor :deep(.meeting-notes-prosemirror blockquote) {
