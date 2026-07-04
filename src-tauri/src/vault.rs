@@ -1,3 +1,4 @@
+use crate::storage::{format_hms, RecordingMeta};
 use std::path::{Path, PathBuf};
 
 /// Resolve the vault root `<ariso_root>/vault`.
@@ -87,6 +88,51 @@ pub fn unique_basename(root: &Path, base: &str) -> String {
     }
 }
 
+/// Render a vault note: YAML front-matter, the audio embed, then the notes body.
+pub fn render_note(meta: &RecordingMeta, audio_file: &str, notes_md: &str) -> String {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let participants = meta
+        .participants
+        .iter()
+        .map(|p| format!("\"{}\"", esc(&p.label)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("oats_id: {}\n", meta.id));
+    out.push_str(&format!("title: \"{}\"\n", esc(&meta.title)));
+    out.push_str(&format!("date: \"{}\"\n", esc(&meta.created_at)));
+    out.push_str(&format!("duration: \"{}\"\n", format_hms(meta.duration_seconds as f64)));
+    out.push_str(&format!("participants: [{participants}]\n"));
+    out.push_str("---\n");
+    out.push_str(&format!("![[Attachments/{audio_file}]]\n\n"));
+    out.push_str(notes_md);
+    out
+}
+
+/// Inverse of `render_note` for in-app rendering: drop the front-matter block
+/// and the leading `![[...]]` embed line, returning just the notes body.
+/// Content without a leading `---` front-matter fence is returned unchanged (a
+/// user may have freely rewritten the note).
+pub fn note_body(contents: &str) -> String {
+    let Some(after_open) = contents.strip_prefix("---\n") else {
+        return contents.to_string();
+    };
+    let Some((_frontmatter, after_fence)) = after_open.split_once("\n---\n") else {
+        return contents.to_string();
+    };
+    // `after_fence` is `![[...]]\n\n<body>` as emitted by render_note. Strip one
+    // leading embed line, then exactly one separator newline — never more, so a
+    // body that itself begins with `\n` is preserved.
+    let body = match after_fence.split_once('\n') {
+        Some((first, tail)) if first.trim_start().starts_with("![[") => {
+            tail.strip_prefix('\n').unwrap_or(tail)
+        }
+        _ => after_fence,
+    };
+    body.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +201,62 @@ mod tests {
     fn note_basename_bad_date_falls_back_to_ten_char_slice() {
         // Unparseable created_at → first 10 chars used as the date prefix.
         assert_eq!(note_basename("2026-06-02xxx", "T", "id"), "2026-06-02 T");
+    }
+
+    fn meta_for_note() -> crate::storage::RecordingMeta {
+        crate::storage::RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "Team \"Standup\"".into(),
+            created_at: "2026-06-02T14:30:05Z".into(),
+            duration_seconds: 2533,
+            status: crate::storage::RecordingStatus::Done,
+            language: Some("en".into()),
+            participants: vec![
+                crate::storage::Participant { id: 0, label: "Speaker 1".into() },
+                crate::storage::Participant { id: 1, label: "Speaker 2".into() },
+            ],
+            model_version: None, error: None, notes_error: None, last_clip_end_at: None,
+            audio_file: None, notes_written: None,
+        }
+    }
+
+    #[test]
+    fn render_note_has_frontmatter_embed_and_body() {
+        let md = render_note(&meta_for_note(), "2026-06-02 Team Standup.mp3", "# Notes\n- point");
+        assert!(md.starts_with("---\n"));
+        assert!(md.contains("oats_id: 2026-06-02T14-30-05Z\n"));
+        assert!(md.contains("duration: \"00:42:13\"\n"));
+        assert!(md.contains("participants: [\"Speaker 1\", \"Speaker 2\"]\n"));
+        assert!(md.contains("![[Attachments/2026-06-02 Team Standup.mp3]]\n"));
+        assert!(md.contains("# Notes\n- point"));
+    }
+
+    #[test]
+    fn note_body_strips_frontmatter_and_embed() {
+        let md = render_note(&meta_for_note(), "a.mp3", "Body line 1\nBody line 2");
+        assert_eq!(note_body(&md), "Body line 1\nBody line 2");
+    }
+
+    #[test]
+    fn note_body_tolerates_missing_frontmatter() {
+        // A user-mangled note with no front-matter returns its content unchanged.
+        assert_eq!(note_body("just text"), "just text");
+    }
+
+    #[test]
+    fn note_body_leaves_embed_alone_without_frontmatter() {
+        // No `---` fence: the embed/trim logic must NOT run, so a first line that
+        // looks like an embed is preserved verbatim.
+        assert_eq!(note_body("![[X]]\nBody"), "![[X]]\nBody");
+    }
+
+    #[test]
+    fn note_body_roundtrips_body_with_leading_blank_line() {
+        // A body that itself begins with `\n` must survive the roundtrip — the
+        // separator strip removes exactly one newline, not all of them.
+        let body = "\nLeading blank line body";
+        let md = render_note(&meta_for_note(), "a.mp3", body);
+        assert_eq!(note_body(&md), body);
     }
 
     #[test]
