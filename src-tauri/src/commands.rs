@@ -974,6 +974,19 @@ const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, String> {
+    crate::storage::validate_recording_id(&id)?;
+    if kind == "note" {
+        // Vault note (new recordings) first, then legacy ~/.ariso/ari-note.md.
+        if let Some(body) = crate::vault::read_note(&id)? {
+            return Ok(Some(body));
+        }
+        let legacy = recording_dir(&id)?.join("ari-note.md");
+        return match std::fs::read_to_string(&legacy) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read recording file: {e}")),
+        };
+    }
     let filename = note_or_transcript_filename(&kind)?;
     let path = recording_dir(&id)?.join(filename);
     // Only a genuine "not found" means the file hasn't been generated yet;
@@ -995,6 +1008,21 @@ pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, S
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+
+    crate::storage::validate_recording_id(&id)?;
+    if kind == "note" {
+        let path = match crate::vault::find_note(&id)? {
+            Some(p) => p,
+            None => recording_dir(&id)?.join("ari-note.md"),
+        };
+        if !path.exists() {
+            return Err(format!("recording file not found: {}", path.display()));
+        }
+        return app
+            .opener()
+            .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|e| e.to_string());
+    }
 
     let filename = note_or_transcript_filename(&kind)?;
     let path = recording_dir(&id)?.join(filename);
@@ -1267,6 +1295,77 @@ mod tests {
         let id = "2026-06-02T14-30-05Z";
         let dir = recording_dir(id).unwrap();
         assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn read_recording_file_note_prefers_vault_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "vault body").unwrap();
+
+        assert_eq!(
+            read_recording_file(id.into(), "note".into())
+                .unwrap()
+                .as_deref(),
+            Some("vault body")
+        );
+        // Transcript still reads ~/.ariso.
+        std::fs::write(dir.join("transcript.md"), b"tscript").unwrap();
+        assert_eq!(
+            read_recording_file(id.into(), "transcript".into())
+                .unwrap()
+                .as_deref(),
+            Some("tscript")
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn read_recording_file_note_falls_back_to_legacy_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T11-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        // No vault note written; only the legacy on-disk file exists.
+        std::fs::write(dir.join("ari-note.md"), b"legacy note").unwrap();
+
+        assert_eq!(
+            read_recording_file(id.into(), "note".into())
+                .unwrap()
+                .as_deref(),
+            Some("legacy note")
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn read_recording_file_note_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T12-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        // Neither a vault note nor a legacy file exists yet.
+
+        assert_eq!(read_recording_file(id.into(), "note".into()).unwrap(), None);
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
