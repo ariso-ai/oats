@@ -179,6 +179,14 @@ fn main() {
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
 
+            // Best-effort: create ~/.ariso/vault (+ Attachments/, .obsidian/app.json)
+            // up front so a user can open it in Obsidian before the first
+            // recording. Write paths also call ensure_vault lazily, so a
+            // failure here only logs — it must not block startup.
+            if let Err(e) = crate::vault::ensure_vault() {
+                eprintln!("ensure vault: {e}");
+            }
+
             // Managed state must exist before the tray is created: tray menu
             // rebuilds and the title refresher read RecordingState and
             // FeaturedMeetingState.
