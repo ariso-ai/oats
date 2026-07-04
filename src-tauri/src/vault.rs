@@ -220,6 +220,40 @@ pub fn read_note(oats_id: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Atomically write a recording's vault note (front-matter + embed + body).
+pub fn write_note(
+    basename: &str,
+    meta: &RecordingMeta,
+    audio_file: &str,
+    notes_md: &str,
+) -> Result<(), String> {
+    let root = ensure_vault()?;
+    let contents = render_note(meta, audio_file, notes_md);
+    crate::storage::write_atomic(&note_path(&root, basename), contents.as_bytes())
+}
+
+/// Remove a recording's vault note (located by `oats_id`) and its audio
+/// attachment. Missing files are not an error (idempotent cascade).
+pub fn delete_recording_artifacts(oats_id: &str, audio_file: Option<&str>) -> Result<(), String> {
+    if let Some(path) = find_note(oats_id)? {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("delete vault note: {e}")),
+        }
+    }
+    if let Some(audio_file) = audio_file {
+        validate_audio_file(audio_file)?;
+        let root = vault_root()?;
+        match std::fs::remove_file(audio_path(&root, audio_file)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("delete vault attachment: {e}")),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +430,44 @@ mod tests {
             std::env::set_var("ARISO_ROOT", tmp.path());
         }
         assert!(scan_vault().unwrap().is_empty());
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn write_note_persists_renderable_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        let mut meta = meta_for_note();
+        meta.id = "id-w".into();
+        write_note("2026-06-02 Team Standup", &meta, "2026-06-02 Team Standup.mp3", "the body")
+            .unwrap();
+        assert_eq!(read_note("id-w").unwrap().as_deref(), Some("the body"));
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn delete_removes_note_and_attachment() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        let mut meta = meta_for_note();
+        meta.id = "id-d".into();
+        write_audio("clip.mp3", b"a").unwrap();
+        write_note("Note D", &meta, "clip.mp3", "b").unwrap();
+        assert!(find_note("id-d").unwrap().is_some());
+
+        delete_recording_artifacts("id-d", Some("clip.mp3")).unwrap();
+        assert!(find_note("id-d").unwrap().is_none());
+        assert!(!audio_path(&vault_root().unwrap(), "clip.mp3").exists());
+        // Idempotent: deleting again is fine.
+        delete_recording_artifacts("id-d", Some("clip.mp3")).unwrap();
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
