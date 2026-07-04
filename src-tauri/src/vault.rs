@@ -1,4 +1,5 @@
 use crate::storage::{format_hms, RecordingMeta};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Resolve the vault root `<ariso_root>/vault`.
@@ -164,6 +165,61 @@ pub fn read_audio(audio_file: &str) -> Result<Vec<u8>, String> {
     std::fs::read(audio_path(&root, audio_file)).map_err(|e| format!("read vault audio: {e}"))
 }
 
+/// Extract `oats_id` from a note's front-matter head, if present. Reads only the
+/// lines inside the leading `---` fence.
+fn parse_oats_id(contents: &str) -> Option<String> {
+    let after_open = contents.strip_prefix("---\n")?;
+    let (frontmatter, _body) = after_open.split_once("\n---\n")?;
+    for line in frontmatter.lines() {
+        if let Some(rest) = line.strip_prefix("oats_id:") {
+            let id = rest.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Map every top-level `.md` note in the vault by its `oats_id`. Files without a
+/// valid `oats_id` (or unreadable) are skipped. Missing vault → empty map.
+pub fn scan_vault() -> Result<HashMap<String, PathBuf>, String> {
+    let root = vault_root()?;
+    let mut map = HashMap::new();
+    if !root.exists() {
+        return Ok(map);
+    }
+    for entry in std::fs::read_dir(&root).map_err(|e| format!("read vault dir: {e}"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+        if let Some(id) = parse_oats_id(&contents) {
+            map.insert(id, path);
+        }
+    }
+    Ok(map)
+}
+
+/// Path of the note whose front-matter carries `oats_id`, if any.
+pub fn find_note(oats_id: &str) -> Result<Option<PathBuf>, String> {
+    Ok(scan_vault()?.remove(oats_id))
+}
+
+/// The notes body (front-matter and embed stripped) for a recording, if a note
+/// exists in the vault.
+pub fn read_note(oats_id: &str) -> Result<Option<String>, String> {
+    match find_note(oats_id)? {
+        Some(path) => {
+            let contents =
+                std::fs::read_to_string(&path).map_err(|e| format!("read vault note: {e}"))?;
+            Ok(Some(note_body(&contents)))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +363,42 @@ mod tests {
     fn audio_file_rejects_traversal() {
         assert!(write_audio("../evil.mp3", b"x").is_err());
         assert!(write_audio("a/b.mp3", b"x").is_err());
+    }
+
+    #[test]
+    fn scan_indexes_by_oats_id_and_skips_junk() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        let root = ensure_vault().unwrap();
+        std::fs::write(root.join("A.md"), "---\noats_id: id-a\n---\n![[x]]\n\nbody a").unwrap();
+        std::fs::write(root.join("B.md"), "---\noats_id: id-b\n---\n\nbody b").unwrap();
+        std::fs::write(root.join("junk.md"), "no frontmatter here").unwrap();
+        std::fs::write(root.join("notes.txt"), "not markdown").unwrap();
+
+        let map = scan_vault().unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("id-a").unwrap(), &root.join("A.md"));
+        assert!(find_note("id-b").unwrap().is_some());
+        assert!(find_note("missing").unwrap().is_none());
+        assert_eq!(read_note("id-a").unwrap().as_deref(), Some("body a"));
+        assert_eq!(read_note("missing").unwrap(), None);
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn scan_empty_when_no_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        assert!(scan_vault().unwrap().is_empty());
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
     }
 
     #[test]
