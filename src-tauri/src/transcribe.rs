@@ -384,7 +384,7 @@ async fn append_recording_core(
     // most_recent_appendable check. Fall back to a fresh recording if the
     // target's state is no longer suitable for an append.
     let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
-        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done => (m, s),
+        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() => (m, s),
         _ => return fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
     };
 

@@ -61,7 +61,7 @@ fn sanitize_component(s: &str) -> String {
 pub fn note_basename(created_at: &str, title: &str, id: &str) -> String {
     let date = match chrono::DateTime::parse_from_rfc3339(created_at) {
         Ok(dt) => dt.format("%Y-%m-%d").to_string(),
-        Err(_) => created_at.chars().take(10).collect(),
+        Err(_) => sanitize_component(&created_at.chars().take(10).collect::<String>()),
     };
     let mut name = sanitize_component(title);
     if name.is_empty() {
@@ -132,6 +132,18 @@ pub fn note_body(contents: &str) -> String {
         _ => after_fence,
     };
     body.to_string()
+}
+
+/// Reject a note basename that could escape the vault root.
+fn validate_basename(basename: &str) -> Result<(), String> {
+    if basename.is_empty()
+        || basename.contains('/')
+        || basename.contains('\\')
+        || basename.contains("..")
+    {
+        return Err(format!("invalid note basename: {basename}"));
+    }
+    Ok(())
 }
 
 /// Reject an attachment filename that could escape `Attachments/`.
@@ -227,6 +239,7 @@ pub fn write_note(
     audio_file: &str,
     notes_md: &str,
 ) -> Result<(), String> {
+    validate_basename(basename)?;
     let root = ensure_vault()?;
     let contents = render_note(meta, audio_file, notes_md);
     crate::storage::write_atomic(&note_path(&root, basename), contents.as_bytes())
