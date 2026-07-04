@@ -310,31 +310,76 @@ pub fn rename_recording_artifacts(
     if desired == old_basename {
         return Ok(old_audio_file.to_string());
     }
-    let new_basename = unique_basename(&root, &desired);
-    let new_audio_file = format!("{new_basename}.mp3");
 
-    // Rename the attachment (best-effort: skip if the old file is already gone).
+    // Locate the existing note before the collision check so it can be excluded:
+    // moving the current note/attachment to the desired name is not a collision.
+    let existing_note_path = find_note(oats_id)?;
     let old_audio = audio_path(&root, old_audio_file);
-    if old_audio.is_file() {
-        std::fs::rename(&old_audio, audio_path(&root, &new_audio_file))
-            .map_err(|e| format!("rename attachment: {e}"))?;
+
+    let taken = |b: &str| -> bool {
+        let np = note_path(&root, b);
+        let ap = attachments_dir(&root).join(format!("{b}.mp3"));
+        let note_taken = np.exists() && existing_note_path.as_deref() != Some(np.as_path());
+        let audio_taken = ap.exists() && ap != old_audio;
+        note_taken || audio_taken
+    };
+    let new_basename = if !taken(&desired) {
+        desired.clone()
+    } else {
+        let mut n = 2;
+        loop {
+            let candidate = format!("{desired} ({n})");
+            if !taken(&candidate) {
+                break candidate;
+            }
+            n += 1;
+        }
+    };
+
+    let new_audio_file = format!("{new_basename}.mp3");
+    let new_note_path = note_path(&root, &new_basename);
+
+    // Read note content before any mutations so the note is updated before the
+    // attachment moves — if the note write fails, the attachment is untouched.
+    let note_update = match &existing_note_path {
+        Some(p) => {
+            let contents = std::fs::read_to_string(p)
+                .map_err(|e| format!("read note for rename: {e}"))?;
+            Some(retitle_note_contents(&contents, old_audio_file, &new_audio_file, new_title))
+        }
+        None => None,
+    };
+
+    if let Some(ref updated) = note_update {
+        crate::storage::write_atomic(&new_note_path, updated.as_bytes())?;
     }
 
-    // Rename + retitle the note if one exists (found by oats_id).
-    if let Some(old_note_path) = find_note(oats_id)? {
-        let contents = std::fs::read_to_string(&old_note_path)
-            .map_err(|e| format!("read note for rename: {e}"))?;
-        let updated = retitle_note_contents(&contents, old_audio_file, &new_audio_file, new_title);
-        let new_note_path = note_path(&root, &new_basename);
-        crate::storage::write_atomic(&new_note_path, updated.as_bytes())?;
-        if new_note_path != old_note_path {
-            match std::fs::remove_file(&old_note_path) {
+    // Rename the attachment. On failure, roll back the new note write so vault
+    // state and meta.audio_file stay consistent.
+    if old_audio.is_file() {
+        if let Err(e) = std::fs::rename(&old_audio, audio_path(&root, &new_audio_file)) {
+            if note_update.is_some()
+                && existing_note_path.as_ref().map(|p| p != &new_note_path).unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(&new_note_path);
+            }
+            return Err(format!("rename attachment: {e}"));
+        }
+    }
+
+    // Remove old note. Both the attachment and new note are already in place, so
+    // treat cleanup as best-effort: a stale duplicate is preferable to returning
+    // an error that would leave meta.audio_file pointing at the moved attachment.
+    if let Some(old_note_path) = &existing_note_path {
+        if new_note_path != *old_note_path {
+            match std::fs::remove_file(old_note_path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("remove old note: {e}")),
+                Err(_) => {}
             }
         }
     }
+
     Ok(new_audio_file)
 }
 
@@ -619,6 +664,41 @@ mod tests {
         let raw = std::fs::read_to_string(note_path(&root, "2026-06-02 Q2 Sync")).unwrap();
         assert!(raw.contains("title: \"Q2 Sync\""));
         assert!(raw.contains("![[Attachments/2026-06-02 Q2 Sync.mp3]]"));
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn rename_recording_artifacts_no_suffix_when_note_already_at_desired_name() {
+        // Regression for: unique_basename used to treat the current note as a
+        // collision and force an unnecessary "(2)" suffix.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        let mut meta = meta_for_note();
+        meta.id = "id-obsidian-rename".into();
+        // Simulate a user having already renamed the note in Obsidian to the
+        // desired basename while the attachment still has the old name.
+        write_audio("2026-06-02 Old.mp3", b"aud").unwrap();
+        write_note("2026-06-02 Q2 Sync", &meta, "2026-06-02 Old.mp3", "the body").unwrap();
+
+        let new_audio = rename_recording_artifacts(
+            &meta.id,
+            &meta.created_at,
+            "2026-06-02 Old.mp3",
+            "Q2 Sync",
+        )
+        .unwrap();
+        let root = vault_root().unwrap();
+
+        // Must use the clean desired name, not "2026-06-02 Q2 Sync (2)".
+        assert_eq!(new_audio, "2026-06-02 Q2 Sync.mp3");
+        assert!(audio_path(&root, "2026-06-02 Q2 Sync.mp3").is_file(), "attachment at new path");
+        assert!(!audio_path(&root, "2026-06-02 Old.mp3").exists(), "old attachment removed");
+        assert!(note_path(&root, "2026-06-02 Q2 Sync").is_file(), "note preserved");
+        assert_eq!(read_note(&meta.id).unwrap().as_deref(), Some("the body"));
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
