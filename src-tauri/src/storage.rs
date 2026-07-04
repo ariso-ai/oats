@@ -98,6 +98,16 @@ pub struct RecordingMeta {
     /// which lags behind reality when clips have inter-clip gaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_clip_end_at: Option<String>,
+    /// Basename of this recording's audio attachment in the vault
+    /// (`<vault>/Attachments/<audio_file>`). `None` for legacy recordings, whose
+    /// audio still lives at `~/.ariso/recordings/<id>/recording.mp3`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_file: Option<String>,
+    /// RFC3339 time oats last wrote this recording's note into the vault. `None`
+    /// means never generated. Recorded for future use (status refinement / an
+    /// auto-regeneration guard); v1 does not branch on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_written: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,12 +120,23 @@ pub struct RecordingSummary {
     pub status: RecordingStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_clip_end_at: Option<String>,
-    /// Whether `recording.mp3` exists in the recording's directory.
+    /// Whether this recording's audio exists: for vault recordings, the vault
+    /// attachment named by `meta.audio_file`; for legacy recordings, whether
+    /// `recording.mp3` exists in the recording's directory. This layer sets
+    /// an optimistic value from `meta.audio_file.is_some()` alone (it is
+    /// vault-agnostic); the command layer overlays the real vault check.
     pub has_audio: bool,
-    /// Whether `ari-note.md` exists in the recording's directory.
+    /// Whether the recording has a note. This layer only checks the legacy
+    /// `ari-note.md` file; the command layer overlays real vault note
+    /// presence (a new recording's note lives only in the vault).
     pub has_note: bool,
     /// Whether `transcript.md` exists in the recording's directory.
     pub has_transcript: bool,
+    /// The recording's vault audio attachment name (from meta), used by the
+    /// command layer to verify the attachment still exists. Not serialized to
+    /// the frontend.
+    #[serde(skip)]
+    pub audio_file: Option<String>,
 }
 
 /// Lightweight per-recording status for the detail panel's generation poller.
@@ -503,9 +524,11 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     duration_seconds: m.duration_seconds,
                     status: m.status,
                     last_clip_end_at: m.last_clip_end_at,
-                    has_audio: recording_dir.join("recording.mp3").is_file(),
+                    has_audio: m.audio_file.is_some()
+                        || recording_dir.join("recording.mp3").is_file(),
                     has_note: recording_dir.join("ari-note.md").is_file(),
                     has_transcript: recording_dir.join("transcript.md").is_file(),
+                    audio_file: m.audio_file.clone(),
                 });
             }
             Err(_) => continue,
@@ -635,7 +658,7 @@ mod tests {
             id: id.into(), title: format!("T {id}"), created_at: created.into(),
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         }
     }
 
@@ -695,6 +718,19 @@ mod tests {
         assert!(!list[1].has_audio);
         assert!(!list[1].has_note);
         assert!(!list[1].has_transcript);
+    }
+
+    #[test]
+    fn list_has_audio_true_when_audio_file_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut m = meta_with(id, "2026-06-02T10:00:00Z");
+        m.audio_file = Some("clip.mp3".into()); // audio lives in the vault, not here
+        write_meta(&dir, &m).unwrap();
+        let list = list_recordings(root).unwrap();
+        assert!(list[0].has_audio, "audio_file set ⇒ has_audio");
     }
 
     #[test]
@@ -796,6 +832,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -816,7 +854,7 @@ mod tests {
             id: "x".into(), title: "t".into(), created_at: "c".into(),
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -995,6 +1033,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();

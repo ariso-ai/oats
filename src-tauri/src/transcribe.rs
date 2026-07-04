@@ -124,11 +124,16 @@ fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool
     before != after
 }
 
-/// Best-effort notes generation: runs the sidecar and writes either
-/// `ari-note.md` or `meta.notes_error`. Failures here never affect the
-/// recording's `Done` status. A third outcome exists: if the transcript
-/// changes mid-run (superseded by a later append/regeneration), this writes
-/// neither file and silently discards its result.
+/// Current instant as an RFC3339 string.
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Best-effort notes generation: runs the sidecar and writes either the vault
+/// note or `meta.notes_error`. Failures here never affect the recording's
+/// `Done` status. A third outcome exists: if the transcript changes mid-run
+/// (superseded by a later append/regeneration), this writes neither file and
+/// silently discards its result.
 async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
     // Capture the transcript this run generates from; if it changes while notes
@@ -139,19 +144,37 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         return;
     }
     match outcome {
-        // Empty output is a silent failure: it would write a blank
-        // ari-note.md with notes_error unset, reading as success. Record it.
+        // Empty output is a silent failure: it would write a blank note with
+        // notes_error unset, reading as success. Record it.
         Ok(notes) if notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
             let _ = storage::write_meta(&dir, &meta);
         }
         Ok(notes) => {
-            if let Err(e) = storage::write_notes(&dir, &notes) {
-                eprintln!("write notes: {e}");
+            let audio_file = match &meta.audio_file {
+                Some(a) => a.clone(),
+                // Legacy recording with no vault audio: keep the old location so
+                // its note stays alongside its audio.
+                None => {
+                    if let Err(e) = storage::write_notes(&dir, &notes) {
+                        eprintln!("write notes: {e}");
+                        meta.notes_error = Some(e);
+                        let _ = storage::write_meta(&dir, &meta);
+                    }
+                    return;
+                }
+            };
+            let basename = audio_file.strip_suffix(".mp3").unwrap_or(audio_file.as_str());
+            if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &notes) {
+                eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
                 let _ = storage::write_meta(&dir, &meta);
+                return;
             }
+            meta.notes_error = None;
+            meta.notes_written = Some(now_rfc3339());
+            let _ = storage::write_meta(&dir, &meta);
         }
         Err(e) => {
             eprintln!("notes generation: {e}");
@@ -197,8 +220,23 @@ async fn fresh_recording_core(
     let id = storage::sanitize_iso_to_id(&created_at);
     let dir = storage::create_recording_dir(root, &id)?;
 
-    // Persist the audio first so it is never lost, even if STT fails.
-    std::fs::write(dir.join("recording.mp3"), &audio).map_err(|e| format!("write audio: {e}"))?;
+    // Persist the audio into the vault first so it is never lost, even if STT
+    // fails. The attachment is this recording's only audio home. On an in-place
+    // rewrite (a retry re-runs this for the same dir), reuse the existing
+    // attachment rather than deriving a fresh unique name — otherwise every
+    // retry would orphan the prior file and repoint an existing note's embed at
+    // a duplicate.
+    let audio_file = match storage::read_meta(&dir).ok().and_then(|m| m.audio_file) {
+        Some(existing) => existing, // in-place rewrite (retry): keep the same attachment
+        None => format!(
+            "{}.mp3",
+            crate::vault::unique_basename(
+                &crate::vault::ensure_vault()?,
+                &crate::vault::note_basename(&created_at, &title, &id),
+            )
+        ),
+    };
+    crate::vault::write_audio(&audio_file, &audio)?;
 
     let mut meta = RecordingMeta {
         id: id.clone(),
@@ -212,11 +250,13 @@ async fn fresh_recording_core(
         error: None,
         notes_error: None,
         last_clip_end_at: None,
+        audio_file: Some(audio_file.clone()),
+        notes_written: None,
     };
     storage::write_meta(&dir, &meta)?;
 
     let models = storage::models_dir(root);
-    let audio_path = dir.join("recording.mp3");
+    let audio_path = crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file);
     match run_transcribe(&audio_path, &models).await {
         Ok(result) => {
             meta.language = Some(result.language.clone());
@@ -270,7 +310,20 @@ fn save_failed_clip(
     let id = storage::sanitize_iso_to_id(created_at);
     match storage::create_recording_dir(root, &id) {
         Ok(dir) => {
-            if let Err(e) = std::fs::write(dir.join("recording.mp3"), audio) {
+            let audio_file = format!(
+                "{}.mp3",
+                match crate::vault::ensure_vault() {
+                    Ok(root) => crate::vault::unique_basename(
+                        &root,
+                        &crate::vault::note_basename(created_at, title, &id),
+                    ),
+                    Err(e) => {
+                        eprintln!("save failed clip: ensure vault: {e}");
+                        return;
+                    }
+                }
+            );
+            if let Err(e) = crate::vault::write_audio(&audio_file, audio) {
                 eprintln!("save failed clip audio: {e}");
             }
             let meta = RecordingMeta {
@@ -285,6 +338,8 @@ fn save_failed_clip(
                 error: Some(err.to_string()),
                 notes_error: None,
                 last_clip_end_at: None,
+                audio_file: Some(audio_file.clone()),
+                notes_written: None,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -329,7 +384,7 @@ async fn append_recording_core(
     // most_recent_appendable check. Fall back to a fresh recording if the
     // target's state is no longer suitable for an append.
     let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
-        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done => (m, s),
+        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() => (m, s),
         _ => return fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
     };
 
@@ -379,10 +434,15 @@ async fn append_recording_core(
     meta.last_clip_end_at = storage::clip_end_timestamp(&created_at, duration_seconds);
 
     // Content writes, in crash-safe order: audio, then structured segments,
-    // then the rendered transcript.
-    let mut combined = std::fs::read(dir.join("recording.mp3")).map_err(|e| format!("read audio: {e}"))?;
+    // then the rendered transcript. The audio lives only in the vault
+    // attachment; read it, concatenate the clip, and write it back.
+    let audio_file = meta
+        .audio_file
+        .clone()
+        .ok_or_else(|| "append target has no vault audio (legacy recording)".to_string())?;
+    let mut combined = crate::vault::read_audio(&audio_file)?;
     combined.extend_from_slice(&audio);
-    storage::write_atomic(&dir.join("recording.mp3"), &combined)?;
+    crate::vault::write_audio(&audio_file, &combined)?;
     storage::write_segments(&dir, &existing)?;
     let md = storage::render_markdown(&meta, &existing.segments);
     storage::write_transcript(&dir, &md)?;
@@ -425,19 +485,26 @@ pub async fn retry_transcription_core(
             meta.id
         ));
     }
-    let audio = std::fs::read(dir.join("recording.mp3"))
-        .map_err(|e| format!("read recording audio: {e}"))?;
+    // Prefer the vault attachment; fall back to legacy `~/.ariso` audio so old
+    // recordings (pre-vault) can still be retried.
+    let audio = match &meta.audio_file {
+        Some(audio_file) => crate::vault::read_audio(audio_file)?,
+        None => std::fs::read(dir.join("recording.mp3"))
+            .map_err(|e| format!("read recording audio: {e}"))?,
+    };
     finalize_core(root, audio, meta.title, meta.created_at, meta.duration_seconds).await
 }
 
 /// Regenerate AI notes for a recording from its existing `transcript.md`,
-/// without re-running STT. Clears any prior `notes_error` and removes any
-/// existing `ari-note.md` first — readiness is signaled by that file's
+/// without re-running STT. Clears any prior `notes_error`/`notes_written` and
+/// removes the existing note first — readiness is signaled by a note's
 /// presence, so leaving a stale note in place would make the poller report the
 /// recording as "ready" the instant polling resumes, finishing the regeneration
-/// silently in the background. Removing it makes the regeneration observable
-/// (`hasNote` false → generating → true when the new note lands). Then spawns
-/// `process_notes` detached (it writes `ari-note.md` or a fresh `notes_error`).
+/// silently in the background. Removes the vault note (new recordings, note-only
+/// — the audio attachment is preserved) and any legacy `~/.ariso/ari-note.md`
+/// (pre-feature recordings), making the regeneration observable (`hasNote`
+/// false → generating → true when the new note lands). Then spawns
+/// `process_notes` detached (it writes a fresh note or a fresh `notes_error`).
 /// Returns the handle so tests can await completion; the command drops it.
 ///
 /// Trade-off: a failed regeneration leaves the recording note-less (surfaced as
@@ -450,9 +517,11 @@ pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, S
     }
     let mut meta = storage::read_meta(&dir)?;
     meta.notes_error = None;
+    meta.notes_written = None;
     storage::write_meta(&dir, &meta)?;
-    // Clear the stale note so regeneration is observable (see doc comment).
-    // A missing file is fine — only surface real removal errors.
+    // Clear the stale note so regeneration is observable. Remove the vault note
+    // (new recordings) and any legacy `~/.ariso/ari-note.md` (pre-feature ones).
+    crate::vault::delete_recording_artifacts(id, None)?;
     match std::fs::remove_file(dir.join("ari-note.md")) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -569,6 +638,9 @@ mod tests {
             format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        // Vault resolves via ARISO_ROOT; point it at the same tempdir as `root`
+        // so audio writes stay inside this test's sandbox.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
@@ -582,9 +654,16 @@ mod tests {
         assert_eq!(res.status, RecordingStatus::Done);
         assert_eq!(res.id, "2026-06-02T14-30-05Z");
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
-        assert!(dir.join("recording.mp3").exists());
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(
+            crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(),
+            b"audio",
+            "audio must live in the vault attachment"
+        );
+        assert!(!dir.join("recording.mp3").exists(), "no ~/.ariso audio copy");
         assert!(dir.join("transcript.md").exists());
-        assert_eq!(read_meta(&dir).unwrap().status, RecordingStatus::Done);
+        assert_eq!(meta.status, RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -594,6 +673,7 @@ mod tests {
         let body = format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
@@ -601,6 +681,7 @@ mod tests {
         ).await.unwrap();
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
 
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         let seg = crate::storage::read_segments(&dir).unwrap().expect("segments.json written");
@@ -613,6 +694,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = write_stub(tmp.path(), "echo 'boom' >&2\nexit 1");
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let err = finalize_core(
             tmp.path(), b"audio".to_vec(),
@@ -622,14 +704,22 @@ mod tests {
 
         assert!(err.contains("boom"), "got: {err}");
         let dir = crate::storage::recordings_dir(tmp.path()).join("2026-06-02T14-30-05Z");
-        assert!(dir.join("recording.mp3").exists(), "audio must be retained");
+        // STT fails *after* the vault write, so the attachment is retained even
+        // though no ~/.ariso copy exists.
         let meta = read_meta(&dir).unwrap();
+        assert_eq!(
+            crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(),
+            b"audio",
+            "audio must be retained in the vault"
+        );
+        assert!(!dir.join("recording.mp3").exists());
         assert_eq!(meta.status, RecordingStatus::Failed);
         assert!(meta.error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
-    async fn finalize_writes_ari_note_md_when_notes_succeed() {
+    async fn finalize_writes_vault_note_when_notes_succeed() {
         let tmp = tempfile::tempdir().unwrap();
         let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
         // Stub: `notes` subcommand prints markdown; otherwise print transcript JSON.
@@ -638,6 +728,7 @@ mod tests {
         );
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
@@ -648,9 +739,43 @@ mod tests {
 
         assert_eq!(res.status, RecordingStatus::Done);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
-        let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
-        assert!(notes.contains("# Notes"), "got: {notes}");
-        assert!(crate::storage::read_meta(&dir).unwrap().notes_error.is_none());
+        // Note lands in the vault (resolvable by oats_id), not ~/.ariso.
+        let notes = crate::vault::read_note(&res.id).unwrap();
+        assert!(notes.as_deref().unwrap_or("").contains("# Notes"), "got: {notes:?}");
+        assert!(!dir.join("ari-note.md").exists());
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert!(meta.notes_error.is_none());
+        assert!(meta.notes_written.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_vault_note_not_ari_note_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo '# Vault note'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // Note is in the vault, resolvable by oats_id; NOT in ~/.ariso.
+        let id = storage::sanitize_iso_to_id("2026-06-02T10:00:00Z");
+        assert_eq!(crate::vault::read_note(&id).unwrap().as_deref(), Some("# Vault note"));
+        let dir = storage::recordings_dir(tmp.path()).join(&id);
+        assert!(!dir.join("ari-note.md").exists());
+        // notes_written stamped.
+        assert!(storage::read_meta(&dir).unwrap().notes_written.is_some());
+        assert_eq!(res.id, id);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -663,6 +788,7 @@ mod tests {
         );
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let (res, notes_handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
@@ -675,9 +801,11 @@ mod tests {
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         assert!(dir.join("transcript.md").exists());
         assert!(!dir.join("ari-note.md").exists());
+        assert!(crate::vault::read_note(&res.id).unwrap().is_none(), "no vault note on notes failure");
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
         assert!(meta.notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -700,6 +828,8 @@ mod tests {
             error: Some("old failure".into()),
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -710,10 +840,12 @@ mod tests {
         );
         let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let (res, notes_handle) = retry_transcription_core(root, id).await.unwrap();
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
 
         assert_eq!(res.status, RecordingStatus::Done);
         assert!(dir.join("transcript.md").exists());
@@ -733,7 +865,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -745,6 +877,9 @@ mod tests {
     async fn retry_notes_regenerates_from_existing_transcript() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        // Isolate the vault lookup `retry_notes_core` now performs so it can't
+        // touch the real ~/.ariso.
+        unsafe { std::env::set_var("ARISO_ROOT", root); }
         let id = "2026-06-02T14-30-05Z";
         let dir = storage::create_recording_dir(root, id).unwrap();
         std::fs::write(dir.join("transcript.md"), b"# Transcript\nhi").unwrap();
@@ -753,7 +888,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -766,9 +901,11 @@ mod tests {
         handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
+        // Legacy recording (no audio_file): the note still lands in ari-note.md.
         let notes = std::fs::read_to_string(dir.join("ari-note.md")).unwrap();
         assert!(notes.contains("# Notes"), "got: {notes}");
         assert!(read_meta(&dir).unwrap().notes_error.is_none(), "notes_error must be cleared");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -779,6 +916,9 @@ mod tests {
         // the regeneration would finish in the background, never surfacing.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        // Isolate the vault lookup `retry_notes_core` now performs so it can't
+        // touch the real ~/.ariso.
+        unsafe { std::env::set_var("ARISO_ROOT", root); }
         let id = "2026-06-02T14-30-05Z";
         let dir = storage::create_recording_dir(root, id).unwrap();
         std::fs::write(dir.join("transcript.md"), b"# Transcript\nhi").unwrap();
@@ -787,7 +927,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -807,6 +947,83 @@ mod tests {
             "stale note must be removed so regeneration is observable"
         );
         assert!(read_meta(&dir).unwrap().notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn retry_notes_replaces_vault_note() {
+        // For a vault-backed recording (has `meta.audio_file`), regeneration must
+        // remove the *vault* note, not just the legacy `ari-note.md`, so
+        // `process_notes` observably writes a fresh vault note rather than
+        // silently leaving the stale one in place.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+
+        let json = r#"{"language":"en","durationSeconds":1.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!("if [ \"$1\" = notes ]; then echo '# first'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub = write_stub(&root, &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, h) = finalize_core(
+            &root, b"a".to_vec(), "N".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# first"));
+
+        // Sidecar now emits new notes: re-stub and re-set ARISO_STT_BIN so
+        // regeneration sees different output the second time.
+        let body2 = format!("if [ \"$1\" = notes ]; then echo '# second'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub2 = write_stub(&root, &body2);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub2); }
+
+        let h2 = retry_notes_core(&root, &res.id).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# second"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn retry_notes_failure_leaves_vault_note_removed() {
+        // Mirrors `retry_notes_removes_stale_note_so_regeneration_is_observable`
+        // but for a vault-backed recording: a *failed* regeneration must not
+        // leave the old vault note in place (which `write_note`'s in-place
+        // overwrite on success would otherwise mask) — the poller's readiness
+        // signal is the vault note's presence.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+
+        let json = r#"{"language":"en","durationSeconds":1.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let body = format!("if [ \"$1\" = notes ]; then echo '# first'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
+        let stub = write_stub(&root, &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, h) = finalize_core(
+            &root, b"a".to_vec(), "N".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# first"));
+
+        // Regeneration now fails outright.
+        let fail_stub = write_stub(&root, "if [ \"$1\" = notes ]; then echo 'boom' >&2; exit 1; fi\nexit 1");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
+
+        let h2 = retry_notes_core(&root, &res.id).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert!(
+            crate::vault::read_note(&res.id).unwrap().is_none(),
+            "stale vault note must be removed so a failed regeneration is observable"
+        );
+        let dir = storage::recordings_dir(&root).join(&res.id);
+        assert!(storage::read_meta(&dir).unwrap().notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     // Helper: a stub that prints notes for `notes`, else a single-segment JSON
@@ -823,6 +1040,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = clip_stub(tmp.path());
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         // First recording: 30s, ends 10:00:30.
         let (r1, h1) = finalize_core(
@@ -850,7 +1068,12 @@ mod tests {
         // Meta duration summed; audio concatenated.
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.duration_seconds, 45);
-        assert_eq!(std::fs::read(dir.join("recording.mp3")).unwrap(), b"aaabbb");
+        assert_eq!(
+            crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(),
+            b"aaabbb",
+            "concatenated audio lives in the vault attachment"
+        );
+        assert!(!dir.join("recording.mp3").exists());
         // transcript.md re-rendered with both clips.
         let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
         assert_eq!(md.matches("clip text").count(), 2);
@@ -858,6 +1081,7 @@ mod tests {
         let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
             .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
         assert_eq!(count, 1);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -865,6 +1089,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = clip_stub(tmp.path());
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let (r1, h1) = finalize_core(
             tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
@@ -876,6 +1101,7 @@ mod tests {
         ).await.unwrap();
         h2.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
 
         assert_ne!(r2.id, r1.id);
         let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
@@ -889,6 +1115,7 @@ mod tests {
         // First: success stub.
         let ok_stub = clip_stub(tmp.path());
         unsafe { std::env::set_var("ARISO_STT_BIN", &ok_stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let (r1, h1) = finalize_core(
             tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
         ).await.unwrap();
@@ -903,17 +1130,20 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         assert!(err.contains("boom"), "got: {err}");
 
-        // Target untouched: still one segment, 30s, audio "aaa".
+        // Target untouched: still one segment, 30s, audio "aaa" in the vault.
         let dir1 = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
         assert_eq!(crate::storage::read_segments(&dir1).unwrap().unwrap().segments.len(), 1);
-        assert_eq!(crate::storage::read_meta(&dir1).unwrap().duration_seconds, 30);
-        assert_eq!(std::fs::read(dir1.join("recording.mp3")).unwrap(), b"aaa");
+        let meta1 = crate::storage::read_meta(&dir1).unwrap();
+        assert_eq!(meta1.duration_seconds, 30);
+        assert_eq!(crate::vault::read_audio(meta1.audio_file.as_ref().unwrap()).unwrap(), b"aaa");
 
-        // The failed clip is its own recording, audio retained, status Failed.
+        // The failed clip is its own recording, audio retained in the vault, status Failed.
         let dir2 = crate::storage::recordings_dir(tmp.path()).join("2026-06-02T10-01-00Z");
-        assert!(dir2.join("recording.mp3").exists());
-        assert_eq!(crate::storage::read_meta(&dir2).unwrap().status, RecordingStatus::Failed);
+        let meta2 = crate::storage::read_meta(&dir2).unwrap();
+        assert_eq!(crate::vault::read_audio(meta2.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+        assert_eq!(meta2.status, RecordingStatus::Failed);
         assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -921,6 +1151,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = clip_stub(tmp.path());
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         // First recording: 30s, ends 10:00:30.
         let (r1, h1) = finalize_core(
@@ -949,10 +1180,12 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
         assert_eq!(count, 2);
 
-        // The clip's audio is preserved as its own fresh recording.
+        // The clip's audio is preserved as its own fresh recording in the vault.
         let dir2 = crate::storage::recordings_dir(tmp.path()).join(&r2.id);
-        assert_eq!(std::fs::read(dir2.join("recording.mp3")).unwrap(), b"bbb");
-        assert_eq!(crate::storage::read_meta(&dir2).unwrap().status, RecordingStatus::Done);
+        let meta2 = crate::storage::read_meta(&dir2).unwrap();
+        assert_eq!(crate::vault::read_audio(meta2.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+        assert_eq!(meta2.status, RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[tokio::test]
@@ -960,6 +1193,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = clip_stub(tmp.path());
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         // First recording: 30s, ends 10:00:30.
         let (r1, h1) = finalize_core(
@@ -980,6 +1214,7 @@ mod tests {
         ).await.unwrap();
         h2.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
 
         assert_eq!(r2.id, r1.id);
         let meta = storage::read_meta(&dir).unwrap();
@@ -996,7 +1231,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T14:30:05Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1022,7 +1257,7 @@ mod tests {
             id: id.into(), title: "T".into(), created_at: "2026-06-02T10:00:00Z".into(),
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
-            last_clip_end_at: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1039,5 +1274,81 @@ mod tests {
 
         assert!(!dir.join("ari-note.md").exists(), "superseded notes must be discarded");
         assert!(storage::read_meta(&dir).unwrap().notes_error.is_none(), "no stale error written");
+    }
+
+    #[tokio::test]
+    async fn fresh_recording_stores_audio_in_vault_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (res, notes_handle) = finalize_core(
+            &root, b"audiobytes".to_vec(), "Team Standup".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let dir = storage::recordings_dir(&root).join(&res.id);
+        let meta = storage::read_meta(&dir).unwrap();
+        let audio_file = meta.audio_file.clone().expect("audio_file set");
+        assert_eq!(audio_file, "2026-06-02 Team Standup.mp3");
+        assert_eq!(crate::vault::read_audio(&audio_file).unwrap(), b"audiobytes");
+        assert!(!dir.join("recording.mp3").exists(), "no ~/.ariso audio copy");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn append_concatenates_audio_in_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        // First clip → fresh recording.
+        let (r1, h1) = finalize_core(
+            &root, b"AAAA".to_vec(), "Chat".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        h1.await.unwrap();
+        // Second clip within the append window → merges into r1.
+        let (r2, h2) = finalize_core(
+            &root, b"BBBB".to_vec(), "Chat".into(), "2026-06-02T10:00:30Z".into(), 1,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(r1.id, r2.id, "second clip appended to the first");
+
+        let dir = storage::recordings_dir(&root).join(&r2.id);
+        let meta = storage::read_meta(&dir).unwrap();
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), b"AAAABBBB");
+        assert!(!dir.join("recording.mp3").exists());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn retry_reads_audio_from_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let (res, h) = finalize_core(
+            &root, b"origaudio".to_vec(), "Sync".into(), "2026-06-02T10:00:00Z".into(), 1,
+        ).await.unwrap();
+        h.await.unwrap();
+        // Retry should re-run using the vault audio without error.
+        let (res2, h2) = retry_transcription_core(&root, &res.id).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(res2.id, res.id);
+        let meta = storage::read_meta(&storage::recordings_dir(&root).join(&res.id)).unwrap();
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), b"origaudio");
+        // Retry must REUSE the original attachment, not orphan a duplicate.
+        assert_eq!(meta.audio_file.as_deref(), Some("2026-06-02 Sync.mp3"));
+        let attachments = crate::vault::attachments_dir(&crate::vault::vault_root().unwrap());
+        let count = std::fs::read_dir(&attachments).unwrap().count();
+        assert_eq!(count, 1, "retry must not orphan a duplicate attachment");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }

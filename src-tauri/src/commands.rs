@@ -756,7 +756,23 @@ pub fn get_desktop_config() -> DesktopConfig {
 #[tauri::command]
 pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
     let root = crate::storage::ariso_root()?;
-    crate::storage::list_recordings(&root)
+    let mut summaries = crate::storage::list_recordings(&root)?;
+    // Overlay vault note presence (a user may have deleted a vault note; a new
+    // recording's note lives only in the vault, not as ari-note.md).
+    let vault_notes = crate::vault::scan_vault()?;
+    let vault_root = crate::vault::vault_root()?;
+    for s in &mut summaries {
+        if vault_notes.contains_key(&s.id) {
+            s.has_note = true;
+        }
+        if let Some(af) = &s.audio_file {
+            // New recording: audio lives in the vault; reflect real existence
+            // (a user may have deleted the attachment in Obsidian).
+            s.has_audio = crate::vault::audio_path(&vault_root, af).is_file();
+        }
+        // Legacy (audio_file None): has_audio already reflects recording.mp3.
+    }
+    Ok(summaries)
 }
 
 /// Lightweight status for a single local recording, used by the detail panel's
@@ -769,7 +785,8 @@ pub fn local_recording_status(
     crate::storage::validate_recording_id(&id)?;
     let dir = recording_dir(&id)?;
     let meta = crate::storage::read_meta(&dir)?;
-    let has_note = dir.join("ari-note.md").is_file();
+    let has_note =
+        dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
     let has_transcript = dir.join("transcript.md").is_file();
     let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
     Ok(crate::storage::RecordingStatusView {
@@ -851,20 +868,33 @@ fn note_or_transcript_filename(kind: &str) -> Result<&'static str, String> {
 /// meeting recording (mp3 at this app's bitrate is well under 1 MB/min).
 const MAX_AUDIO_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Read the raw bytes of a recording's `recording.mp3`, returned as a raw
-/// binary IPC response so the frontend can build a Blob URL for an `<audio>`
-/// element (avoids JSON-array bloat from a `Vec<u8>` return).
-#[tauri::command]
-pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> {
-    let path = recording_dir(&id)?.join("recording.mp3");
+/// Resolve and read a recording's audio bytes. New recordings store audio in
+/// the vault (`meta.audio_file` names the attachment); legacy recordings
+/// (pre-vault, `audio_file: None`) keep it at `<recording_dir>/recording.mp3`.
+/// Bounded by `MAX_AUDIO_BYTES` to avoid loading a pathologically large file.
+fn read_recording_audio_bytes(id: &str) -> Result<Vec<u8>, String> {
+    crate::storage::validate_recording_id(id)?;
+    let dir = recording_dir(id)?;
+    let meta = crate::storage::read_meta(&dir)?;
+    let path = match meta.audio_file {
+        Some(audio_file) => crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file),
+        None => dir.join("recording.mp3"),
+    };
     let size = std::fs::metadata(&path)
         .map_err(|e| format!("read recording audio: {e}"))?
         .len();
     if size > MAX_AUDIO_BYTES {
         return Err(format!("recording audio too large to play: {size} bytes"));
     }
-    let bytes = std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))?;
-    Ok(tauri::ipc::Response::new(bytes))
+    std::fs::read(&path).map_err(|e| format!("read recording audio: {e}"))
+}
+
+/// Read the raw bytes of a recording's audio, returned as a raw binary IPC
+/// response so the frontend can build a Blob URL for an `<audio>` element
+/// (avoids JSON-array bloat from a `Vec<u8>` return).
+#[tauri::command]
+pub fn read_recording_audio(id: String) -> Result<tauri::ipc::Response, String> {
+    Ok(tauri::ipc::Response::new(read_recording_audio_bytes(&id)?))
 }
 
 /// Meeting ids are numeric on the Ariso backend; rejecting anything else also
@@ -961,6 +991,19 @@ const MAX_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 /// `kind` must be `"note"` or `"transcript"`.
 #[tauri::command]
 pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, String> {
+    crate::storage::validate_recording_id(&id)?;
+    if kind == "note" {
+        // Vault note (new recordings) first, then legacy ~/.ariso/ari-note.md.
+        if let Some(body) = crate::vault::read_note(&id)? {
+            return Ok(Some(body));
+        }
+        let legacy = recording_dir(&id)?.join("ari-note.md");
+        return match std::fs::read_to_string(&legacy) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read recording file: {e}")),
+        };
+    }
     let filename = note_or_transcript_filename(&kind)?;
     let path = recording_dir(&id)?.join(filename);
     // Only a genuine "not found" means the file hasn't been generated yet;
@@ -982,6 +1025,21 @@ pub fn read_recording_file(id: String, kind: String) -> Result<Option<String>, S
 #[tauri::command]
 pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+
+    crate::storage::validate_recording_id(&id)?;
+    if kind == "note" {
+        let path = match crate::vault::find_note(&id)? {
+            Some(p) => p,
+            None => recording_dir(&id)?.join("ari-note.md"),
+        };
+        if !path.exists() {
+            return Err(format!("recording file not found: {}", path.display()));
+        }
+        return app
+            .opener()
+            .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|e| e.to_string());
+    }
 
     let filename = note_or_transcript_filename(&kind)?;
     let path = recording_dir(&id)?.join(filename);
@@ -1257,6 +1315,77 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
+    #[test]
+    fn read_recording_file_note_prefers_vault_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "vault body").unwrap();
+
+        assert_eq!(
+            read_recording_file(id.into(), "note".into())
+                .unwrap()
+                .as_deref(),
+            Some("vault body")
+        );
+        // Transcript still reads ~/.ariso.
+        std::fs::write(dir.join("transcript.md"), b"tscript").unwrap();
+        assert_eq!(
+            read_recording_file(id.into(), "transcript".into())
+                .unwrap()
+                .as_deref(),
+            Some("tscript")
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn read_recording_file_note_falls_back_to_legacy_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T11-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        // No vault note written; only the legacy on-disk file exists.
+        std::fs::write(dir.join("ari-note.md"), b"legacy note").unwrap();
+
+        assert_eq!(
+            read_recording_file(id.into(), "note".into())
+                .unwrap()
+                .as_deref(),
+            Some("legacy note")
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn read_recording_file_note_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T12-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        // Neither a vault note nor a legacy file exists yet.
+
+        assert_eq!(read_recording_file(id.into(), "note".into()).unwrap(), None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
     fn test_meta(id: &str) -> crate::storage::RecordingMeta {
         crate::storage::RecordingMeta {
             id: id.into(),
@@ -1270,7 +1399,38 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         }
+    }
+
+    #[test]
+    fn read_recording_audio_resolves_vault_then_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+
+        // New recording: audio in the vault via meta.audio_file.
+        let id_new = "2026-06-02T10-00-00Z";
+        let dir_new = crate::storage::create_recording_dir(root, id_new).unwrap();
+        let mut meta_new = test_meta(id_new);
+        meta_new.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir_new, &meta_new).unwrap();
+        crate::vault::write_audio("clip.mp3", b"newbytes").unwrap();
+        assert_eq!(read_recording_audio_bytes(id_new).unwrap(), b"newbytes");
+        // The public command wraps the same resolution logic; smoke-test it too.
+        assert!(read_recording_audio(id_new.into()).is_ok());
+
+        // Legacy recording: no audio_file, audio in ~/.ariso.
+        let id_old = "2026-06-01T10-00-00Z";
+        let dir_old = crate::storage::create_recording_dir(root, id_old).unwrap();
+        crate::storage::write_meta(&dir_old, &test_meta(id_old)).unwrap();
+        std::fs::write(dir_old.join("recording.mp3"), b"oldbytes").unwrap();
+        assert_eq!(read_recording_audio_bytes(id_old).unwrap(), b"oldbytes");
+        assert!(read_recording_audio(id_old.into()).is_ok());
+
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[test]
@@ -1471,6 +1631,8 @@ mod tests {
             error: None,
             notes_error: None,
             last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();
@@ -1500,6 +1662,56 @@ mod tests {
     #[test]
     fn local_recording_status_rejects_bad_id() {
         assert!(local_recording_status("../escape".to_string()).is_err());
+    }
+
+    #[test]
+    fn list_local_recordings_marks_has_note_from_vault() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "b").unwrap();
+
+        let list = list_local_recordings().unwrap();
+        assert!(list.iter().find(|s| s.id == id).unwrap().has_note);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_local_recordings_reflects_vault_audio_deletion() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        // No attachment written yet: the vault attachment does not exist, so
+        // has_audio must reflect that even though meta.audio_file is set.
+        let list = list_local_recordings().unwrap();
+        assert!(
+            !list.iter().find(|s| s.id == id).unwrap().has_audio,
+            "attachment missing ⇒ has_audio should be false"
+        );
+
+        // Write the attachment: has_audio should flip to true.
+        crate::vault::write_audio("clip.mp3", b"bytes").unwrap();
+        let list = list_local_recordings().unwrap();
+        assert!(
+            list.iter().find(|s| s.id == id).unwrap().has_audio,
+            "attachment present ⇒ has_audio should be true"
+        );
+
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }
 
