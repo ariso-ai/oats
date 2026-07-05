@@ -187,7 +187,7 @@ async fn run_session(
             }
             _ = ping.tick() => {
                 let _ = write
-                    .send(Message::Text(r#"{"event":"pusher:ping","data":"{}"}"#.to_string()))
+                    .send(Message::text(r#"{"event":"pusher:ping","data":"{}"}"#))
                     .await;
             }
         }
@@ -225,13 +225,13 @@ async fn handle_message(
                 "data": { "channel": channel, "auth": auth }
             });
             write
-                .send(Message::Text(sub.to_string()))
+                .send(Message::text(sub.to_string()))
                 .await
                 .map_err(|e| SessionError::Other(format!("subscribe send: {e}")))?;
         }
         "pusher:ping" => {
             let _ = write
-                .send(Message::Text(r#"{"event":"pusher:pong","data":"{}"}"#.to_string()))
+                .send(Message::text(r#"{"event":"pusher:pong","data":"{}"}"#))
                 .await;
         }
         "pusher:error" => eprintln!("meeting-notifications: pusher error: {text}"),
