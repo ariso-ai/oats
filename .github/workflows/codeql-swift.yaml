@@ -72,7 +72,7 @@ jobs:
       # rebuilds whatever is stale, so a partial restore on a Package.resolved
       # change is safe and still skips most of the dependency compile.
       - name: Cache ariso-stt DerivedData
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: src-tauri/ariso-stt/.xcode
           key: codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved') }}
