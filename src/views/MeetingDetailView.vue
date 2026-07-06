@@ -713,6 +713,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   editingTitle.value = false;
   savingTitle.value = false;
   showShare.value = false;
+  showAttendees.value = false;
+  attendeesAnchor.value = null;
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
