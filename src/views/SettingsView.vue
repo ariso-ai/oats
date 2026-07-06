@@ -135,10 +135,30 @@
             </button>
           </div>
         </div>
-        <div class="setting-row" style="margin-top: 16px">
-          <span class="setting-label">Vault location</span>
+        <div class="setting-row vault-row" style="margin-top: 16px">
+          <span class="label-with-help">
+            <span class="setting-label">Vault location</span>
+            <span class="help">
+              <button
+                type="button"
+                class="help-btn"
+                data-test="vault-help"
+                aria-label="About vault location"
+                aria-describedby="vault-help-text"
+              >
+                ?
+              </button>
+              <span id="vault-help-text" role="tooltip" class="help-tooltip">
+                Notes and audio are saved as a local Obsidian vault here.
+                Choosing a new folder starts a fresh, empty vault — existing
+                recordings stay in the old folder and aren't moved. If you sync
+                this folder (iCloud, Obsidian Sync, etc.), those notes and audio
+                leave this device.
+              </span>
+            </span>
+          </span>
           <div class="model-controls">
-            <code class="vault-path" :title="vaultDir">{{ vaultDir }}</code>
+            <span class="vault-path" :title="vaultDir">{{ vaultDir }}</span>
             <button
               class="secondary-btn"
               data-test="change-vault"
@@ -151,12 +171,6 @@
         </div>
         <p v-if="vaultError" class="setting-hint" style="color: var(--danger, #c0392b)">
           {{ vaultError }}
-        </p>
-        <p class="setting-hint">
-          Notes and audio are saved as a local Obsidian vault here. Choosing a
-          new folder starts a fresh, empty vault — existing recordings stay in
-          the old folder and aren't moved. If you sync this folder (iCloud,
-          Obsidian Sync, etc.), those notes and audio leave this device.
         </p>
       </div>
     </section>
@@ -1280,11 +1294,83 @@ async function handleSignOut() {
   line-height: 1;
 }
 
+/* Let the path shrink and truncate to the space left in the row. `min-width: 0`
+   defeats the flexbox default (`min-width: auto` = min-content), which would
+   otherwise keep a long path wider than its box and suppress the ellipsis.
+   The `title` attribute reveals the full path on hover. */
+.vault-row .model-controls {
+  min-width: 0;
+}
+
 .vault-path {
+  min-width: 0;
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Match the "Vault location" label rather than a monospace code font. */
+  font-size: 14px;
+  color: #1c1c1c;
+}
+
+.label-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.help {
+  position: relative;
+  display: inline-flex;
+}
+
+.help-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid #d6d6d6;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #6f6f6f;
+  font-size: 11px;
+  line-height: 1;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+}
+
+.help-btn:hover,
+.help-btn:focus-visible {
+  border-color: #1c1c1c;
+  color: #1c1c1c;
+}
+
+/* Description is revealed only when the "?" is hovered or keyboard-focused. */
+.help-tooltip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 260px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #1c1c1c;
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+
+.help:hover .help-tooltip,
+.help-btn:focus-visible + .help-tooltip {
+  opacity: 1;
+  visibility: visible;
 }
 
 .backend-select {

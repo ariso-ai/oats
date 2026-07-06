@@ -430,6 +430,22 @@ describe('SettingsView vault location', () => {
     expect(wrapper.text()).toContain('/Users/x/Notes/oats');
   });
 
+  it('exposes the vault description via an accessible help tooltip', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const help = wrapper.find('[data-test="vault-help"]');
+    expect(help.exists()).toBe(true);
+    // The button points at the tooltip that carries the description.
+    const tooltipId = help.attributes('aria-describedby');
+    expect(tooltipId).toBe('vault-help-text');
+    const tooltip = wrapper.find(`#${tooltipId}`);
+    expect(tooltip.attributes('role')).toBe('tooltip');
+    const description = tooltip.text().replace(/\s+/g, ' ');
+    expect(description).toContain("existing recordings stay in the old folder and aren't moved");
+    expect(description).toContain('those notes and audio leave this device');
+  });
+
   it('does nothing when the folder picker is dismissed', async () => {
     pickVaultFolder.mockResolvedValue(null);
     const wrapper = mount(SettingsView);
