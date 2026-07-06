@@ -70,17 +70,55 @@
           <span class="dur">{{ durationLabel }}</span>
         </div>
         <div v-if="detail.participants.length" class="meta-item attendees">
-          <span class="avatars">
-            <span
-              v-for="(p, i) in detail.participants.slice(0, 4)"
-              :key="i"
-              class="avatar"
-              :style="{ background: avatarColor(i) }"
-              :title="p.name || p.email || ''"
-            >{{ initials(p.name || p.email) }}</span>
-            <span v-if="detail.participants.length > 4" class="avatar avatar--more">+{{ detail.participants.length - 4 }}</span>
-          </span>
-          <span class="attendees-label">{{ detail.participants.length }} Attendees</span>
+          <button
+            ref="attendeesBtn"
+            type="button"
+            class="attendees-trigger"
+            aria-haspopup="true"
+            :aria-expanded="showAttendees"
+            title="Show attendees"
+            @click="onAttendeesClick"
+          >
+            <span class="avatars">
+              <span
+                v-for="(p, i) in detail.participants.slice(0, 4)"
+                :key="i"
+                class="avatar"
+                :style="{ background: avatarColor(i) }"
+              >{{ initials(p.name || p.email) }}</span>
+              <span v-if="detail.participants.length > 4" class="avatar avatar--more">+{{ detail.participants.length - 4 }}</span>
+            </span>
+            <span class="attendees-label">{{ detail.participants.length }} Attendees</span>
+            <svg viewBox="0 0 24 24" class="ic attendees-caret" :class="{ open: showAttendees }" aria-hidden="true"><path d="M19 9l-7 7-7-7" /></svg>
+          </button>
+
+          <!-- Attendees dropdown. Fixed-positioned (like the share popover)
+               so it escapes the card's `overflow: hidden`; the full-screen
+               overlay closes it on any outside click. -->
+          <template v-if="showAttendees">
+            <div class="attendees-overlay" @click="showAttendees = false" />
+            <div class="attendees-menu" :style="attendeesMenuStyle" role="menu">
+              <div class="attendees-menu-head">Attendees</div>
+              <ul class="attendees-list">
+                <li
+                  v-for="(p, i) in detail.participants"
+                  :key="i"
+                  class="attendee-row"
+                >
+                  <span class="avatar avatar--sm" :style="{ background: avatarColor(i) }">{{ initials(p.name || p.email) }}</span>
+                  <span class="attendee-info">
+                    <span class="attendee-name">{{ p.name || p.email || 'Guest' }}<span v-if="p.self" class="attendee-me"> (me)</span></span>
+                    <span v-if="p.email && p.name" class="attendee-email">{{ p.email }}</span>
+                  </span>
+                  <span
+                    v-if="p.role"
+                    class="attendee-role"
+                    :class="{ 'attendee-role--host': p.role === 'host' }"
+                  >{{ p.role }}</span>
+                </li>
+              </ul>
+            </div>
+          </template>
         </div>
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
@@ -357,6 +395,27 @@ const titleError = computed<string | null>(() => {
 const showShare = ref(false);
 const shareBtn = ref<HTMLButtonElement | null>(null);
 const shareAnchor = ref<{ bottom: number; right: number } | null>(null);
+
+// Attendees dropdown. The card clips overflow, so the menu is fixed-
+// positioned and anchored to the trigger's rect (captured on open),
+// mirroring the share popover.
+const showAttendees = ref(false);
+const attendeesBtn = ref<HTMLButtonElement | null>(null);
+const attendeesAnchor = ref<{ bottom: number; left: number } | null>(null);
+
+function onAttendeesClick(): void {
+  const rect = attendeesBtn.value?.getBoundingClientRect();
+  attendeesAnchor.value = rect ? { bottom: rect.bottom, left: rect.left } : null;
+  showAttendees.value = !showAttendees.value;
+}
+
+const attendeesMenuStyle = computed<Record<string, string>>(() => {
+  const a = attendeesAnchor.value;
+  const width = 260;
+  if (!a) return { position: 'fixed', top: '120px', left: '24px', width: `${width}px` };
+  const left = Math.max(8, Math.min(a.left, window.innerWidth - width - 8));
+  return { position: 'fixed', top: `${a.bottom + 6}px`, left: `${left}px`, width: `${width}px` };
+});
 
 const isHost = computed(() =>
   (detail.value?.participants ?? []).some((p) => p.role === 'host' && p.self)
@@ -1199,7 +1258,23 @@ const durationLabel = computed<string | null>(() => {
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
-.attendees { gap: 0; }
+.attendees { gap: 0; position: relative; }
+.attendees-trigger { display: flex; align-items: center; gap: 0; background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; }
+.attendees-trigger:hover { opacity: 0.85; }
+.attendees-caret { width: 14px; height: 14px; margin-left: 4px; color: #9b9b9b; transition: transform 0.15s; }
+.attendees-caret.open { transform: rotate(180deg); }
+.attendees-overlay { position: fixed; inset: 0; z-index: 60; }
+.attendees-menu { z-index: 61; background: #fff; border: 1px solid #e5e6e3; border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); overflow: hidden; }
+.attendees-menu-head { padding: 10px 14px; font-size: 12px; font-weight: 600; color: #6f6f6f; border-bottom: 1px solid #e5e6e3; }
+.attendees-list { list-style: none; margin: 0; padding: 6px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.attendee-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; }
+.attendee-row:hover { background: #f7f6f4; }
+.attendee-info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.attendee-name { font-size: 13px; color: #1f1f1f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attendee-me { color: #9b9b9b; }
+.attendee-email { font-size: 11px; color: #9b9b9b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attendee-role { font-size: 10px; text-transform: capitalize; color: #6f6f6f; background: #ecebe8; border-radius: 999px; padding: 2px 8px; flex-shrink: 0; }
+.attendee-role--host { color: #6c63c0; background: rgba(108, 99, 192, 0.1); }
 .avatars { display: flex; align-items: center; }
 .avatar { width: 23px; height: 23px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 600; border: 2px solid #f7f6f4; margin-left: -5px; }
 .avatar:first-child { margin-left: 0; }
