@@ -21,6 +21,7 @@
       "allow": [{ "url": "x-apple.systempreferences:*" }]
     },
     "notification:default",
-    "updater:default"
+    "updater:default",
+    "dialog:allow-open"
   ]
 }
