@@ -716,9 +716,12 @@ onMounted(() => {
   }).then((un) => {
     unlistenRecordingReveal = un;
   });
-  // The local backend's vault directory can change from Settings; reload the
-  // meeting list so it reflects the newly active vault's recordings.
+  // The local backend's vault directory can change from Settings; clear stale
+  // selection state from the old vault before reloading the meeting list.
   void listen('vault://changed', () => {
+    selectedItem.value = null;
+    userSelectedMeetingId.value = null;
+    pinnedMeetings.value = new Map();
     void loadMeetings(true);
   }).then((un) => {
     unlistenVaultChanged = un;

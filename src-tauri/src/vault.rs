@@ -14,6 +14,18 @@ pub fn set_vault_override(path: PathBuf) {
     *VAULT_DIR.write().expect("VAULT_DIR poisoned") = Some(path);
 }
 
+/// Return the current override path, if set. Used to capture state before a
+/// fallible operation so the caller can roll back via `restore_vault_override`.
+pub fn current_vault_override() -> Option<PathBuf> {
+    VAULT_DIR.read().expect("VAULT_DIR poisoned").clone()
+}
+
+/// Restore a previously-captured override (or revert to the default vault when
+/// `previous` is `None`). Call this to roll back after a failed `set_vault_dir`.
+pub fn restore_vault_override(previous: Option<PathBuf>) {
+    *VAULT_DIR.write().expect("VAULT_DIR poisoned") = previous;
+}
+
 /// Drop the override, reverting to the default `<ariso_root>/vault`. Test-only:
 /// serial tests use it to reset the process-global between cases.
 #[cfg(test)]

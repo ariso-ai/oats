@@ -531,11 +531,21 @@ pub fn set_vault_dir(app: tauri::AppHandle, path: String) -> Result<(), String> 
     validate_vault_path(&path)?;
     let dir = std::path::PathBuf::from(&path);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create vault dir: {e}"))?;
+    let previous = crate::vault::current_vault_override();
     crate::vault::set_vault_override(dir);
-    crate::vault::ensure_vault()?;
-    let store = app.store(SETTINGS_PATH).map_err(|e| e.to_string())?;
-    store.set("vaultDir", serde_json::json!(path));
-    store.save().map_err(|e| e.to_string())?;
+    // Run all fallible steps; on any failure, restore the previous vault state
+    // so the process and the persisted setting stay in sync.
+    let result = (|| -> Result<(), String> {
+        crate::vault::ensure_vault()?;
+        let store = app.store(SETTINGS_PATH).map_err(|e| e.to_string())?;
+        store.set("vaultDir", serde_json::json!(path));
+        store.save().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        crate::vault::restore_vault_override(previous);
+        return result;
+    }
     let _ = app.emit("vault://changed", ());
     Ok(())
 }
