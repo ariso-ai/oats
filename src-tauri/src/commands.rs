@@ -1076,6 +1076,15 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
     let dir = recording_dir(&id)?;
     let mut meta = crate::storage::read_meta(&dir)?;
     meta.title = title.to_string();
+    // Propagate the rename into the vault: rename the note file + audio
+    // attachment to match the new title (preserving the note body), and store
+    // the new attachment name. Legacy recordings (no `audio_file`) have their
+    // note/audio under `~/.ariso` with fixed names, so nothing to propagate.
+    if let Some(old_audio_file) = meta.audio_file.clone() {
+        let new_audio_file =
+            crate::vault::rename_recording_artifacts(&id, &meta.created_at, &old_audio_file, title)?;
+        meta.audio_file = Some(new_audio_file);
+    }
     crate::storage::write_meta(&dir, &meta)
 }
 
@@ -1451,6 +1460,34 @@ mod tests {
         assert_eq!(meta.title, "Team sync \"Q2\"");
         assert_eq!(meta.created_at, "2026-06-02T14:30:05Z");
         assert_eq!(meta.status, crate::storage::RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_recording_propagates_to_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1`.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("2026-06-02 Old.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_audio("2026-06-02 Old.mp3", b"aud").unwrap();
+        crate::vault::write_note("2026-06-02 Old", &meta, "2026-06-02 Old.mp3", "kept body").unwrap();
+
+        rename_local_recording(id.to_string(), "Q2 Sync".to_string()).unwrap();
+
+        // meta.audio_file now points at the renamed attachment.
+        let meta2 = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta2.title, "Q2 Sync");
+        assert_eq!(meta2.audio_file.as_deref(), Some("2026-06-02 Q2 Sync.mp3"));
+        // Vault note + attachment renamed; old gone; body preserved; still found by oats_id.
+        let root = crate::vault::vault_root().unwrap();
+        assert!(crate::vault::audio_path(&root, "2026-06-02 Q2 Sync.mp3").is_file());
+        assert!(!crate::vault::audio_path(&root, "2026-06-02 Old.mp3").exists());
+        assert!(!crate::vault::note_path(&root, "2026-06-02 Old").exists());
+        assert_eq!(crate::vault::read_note(id).unwrap().as_deref(), Some("kept body"));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
