@@ -120,7 +120,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                 let _ = app_main.emit("tray://show-sign-in-prompt", ());
                                 return;
                             }
-                            let _ = crate::commands::open_meeting_picker_window(&app_main);
+                            let _ = crate::commands::open_meeting_picker_window(&app_main, None);
                         });
                     });
                 }
