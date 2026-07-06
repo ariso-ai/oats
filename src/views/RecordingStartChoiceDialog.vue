@@ -14,9 +14,9 @@
       </p>
       <div class="rec-choice__actions">
         <button class="secondary-btn rec-choice__cancel" @click="$emit('cancel')">Cancel</button>
-        <button class="secondary-btn rec-choice__new" @click="$emit('new')">Start new recording</button>
+        <button class="secondary-btn rec-choice__new" @click="$emit('new')">Start new</button>
         <button class="primary-btn rec-choice__continue" @click="$emit('continue')">
-          Continue recording
+          Continue
         </button>
       </div>
     </div>
