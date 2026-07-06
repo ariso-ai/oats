@@ -507,6 +507,73 @@ describe('MeetingDetailView inline title editing', () => {
   });
 });
 
+describe('MeetingDetailView attendees dropdown', () => {
+  const withParticipants = () =>
+    detail({
+      participants: [
+        { name: 'Ada Lovelace', email: 'ada@example.com', role: 'host', self: true },
+        { name: 'Alan Turing', email: 'alan@example.com', role: 'attendee' },
+        { name: 'Grace Hopper', email: 'grace@example.com', role: 'attendee' },
+        { name: 'Katherine Johnson', email: 'katherine@example.com', role: 'attendee' },
+        { name: 'Edsger Dijkstra', email: 'edsger@example.com', role: 'attendee' },
+      ],
+    });
+
+  it('opens a dropdown listing every attendee when the avatars are clicked', async () => {
+    const wrapper = await mountWith(withParticipants());
+
+    // Collapsed: no dropdown yet, and attendees past the visible avatars
+    // (here the 5th, behind the "+1" chip) aren't shown by name anywhere.
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Edsger Dijkstra');
+
+    await wrapper.find('.attendees-trigger').trigger('click');
+
+    const menu = wrapper.find('.attendees-menu');
+    expect(menu.exists()).toBe(true);
+    // Every attendee is listed — including the one hidden behind "+1".
+    expect(menu.findAll('.attendee-row')).toHaveLength(5);
+    expect(menu.text()).toContain('Ada Lovelace');
+    expect(menu.text()).toContain('Edsger Dijkstra');
+    expect(menu.text()).toContain('ada@example.com');
+    expect(menu.text()).toContain('host');
+    // The current user is marked.
+    expect(menu.text()).toContain('(me)');
+  });
+
+  it('closes the dropdown when the overlay is clicked', async () => {
+    const wrapper = await mountWith(withParticipants());
+
+    await wrapper.find('.attendees-trigger').trigger('click');
+    expect(wrapper.find('.attendees-menu').exists()).toBe(true);
+
+    await wrapper.find('.attendees-overlay').trigger('click');
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+  });
+
+  it('closes the dropdown when Escape is pressed', async () => {
+    const wrapper = await mountWith(withParticipants());
+
+    await wrapper.find('.attendees-trigger').trigger('click');
+    expect(wrapper.find('.attendees-menu').exists()).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+  });
+
+  it('ignores Escape while the dropdown is closed', async () => {
+    const wrapper = await mountWith(withParticipants());
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+
+    // No listener is registered while closed, so this is a no-op (and must
+    // not throw).
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+  });
+});
+
 describe('MeetingDetailView audio player', () => {
   beforeEach(() => {
     URL.createObjectURL = vi.fn(() => 'blob:test');
