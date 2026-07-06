@@ -24,7 +24,7 @@ mod vault;
 /// to a generic icon in dev builds where no bundle icon is present.
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::image::Image;
-    use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
     let pkg = app.package_info();
     let config = app.config();
@@ -39,12 +39,24 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         ..Default::default()
     };
 
+    // Standard macOS "Settings…" item (⌘,). Its id matches the tray's settings
+    // menu item so both routes are handled by the same `on_menu_event` arm.
+    let settings_item = MenuItem::with_id(
+        app,
+        "settings",
+        "Settings…",
+        true,
+        Some("Cmd+,"),
+    )?;
+
     let app_menu = Submenu::with_items(
         app,
         "oats",
         true,
         &[
             &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &settings_item,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -108,6 +120,16 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
+        .on_menu_event(|app, event| {
+            use tauri::Manager;
+            // The app menu's "Settings…" (⌘,) opens the same window the tray does.
+            if event.id().as_ref() == "settings" {
+                if let Some(win) = app.get_webview_window("settings") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
             commands::check_session,
