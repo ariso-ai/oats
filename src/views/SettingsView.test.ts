@@ -18,6 +18,11 @@ const apiRequest = vi.fn(
   ): Promise<{ status: number; data: unknown }> =>
     Promise.resolve({ status: 200, data: {} })
 );
+const getVaultDir = vi.fn(() => Promise.resolve('/Users/x/.ariso/vault'));
+const setVaultDir = vi.fn((_path: string) => Promise.resolve());
+const pickVaultFolder = vi.fn(
+  (_current?: string): Promise<string | null> => Promise.resolve(null)
+);
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -57,6 +62,9 @@ vi.mock('../tauri', () => ({
   setBackendSetting: (b: unknown) => setBackendSetting(b),
   hasPromptedLocalModels: () => hasPromptedLocalModels(),
   setPromptedLocalModels: (v: unknown) => setPromptedLocalModels(v),
+  getVaultDir: () => getVaultDir(),
+  setVaultDir: (path: string) => setVaultDir(path),
+  pickVaultFolder: (current?: string) => pickVaultFolder(current),
   local: {
     modelStatus: () => Promise.resolve({ state: 'not_downloaded' }),
     downloadStt: () => downloadStt(),
@@ -110,6 +118,9 @@ beforeEach(() => {
   apiRequest.mockImplementation(() =>
     Promise.resolve({ status: 200, data: {} })
   );
+  getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
+  setVaultDir.mockResolvedValue(undefined);
+  pickVaultFolder.mockResolvedValue(null);
 });
 
 function fireRecordingState(active: boolean) {
@@ -392,6 +403,72 @@ describe('SettingsView silence detection toggle', () => {
     await input.trigger('change');
     await flushPromises();
     expect(setSilenceDetectionEnabled).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('SettingsView vault location', () => {
+  beforeEach(() => {
+    // The vault control only renders inside the "On-device models" card,
+    // which is shown for the local backend.
+    getBackendSetting.mockResolvedValue('local');
+  });
+
+  it('shows the current vault path and changes it via the folder picker', async () => {
+    getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
+    pickVaultFolder.mockResolvedValue('/Users/x/Notes/oats');
+
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('/Users/x/.ariso/vault');
+
+    await wrapper.find('[data-test="change-vault"]').trigger('click');
+    await flushPromises();
+
+    expect(setVaultDir).toHaveBeenCalledWith('/Users/x/Notes/oats');
+    expect(wrapper.text()).toContain('/Users/x/Notes/oats');
+  });
+
+  it('does nothing when the folder picker is dismissed', async () => {
+    pickVaultFolder.mockResolvedValue(null);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await wrapper.find('[data-test="change-vault"]').trigger('click');
+    await flushPromises();
+
+    expect(setVaultDir).not.toHaveBeenCalled();
+  });
+
+  it('disables the change-vault button while a recording is active', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    fireRecordingState(true);
+    await flushPromises();
+
+    expect(
+      wrapper.get('[data-test="change-vault"]').attributes('disabled')
+    ).toBeDefined();
+  });
+
+  it('shows an error and re-syncs the displayed path when setVaultDir fails', async () => {
+    getVaultDir
+      .mockResolvedValueOnce('/Users/x/.ariso/vault')
+      .mockResolvedValueOnce('/Users/x/.ariso/vault-actual');
+    pickVaultFolder.mockResolvedValue('/Users/x/Notes/oats');
+    setVaultDir.mockRejectedValue(new Error('failed to persist vault dir'));
+
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await wrapper.find('[data-test="change-vault"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('failed to persist vault dir');
+    // Re-fetches the true active vault rather than trusting the failed picked path.
+    expect(getVaultDir).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain('/Users/x/.ariso/vault-actual');
   });
 });
 

@@ -687,6 +687,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
+let unlistenVaultChanged: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -715,6 +716,13 @@ onMounted(() => {
   }).then((un) => {
     unlistenRecordingReveal = un;
   });
+  // The local backend's vault directory can change from Settings; reload the
+  // meeting list so it reflects the newly active vault's recordings.
+  void listen('vault://changed', () => {
+    void loadMeetings(true);
+  }).then((un) => {
+    unlistenVaultChanged = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -728,6 +736,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
   unlistenRecordingReveal?.();
+  unlistenVaultChanged?.();
 });
 </script>
 
