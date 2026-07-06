@@ -106,6 +106,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
@@ -121,6 +122,8 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::get_vault_dir,
+            commands::set_vault_dir,
             commands::local_recording_status,
             commands::create_library_window,
             commands::get_active_recording_meeting_id,
@@ -179,10 +182,29 @@ fn main() {
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
 
-            // Best-effort: create ~/.ariso/vault (+ Attachments/, .obsidian/app.json)
-            // up front so a user can open it in Obsidian before the first
-            // recording. Write paths also call ensure_vault lazily, so a
-            // failure here only logs — it must not block startup.
+            // Seed the configured vault directory from the persisted setting so
+            // the free `vault_root()` (called deep in the transcription
+            // pipeline) resolves it. Empty/missing → default `~/.ariso/vault`.
+            {
+                use tauri_plugin_store::StoreExt;
+                if let Some(dir) = app
+                    .store("settings.json")
+                    .ok()
+                    .and_then(|s| s.get("vaultDir"))
+                    .and_then(|v| v.as_str().map(String::from))
+                    .filter(|s| !s.is_empty())
+                {
+                    crate::vault::set_vault_override(std::path::PathBuf::from(dir));
+                }
+            }
+            // One-time upgrade migration MUST run before ensure_vault (which
+            // creates `.oats/recordings`). Best-effort: log and continue.
+            if let Err(e) = crate::vault::migrate_legacy_recordings() {
+                eprintln!("migrate legacy recordings: {e}");
+            }
+            // Best-effort: create the vault (+ Attachments/, .oats/, .obsidian)
+            // up front so it can be opened in Obsidian before the first
+            // recording. Write paths also call ensure_vault lazily.
             if let Err(e) = crate::vault::ensure_vault() {
                 eprintln!("ensure vault: {e}");
             }

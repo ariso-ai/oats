@@ -1,10 +1,51 @@
 use crate::storage::{format_hms, RecordingMeta};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
-/// Resolve the vault root `<ariso_root>/vault`.
+/// Process-global override for the vault directory. `None` = default
+/// `<ariso_root>/vault`. Set at startup from the persisted `vaultDir` setting
+/// and whenever the user changes it. `RwLock::new` is const, so this is a
+/// zero-init static.
+static VAULT_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Point the vault at `path` for the rest of the process (and future calls).
+pub fn set_vault_override(path: PathBuf) {
+    *VAULT_DIR.write().expect("VAULT_DIR poisoned") = Some(path);
+}
+
+/// Return the current override path, if set. Used to capture state before a
+/// fallible operation so the caller can roll back via `restore_vault_override`.
+pub fn current_vault_override() -> Option<PathBuf> {
+    VAULT_DIR.read().expect("VAULT_DIR poisoned").clone()
+}
+
+/// Restore a previously-captured override (or revert to the default vault when
+/// `previous` is `None`). Call this to roll back after a failed `set_vault_dir`.
+pub fn restore_vault_override(previous: Option<PathBuf>) {
+    *VAULT_DIR.write().expect("VAULT_DIR poisoned") = previous;
+}
+
+/// Drop the override, reverting to the default `<ariso_root>/vault`. Test-only:
+/// serial tests use it to reset the process-global between cases.
+#[cfg(test)]
+pub fn clear_vault_override() {
+    *VAULT_DIR.write().expect("VAULT_DIR poisoned") = None;
+}
+
+/// Resolve the active vault root: the configured override, else
+/// `<ariso_root>/vault`.
 pub fn vault_root() -> Result<PathBuf, String> {
+    if let Some(p) = VAULT_DIR.read().expect("VAULT_DIR poisoned").clone() {
+        return Ok(p);
+    }
     Ok(crate::storage::ariso_root()?.join("vault"))
+}
+
+/// Hidden bookkeeping root inside the vault: `<vault>/.oats`. Per-recording
+/// dirs live at `<vault>/.oats/recordings/<id>/`.
+pub fn meta_root() -> Result<PathBuf, String> {
+    Ok(vault_root()?.join(".oats"))
 }
 
 /// Where audio attachments live inside the vault.
@@ -29,7 +70,33 @@ pub fn ensure_vault() -> Result<PathBuf, String> {
         std::fs::write(&app_json, OBSIDIAN_APP_JSON)
             .map_err(|e| format!("write app.json: {e}"))?;
     }
+    std::fs::create_dir_all(root.join(".oats").join("recordings"))
+        .map_err(|e| format!("create vault .oats/recordings dir: {e}"))?;
     Ok(root)
+}
+
+/// One-time upgrade: when the default vault is in use, move a legacy
+/// `<ariso_root>/recordings` directory into the default vault's
+/// `.oats/recordings`. No-op if an override is set (custom vault), the legacy
+/// dir is absent, or the destination already exists — so it is safe to call on
+/// every startup. Must run BEFORE `ensure_vault()` creates `.oats/recordings`,
+/// otherwise the destination would already exist and the move would be skipped.
+pub fn migrate_legacy_recordings() -> Result<(), String> {
+    if VAULT_DIR.read().expect("VAULT_DIR poisoned").is_some() {
+        return Ok(());
+    }
+    let legacy = crate::storage::ariso_root()?.join("recordings");
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+    let dest = meta_root()?.join("recordings");
+    if dest.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create .oats dir: {e}"))?;
+    }
+    std::fs::rename(&legacy, &dest).map_err(|e| format!("migrate legacy recordings: {e}"))
 }
 
 /// The vault-relative markdown note path for a basename.
@@ -412,6 +479,32 @@ mod tests {
     // so there is no concurrent env mutation while these calls execute.
 
     #[test]
+    fn vault_root_honors_override_and_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        // Default: <ariso_root>/vault
+        assert_eq!(vault_root().unwrap(), tmp.path().join("vault"));
+        assert_eq!(meta_root().unwrap(), tmp.path().join("vault").join(".oats"));
+        // Override wins
+        let other = tmp.path().join("elsewhere");
+        set_vault_override(other.clone());
+        assert_eq!(vault_root().unwrap(), other);
+        assert_eq!(meta_root().unwrap(), other.join(".oats"));
+        clear_vault_override();
+        assert_eq!(vault_root().unwrap(), tmp.path().join("vault"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn ensure_vault_creates_oats_recordings() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = ensure_vault().unwrap();
+        assert!(root.join(".oats").join("recordings").is_dir());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
     fn attachments_dir_is_under_root() {
         let root = Path::new("/tmp/v");
         assert_eq!(attachments_dir(root), Path::new("/tmp/v/Attachments"));
@@ -723,6 +816,44 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+
+    #[test]
+    fn migrate_legacy_recordings_moves_once_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        clear_vault_override(); // default vault in effect
+        // Seed a legacy recording at <ariso_root>/recordings/<id>/meta.json.
+        let legacy = tmp.path().join("recordings").join("rec-1");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("meta.json"), b"{}").unwrap();
+
+        migrate_legacy_recordings().unwrap();
+
+        let dest = meta_root().unwrap().join("recordings").join("rec-1");
+        assert!(dest.join("meta.json").is_file(), "recording moved into vault .oats");
+        assert!(!tmp.path().join("recordings").exists(), "legacy dir removed");
+
+        // Idempotent: second call is a no-op and does not error.
+        migrate_legacy_recordings().unwrap();
+        assert!(dest.join("meta.json").is_file());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn migrate_legacy_recordings_skips_when_override_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let legacy = tmp.path().join("recordings").join("rec-1");
+        std::fs::create_dir_all(&legacy).unwrap();
+        set_vault_override(tmp.path().join("custom"));
+
+        migrate_legacy_recordings().unwrap();
+
+        // Override set → non-default vault → legacy left untouched.
+        assert!(legacy.exists(), "legacy dir untouched for custom vaults");
+        clear_vault_override();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[test]

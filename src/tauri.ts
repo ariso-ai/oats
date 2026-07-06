@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { load } from '@tauri-apps/plugin-store';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 // Broadcast when any window completes desktop auth. Settings is pre-created and
 // can mount before onboarding signs in, so it needs a cross-window refresh cue.
@@ -377,4 +378,20 @@ export async function requestMicrophonePermission(): Promise<boolean> {
 /** Return the current microphone permission state without prompting. */
 export async function checkMicrophonePermission(): Promise<boolean> {
   return invoke<boolean>('check_microphone_permission');
+}
+
+/** The active local vault directory (resolved absolute path). */
+export function getVaultDir(): Promise<string> {
+  return invoke<string>('get_vault_dir');
+}
+
+/** Point the local backend at a new vault directory (fresh store, no copy). */
+export function setVaultDir(path: string): Promise<void> {
+  return invoke('set_vault_dir', { path });
+}
+
+/** Open a native folder picker; returns the chosen absolute path or null. */
+export async function pickVaultFolder(current?: string): Promise<string | null> {
+  const picked = await openDialog({ directory: true, multiple: false, defaultPath: current });
+  return typeof picked === 'string' ? picked : null;
 }
