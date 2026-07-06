@@ -118,6 +118,7 @@ beforeEach(() => {
   apiRequest.mockImplementation(() =>
     Promise.resolve({ status: 200, data: {} })
   );
+  getBackendSetting.mockResolvedValue('ariso');
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);

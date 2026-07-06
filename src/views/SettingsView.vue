@@ -1280,6 +1280,13 @@ async function handleSignOut() {
   line-height: 1;
 }
 
+.vault-path {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .backend-select {
   position: relative;
 }
