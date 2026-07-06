@@ -10,18 +10,33 @@ name: CodeQL (Swift)
 # build and stay on the managed default setup — drop `swift` from its language
 # list (Settings → Code security → CodeQL → Default setup) so it doesn't also
 # analyze Swift and duplicate this job.
+#
+# Two things keep this from starving the runner ("lost communication" errors):
+#   1. We build the heavy MLX dependency tree *before* codeql-action/init, so it
+#      compiles UNTRACED (like desktop.yaml, which survives). Only our own
+#      ariso-stt sources are then rebuilt under the tracer — a single file, not
+#      the whole C++ world. Tracing the full universal MLX build was what killed
+#      the runner (~3h in, out of memory/disk).
+#   2. We build arm64-only (ARCHS=arm64). CodeQL analyses Swift semantics, not a
+#      shippable binary, so there's no need to also compile x86_64 and double the
+#      work — the runner is Apple Silicon and arm64 is native.
 
 on:
+  # A traced Swift compile is the slow part of this scan, so only run it when
+  # Swift sources/dependencies (or this workflow) actually change — on both PRs
+  # and pushes to main. A no-Swift merge to main can't change the scan result,
+  # so skipping it keeps main's baseline current without a 25-min recompile.
+  # (Safe to path-filter: CodeQL (Swift) is not a required status check.) The
+  # weekly schedule below stays unfiltered so the baseline never goes stale.
   push:
     branches:
       - main
+    paths:
+      - 'src-tauri/ariso-stt/**'
+      - '.github/workflows/codeql-swift.yaml'
   pull_request:
     branches:
       - main
-    # A traced Swift compile is the slow part of this scan, so on PRs only run it
-    # when Swift sources/dependencies (or this workflow) actually change. Push to
-    # main and the weekly schedule stay unfiltered to keep main's scan baseline
-    # current even after a no-Swift PR merges.
     paths:
       - 'src-tauri/ariso-stt/**'
       - '.github/workflows/codeql-swift.yaml'
@@ -42,6 +57,10 @@ jobs:
     name: Analyze Swift
     # macos-15 is a GitHub-hosted Apple Silicon runner, same as desktop.yaml.
     runs-on: macos-15
+    # A cold cache builds the whole MLX tree once (~25 min); warm runs are
+    # minutes. Bound it so a hung/starved build fails fast instead of burning
+    # hours before the runner drops (the old failure mode).
+    timeout-minutes: 120
     permissions:
       contents: read
       # Required for github/codeql-action/analyze to upload results.
@@ -50,14 +69,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496  # codeql-bundle-v2.25.6
-        with:
-          languages: swift
-          # We drive the compiler ourselves (cached xcodebuild) between init and
-          # analyze; "manual" makes CodeQL trace exactly that build.
-          build-mode: manual
 
       # Key the build cache on the Xcode toolchain, same rationale as desktop.yaml:
       # DerivedData from one toolchain must not be restored into another.
@@ -79,18 +90,42 @@ jobs:
           restore-keys: |
             codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-
 
-      # Build under CodeQL's tracer. `touch`-ing our own sources forces the
-      # ariso-stt target to recompile so the extractor always sees our code,
-      # while the cached DerivedData leaves the (unchanged) MLX dependency
-      # modules alone. Debug config compiles faster than Release and CodeQL
-      # doesn't need optimized output. -skipMacroValidation mirrors desktop.yaml.
+      # Compile the MLX dependency tree BEFORE codeql init, so it happens
+      # untraced. Tracing this full C++ build is what starved the runner; doing
+      # it plainly (as desktop.yaml does) keeps it within the resource envelope
+      # and seeds DerivedData for the traced step below. On a warm cache this is
+      # a near-no-op. arm64-only (ARCHS=arm64) — no need to also build x86_64.
+      # -skipMacroValidation mirrors desktop.yaml.
+      - name: Prime dependency build (untraced)
+        working-directory: src-tauri/ariso-stt
+        run: |
+          xcodebuild build -scheme ariso-stt -configuration Debug \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496  # codeql-bundle-v2.25.6
+        with:
+          languages: swift
+          # We drive the compiler ourselves (cached xcodebuild) between init and
+          # analyze; "manual" makes CodeQL trace exactly that build.
+          build-mode: manual
+
+      # Now build under CodeQL's tracer. `touch`-ing our own sources forces just
+      # the ariso-stt target to recompile so the extractor sees our code, while
+      # the DerivedData primed above leaves the (unchanged) MLX dependency
+      # modules alone — so only our handful of Swift files compile under trace.
+      # Must match the primed build (Debug, arm64, same derivedDataPath) or it
+      # would rebuild dependencies for a different arch/config under the tracer.
       - name: Build ariso-stt (traced)
         working-directory: src-tauri/ariso-stt
         run: |
           touch Sources/ariso-stt/*.swift
           xcodebuild build -scheme ariso-stt -configuration Debug \
             -destination 'generic/platform=macOS' \
-            -derivedDataPath .xcode -skipMacroValidation
+            -derivedDataPath .xcode -skipMacroValidation \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496  # codeql-bundle-v2.25.6
