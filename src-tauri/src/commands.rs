@@ -755,7 +755,7 @@ pub fn get_desktop_config() -> DesktopConfig {
 
 #[tauri::command]
 pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, String> {
-    let root = crate::storage::ariso_root()?;
+    let root = crate::vault::meta_root()?;
     let mut summaries = crate::storage::list_recordings(&root)?;
     // Overlay vault note presence (a user may have deleted a vault note; a new
     // recording's note lives only in the vault, not as ari-note.md).
@@ -834,7 +834,7 @@ pub fn combine_pending_audio(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Resolve a recording's directory under `<ariso_root>/recordings/<id>`,
+/// Resolve a recording's directory under `<vault>/.oats/recordings/<id>`,
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
 fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
@@ -848,7 +848,7 @@ fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
     {
         return Err(format!("invalid recording id: {id}"));
     }
-    let root = crate::storage::ariso_root()?;
+    let root = crate::vault::meta_root()?;
     Ok(crate::storage::recordings_dir(&root).join(id))
 }
 
@@ -1320,7 +1320,7 @@ mod tests {
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let id = "2026-06-02T14-30-05Z";
         let dir = recording_dir(id).unwrap();
-        assert_eq!(dir, crate::storage::recordings_dir(tmp.path()).join(id));
+        assert_eq!(dir, crate::storage::recordings_dir(&crate::vault::meta_root().unwrap()).join(id));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
@@ -1330,9 +1330,9 @@ mod tests {
         // SAFETY: env mutation requires `--test-threads=1` so no concurrent
         // env access races with these calls (same convention as transcribe).
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let root = tmp.path();
+        let root = crate::vault::meta_root().unwrap();
         let id = "2026-06-02T10-00-00Z";
-        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
         let mut meta = test_meta(id);
         meta.audio_file = Some("clip.mp3".into());
         crate::storage::write_meta(&dir, &meta).unwrap();
@@ -1361,9 +1361,9 @@ mod tests {
         // SAFETY: env mutation requires `--test-threads=1` so no concurrent
         // env access races with these calls (same convention as transcribe).
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let root = tmp.path();
+        let root = crate::vault::meta_root().unwrap();
         let id = "2026-06-02T11-00-00Z";
-        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
         let meta = test_meta(id);
         crate::storage::write_meta(&dir, &meta).unwrap();
         // No vault note written; only the legacy on-disk file exists.
@@ -1384,9 +1384,9 @@ mod tests {
         // SAFETY: env mutation requires `--test-threads=1` so no concurrent
         // env access races with these calls (same convention as transcribe).
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let root = tmp.path();
+        let root = crate::vault::meta_root().unwrap();
         let id = "2026-06-02T12-00-00Z";
-        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
         let meta = test_meta(id);
         crate::storage::write_meta(&dir, &meta).unwrap();
         // Neither a vault note nor a legacy file exists yet.
@@ -1418,11 +1418,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: see above.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let root = tmp.path();
+        let root = crate::vault::meta_root().unwrap();
 
         // New recording: audio in the vault via meta.audio_file.
         let id_new = "2026-06-02T10-00-00Z";
-        let dir_new = crate::storage::create_recording_dir(root, id_new).unwrap();
+        let dir_new = crate::storage::create_recording_dir(&root, id_new).unwrap();
         let mut meta_new = test_meta(id_new);
         meta_new.audio_file = Some("clip.mp3".into());
         crate::storage::write_meta(&dir_new, &meta_new).unwrap();
@@ -1433,7 +1433,7 @@ mod tests {
 
         // Legacy recording: no audio_file, audio in ~/.ariso.
         let id_old = "2026-06-01T10-00-00Z";
-        let dir_old = crate::storage::create_recording_dir(root, id_old).unwrap();
+        let dir_old = crate::storage::create_recording_dir(&root, id_old).unwrap();
         crate::storage::write_meta(&dir_old, &test_meta(id_old)).unwrap();
         std::fs::write(dir_old.join("recording.mp3"), b"oldbytes").unwrap();
         assert_eq!(read_recording_audio_bytes(id_old).unwrap(), b"oldbytes");
@@ -1449,7 +1449,7 @@ mod tests {
         // env access races with these calls (same convention as transcribe).
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let id = "2026-06-02T14-30-05Z";
-        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
         crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
 
         // Quotes round-trip through meta.json (serde escapes them); whitespace
@@ -1469,7 +1469,7 @@ mod tests {
         // SAFETY: env mutation requires `--test-threads=1`.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let id = "2026-06-02T14-30-05Z";
-        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
         let mut meta = test_meta(id);
         meta.audio_file = Some("2026-06-02 Old.mp3".into());
         crate::storage::write_meta(&dir, &meta).unwrap();
@@ -1504,7 +1504,7 @@ mod tests {
         // SAFETY: see above.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let id = "2026-06-02T14-30-05Z";
-        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
         crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
 
         // 41 characters is rejected without touching the file.
@@ -1568,12 +1568,12 @@ mod tests {
         }
 
         let id = "2026-06-02T14-30-05Z";
-        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        std::fs::create_dir_all(crate::storage::recordings_dir(&crate::vault::meta_root().unwrap()).join(id)).unwrap();
         assert_eq!(read_recording_note(id.into()).unwrap(), "");
         write_recording_note(id.into(), "# Note\n- point".into()).unwrap();
         let saved = read_recording_note(id.into()).unwrap();
         assert_eq!(saved, "# Note\n- point");
-        assert!(crate::storage::recordings_dir(tmp.path()).join(id).join("user-note.md").is_file());
+        assert!(crate::storage::recordings_dir(&crate::vault::meta_root().unwrap()).join(id).join("user-note.md").is_file());
 
         unsafe {
             std::env::remove_var("ARISO_ROOT");
@@ -1588,13 +1588,13 @@ mod tests {
         }
 
         let id = "2026-06-02T14-30-05Z";
-        std::fs::create_dir_all(crate::storage::recordings_dir(tmp.path()).join(id)).unwrap();
+        std::fs::create_dir_all(crate::storage::recordings_dir(&crate::vault::meta_root().unwrap()).join(id)).unwrap();
         // Missing sidecar reads as empty so a fresh recording has no title yet.
         assert_eq!(read_recording_note_title(id.into()).unwrap(), "");
         write_recording_note_title(id.into(), "Kickoff sync".into()).unwrap();
         let saved = read_recording_note_title(id.into()).unwrap();
         assert_eq!(saved, "Kickoff sync");
-        assert!(crate::storage::recordings_dir(tmp.path())
+        assert!(crate::storage::recordings_dir(&crate::vault::meta_root().unwrap())
             .join(id)
             .join("user-note-title.txt")
             .is_file());
@@ -1614,7 +1614,7 @@ mod tests {
         }
 
         let id = "2026-06-02T14-30-05Z";
-        let dir = crate::storage::recordings_dir(tmp.path()).join(id);
+        let dir = crate::storage::recordings_dir(&crate::vault::meta_root().unwrap()).join(id);
         std::fs::create_dir_all(&dir).unwrap();
         let file = std::fs::File::create(dir.join("user-note.md")).unwrap();
         file.set_len(MAX_TEXT_BYTES + 1).unwrap();
@@ -1640,7 +1640,7 @@ mod tests {
         let markdown = "x".repeat((MAX_TEXT_BYTES + 1) as usize);
         let err = write_recording_note(id.into(), markdown).unwrap_err();
         assert!(err.contains("recording note too large to write"));
-        assert!(!crate::storage::recordings_dir(tmp.path()).join(id).exists());
+        assert!(!crate::storage::recordings_dir(&crate::vault::meta_root().unwrap()).join(id).exists());
 
         unsafe {
             std::env::remove_var("ARISO_ROOT");
@@ -1655,7 +1655,7 @@ mod tests {
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
         let id = "2026-06-02T14-30-05Z";
-        let dir = crate::storage::create_recording_dir(tmp.path(), id).unwrap();
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
         let mut meta = crate::storage::RecordingMeta {
             id: id.into(),
             title: "T".into(),
@@ -1707,9 +1707,9 @@ mod tests {
         // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let root = tmp.path();
+        let root = crate::vault::meta_root().unwrap();
         let id = "2026-06-02T10-00-00Z";
-        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
         let mut meta = test_meta(id);
         meta.audio_file = Some("clip.mp3".into());
         crate::storage::write_meta(&dir, &meta).unwrap();
@@ -1726,9 +1726,9 @@ mod tests {
         // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let root = tmp.path();
+        let root = crate::vault::meta_root().unwrap();
         let id = "2026-06-02T10-00-00Z";
-        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
         let mut meta = test_meta(id);
         meta.audio_file = Some("clip.mp3".into());
         crate::storage::write_meta(&dir, &meta).unwrap();

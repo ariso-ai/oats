@@ -255,7 +255,7 @@ async fn fresh_recording_core(
     };
     storage::write_meta(&dir, &meta)?;
 
-    let models = storage::models_dir(root);
+    let models = storage::models_dir(&storage::ariso_root()?);
     let audio_path = crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file);
     match run_transcribe(&audio_path, &models).await {
         Ok(result) => {
@@ -405,7 +405,7 @@ async fn append_recording_core(
     // `meta` is mutated any further below.
     let time_offset = meta.duration_seconds as f64;
 
-    let models = storage::models_dir(root);
+    let models = storage::models_dir(&storage::ariso_root()?);
     // Transcribe from a temp file so the target's audio is never touched on failure.
     let clip_path = dir.join("append-clip.mp3");
     if let Err(e) = std::fs::write(&clip_path, &audio) {
@@ -540,14 +540,14 @@ pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, S
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("remove stale note: {e}")),
     }
-    let models = storage::models_dir(root);
+    let models = storage::models_dir(&storage::ariso_root()?);
     Ok(tokio::spawn(process_notes(dir, models, meta)))
 }
 
 /// Retry transcription (and notes) for a failed local recording.
 #[tauri::command]
 pub async fn retry_local_transcription(id: String) -> Result<FinalizeResult, String> {
-    let root = storage::ariso_root()?;
+    let root = crate::vault::meta_root()?;
     // Drop the notes JoinHandle: notes are best-effort and write their outcome
     // to meta.json directly, matching `local_finalize_recording`.
     retry_transcription_core(&root, &id)
@@ -558,7 +558,7 @@ pub async fn retry_local_transcription(id: String) -> Result<FinalizeResult, Str
 /// Retry only AI-notes generation for a recording whose transcript exists.
 #[tauri::command]
 pub async fn retry_local_notes(id: String) -> Result<(), String> {
-    let root = storage::ariso_root()?;
+    let root = crate::vault::meta_root()?;
     // Drop the JoinHandle: the detached task writes its outcome to disk; the
     // frontend observes completion via `local_recording_status` polling.
     retry_notes_core(&root, &id).await.map(|_handle| ())
@@ -571,7 +571,7 @@ pub async fn retry_local_notes(id: String) -> Result<(), String> {
 /// otherwise) instead of a phantom new note that vanishes when the append lands.
 #[tauri::command]
 pub async fn local_recording_id_for_start(created_at: String) -> Result<String, String> {
-    let root = storage::ariso_root()?;
+    let root = crate::vault::meta_root()?;
     storage::resolve_local_recording_id(&root, &created_at)
 }
 
@@ -582,7 +582,7 @@ pub async fn local_finalize_recording(
     created_at: String,
     duration_seconds: u64,
 ) -> Result<FinalizeResult, String> {
-    let root = storage::ariso_root()?;
+    let root = crate::vault::meta_root()?;
     // Drop the notes JoinHandle: notes are best-effort and continue running
     // in the background, writing their outcome to meta.json directly.
     finalize_core(&root, audio, title, created_at, duration_seconds)
