@@ -503,6 +503,43 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
+/// Reject a vault path that isn't absolute. Split out so it is unit-testable
+/// without an AppHandle.
+pub(crate) fn validate_vault_path(path: &str) -> Result<(), String> {
+    if !std::path::Path::new(path).is_absolute() {
+        return Err("Vault path must be an absolute directory.".to_string());
+    }
+    Ok(())
+}
+
+/// The active local vault directory (resolved absolute path), for Settings.
+#[tauri::command]
+pub fn get_vault_dir() -> Result<String, String> {
+    Ok(crate::vault::vault_root()?.to_string_lossy().into_owned())
+}
+
+/// Point the local backend at a new vault directory. Treats it as a fresh,
+/// independent store: no existing data is copied. Rejected while recording.
+#[tauri::command]
+pub fn set_vault_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    if app
+        .state::<crate::recording_state::RecordingState>()
+        .is_active()
+    {
+        return Err("Can't change the vault while recording.".to_string());
+    }
+    validate_vault_path(&path)?;
+    let dir = std::path::PathBuf::from(&path);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create vault dir: {e}"))?;
+    crate::vault::set_vault_override(dir);
+    crate::vault::ensure_vault()?;
+    let store = app.store(SETTINGS_PATH).map_err(|e| e.to_string())?;
+    store.set("vaultDir", serde_json::json!(path));
+    store.save().map_err(|e| e.to_string())?;
+    let _ = app.emit("vault://changed", ());
+    Ok(())
+}
+
 /// Open the dedicated first-run onboarding window. It is separate from Settings
 /// so a fresh install can explain sign-in before the main preferences surface.
 #[tauri::command]
@@ -1267,6 +1304,32 @@ pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_vault_dir_returns_resolved_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::vault::clear_vault_override();
+        assert_eq!(
+            get_vault_dir().unwrap(),
+            tmp.path().join("vault").to_string_lossy().into_owned()
+        );
+        crate::vault::set_vault_override(tmp.path().join("custom"));
+        assert_eq!(
+            get_vault_dir().unwrap(),
+            tmp.path().join("custom").to_string_lossy().into_owned()
+        );
+        crate::vault::clear_vault_override();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn set_vault_dir_rejects_relative_path() {
+        // Relative paths are rejected before any app/store access, so no AppHandle
+        // is needed to exercise this branch. Extract the validation into a helper.
+        assert!(super::validate_vault_path("relative/dir").is_err());
+        assert!(super::validate_vault_path("/absolute/dir").is_ok());
+    }
 
     #[test]
     fn waveform_url_appends_flags_with_correct_separators() {

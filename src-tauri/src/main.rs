@@ -121,6 +121,8 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::get_vault_dir,
+            commands::set_vault_dir,
             commands::local_recording_status,
             commands::create_library_window,
             commands::get_active_recording_meeting_id,
