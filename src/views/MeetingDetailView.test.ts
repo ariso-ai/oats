@@ -550,6 +550,28 @@ describe('MeetingDetailView attendees dropdown', () => {
     await wrapper.find('.attendees-overlay').trigger('click');
     expect(wrapper.find('.attendees-menu').exists()).toBe(false);
   });
+
+  it('closes the dropdown when Escape is pressed', async () => {
+    const wrapper = await mountWith(withParticipants());
+
+    await wrapper.find('.attendees-trigger').trigger('click');
+    expect(wrapper.find('.attendees-menu').exists()).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+  });
+
+  it('ignores Escape while the dropdown is closed', async () => {
+    const wrapper = await mountWith(withParticipants());
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+
+    // No listener is registered while closed, so this is a no-op (and must
+    // not throw).
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.attendees-menu').exists()).toBe(false);
+  });
 });
 
 describe('MeetingDetailView audio player', () => {

@@ -94,10 +94,11 @@
 
           <!-- Attendees dropdown. Fixed-positioned (like the share popover)
                so it escapes the card's `overflow: hidden`; the full-screen
-               overlay closes it on any outside click. -->
+               overlay closes it on any outside click, and Escape closes it
+               from the keyboard. -->
           <template v-if="showAttendees">
             <div class="attendees-overlay" @click="showAttendees = false" />
-            <div class="attendees-menu" :style="attendeesMenuStyle" role="menu">
+            <div class="attendees-menu" :style="attendeesMenuStyle">
               <div class="attendees-menu-head">Attendees</div>
               <ul class="attendees-list">
                 <li
@@ -408,6 +409,17 @@ function onAttendeesClick(): void {
   attendeesAnchor.value = rect ? { bottom: rect.bottom, left: rect.left } : null;
   showAttendees.value = !showAttendees.value;
 }
+
+// Escape closes the dropdown regardless of where focus sits. The window
+// listener only lives while the dropdown is open.
+function onAttendeesKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') showAttendees.value = false;
+}
+watch(showAttendees, (open) => {
+  if (open) window.addEventListener('keydown', onAttendeesKeydown);
+  else window.removeEventListener('keydown', onAttendeesKeydown);
+});
+onBeforeUnmount(() => window.removeEventListener('keydown', onAttendeesKeydown));
 
 const attendeesMenuStyle = computed<Record<string, string>>(() => {
   const a = attendeesAnchor.value;
