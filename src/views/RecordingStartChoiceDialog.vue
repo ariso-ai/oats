@@ -14,9 +14,9 @@
       </p>
       <div class="rec-choice__actions">
         <button class="secondary-btn rec-choice__cancel" @click="$emit('cancel')">Cancel</button>
-        <button class="secondary-btn rec-choice__new" @click="$emit('new')">New recording</button>
+        <button class="secondary-btn rec-choice__new" @click="$emit('new')">Start new recording</button>
         <button class="primary-btn rec-choice__continue" @click="$emit('continue')">
-          Continue meeting
+          Continue recording
         </button>
       </div>
     </div>
@@ -63,5 +63,8 @@ defineEmits<{ (e: 'continue'): void; (e: 'new'): void; (e: 'cancel'): void }>();
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.rec-choice__actions button {
+  cursor: pointer;
 }
 </style>
