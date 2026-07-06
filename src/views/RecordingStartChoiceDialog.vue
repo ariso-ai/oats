@@ -64,7 +64,39 @@ defineEmits<{ (e: 'continue'): void; (e: 'new'): void; (e: 'cancel'): void }>();
   justify-content: flex-end;
   gap: 8px;
 }
-.rec-choice__actions button {
+
+/* Button design mirrors Settings' `.primary-btn` / `.secondary-btn` — the app's
+   canonical pill buttons. These classes are scoped per-view in this codebase, so
+   they must be (re)defined here rather than inherited globally. */
+.primary-btn {
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: none;
+  background: #1c1c1c;
+  color: white;
+  font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
+}
+.secondary-btn {
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid #d6d6d6;
+  background: #ffffff;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  color: #1c1c1c;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.secondary-btn:hover:not(:disabled) {
+  box-shadow: 1px 1px 0 #e7e5e2;
+  transform: translate(1px, 1px);
+}
+.secondary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
