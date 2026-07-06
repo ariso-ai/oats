@@ -13,22 +13,17 @@
     </div>
 
     <template v-else-if="state === 'list'">
-      <!-- Featured default: the meeting the Library asked us to feature (the
-           meeting open in its detail pane), possibly a past meeting. -->
-      <template v-if="forcedDefault && !showAll">
-        <p class="section-label">Continue meeting</p>
-        <button class="meeting-row" :disabled="isChoosing" @click="choose(forcedDefault.id)">
-          <span class="meeting-title">{{ forcedDefault.title || 'Untitled meeting' }}</span>
-          <span class="meeting-time">{{ formatTime(forcedDefault.start_at) }}</span>
-        </button>
-        <button class="link-btn" type="button" @click="showAll = !showAll">
-          {{ showAll ? 'View less ▴' : 'View all ▾' }}
-        </button>
-      </template>
-
-      <template v-if="!forcedDefault">
-        <!-- Collapsed default: a single featured meeting (or a prompt) -->
-        <template v-if="!showAll">
+      <!-- Collapsed default: the forced "Continue" meeting (from the Library),
+           else the heuristic pick. -->
+      <template v-if="!showAll">
+        <template v-if="forcedDefault">
+          <p class="section-label">Continue meeting</p>
+          <button class="meeting-row" :disabled="isChoosing" @click="choose(forcedDefault.id)">
+            <span class="meeting-title">{{ forcedDefault.title || 'Untitled meeting' }}</span>
+            <span class="meeting-time">{{ formatTime(forcedDefault.start_at) }}</span>
+          </button>
+        </template>
+        <template v-else>
           <p v-if="defaultMeeting.kind !== 'none'" class="section-label">
             {{ defaultMeeting.kind === 'current' ? 'Happening now' : 'Up next' }}
           </p>
@@ -43,21 +38,21 @@
           </button>
           <p v-else class="section-label">No meeting happening now</p>
         </template>
-
-        <!-- Expanded: full flat list of today's meetings -->
-        <ul v-else class="meeting-list">
-          <li v-for="m in meetings" :key="m.id">
-            <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
-              <span class="meeting-title">{{ m.title || 'Untitled meeting' }}</span>
-              <span class="meeting-time">{{ formatTime(m.start_at) }}</span>
-            </button>
-          </li>
-        </ul>
-
-        <button class="link-btn" type="button" @click="showAll = !showAll">
-          {{ showAll ? 'View less ▴' : 'View all ▾' }}
-        </button>
       </template>
+
+      <!-- Expanded: full flat list of today's meetings (shared by both cases) -->
+      <ul v-else class="meeting-list">
+        <li v-for="m in meetings" :key="m.id">
+          <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
+            <span class="meeting-title">{{ m.title || 'Untitled meeting' }}</span>
+            <span class="meeting-time">{{ formatTime(m.start_at) }}</span>
+          </button>
+        </li>
+      </ul>
+
+      <button class="link-btn" type="button" @click="showAll = !showAll">
+        {{ showAll ? 'View less ▴' : 'View all ▾' }}
+      </button>
     </template>
 
     <div class="new-meeting">
@@ -241,13 +236,19 @@ onMounted(async () => {
     }
   } catch (err) {
     console.error('Failed to load scheduled meetings:', err);
-    // A forced default still lets the user continue that meeting even if the
-    // today-list fetch failed.
-    if (forcedId != null && forcedDefault.value) {
-      state.value = 'list';
-    } else {
-      state.value = 'error';
+    if (forcedId != null) {
+      // Still let the user continue the intended meeting even if the today-list
+      // fetch failed.
+      try {
+        const notes = await meetingApi.getMeetingNotes(forcedId);
+        forcedDefault.value = { id: forcedId, title: notes.title ?? '', start_at: notes.start_at };
+        state.value = 'list';
+        return;
+      } catch (e) {
+        console.error('Failed to resolve default meeting for picker', e);
+      }
     }
+    state.value = 'error';
   }
 });
 </script>

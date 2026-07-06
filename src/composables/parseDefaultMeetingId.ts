@@ -6,7 +6,7 @@ export function parseDefaultMeetingId(hash: string): number | null {
   if (qIndex < 0) return null;
   const params = new URLSearchParams(hash.slice(qIndex + 1));
   const raw = params.get('defaultMeetingId');
-  if (raw == null || !/^\d+$/.test(raw)) return null;
+  if (raw == null || !/^[1-9]\d*$/.test(raw)) return null;
   const n = Number(raw);
   return Number.isSafeInteger(n) ? n : null;
 }

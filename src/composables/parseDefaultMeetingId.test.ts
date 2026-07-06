@@ -10,5 +10,6 @@ describe('parseDefaultMeetingId', () => {
     expect(parseDefaultMeetingId('#/meeting-picker')).toBeNull();
     expect(parseDefaultMeetingId('#/meeting-picker?defaultMeetingId=abc')).toBeNull();
     expect(parseDefaultMeetingId('')).toBeNull();
+    expect(parseDefaultMeetingId('#/meeting-picker?defaultMeetingId=0')).toBeNull();
   });
 });

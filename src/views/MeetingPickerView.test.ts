@@ -177,4 +177,32 @@ describe('MeetingPickerView — forced default from the Library', () => {
       window.location.hash = prevHash;
     }
   });
+
+  it('"View all" shows the full list instead of a blank screen, and "View less" returns to Continue meeting', async () => {
+    listScheduledMeetings.mockResolvedValue([
+      { id: 9, title: 'Other Meeting', start_at: new Date().toISOString() },
+    ]);
+    getMeetingNotes.mockResolvedValue({ id: 5, title: 'Past Sync', start_at: '2026-06-01T09:00:00Z' });
+    const prevHash = window.location.hash;
+    window.location.hash = '#/meeting-picker?defaultMeetingId=5';
+    try {
+      const wrapper = mount(MeetingPickerView);
+      await flushPromises();
+      expect(wrapper.text()).toContain('Continue meeting');
+
+      await byText(wrapper, 'View all ▾')!.trigger('click');
+      await flushPromises();
+      expect(wrapper.find('.meeting-list').exists()).toBe(true);
+      expect(wrapper.text()).toContain('Other Meeting');
+      expect(wrapper.text()).not.toContain('Continue meeting');
+
+      await byText(wrapper, 'View less ▴')!.trigger('click');
+      await flushPromises();
+      expect(wrapper.text()).toContain('Continue meeting');
+      expect(wrapper.text()).toContain('Past Sync');
+      expect(wrapper.find('.meeting-list').exists()).toBe(false);
+    } finally {
+      window.location.hash = prevHash;
+    }
+  });
 });
