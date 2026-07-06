@@ -14,7 +14,9 @@ pub fn set_vault_override(path: PathBuf) {
     *VAULT_DIR.write().expect("VAULT_DIR poisoned") = Some(path);
 }
 
-/// Drop the override, reverting to the default `<ariso_root>/vault`.
+/// Drop the override, reverting to the default `<ariso_root>/vault`. Test-only:
+/// serial tests use it to reset the process-global between cases.
+#[cfg(test)]
 pub fn clear_vault_override() {
     *VAULT_DIR.write().expect("VAULT_DIR poisoned") = None;
 }
