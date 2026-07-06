@@ -162,6 +162,13 @@
       @confirm="ariConfirm.confirm"
       @cancel="ariConfirm.cancel"
     />
+    <RecordingStartChoiceDialog
+      :open="recordingStartChoice.open.value"
+      :meeting-title="recordingStartChoice.meetingTitle.value"
+      @continue="recordingStartChoice.choose('continue')"
+      @new="recordingStartChoice.choose('new')"
+      @cancel="recordingStartChoice.cancel"
+    />
   </div>
 </template>
 
@@ -189,6 +196,9 @@ import { decideRecordingAction } from '../composables/decideRecordingAction';
 import { shouldConfirmAriJoin } from '../composables/autoJoin';
 import { useAriJoinConfirm } from '../composables/useAriJoinConfirm';
 import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
+import { decideStartRecording } from '../composables/decideStartRecording';
+import { useRecordingStartChoice } from '../composables/useRecordingStartChoice';
+import RecordingStartChoiceDialog from './RecordingStartChoiceDialog.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -200,6 +210,7 @@ const selectedItem = ref<MeetingListItem | null>(null);
 // selections must not override Today's "record the live meeting" behavior.
 const userSelectedMeetingId = ref<string | null>(null);
 const ariConfirm = useAriJoinConfirm();
+const recordingStartChoice = useRecordingStartChoice();
 const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
@@ -556,6 +567,42 @@ async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
     const usesPicker = backend.usesMeetingPicker;
+
+    // The gate only applies to a meeting the user DELIBERATELY opened — an
+    // auto-selected-on-mount row must not trigger it, so Today's "record the
+    // live meeting" behavior is preserved.
+    const open =
+      selectedItem.value && userSelectedMeetingId.value === selectedItem.value.id
+        ? selectedItem.value
+        : null;
+
+    const plan = decideStartRecording({
+      usesPicker,
+      openMeeting: open
+        ? { id: open.id, title: open.title, numericId: numericMeetingId(open) }
+        : null,
+    });
+
+    if (plan.kind === 'ariso-picker') {
+      // Ariso: open the picker with the open meeting featured as default.
+      const args = plan.defaultMeetingId != null ? { defaultMeetingId: plan.defaultMeetingId } : {};
+      await invoke('open_meeting_picker', args);
+      return;
+    }
+
+    if (plan.kind === 'local-choice') {
+      const choice = await recordingStartChoice.requestChoice(plan.meetingTitle);
+      if (choice === 'continue') {
+        await invoke('start_recording_window', { localAppendId: plan.localRecordingId });
+        setRecording(true);
+      } else if (choice === 'new') {
+        await invoke('start_recording_window', {});
+        setRecording(true);
+      }
+      return;
+    }
+
+    // plan.kind === 'default': no deliberately-open meeting — today's behavior.
     const selectedTodayId =
       usesPicker &&
       activeView.value === 'today' &&
