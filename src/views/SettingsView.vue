@@ -135,7 +135,7 @@
             </button>
           </div>
         </div>
-        <div class="setting-row vault-row" style="margin-top: 16px">
+        <div class="setting-row" style="margin-top: 16px">
           <span class="label-with-help">
             <span class="setting-label">Vault location</span>
             <span class="help">
@@ -158,7 +158,7 @@
             </span>
           </span>
           <div class="model-controls">
-            <span class="vault-path" :title="vaultDir">{{ vaultDir }}</span>
+            <span class="vault-path" data-test="vault-path" :title="vaultDir">{{ vaultDirDisplay }}</span>
             <button
               class="secondary-btn"
               data-test="change-vault"
@@ -478,6 +478,16 @@ async function refreshModelStatus() {
 
 const vaultDir = ref('');
 const vaultError = ref('');
+
+// Show the tail of the path (its most specific part) under 20 chars, with a
+// leading "..." when truncated. The full path stays available via the `title`
+// attribute on hover.
+const vaultDirDisplay = computed(() => {
+  const path = vaultDir.value;
+  const MAX = 20;
+  if (path.length <= MAX) return path;
+  return '...' + path.slice(-(MAX - 3));
+});
 
 async function loadVaultDir() {
   try {
@@ -1294,21 +1304,11 @@ async function handleSignOut() {
   line-height: 1;
 }
 
-/* Let the path shrink and truncate to the space left in the row. `min-width: 0`
-   defeats the flexbox default (`min-width: auto` = min-content), which would
-   otherwise keep a long path wider than its box and suppress the ellipsis.
-   The `title` attribute reveals the full path on hover. */
-.vault-row .model-controls {
-  min-width: 0;
-}
-
+/* The displayed path is front-truncated to <20 chars in JS (leading "..."),
+   so the tail stays visible; the full path is available via the `title`
+   attribute on hover. Match the "Vault location" label font, not monospace. */
 .vault-path {
-  min-width: 0;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  /* Match the "Vault location" label rather than a monospace code font. */
   font-size: 14px;
   color: #1c1c1c;
 }

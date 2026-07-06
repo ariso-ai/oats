@@ -421,13 +421,33 @@ describe('SettingsView vault location', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    expect(wrapper.text()).toContain('/Users/x/.ariso/vault');
+    // The full path is carried in the title; the visible text is truncated.
+    expect(wrapper.get('[data-test="vault-path"]').attributes('title')).toBe(
+      '/Users/x/.ariso/vault'
+    );
 
     await wrapper.find('[data-test="change-vault"]').trigger('click');
     await flushPromises();
 
     expect(setVaultDir).toHaveBeenCalledWith('/Users/x/Notes/oats');
-    expect(wrapper.text()).toContain('/Users/x/Notes/oats');
+    expect(wrapper.get('[data-test="vault-path"]').attributes('title')).toBe(
+      '/Users/x/Notes/oats'
+    );
+  });
+
+  it('front-truncates a long path under 20 chars while keeping the full path in the title', async () => {
+    getVaultDir.mockResolvedValue('/Users/x/Documents/Notes/oats-vault');
+
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const path = wrapper.get('[data-test="vault-path"]');
+    expect(path.attributes('title')).toBe('/Users/x/Documents/Notes/oats-vault');
+    const shown = path.text();
+    expect(shown.startsWith('...')).toBe(true);
+    expect(shown.length).toBeLessThanOrEqual(20);
+    // The tail (most specific part of the path) stays visible.
+    expect(shown.endsWith('oats-vault')).toBe(true);
   });
 
   it('exposes the vault description via an accessible help tooltip', async () => {
@@ -485,7 +505,9 @@ describe('SettingsView vault location', () => {
     expect(wrapper.text()).toContain('failed to persist vault dir');
     // Re-fetches the true active vault rather than trusting the failed picked path.
     expect(getVaultDir).toHaveBeenCalledTimes(2);
-    expect(wrapper.text()).toContain('/Users/x/.ariso/vault-actual');
+    expect(wrapper.get('[data-test="vault-path"]').attributes('title')).toBe(
+      '/Users/x/.ariso/vault-actual'
+    );
   });
 });
 
