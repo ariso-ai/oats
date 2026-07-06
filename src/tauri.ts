@@ -210,13 +210,15 @@ export const local = {
     audio: number[],
     title: string,
     createdAt: string,
-    durationSeconds: number
+    durationSeconds: number,
+    appendTo?: string
   ): Promise<LocalFinalizeResult> {
     return invoke<LocalFinalizeResult>('local_finalize_recording', {
       audio,
       title,
       createdAt,
       durationSeconds,
+      appendTo,
     });
   },
   listRecordings(): Promise<RecordingSummary[]> {

@@ -331,7 +331,9 @@ async fn run_loop(app: AppHandle) {
                             let app_main = app2.clone();
                             let _ = app2.run_on_main_thread(move || {
                                 if let Err(e) =
-                                    crate::commands::open_waveform_window(&app_main, None, true)
+                                    crate::commands::open_waveform_window(
+                                        &app_main, None, None, true,
+                                    )
                                 {
                                     eprintln!("mic-monitor: failed to open recorder window: {e}");
                                 }

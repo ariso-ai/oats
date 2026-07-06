@@ -527,17 +527,26 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-/// Build the waveform window's route, appending the optional `auto` and
-/// `pillHidden` query flags. Kept pure so the flag wiring is unit-testable.
-fn waveform_url(meeting_id: Option<i64>, auto: bool, pill_hidden: bool) -> String {
+/// Build the waveform window's route, appending the optional `localAppendId`
+/// value plus the `auto` and `pillHidden` query flags. Kept pure so the wiring
+/// is unit-testable.
+fn waveform_url(
+    meeting_id: Option<i64>,
+    auto: bool,
+    pill_hidden: bool,
+    local_append_id: Option<&str>,
+) -> String {
     let mut url = match meeting_id {
         Some(id) => format!("/#/waveform?meetingId={id}"),
         None => "/#/waveform".to_string(),
     };
-    let mut push = |flag: &str| {
+    let mut push = |part: &str| {
         url.push_str(if url.contains('?') { "&" } else { "?" });
-        url.push_str(flag);
+        url.push_str(part);
     };
+    if let Some(id) = local_append_id {
+        push(&format!("localAppendId={id}"));
+    }
     if auto {
         push("auto=1");
     }
@@ -554,6 +563,7 @@ fn waveform_url(meeting_id: Option<i64>, auto: bool, pill_hidden: bool) -> Strin
 pub(crate) fn open_waveform_window(
     app: &tauri::AppHandle,
     meeting_id: Option<i64>,
+    local_append_id: Option<String>,
     auto: bool,
 ) -> Result<(), String> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -569,7 +579,7 @@ pub(crate) fn open_waveform_window(
     // recorder UI, so the pill never flashes over it. The window is still
     // created visible for getUserMedia; only its painting is suppressed.
     let pill_hidden = !crate::recorder_pill::should_show_now(app);
-    let url = waveform_url(meeting_id, auto, pill_hidden);
+    let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref());
     let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
@@ -675,17 +685,21 @@ async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
 pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
+    local_append_id: Option<String>,
 ) -> Result<(), String> {
     if !ensure_recording_allowed(&app).await {
         return Err("sign-in required".to_string());
     }
-    open_waveform_window(&app, meeting_id, false)
+    open_waveform_window(&app, meeting_id, local_append_id, false)
 }
 
 /// Show/focus the meeting-picker window, building it if absent. Shared by the
 /// tray (Ariso path) and the `open_meeting_picker` command so both open the
 /// picker identically.
-pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn open_meeting_picker_window(
+    app: &tauri::AppHandle,
+    default_meeting_id: Option<i64>,
+) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     if let Some(picker) = app.get_webview_window("meeting-picker") {
@@ -693,7 +707,11 @@ pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), S
         let _ = picker.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "meeting-picker", WebviewUrl::App("/#/meeting-picker".into()))
+    let route = match default_meeting_id {
+        Some(id) => format!("/#/meeting-picker?defaultMeetingId={id}"),
+        None => "/#/meeting-picker".to_string(),
+    };
+    WebviewWindowBuilder::new(app, "meeting-picker", WebviewUrl::App(route.into()))
         .title("Select a meeting")
         .inner_size(400.0, 500.0)
         .resizable(false)
@@ -707,11 +725,14 @@ pub(crate) fn open_meeting_picker_window(app: &tauri::AppHandle) -> Result<(), S
 /// Open (or focus) the meeting-picker window. Invoked by the library's
 /// start-recording button for picker-using backends.
 #[tauri::command]
-pub async fn open_meeting_picker(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_meeting_picker(
+    app: tauri::AppHandle,
+    default_meeting_id: Option<i64>,
+) -> Result<(), String> {
     if !ensure_recording_allowed(&app).await {
         return Err("sign-in required".to_string());
     }
-    open_meeting_picker_window(&app)
+    open_meeting_picker_window(&app, default_meeting_id)
 }
 
 /// PUT binary data to a presigned URL (bypasses CORS via native HTTP client)
@@ -1270,14 +1291,23 @@ mod tests {
 
     #[test]
     fn waveform_url_appends_flags_with_correct_separators() {
-        assert_eq!(waveform_url(None, false, false), "/#/waveform");
-        assert_eq!(waveform_url(Some(42), false, false), "/#/waveform?meetingId=42");
-        // First flag uses `?`, the second uses `&`.
-        assert_eq!(waveform_url(None, true, true), "/#/waveform?auto=1&pillHidden=1");
-        assert_eq!(waveform_url(None, false, true), "/#/waveform?pillHidden=1");
+        assert_eq!(waveform_url(None, false, false, None), "/#/waveform");
+        assert_eq!(waveform_url(Some(42), false, false, None), "/#/waveform?meetingId=42");
+        assert_eq!(waveform_url(None, true, false, None), "/#/waveform?auto=1");
+        assert_eq!(waveform_url(None, true, true, None), "/#/waveform?auto=1&pillHidden=1");
+        assert_eq!(waveform_url(None, false, true, None), "/#/waveform?pillHidden=1");
         assert_eq!(
-            waveform_url(Some(7), true, true),
+            waveform_url(Some(7), true, true, None),
             "/#/waveform?meetingId=7&auto=1&pillHidden=1"
+        );
+        // Local continue: the append target id rides on the URL like the flags.
+        assert_eq!(
+            waveform_url(None, false, false, Some("2026-06-02T10-00-00Z")),
+            "/#/waveform?localAppendId=2026-06-02T10-00-00Z"
+        );
+        assert_eq!(
+            waveform_url(None, true, false, Some("abc")),
+            "/#/waveform?localAppendId=abc&auto=1"
         );
     }
 

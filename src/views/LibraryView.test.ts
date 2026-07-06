@@ -723,7 +723,7 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', {});
   });
 
-  it('Today view records a deliberately selected today meeting (override beats the live one)', async () => {
+  it('Today view opens the picker defaulted to a deliberately selected today meeting', async () => {
     backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
     const start = new Date(Date.now() - 30 * 60_000).toISOString();
@@ -744,8 +744,8 @@ describe('LibraryView', () => {
     await flushPromises();
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
-    expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 50 });
-    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 99 });
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', { defaultMeetingId: 50 });
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', { meetingId: 50 });
   });
 
   it('falls back to the meeting picker when the selected scheduled meeting id is not numeric', async () => {
@@ -1212,5 +1212,66 @@ describe('LibraryView', () => {
 
     expect(wrapper.text()).not.toContain('Ari is scheduled to join this meeting');
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 7 });
+  });
+
+  it('local: deliberately opening a meeting then Start offers Continue, which appends', async () => {
+    backendId.mockReturnValue('local');
+    usesMeetingPicker.mockReturnValue(false);
+    listMeetings.mockResolvedValue([
+      item({ id: '2026-06-02T10-00-00Z', title: 'Standup' }),
+      item({ id: '2026-06-01T09-00-00Z', title: 'Older' }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    // Deliberately select the first meeting (a user click, not the auto-select).
+    const target = wrapper.findAll('.meeting-item').find((r) => r.text().includes('Standup'))!;
+    await target.trigger('click');
+    await flushPromises();
+
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    // Dialog appears; no recording started yet.
+    expect(wrapper.find('.rec-choice').exists()).toBe(true);
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_window', expect.anything());
+
+    await wrapper.find('.rec-choice__continue').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', {
+      localAppendId: '2026-06-02T10-00-00Z',
+    });
+  });
+
+  it('local: choosing New from the dialog starts an ad-hoc recording', async () => {
+    backendId.mockReturnValue('local');
+    usesMeetingPicker.mockReturnValue(false);
+    listMeetings.mockResolvedValue([item({ id: '2026-06-02T10-00-00Z', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    const target = wrapper.findAll('.meeting-item').find((r) => r.text().includes('Standup'))!;
+    await target.trigger('click');
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    await wrapper.find('.rec-choice__new').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('ariso: deliberately opening a meeting then Start opens the picker defaulted to it', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([
+      item({ id: '42', title: 'Daily Plan', files: undefined }),
+      item({ id: '7', title: 'Other Sync', files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    const target = wrapper.findAll('.meeting-item').find((r) => r.text().includes('Daily Plan'))!;
+    await target.trigger('click');
+    await flushPromises();
+    await wrapper.get('.add-btn').trigger('click');
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('open_meeting_picker', { defaultMeetingId: 42 });
   });
 });

@@ -20,6 +20,9 @@ export interface RecordingMeta {
   endAt: string;
   durationSeconds: number;
   meetingId?: number;
+  /** Local "Continue this meeting": append into this existing recording id,
+   *  bypassing the 5-minute auto-append window. */
+  localAppendId?: string;
 }
 
 export interface FinalizeResult {
@@ -398,7 +401,8 @@ export class LocalBackend implements Backend {
       bytes,
       timestampTitle(createdAt),
       createdAt,
-      meta.durationSeconds
+      meta.durationSeconds,
+      meta.localAppendId
     );
     return { backend: 'local', ...res };
   }
