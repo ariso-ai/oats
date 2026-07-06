@@ -179,10 +179,29 @@ fn main() {
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
 
-            // Best-effort: create ~/.ariso/vault (+ Attachments/, .obsidian/app.json)
-            // up front so a user can open it in Obsidian before the first
-            // recording. Write paths also call ensure_vault lazily, so a
-            // failure here only logs — it must not block startup.
+            // Seed the configured vault directory from the persisted setting so
+            // the free `vault_root()` (called deep in the transcription
+            // pipeline) resolves it. Empty/missing → default `~/.ariso/vault`.
+            {
+                use tauri_plugin_store::StoreExt;
+                if let Some(dir) = app
+                    .store("settings.json")
+                    .ok()
+                    .and_then(|s| s.get("vaultDir"))
+                    .and_then(|v| v.as_str().map(String::from))
+                    .filter(|s| !s.is_empty())
+                {
+                    crate::vault::set_vault_override(std::path::PathBuf::from(dir));
+                }
+            }
+            // One-time upgrade migration MUST run before ensure_vault (which
+            // creates `.oats/recordings`). Best-effort: log and continue.
+            if let Err(e) = crate::vault::migrate_legacy_recordings() {
+                eprintln!("migrate legacy recordings: {e}");
+            }
+            // Best-effort: create the vault (+ Attachments/, .oats/, .obsidian)
+            // up front so it can be opened in Obsidian before the first
+            // recording. Write paths also call ensure_vault lazily.
             if let Err(e) = crate::vault::ensure_vault() {
                 eprintln!("ensure vault: {e}");
             }

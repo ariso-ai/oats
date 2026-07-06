@@ -61,6 +61,30 @@ pub fn ensure_vault() -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// One-time upgrade: when the default vault is in use, move a legacy
+/// `<ariso_root>/recordings` directory into the default vault's
+/// `.oats/recordings`. No-op if an override is set (custom vault), the legacy
+/// dir is absent, or the destination already exists — so it is safe to call on
+/// every startup. Must run BEFORE `ensure_vault()` creates `.oats/recordings`,
+/// otherwise the destination would already exist and the move would be skipped.
+pub fn migrate_legacy_recordings() -> Result<(), String> {
+    if VAULT_DIR.read().expect("VAULT_DIR poisoned").is_some() {
+        return Ok(());
+    }
+    let legacy = crate::storage::ariso_root()?.join("recordings");
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+    let dest = meta_root()?.join("recordings");
+    if dest.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create .oats dir: {e}"))?;
+    }
+    std::fs::rename(&legacy, &dest).map_err(|e| format!("migrate legacy recordings: {e}"))
+}
+
 /// The vault-relative markdown note path for a basename.
 pub fn note_path(root: &Path, basename: &str) -> PathBuf {
     root.join(format!("{basename}.md"))
@@ -778,6 +802,44 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+
+    #[test]
+    fn migrate_legacy_recordings_moves_once_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        clear_vault_override(); // default vault in effect
+        // Seed a legacy recording at <ariso_root>/recordings/<id>/meta.json.
+        let legacy = tmp.path().join("recordings").join("rec-1");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("meta.json"), b"{}").unwrap();
+
+        migrate_legacy_recordings().unwrap();
+
+        let dest = meta_root().unwrap().join("recordings").join("rec-1");
+        assert!(dest.join("meta.json").is_file(), "recording moved into vault .oats");
+        assert!(!tmp.path().join("recordings").exists(), "legacy dir removed");
+
+        // Idempotent: second call is a no-op and does not error.
+        migrate_legacy_recordings().unwrap();
+        assert!(dest.join("meta.json").is_file());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn migrate_legacy_recordings_skips_when_override_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let legacy = tmp.path().join("recordings").join("rec-1");
+        std::fs::create_dir_all(&legacy).unwrap();
+        set_vault_override(tmp.path().join("custom"));
+
+        migrate_legacy_recordings().unwrap();
+
+        // Override set → non-default vault → legacy left untouched.
+        assert!(legacy.exists(), "legacy dir untouched for custom vaults");
+        clear_vault_override();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[test]
