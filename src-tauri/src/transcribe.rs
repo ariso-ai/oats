@@ -215,7 +215,15 @@ pub async fn finalize_core_with_target(
     append_to: Option<String>,
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     if let Some(target_id) = append_to {
-        return append_recording_core(root, &target_id, audio, title, created_at, duration_seconds).await;
+        // Defense-in-depth: an explicit append target is externally influenced
+        // (round-trips through the recorder window URL). Reject ids that could
+        // escape the recordings dir before joining to a path — mirrors
+        // validate_recording_id use in retry_transcription_core. Fall back to a
+        // fresh recording (audio is never lost) rather than erroring.
+        if storage::validate_recording_id(&target_id).is_ok() {
+            return append_recording_core(root, &target_id, audio, title, created_at, duration_seconds).await;
+        }
+        return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
     }
     match storage::most_recent_appendable(root, &created_at)? {
         Some(target_id) => {
@@ -1191,6 +1199,31 @@ mod tests {
         let (r, h) = finalize_core_with_target(
             tmp.path(), b"bbb".to_vec(), "T".into(), "2026-06-02T10:01:00.000Z".into(), 15,
             Some("2026-01-01T00-00-00Z".into()),
+        ).await.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(r.id, "2026-06-02T10-01-00Z");
+        assert_eq!(r.status, RecordingStatus::Done);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&r.id);
+        assert_eq!(crate::vault::read_audio(
+            crate::storage::read_meta(&dir).unwrap().audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn forced_append_rejects_invalid_target_id_and_falls_back_to_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        // A traversal-shaped target id must never be joined to a path; it
+        // degrades to a fresh recording keyed by the clip's own created_at,
+        // same as an explicit target that fails validate_recording_id.
+        let (r, h) = finalize_core_with_target(
+            tmp.path(), b"bbb".to_vec(), "T".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+            Some("../evil".into()),
         ).await.unwrap();
         h.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
