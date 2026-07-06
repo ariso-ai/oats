@@ -341,27 +341,35 @@ pub fn rename_recording_artifacts(
 
     // Read note content before any mutations so the note is updated before the
     // attachment moves — if the note write fails, the attachment is untouched.
+    // Keep the original bytes so a failed attachment rename can be rolled back
+    // even when the note is updated in place (new_note_path == existing note).
     let note_update = match &existing_note_path {
         Some(p) => {
-            let contents = std::fs::read_to_string(p)
+            let original = std::fs::read_to_string(p)
                 .map_err(|e| format!("read note for rename: {e}"))?;
-            Some(retitle_note_contents(&contents, old_audio_file, &new_audio_file, new_title))
+            let updated =
+                retitle_note_contents(&original, old_audio_file, &new_audio_file, new_title);
+            Some((original, updated))
         }
         None => None,
     };
 
-    if let Some(ref updated) = note_update {
+    if let Some((_, ref updated)) = note_update {
         crate::storage::write_atomic(&new_note_path, updated.as_bytes())?;
     }
 
-    // Rename the attachment. On failure, roll back the new note write so vault
-    // state and meta.audio_file stay consistent.
+    // Rename the attachment. On failure, roll back the note write so vault state
+    // and meta.audio_file stay consistent. If the note moved to a new path,
+    // delete it; if it was updated in place, restore the original content.
     if old_audio.is_file() {
         if let Err(e) = std::fs::rename(&old_audio, audio_path(&root, &new_audio_file)) {
-            if note_update.is_some()
-                && existing_note_path.as_ref().map(|p| p != &new_note_path).unwrap_or(false)
-            {
-                let _ = std::fs::remove_file(&new_note_path);
+            if let Some((ref original, _)) = note_update {
+                let moved = existing_note_path.as_ref().map(|p| p != &new_note_path).unwrap_or(true);
+                if moved {
+                    let _ = std::fs::remove_file(&new_note_path);
+                } else {
+                    let _ = crate::storage::write_atomic(&new_note_path, original.as_bytes());
+                }
             }
             return Err(format!("rename attachment: {e}"));
         }
