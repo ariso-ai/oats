@@ -10,6 +10,12 @@ import { arisoTruthy } from './autoJoin';
 
 export type BackendId = 'ariso' | 'local';
 
+// Cross-window signal that the active backend setting changed. The switch lives
+// in the Settings window but only writes the shared store, so windows showing
+// backend-specific state (the Library's meeting list/detail) listen for this to
+// drop stale selections and reload against the new backend's corpus.
+export const BACKEND_CHANGED_EVENT = 'backend://changed';
+
 export interface Readiness {
   ready: boolean;
   reason?: 'signed-out' | 'model-missing' | 'unsupported-platform';

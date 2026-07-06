@@ -396,7 +396,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
@@ -595,6 +596,11 @@ async function selectBackend(next: 'ariso' | 'local') {
   if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
+  // Tell other windows (the Library) the active backend changed so they drop
+  // any meeting held open from the previous backend and reload.
+  void emit(BACKEND_CHANGED_EVENT).catch((err) => {
+    console.warn('Failed to broadcast backend change', err);
+  });
   // Native orchestrators (tray next-meeting, notifications) re-evaluate
   // their backend/session gates via the bootstrap window's SYNC listener.
   void emitNotificationsSync().catch((err) => {
@@ -632,6 +638,9 @@ async function cancelDownloadModels() {
   // prompted flag, so a later switch to Local will ask again.
   backend.value = 'ariso';
   await setBackendSetting('ariso');
+  void emit(BACKEND_CHANGED_EVENT).catch((err) => {
+    console.warn('Failed to broadcast backend change', err);
+  });
 }
 
 async function onInstallStt() {

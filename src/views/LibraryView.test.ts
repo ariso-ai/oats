@@ -601,6 +601,27 @@ describe('LibraryView', () => {
     expect(wrapper.findAll('.meeting-item').every((r) => r.attributes('aria-pressed') === 'false')).toBe(true);
   });
 
+  it('closes the open meeting and reloads when the backend changes', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'a', title: 'Standup' }),
+      item({ id: 'b', title: 'Planning' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    // A meeting from the previous backend is open in the detail pane.
+    expect(wrapper.find('.meeting-item').attributes('aria-pressed')).toBe('true');
+    expect(wrapper.find('.up-next').exists()).toBe(false);
+
+    // Switching backends (from the Settings window) must close that meeting,
+    // returning the detail to the neutral Up Next state, and reload the list.
+    emitEvent('backend://changed', {});
+    await flushPromises();
+
+    expect(listMeetings).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('.up-next').exists()).toBe(true);
+    expect(wrapper.findAll('.meeting-item').every((r) => r.attributes('aria-pressed') === 'false')).toBe(true);
+  });
+
   it('shows a distinct error message (not the empty state) when loading fails', async () => {
     listMeetings.mockRejectedValue(new Error('boom'));
     const wrapper = mount(LibraryView);

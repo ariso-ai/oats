@@ -177,7 +177,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, timestampTitle, type Backend, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, BACKEND_CHANGED_EVENT, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
@@ -735,6 +735,7 @@ let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
+let unlistenBackendChanged: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -773,6 +774,17 @@ onMounted(() => {
   }).then((un) => {
     unlistenVaultChanged = un;
   });
+  // Switching backends (in Settings) changes the whole meeting corpus. Close
+  // any meeting held open from the previous backend — returning the detail to
+  // the neutral Up Next state — and reload against the new backend.
+  void listen(BACKEND_CHANGED_EVENT, () => {
+    selectedItem.value = null;
+    userSelectedMeetingId.value = null;
+    pinnedMeetings.value = new Map();
+    void loadMeetings();
+  }).then((un) => {
+    unlistenBackendChanged = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -787,6 +799,7 @@ onUnmounted(() => {
   unlistenRecordingStarted?.();
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
+  unlistenBackendChanged?.();
 });
 </script>
 
