@@ -154,6 +154,11 @@ const effectiveMeetingId = ref<number | null>(
     ? Number(meetingIdQuery)
     : null,
 );
+const localAppendIdRaw = route.query.localAppendId;
+// When the user chose "Continue this meeting", the Library passes the target
+// local recording id here so finalize appends to it regardless of elapsed time.
+const localAppendId =
+  typeof localAppendIdRaw === 'string' && localAppendIdRaw.length > 0 ? localAppendIdRaw : null;
 const isAuto = route.query.auto === '1';
 // Born hidden when the meetings window is the visible UI: the window must still
 // exist (and stay visible to WebKit so getUserMedia resolves), but the pill
@@ -238,6 +243,11 @@ watch(
     const token = ++idResolveToken;
     if (!startAt || backendId !== 'local') {
       effectiveLocalRecordingId.value = null;
+      return;
+    }
+    if (localAppendId) {
+      // Explicit continue: skip the time-window resolve and dock to the target.
+      effectiveLocalRecordingId.value = localAppendId;
       return;
     }
     try {
@@ -474,6 +484,7 @@ async function handleStop() {
       durationSeconds:
         (prevMeta?.durationSeconds ?? 0) + recorder.durationSeconds.value,
       meetingId: prevMeta?.meetingId ?? effectiveMeetingId.value ?? undefined,
+      localAppendId: prevMeta?.localAppendId ?? localAppendId ?? undefined,
     };
     await runFinalize();
   } else {
