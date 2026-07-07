@@ -53,15 +53,9 @@ A fresh git worktree needs bootstrapping first (sidecar binaries, `npm ci`,
   `invoke_handler`), domain modules, `capabilities/` (permission allowlist).
 - `docs/superpowers/specs/` — design specs.
 
-## Agent instruction files
-
-- `AGENTS.md` — canonical repository instructions for coding agents.
-- `CLAUDE.md` — symlink to `AGENTS.md` for Claude Code compatibility.
-
 ## Agent skills
 
-- `.agents/skills/` — canonical source for the five oats skills above.
-- `.claude/skills` — symlink to `.agents/skills` for Claude Code compatibility.
+- `.agents/skills/` — the five oats skills above, shared by Codex and Claude Code.
 
 ## `.claude/` directory
 
