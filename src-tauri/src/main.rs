@@ -17,6 +17,7 @@ mod tray;
 mod tray_meeting;
 mod update_manager;
 mod vault;
+mod window_style;
 
 /// Build the macOS application menu. Mirrors Tauri's default menu (so the
 /// standard Edit/Window/View items and their shortcuts still work) but injects
@@ -288,13 +289,8 @@ fn main() {
             // Pre-create settings window (hidden) — shown on demand from tray.
             // Intercept close requests so the window hides instead of being
             // destroyed; otherwise re-opening from the tray would do nothing.
-            let settings = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/#/settings".into()))
-                .title("Oats Settings")
-                .inner_size(450.0, 800.0)
-                .resizable(false)
-                .center()
+            let settings = crate::window_style::settings_window_builder(app)
                 .visible(false)
-                .skip_taskbar(true)
                 .build()?;
 
             let settings_clone = settings.clone();

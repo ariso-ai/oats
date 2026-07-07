@@ -2,7 +2,7 @@ use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager,
 };
 
 // The menu-bar icon is a macOS template image: AppKit uses the PNG alpha mask
@@ -186,17 +186,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     if let Some(win) = app.get_webview_window("settings") {
                         let _ = win.show();
                         let _ = win.set_focus();
-                    } else if let Ok(win) = WebviewWindowBuilder::new(
-                        app,
-                        "settings",
-                        tauri::WebviewUrl::App("/#/settings".into()),
-                    )
-                    .title("oats Settings")
-                    .inner_size(450.0, 800.0)
-                    .resizable(false)
-                    .center()
-                    .skip_taskbar(true)
-                    .build()
+                    } else if let Ok(win) = crate::window_style::settings_window_builder(app)
+                        .build()
                     {
                         let win_clone = win.clone();
                         win.on_window_event(move |event| {
