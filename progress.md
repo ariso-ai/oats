@@ -22,8 +22,8 @@
 - Findings so far: the target repo has only `README.md`, no separate
   contribution guide, no open PRs/issues, and the README explicitly welcomes
   issues/PRs. It describes the list as open-source Mac apps and says apps are
-  free unless marked paid, so OATS honestly fits as a free/open-source menu bar
-  app.
+  free unless marked paid, so OATS honestly fits as a free/open-source
+  local-first meeting-notes app.
 - Current plan: add one OATS entry under `## Menu bar apps`, matching the
   existing `[Name](url): description` style; commit with `docs: add oats`; push
   a unique branch to the authenticated user's fork; open a draft PR linking the
@@ -37,7 +37,7 @@
   draft PR https://github.com/viraat/awesome-mac-apps/pull/1 against
   `viraat/awesome-mac-apps:master`.
 - Placement/edit: added
-  `[OATS](https://github.com/ariso-ai/oats): Open-source menu bar meeting-notes app for Apple Silicon Macs with live transcription, speaker labels, AI summaries, and an offline on-device mode.`
+  `[OATS](https://github.com/ariso-ai/oats): Open-source local-first meeting-notes app for Apple Silicon Macs with live transcription, speaker labels, AI summaries, and an offline on-device mode.`
   under `README.md` > `## Menu bar apps`, after `itsycal` and before
   `Tomato One`.
 - Validation: `git diff --check` passed before commit and
@@ -155,7 +155,7 @@
   entry, committed `docs: add oats`, pushed to the fork, and opened draft PR
   https://github.com/jordanbaird/awesome-menubar/pull/1.
 - Placement/edit: added
-  `[oats](https://github.com/ariso-ai/oats) - Open-source macOS menu bar meeting-notes app with live transcription, speaker labels, AI summaries, and optional fully offline on-device mode.`
+  `[oats](https://github.com/ariso-ai/oats) - Open-source local-first macOS meeting-notes app with live transcription, speaker labels, AI summaries, and optional fully offline on-device mode.`
   under `README.md` > `## Apps`.
 - Validation: `git diff --check` passed. No `markdownlint` executable was
   available, and the target repo has no package/config files defining tests,
@@ -185,8 +185,8 @@
   `applications.json` near the notes apps with `notes`, `productivity`, and
   `menubar` categories; committed `docs: add oats`; pushed the branch; opened
   draft PR https://github.com/serhii-londar/open-source-mac-os-apps/pull/1188.
-- Placement/edit: entry title `OATS`; description `Open-source macOS menu bar
-  app for meeting notes with live transcription, speaker labels, AI summaries,
+- Placement/edit: entry title `OATS`; description `Open-source local-first
+  macOS meeting-notes app with live transcription, speaker labels, AI summaries,
   and an offline on-device mode.`; repo URL `https://github.com/ariso-ai/oats`;
   official site `https://ariso.ai/oats`; icon and screenshot use raw URLs from
   the OATS repository.
@@ -352,3 +352,34 @@
 - Lessons learned: when OATS is submitted to broad app lists, the primary
   category should be notes, meeting notes, recorder, or studying before generic
   voice-to-text, transcription, or menu-bar categories if the list offers both.
+
+### External PR wording cleanup
+
+- Approach: replace product-description language that framed OATS as a
+  `menu bar meeting-notes app` with `local-first meeting-notes app`, while
+  preserving target-specific categories such as `awesome-menubar` and
+  `menubar` metadata where they are part of the destination list structure.
+- Steps taken: updated and pushed wording-only follow-up commits to the affected
+  external PR branches for `jaywcjlove/awesome-mac`,
+  `serhii-londar/open-source-mac-os-apps`, `iCHAIT/awesome-macOS`,
+  `phmullins/awesome-macos`, `jordanbaird/awesome-menubar`,
+  `feep/awesome-apple-silicon`, `schickling/awesome-local-first`,
+  `zhongkechen/awesome-local-first`, `alexanderop/awesome-local-first`,
+  `smashism/awesome-macadmin-tools`, `alvinreal/awesome-opensource-ai`,
+  `mundimark/awesome-markdown-editors`, `tehtbl/awesome-note-taking`,
+  `suncloudsmoon/awesome-open-source-ai`, and
+  `nil0x42/awesome-hacker-note-taking`.
+- PR bodies: edited the live descriptions for the open PRs that still used the
+  old wording, including `open-source-mac-os-apps#1188`,
+  `awesome-macOS#909`, `awesome-macos#210`, `awesome-menubar#1`,
+  `tborychowski/awesome-mac#5`, `awesome-macadmin-tools#57`,
+  `janhq/awesome-local-ai#132`, `alexanderop/awesome-local-first#44`,
+  `schickling/awesome-local-first#40`, `awesome-opensource-ai#575`,
+  `awesome-note-taking#108`, and `awesome-hacker-note-taking#8`.
+- Validation: all touched target repos passed `git diff --check`; additional
+  target checks passed for `jaywcjlove/awesome-mac` (`npm run build` and
+  `npm run create:ast`), `serhii-londar/open-source-mac-os-apps`
+  (`swift .github/main.swift`, with generated README/api side effects removed),
+  `alvinreal/awesome-opensource-ai`
+  (`python3 tools/validate_awesome.py --skip-remote`), and
+  `tehtbl/awesome-note-taking` (markdownlint).

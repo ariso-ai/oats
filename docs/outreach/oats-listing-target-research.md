@@ -243,20 +243,20 @@ These are written to be copied with minimal editing. I have kept them short beca
 
 | Target | Recommended message |
 |---|---|
-| GitHub Topics | **Repo metadata update**: “Updating OATS topics for discoverability: `meeting-notes`, `speech-to-text`, `transcription`, `ai-notes`, `local-first`, `privacy`, `menubar-app`, `macos-application`, `apple-silicon`, `tauri`, `tauri-app`. OATS is a free, open-source Mac menubar app for offline transcription and AI meeting notes.” |
-| open-source-mac-os-apps | **PR text**: “Add **OATS** — free, open-source macOS menubar app for meeting recording, transcription, and AI notes. Supports cloud mode or fully on-device mode on Apple Silicon Macs. Suggested category: Productivity / Notes / Audio.” |
-| awesome-tauri | **PR text**: “Add **OATS** under Apps/Productivity: a Tauri + Rust + Vue macOS menubar app for meeting transcription and AI notes, with privacy-first local mode and Apple Silicon support.” |
-| awesome-mac | **PR text**: “Add **OATS** in Productivity / Note Taking: open-source macOS menubar app for meeting notes, offline transcription, and AI summaries. Built with Tauri and optimized for Apple Silicon.” |
-| awesome-menubar | **PR text**: “Add **OATS**: open-source menu bar app for Mac that records/transcribes meetings and generates AI notes, with optional 100% on-device mode for privacy-sensitive workflows.” |
-| awesome-note-taking | **Issue or PR text**: “Suggest adding **OATS** to AI note-taking / meeting notes. It is a free, open-source macOS menubar app focused on meeting capture, offline transcription, and AI-generated notes.” |
+| GitHub Topics | **Repo metadata update**: “Updating OATS topics for discoverability: `meeting-notes`, `speech-to-text`, `transcription`, `ai-notes`, `local-first`, `privacy`, `menubar-app`, `macos-application`, `apple-silicon`, `tauri`, `tauri-app`. OATS is a free, open-source local-first Mac meeting-notes app for offline transcription and AI meeting notes.” |
+| open-source-mac-os-apps | **PR text**: “Add **OATS** — free, open-source local-first macOS meeting-notes app for meeting recording, transcription, and AI notes. Supports cloud mode or fully on-device mode on Apple Silicon Macs. Suggested category: Productivity / Notes / Audio.” |
+| awesome-tauri | **PR text**: “Add **OATS** under Apps/Productivity: a Tauri + Rust + Vue local-first macOS meeting-notes app for meeting transcription and AI notes, with privacy-first local mode and Apple Silicon support.” |
+| awesome-mac | **PR text**: “Add **OATS** in Productivity / Note Taking: open-source local-first macOS meeting-notes app for meeting notes, offline transcription, and AI summaries. Built with Tauri and optimized for Apple Silicon.” |
+| awesome-menubar | **PR text**: “Add **OATS**: open-source local-first meeting-notes app for Mac that records/transcribes meetings and generates AI notes, with optional 100% on-device mode for privacy-sensitive workflows.” |
+| awesome-note-taking | **Issue or PR text**: “Suggest adding **OATS** to AI note-taking / meeting notes. It is a free, open-source local-first macOS app focused on meeting capture, offline transcription, and AI-generated notes.” |
 | awesome-whisper | **PR text**: “Add **OATS** to apps built with Whisper/ASR tooling: open-source Mac app for meeting transcription and AI notes, with on-device mode and privacy-first positioning.” |
 | awesome-voice-typing | **PR text**: “Add **OATS** in desktop/macOS section: open-source app for speech-to-text meeting capture and AI notes. Strong fit for offline, local, and privacy-preserving dictation workflows.” |
-| MacMenuBar.com | **Submission copy**: “**OATS** is a free, open-source menu bar app for macOS that records meetings, transcribes speech, and turns conversations into AI notes. Built for Apple Silicon with privacy-first on-device mode.” |
+| MacMenuBar.com | **Submission copy**: “**OATS** is a free, open-source local-first meeting-notes app for macOS that records meetings, transcribes speech, and turns conversations into AI notes. Built for Apple Silicon with privacy-first on-device mode.” |
 | AlternativeTo | **App description**: “OATS is a free and open-source macOS app for meeting notes. It records, transcribes, and summarizes meetings with AI, and can run fully on-device on Apple Silicon Macs for privacy-sensitive workflows. Good alternative positioning: Otter.ai, Granola, Plaud, Fathom, Superwhisper-style workflows.” |
 
 A short reusable one-line pitch for most listings is:
 
-> **OATS is a free, open-source macOS menubar app for meeting transcription and AI notes, with privacy-first on-device mode on Apple Silicon.**
+> **OATS is a free, open-source local-first macOS meeting-notes app for meeting transcription and AI notes, with privacy-first on-device mode on Apple Silicon.**
 
 A slightly more technical variant for developer lists is:
 

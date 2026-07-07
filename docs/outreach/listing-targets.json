@@ -12,8 +12,8 @@
     "download": "https://github.com/ariso-ai/oats/releases/latest",
     "license": "MIT",
     "platform": "macOS 14+ on Apple Silicon",
-    "pitch": "oats is an open-source macOS menu bar app that records meetings, streams transcripts, labels speakers, and writes clean Markdown notes, with a free cloud backend or a fully offline on-device mode.",
-    "shortPitch": "Open-source macOS menu bar meeting-notes app with live transcription, speaker labels, AI summaries, and a fully offline on-device mode.",
+    "pitch": "oats is an open-source local-first macOS meeting-notes app that records meetings, streams transcripts, labels speakers, and writes clean Markdown notes, with a free cloud backend or a fully offline on-device mode.",
+    "shortPitch": "Open-source local-first macOS meeting-notes app with live transcription, speaker labels, AI summaries, and a fully offline on-device mode.",
     "tags": [
       "macos",
       "meeting-notes",
