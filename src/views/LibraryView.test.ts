@@ -402,6 +402,39 @@ describe('LibraryView', () => {
     vi.useRealTimers();
   });
 
+  it('stops spinning and shows an error when a search request never settles', async () => {
+    vi.useFakeTimers();
+    backendId.mockReturnValue('ariso');
+    supportsSearch.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Existing' })]);
+    // A hung backend request: the promise never resolves or rejects, which is
+    // what left cmd-K stuck in a persistent "Searching…" state (issue #210).
+    searchMeetings.mockImplementation(() => new Promise(() => {}));
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    await wrapper.get('.search-trigger').trigger('click');
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>('.palette-input')!;
+
+    input.value = 'note';
+    input.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(180);
+    await flushPromises();
+    // Loading progress shows briefly while the request is in flight.
+    expect(document.body.textContent).toContain('Searching');
+
+    // Once the search timeout elapses it must stop spinning and surface a clear
+    // error state instead of hanging on "Searching…" forever.
+    await vi.advanceTimersByTimeAsync(15000);
+    await flushPromises();
+    expect(document.body.textContent).not.toContain('Searching');
+    const errorRow = document.body.querySelector('.empty-row.error');
+    expect(errorRow).not.toBeNull();
+    expect(errorRow!.textContent).toContain('timed out');
+    vi.useRealTimers();
+  });
+
   it('selecting a search result closes the palette and opens that meeting', async () => {
     vi.useFakeTimers();
     backendId.mockReturnValue('ariso');

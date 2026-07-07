@@ -92,6 +92,30 @@ import type { MeetingListItem } from '../composables/useBackend';
 
 const minQueryLength = 2;
 const debounceMs = 180;
+// A search request must always reach a terminal state. The Ariso HTTP proxy has
+// no request timeout, so a slow/hung `/meetings` response would otherwise leave
+// the palette stuck on "Searching…" forever (issue #210). Bound the wait and
+// fall back to a clear error state instead.
+const searchTimeoutMs = 15000;
+
+class SearchTimeoutError extends Error {}
+
+// Reject with SearchTimeoutError if `promise` hasn't settled within `ms`.
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new SearchTimeoutError()), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
 
 const props = defineProps<{
   open: boolean;
@@ -216,14 +240,14 @@ async function runSearch(term: string): Promise<void> {
   loading.value = true;
   error.value = null;
   try {
-    const next = await props.searchMeetings(term);
+    const next = await withTimeout(props.searchMeetings(term), searchTimeoutMs);
     if (requestId !== searchRequestId) return;
     results.value = next;
     activeIndex.value = 0;
   } catch (e) {
     if (requestId !== searchRequestId) return;
     console.error('Failed to search meetings', e);
-    error.value = 'Search failed.';
+    error.value = e instanceof SearchTimeoutError ? 'Search timed out. Try again.' : 'Search failed.';
     results.value = [];
   } finally {
     if (requestId === searchRequestId) loading.value = false;
