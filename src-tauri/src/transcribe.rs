@@ -86,10 +86,33 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
     })
 }
 
+/// Parsed output of `ariso-stt notes`: the Markdown notes plus an optional
+/// generated title. `title` is `None` when the sidecar emits no title (blank,
+/// or a non-JSON/older binary whose whole stdout is treated as the notes body).
+#[derive(Debug, Clone)]
+pub struct NotesOutput {
+    pub title: Option<String>,
+    pub notes: String,
+}
+
+/// JSON contract emitted by `ariso-stt notes`: `{ "title": ..., "notes": ... }`.
+#[derive(Deserialize)]
+struct NotesJson {
+    #[serde(default)]
+    title: String,
+    notes: String,
+}
+
+/// Trimmed title, or `None` when empty.
+fn normalize_title(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
 /// Run the sidecar in notes mode and return the generated markdown (stdout).
 /// Bounded by [`NOTES_TIMEOUT`]; on timeout the child process is killed
 /// (via `kill_on_drop`) so a hung sidecar can't keep a caller pending.
-pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, String> {
+pub async fn run_notes(transcript: &Path, models: &Path) -> Result<NotesOutput, String> {
     let bin = sidecar_path()?;
     let mut cmd = Command::new(&bin);
     cmd.arg("notes")
@@ -115,7 +138,20 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, Strin
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ariso-stt notes failed: {}", stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    // Tolerant parse: prefer the {title, notes} JSON contract; fall back to
+    // treating raw stdout as the notes body (non-JSON / older sidecar binary).
+    match serde_json::from_str::<NotesJson>(trimmed) {
+        Ok(j) => Ok(NotesOutput {
+            title: normalize_title(&j.title),
+            notes: j.notes.trim().to_string(),
+        }),
+        Err(_) => Ok(NotesOutput {
+            title: None,
+            notes: trimmed.to_string(),
+        }),
+    }
 }
 
 /// Whether the transcript's on-disk bytes differ between two reads. Used to
@@ -146,18 +182,18 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     match outcome {
         // Empty output is a silent failure: it would write a blank note with
         // notes_error unset, reading as success. Record it.
-        Ok(notes) if notes.trim().is_empty() => {
+        Ok(output) if output.notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
             let _ = storage::write_meta(&dir, &meta);
         }
-        Ok(notes) => {
+        Ok(output) => {
             let audio_file = match &meta.audio_file {
                 Some(a) => a.clone(),
                 // Legacy recording with no vault audio: keep the old location so
                 // its note stays alongside its audio.
                 None => {
-                    if let Err(e) = storage::write_notes(&dir, &notes) {
+                    if let Err(e) = storage::write_notes(&dir, &output.notes) {
                         eprintln!("write notes: {e}");
                         meta.notes_error = Some(e);
                         let _ = storage::write_meta(&dir, &meta);
@@ -166,7 +202,7 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                 }
             };
             let basename = audio_file.strip_suffix(".mp3").unwrap_or(audio_file.as_str());
-            if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &notes) {
+            if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &output.notes) {
                 eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
                 let _ = storage::write_meta(&dir, &meta);
@@ -637,6 +673,48 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn run_notes_parses_title_and_notes_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(
+            tmp.path(),
+            "echo '{\"title\":\"Budget Planning\",\"notes\":\"## Summary body\"}'",
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let transcript = tmp.path().join("transcript.md");
+        std::fs::write(&transcript, b"hi").unwrap();
+        let out = run_notes(&transcript, tmp.path()).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(out.title.as_deref(), Some("Budget Planning"));
+        assert_eq!(out.notes, "## Summary body");
+    }
+
+    #[tokio::test]
+    async fn run_notes_falls_back_to_raw_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), "echo '# Notes'");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let transcript = tmp.path().join("transcript.md");
+        std::fs::write(&transcript, b"hi").unwrap();
+        let out = run_notes(&transcript, tmp.path()).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(out.title, None);
+        assert_eq!(out.notes, "# Notes");
+    }
+
+    #[tokio::test]
+    async fn run_notes_blank_title_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), "echo '{\"title\":\"   \",\"notes\":\"## Summary\"}'");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let transcript = tmp.path().join("transcript.md");
+        std::fs::write(&transcript, b"hi").unwrap();
+        let out = run_notes(&transcript, tmp.path()).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(out.title, None);
+        assert_eq!(out.notes, "## Summary");
     }
 
     #[tokio::test]
