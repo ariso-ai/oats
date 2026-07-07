@@ -208,9 +208,10 @@ func generateTitle(container: ModelContainer, notes: String) async throws -> Str
 }
 
 /// Reduce a model's title output to one clean line: take the first non-empty
-/// non-fence line, strip surrounding quotes / leading Markdown markers, collapse
-/// whitespace, drop trailing sentence punctuation, and cap at 40 characters on a
-/// word boundary. Returns "" when nothing usable remains.
+/// non-fence line, strip surrounding quotes / Markdown markers (both ends),
+/// collapse whitespace, drop trailing sentence punctuation, strip a leading
+/// "Meeting"/"Notes"/"Summary" token, and cap at 40 characters on a word
+/// boundary. Returns "" when nothing usable remains.
 func sanitizeTitle(_ raw: String) -> String {
     let firstLine = raw
         .replacingOccurrences(of: "\r\n", with: "\n")
@@ -218,12 +219,38 @@ func sanitizeTitle(_ raw: String) -> String {
         .map { $0.trimmingCharacters(in: .whitespaces) }
         .first(where: { !$0.isEmpty && !$0.hasPrefix("```") }) ?? ""
     var s = firstLine
-    while let f = s.first, "#*->\"'`".contains(f) { s.removeFirst() }
+    // Strip the same marker set from BOTH ends so e.g. "**Budget Review**"
+    // fully unwraps (a leading-only strip would leave the trailing "**").
+    let markers = "#*->\"'`"
+    while let f = s.first, markers.contains(f) { s.removeFirst() }
     s = s.trimmingCharacters(in: .whitespaces)
-    while let l = s.last, "\"'`".contains(l) { s.removeLast() }
+    while let l = s.last, markers.contains(l) { s.removeLast() }
+    s = s.trimmingCharacters(in: .whitespaces)
     s = s.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
     while let l = s.last, ".,;:".contains(l) { s.removeLast() }
     s = s.trimmingCharacters(in: .whitespaces)
+    // Deterministically drop a leading "Meeting"/"Notes"/"Summary" token (a
+    // stated title constraint the model sometimes violates), optionally
+    // followed by ":"/"-"/whitespace. Loop so "Meeting Notes: X" -> "X". Strip
+    // from the original-case `s` so the remainder keeps its casing.
+    let bannedPrefixes = ["meeting", "notes", "summary"]
+    var strippedPrefix = true
+    while strippedPrefix {
+        strippedPrefix = false
+        for prefix in bannedPrefixes where s.lowercased().hasPrefix(prefix) {
+            let rest = String(s.dropFirst(prefix.count))
+            // Only strip if the token is a whole word (next char isn't a letter
+            // or digit continuing it), so "Meetings Recap" is left untouched.
+            if let next = rest.first, next.isLetter || next.isNumber { continue }
+            var trimmed = rest
+            while let f = trimmed.first, f == ":" || f == "-" || f == " " || f == "\t" {
+                trimmed.removeFirst()
+            }
+            s = trimmed.trimmingCharacters(in: .whitespaces)
+            strippedPrefix = true
+            break
+        }
+    }
     let maxChars = 40
     if s.count > maxChars {
         let capped = String(s.prefix(maxChars))
