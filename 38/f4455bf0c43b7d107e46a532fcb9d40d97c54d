@@ -1,0 +1,22 @@
+docs/outreach/listing-pr-batch-report.md
+  s_cf3c9812e7fc2c::t_be4edf3bd546a6 36,40,45,103-108
+  s_cf3c9812e7fc2c::t_db62e0d05e5d15 109
+progress.md
+  s_cf3c9812e7fc2c::t_be4edf3bd546a6 336-354
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "38f4455bf0c43b7d107e46a532fcb9d40d97c54d",
+  "prompts": {},
+  "sessions": {
+    "s_cf3c9812e7fc2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d22-876f-7442-961e-bb24e65d0362",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
