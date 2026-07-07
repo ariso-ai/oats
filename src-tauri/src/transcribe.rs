@@ -1662,6 +1662,29 @@ mod tests {
         assert!(meta.title_is_default);
     }
 
+    #[test]
+    fn generated_title_skipped_when_whitespace() {
+        let mut meta = RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "Mon Jul 6 @ 959AM".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 12,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some("2026-06-02 default.mp3".into()),
+            notes_written: None,
+            title_is_default: true,
+        };
+        maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", Some("   ".to_string()));
+        assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
+        assert!(meta.title_is_default);
+    }
+
     #[tokio::test]
     async fn notes_regenerate_default_title_and_rename_vault_note() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1685,6 +1708,7 @@ mod tests {
         let meta = read_meta(&dir).unwrap();
         assert_eq!(meta.title, "Budget Planning");
         assert!(!meta.title_is_default);
+        assert_eq!(meta.audio_file.as_deref(), Some("2026-06-02 Budget Planning.mp3"));
         // The vault note file was renamed to the generated-title basename.
         let vault = crate::vault::vault_root().unwrap();
         assert!(
