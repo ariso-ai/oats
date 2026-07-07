@@ -1,0 +1,19 @@
+AGENTS.md
+  s_1d7e9611628d32::t_15f9e802832f76 58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1221012d4bdf333e9088f89b1344f25e79b79e54",
+  "prompts": {},
+  "sessions": {
+    "s_1d7e9611628d32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3cfa-050a-7191-89b4-a3aa8c6faada",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
