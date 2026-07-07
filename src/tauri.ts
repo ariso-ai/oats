@@ -212,7 +212,8 @@ export const local = {
     title: string,
     createdAt: string,
     durationSeconds: number,
-    appendTo?: string
+    appendTo?: string,
+    forceNew?: boolean
   ): Promise<LocalFinalizeResult> {
     return invoke<LocalFinalizeResult>('local_finalize_recording', {
       audio,
@@ -220,6 +221,7 @@ export const local = {
       createdAt,
       durationSeconds,
       appendTo,
+      forceNew,
     });
   },
   listRecordings(): Promise<RecordingSummary[]> {
@@ -229,8 +231,8 @@ export const local = {
    *  will finalize into — the append target if it will merge into the recent
    *  recording, else the new recording's own id. Lets the recorder surface the
    *  right row up front instead of a phantom new note. */
-  recordingIdForStart(createdAt: string): Promise<string> {
-    return invoke<string>('local_recording_id_for_start', { createdAt });
+  recordingIdForStart(createdAt: string, forceNew?: boolean): Promise<string> {
+    return invoke<string>('local_recording_id_for_start', { createdAt, forceNew });
   },
   /** Cheap single-recording status for the detail panel's generation poller. */
   recordingStatus(id: string): Promise<RecordingStatusView> {
