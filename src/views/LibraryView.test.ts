@@ -129,6 +129,9 @@ beforeEach(() => {
   searchMeetings.mockResolvedValue([]);
 });
 afterEach(() => {
+  // Restore real timers even if a fake-timer test failed before its own
+  // vi.useRealTimers() — otherwise leaked fake timers break later tests.
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
