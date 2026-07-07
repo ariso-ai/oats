@@ -575,13 +575,14 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
 }
 
 /// Build the waveform window's route, appending the optional `localAppendId`
-/// value plus the `auto` and `pillHidden` query flags. Kept pure so the wiring
-/// is unit-testable.
+/// value, the `forceNew` flag, plus the `auto` and `pillHidden` query flags.
+/// Kept pure so the wiring is unit-testable.
 fn waveform_url(
     meeting_id: Option<i64>,
     auto: bool,
     pill_hidden: bool,
     local_append_id: Option<&str>,
+    force_new: bool,
 ) -> String {
     let mut url = match meeting_id {
         Some(id) => format!("/#/waveform?meetingId={id}"),
@@ -593,6 +594,9 @@ fn waveform_url(
     };
     if let Some(id) = local_append_id {
         push(&format!("localAppendId={id}"));
+    }
+    if force_new {
+        push("forceNew=1");
     }
     if auto {
         push("auto=1");
@@ -606,11 +610,14 @@ fn waveform_url(
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
-/// `RecordingState` as an auto recording.
+/// `RecordingState` as an auto recording. `force_new` adds `forceNew=1`,
+/// telling the recorder to skip the 5-minute auto-append window and always
+/// dock to a brand-new recording id.
 pub(crate) fn open_waveform_window(
     app: &tauri::AppHandle,
     meeting_id: Option<i64>,
     local_append_id: Option<String>,
+    force_new: bool,
     auto: bool,
 ) -> Result<(), String> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -626,7 +633,7 @@ pub(crate) fn open_waveform_window(
     // recorder UI, so the pill never flashes over it. The window is still
     // created visible for getUserMedia; only its painting is suppressed.
     let pill_hidden = !crate::recorder_pill::should_show_now(app);
-    let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref());
+    let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref(), force_new);
     let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
@@ -727,17 +734,20 @@ async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
 
 /// Open the waveform recording window, optionally attaching to an existing
 /// meeting id. Closes the meeting-picker window if present and flips the
-/// tray menu to the recording state.
+/// tray menu to the recording state. `force_new` (default `false` when
+/// omitted) requests a brand-new local recording that skips the 5-minute
+/// auto-append window.
 #[tauri::command]
 pub async fn start_recording_window(
     app: tauri::AppHandle,
     meeting_id: Option<i64>,
     local_append_id: Option<String>,
+    force_new: Option<bool>,
 ) -> Result<(), String> {
     if !ensure_recording_allowed(&app).await {
         return Err("sign-in required".to_string());
     }
-    open_waveform_window(&app, meeting_id, local_append_id, false)
+    open_waveform_window(&app, meeting_id, local_append_id, force_new.unwrap_or(false), false)
 }
 
 /// Show/focus the meeting-picker window, building it if absent. Shared by the
@@ -1364,23 +1374,40 @@ mod tests {
 
     #[test]
     fn waveform_url_appends_flags_with_correct_separators() {
-        assert_eq!(waveform_url(None, false, false, None), "/#/waveform");
-        assert_eq!(waveform_url(Some(42), false, false, None), "/#/waveform?meetingId=42");
-        assert_eq!(waveform_url(None, true, false, None), "/#/waveform?auto=1");
-        assert_eq!(waveform_url(None, true, true, None), "/#/waveform?auto=1&pillHidden=1");
-        assert_eq!(waveform_url(None, false, true, None), "/#/waveform?pillHidden=1");
+        assert_eq!(waveform_url(None, false, false, None, false), "/#/waveform");
+        assert_eq!(waveform_url(Some(42), false, false, None, false), "/#/waveform?meetingId=42");
+        assert_eq!(waveform_url(None, true, false, None, false), "/#/waveform?auto=1");
+        assert_eq!(waveform_url(None, true, true, None, false), "/#/waveform?auto=1&pillHidden=1");
+        assert_eq!(waveform_url(None, false, true, None, false), "/#/waveform?pillHidden=1");
         assert_eq!(
-            waveform_url(Some(7), true, true, None),
+            waveform_url(Some(7), true, true, None, false),
             "/#/waveform?meetingId=7&auto=1&pillHidden=1"
         );
         // Local continue: the append target id rides on the URL like the flags.
         assert_eq!(
-            waveform_url(None, false, false, Some("2026-06-02T10-00-00Z")),
+            waveform_url(None, false, false, Some("2026-06-02T10-00-00Z"), false),
             "/#/waveform?localAppendId=2026-06-02T10-00-00Z"
         );
         assert_eq!(
-            waveform_url(None, true, false, Some("abc")),
+            waveform_url(None, true, false, Some("abc"), false),
             "/#/waveform?localAppendId=abc&auto=1"
+        );
+    }
+
+    #[test]
+    fn waveform_url_appends_force_new_flag() {
+        // force_new rides on the URL the same way localAppendId does.
+        assert_eq!(waveform_url(None, false, false, None, true), "/#/waveform?forceNew=1");
+        assert_eq!(
+            waveform_url(None, true, true, None, true),
+            "/#/waveform?forceNew=1&auto=1&pillHidden=1"
+        );
+        // Both localAppendId and forceNew can theoretically be present (an
+        // explicit continue still wins in finalize_core_with_target); the URL
+        // just carries whatever flags it's given.
+        assert_eq!(
+            waveform_url(Some(7), false, false, Some("2026-06-02T10-00-00Z"), true),
+            "/#/waveform?meetingId=7&localAppendId=2026-06-02T10-00-00Z&forceNew=1"
         );
     }
 
