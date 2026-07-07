@@ -1,0 +1,61 @@
+docs/outreach/listing-pr-batch-report.md
+  s_cf3c9812e7fc2c::t_802b9678d09d0b 23
+  s_cf3c9812e7fc2c::t_ddc3331741b5a6 10-19,25-100
+  s_cf3c9812e7fc2c::t_00955edb116c7a 7-9
+  s_cf3c9812e7fc2c::t_ed2ed98387320d 20-22
+  s_cf3c9812e7fc2c::t_b2ee88787fd633 24
+  s_cf3c9812e7fc2c::t_c604f5e957460c 1-6
+src/views/WaveformView.test.ts
+  s_cf3c9812e7fc2c::t_73a5307fa7a3d6 268,314,333,355,382,403,411,417,443,450,460,470,480,663,688
+docs/outreach/oats-listing-target-research.md
+  s_cf3c9812e7fc2c::t_332cedec73fb0a 227-236
+  s_cf3c9812e7fc2c::t_9e1923c690dce0 1-226,237-269
+.agents/prose/src/oats-listing-campaign/index.prose.md
+  s_cf3c9812e7fc2c::t_5fc66f14ca7604 159,167-169,243-300,302-304,396-414
+  s_cf3c9812e7fc2c::t_ddc3331741b5a6 1-158,160-166,170-242,301,305-395,415-443
+.gitignore
+  s_cf3c9812e7fc2c::t_ddc3331741b5a6 5-8
+  s_cf3c9812e7fc2c::t_098fd74b4bb3f4 4
+docs/outreach/listing-targets.json
+  s_cf3c9812e7fc2c::t_24270ba47d463b 1-2734,2736-2737,2739-2761,2763-2764,2766-2788,2790-2791,2793-2808
+  s_cf3c9812e7fc2c::t_e92a98939d78de 2735,2738,2762,2765,2789,2792
+src/views/LibraryView.test.ts
+  s_cf3c9812e7fc2c::t_0082a8f712b59e 98-103,127,895,900,907
+progress.md
+  s_cf3c9812e7fc2c::t_62b6e367ee7e19 31-43,53-54
+  s_cf3c9812e7fc2c::t_965e9c7b77ee91 27,44-48
+  s_cf3c9812e7fc2c::t_ddc3331741b5a6 5-14,18-26,28-30,51-52
+  s_cf3c9812e7fc2c::t_0842305f1ee26b 16-17
+  s_cf3c9812e7fc2c::t_1a4d044e90dbf4 2-4
+  s_cf3c9812e7fc2c::t_0f724bc130ab4e 15
+  s_cf3c9812e7fc2c::t_b02be57b9a5ac3 49-50
+  s_cf3c9812e7fc2c::t_55f418b8d45c4a 1
+src/views/UpdateView.test.ts
+  s_cf3c9812e7fc2c::t_87838a0d4ba30e 47-48,61,87,100
+docs/outreach/oats-listing-profile.md
+  s_7d926d386da042::t_324c752dda89c3 1-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cc0cc0203e0a20c0d67e1881a5fe7389c2328a96",
+  "prompts": {},
+  "sessions": {
+    "s_7d926d386da042": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d1b-44e9-70a0-8b0e-5f4d547e2501",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    },
+    "s_cf3c9812e7fc2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d22-876f-7442-961e-bb24e65d0362",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
