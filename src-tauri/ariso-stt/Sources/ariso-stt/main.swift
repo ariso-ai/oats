@@ -267,7 +267,7 @@ func sanitizeTitle(_ raw: String) -> String {
 func generateNotesAndTitle(transcript: String, modelsURL: URL) async throws -> NotesResult {
     let container = try await loadNotesModel(modelsURL: modelsURL)
     let notes = try await generateNotes(container: container, transcript: transcript)
-    let title = try await generateTitle(container: container, notes: notes)
+    let title = (try? await generateTitle(container: container, notes: notes)) ?? ""
     return NotesResult(title: title, notes: notes)
 }
 
