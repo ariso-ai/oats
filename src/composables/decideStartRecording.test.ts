@@ -2,35 +2,45 @@ import { describe, it, expect } from 'vitest';
 import { decideStartRecording } from './decideStartRecording';
 
 describe('decideStartRecording', () => {
-  it('returns default when no meeting is deliberately open', () => {
-    expect(decideStartRecording({ usesPicker: true, openMeeting: null })).toEqual({ kind: 'default' });
-    expect(decideStartRecording({ usesPicker: false, openMeeting: null })).toEqual({ kind: 'default' });
+  it('local backend, detail pane closed → fresh local recording', () => {
+    expect(
+      decideStartRecording({ usesPicker: false, detailOpen: false, shownMeeting: null })
+    ).toEqual({ kind: 'local-new' });
   });
 
-  it('local backend with an open meeting → choice dialog for that recording', () => {
+  it('local backend, detail pane open → continue the 5-min auto-append recording', () => {
     expect(
       decideStartRecording({
         usesPicker: false,
-        openMeeting: { id: '2026-06-02T10-00-00Z', title: 'Standup', numericId: undefined },
+        detailOpen: true,
+        shownMeeting: { numericId: 42, title: 'Standup' },
       })
-    ).toEqual({ kind: 'local-choice', meetingTitle: 'Standup', localRecordingId: '2026-06-02T10-00-00Z' });
+    ).toEqual({ kind: 'local-continue' });
   });
 
-  it('ariso backend with a numeric open meeting → picker defaulted to it', () => {
+  it('ariso backend, detail pane empty → picker with no default', () => {
+    expect(
+      decideStartRecording({ usesPicker: true, detailOpen: false, shownMeeting: null })
+    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null, defaultMeetingTitle: null });
+  });
+
+  it('ariso backend, detail pane populated → picker defaulted to the shown meeting', () => {
     expect(
       decideStartRecording({
         usesPicker: true,
-        openMeeting: { id: '50', title: 'Sync', numericId: 50 },
+        detailOpen: true,
+        shownMeeting: { numericId: 42, title: 'Standup' },
       })
-    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: 50 });
+    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: 42, defaultMeetingTitle: 'Standup' });
   });
 
-  it('ariso backend with a non-numeric open meeting → picker with no default', () => {
+  it('ariso backend, detail pane populated but numericId is undefined → default id gracefully null', () => {
     expect(
       decideStartRecording({
         usesPicker: true,
-        openMeeting: { id: 'draft', title: 'Draft', numericId: undefined },
+        detailOpen: true,
+        shownMeeting: { numericId: undefined, title: 'Draft' },
       })
-    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null });
+    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null, defaultMeetingTitle: 'Draft' });
   });
 });
