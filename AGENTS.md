@@ -1,12 +1,12 @@
-# oats — working with Codex
+# oats — working with coding agents
 
 oats is a macOS menu-bar meeting recorder/notetaker: hit record, get a transcript and
 notes. **Tauri v2 (Rust) + Vue 3 (TypeScript)**, Apple Silicon only. It runs either in
 the cloud (Ariso) or fully offline on-device.
 
-This repo is set up so Codex is productive on clone. When you trust the folder you
-get the **superpowers** plugin (brainstorming, plans, TDD, systematic debugging) plus
-this repo's own skills.
+This repo is set up so Codex and Claude Code are productive on clone. When you trust
+the folder you get the **superpowers** plugin (brainstorming, plans, TDD, systematic
+debugging) plus this repo's own skills.
 
 ## Use the skills
 
@@ -53,11 +53,19 @@ A fresh git worktree needs bootstrapping first (sidecar binaries, `npm ci`,
   `invoke_handler`), domain modules, `capabilities/` (permission allowlist).
 - `docs/superpowers/specs/` — design specs.
 
-## `.Codex/` directory
+## Agent instruction files
+
+- `AGENTS.md` — canonical repository instructions for coding agents.
+- `CLAUDE.md` — symlink to `AGENTS.md` for Claude Code compatibility.
+
+## Agent skills
+
+- `.agents/skills/` — canonical source for the five oats skills above.
+- `.claude/skills` — symlink to `.agents/skills` for Claude Code compatibility.
+
+## `.claude/` directory
 
 - `settings.json` — shared: registers the official marketplace, auto-enables superpowers.
 - `settings.local.json` — personal overrides (not your concern when shared); it disables
   the `oats-desktop` MCP server by default — `oats-debugging` explains enabling it.
-- `skills/` — the five oats skills above (auto-discovered; also packaged as the
-  `oats-skills` plugin via `.Codex-plugin/`).
 - `commands/` — repo slash commands (e.g. `apply-coderabbit`).

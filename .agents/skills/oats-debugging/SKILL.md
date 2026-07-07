@@ -12,10 +12,10 @@ verify a fix in the real app, not just in unit tests. Pair this with superpowers
 
 ## Enable the server
 
-It is registered in `.mcp.json` as **`oats-desktop`** but disabled by default in
-`.Codex/settings.local.json` (`disabledMcpjsonServers`). Remove it from that list (or
-approve the server when prompted) to use it. The app must be launched with the MCP
-feature:
+It is registered in `.mcp.json` as **`oats-desktop`**. In Claude Code, it may be
+disabled by default in `.claude/settings.local.json` (`disabledMcpjsonServers`);
+remove it from that list or approve the server when prompted. The app must be launched
+with the MCP feature:
 
 ```
 npm run tauri:dev:debug      # = tauri dev --features mcp
