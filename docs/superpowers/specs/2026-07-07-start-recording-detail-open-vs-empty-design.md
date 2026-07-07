@@ -57,12 +57,18 @@ export interface StartRecordingInput {
 export type StartRecordingPlan =
   | { kind: 'local-new' }                                            // forceNew recording
   | { kind: 'local-continue' }                                       // 5-min auto-append (start_recording_window({}))
-  | { kind: 'ariso-picker'; defaultMeetingId: number | null; defaultMeetingTitle: string | null };
+  | { kind: 'ariso-picker'; defaultMeetingId: number | null };
 ```
+
+> **Revised during implementation:** the `open_meeting_picker` command accepts only
+> `default_meeting_id`, so the plan/input carry the meeting id alone — no
+> `defaultMeetingTitle`. The picker resolves the featured meeting's title from its own
+> fetched list (matching the pre-existing #206 wiring). `shownMeeting` is
+> `{ numericId: number | undefined }`.
 
 Decision:
 - `usesPicker` (Ariso): always `ariso-picker`. When `detailOpen`, pass
-  `defaultMeetingId`/`defaultMeetingTitle` from `shownMeeting`; when empty, both `null`.
+  `defaultMeetingId` from `shownMeeting`; when empty, `null`.
 - local + `detailOpen` → `local-continue`.
 - local + empty → `local-new`.
 
@@ -70,9 +76,9 @@ Decision:
 `open`/`decideRecordingAction` wiring for the Start button with:
 
 - Compute `detailOpen = selectedItem.value != null` and `shownMeeting` from
-  `selectedItem.value` (`numericMeetingId(selectedItem.value)`, its title).
+  `selectedItem.value` (`numericMeetingId(selectedItem.value)`).
 - `ariso-picker` → `invoke('open_meeting_picker', args)` where `args` includes
-  `defaultMeetingId`/`defaultMeetingTitle` only when non-null (empty → `{}`).
+  `defaultMeetingId` only when non-null (empty → `{}`).
 - `local-continue` → `invoke('start_recording_window', {})`; `setRecording(true)`.
 - `local-new` → `invoke('start_recording_window', { forceNew: true })`; `setRecording(true)`.
 
@@ -122,8 +128,8 @@ opens the picker with a featured default (existing `open_meeting_picker` args fr
 - `decideStartRecording`: the 2×2 table —
   - local + empty → `local-new`
   - local + populated → `local-continue`
-  - Ariso + empty → `ariso-picker` with `defaultMeetingId: null`, `defaultMeetingTitle: null`
-  - Ariso + populated → `ariso-picker` with the shown meeting's id/title
+  - Ariso + empty → `ariso-picker` with `defaultMeetingId: null`
+  - Ariso + populated → `ariso-picker` with the shown meeting's numeric id
   - Ariso + populated but `numericId` undefined → `defaultMeetingId: null` (graceful)
 
 **Rust (unit, in `transcribe.rs` test module, using the `ARISO_STT_BIN`/`ARISO_ROOT` stubs):**
