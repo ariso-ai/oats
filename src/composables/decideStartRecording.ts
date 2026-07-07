@@ -8,14 +8,15 @@ export interface StartRecordingInput {
   usesPicker: boolean;
   /** Whether a meeting is shown in the detail pane (selectedItem != null). */
   detailOpen: boolean;
-  /** The meeting shown in detail, when populated. null when empty. */
-  shownMeeting: { numericId: number | undefined; title: string } | null;
+  /** The meeting shown in detail, when populated. null when empty. The picker
+   *  command features it by id only (it resolves the title from its own list). */
+  shownMeeting: { numericId: number | undefined } | null;
 }
 
 export type StartRecordingPlan =
   | { kind: 'local-new' }
   | { kind: 'local-continue' }
-  | { kind: 'ariso-picker'; defaultMeetingId: number | null; defaultMeetingTitle: string | null };
+  | { kind: 'ariso-picker'; defaultMeetingId: number | null };
 
 export function decideStartRecording(input: StartRecordingInput): StartRecordingPlan {
   if (input.usesPicker) {
@@ -23,7 +24,6 @@ export function decideStartRecording(input: StartRecordingInput): StartRecording
     return {
       kind: 'ariso-picker',
       defaultMeetingId: hasDefault ? input.shownMeeting!.numericId ?? null : null,
-      defaultMeetingTitle: hasDefault ? input.shownMeeting!.title : null,
     };
   }
 

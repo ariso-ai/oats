@@ -549,7 +549,7 @@ async function startRecording(): Promise<void> {
     const plan = decideStartRecording({
       usesPicker,
       detailOpen: shown != null,
-      shownMeeting: shown ? { numericId: numericMeetingId(shown), title: shown.title } : null,
+      shownMeeting: shown ? { numericId: numericMeetingId(shown) } : null,
     });
 
     if (plan.kind === 'ariso-picker') {

@@ -13,7 +13,7 @@ describe('decideStartRecording', () => {
       decideStartRecording({
         usesPicker: false,
         detailOpen: true,
-        shownMeeting: { numericId: 42, title: 'Standup' },
+        shownMeeting: { numericId: 42 },
       })
     ).toEqual({ kind: 'local-continue' });
   });
@@ -21,7 +21,7 @@ describe('decideStartRecording', () => {
   it('ariso backend, detail pane empty → picker with no default', () => {
     expect(
       decideStartRecording({ usesPicker: true, detailOpen: false, shownMeeting: null })
-    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null, defaultMeetingTitle: null });
+    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null });
   });
 
   it('ariso backend, detail pane populated → picker defaulted to the shown meeting', () => {
@@ -29,9 +29,9 @@ describe('decideStartRecording', () => {
       decideStartRecording({
         usesPicker: true,
         detailOpen: true,
-        shownMeeting: { numericId: 42, title: 'Standup' },
+        shownMeeting: { numericId: 42 },
       })
-    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: 42, defaultMeetingTitle: 'Standup' });
+    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: 42 });
   });
 
   it('ariso backend, detail pane populated but numericId is undefined → default id gracefully null', () => {
@@ -39,8 +39,8 @@ describe('decideStartRecording', () => {
       decideStartRecording({
         usesPicker: true,
         detailOpen: true,
-        shownMeeting: { numericId: undefined, title: 'Draft' },
+        shownMeeting: { numericId: undefined },
       })
-    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null, defaultMeetingTitle: 'Draft' });
+    ).toEqual({ kind: 'ariso-picker', defaultMeetingId: null });
   });
 });
