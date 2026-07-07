@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
+const emit = vi.fn((..._a: unknown[]) => Promise.resolve());
 const getBackendSetting = vi.fn(() => Promise.resolve('ariso' as const));
 const setBackendSetting = vi.fn((_b: unknown) => Promise.resolve());
 const hasPromptedLocalModels = vi.fn(() => Promise.resolve(false));
@@ -35,6 +36,7 @@ vi.mock('@tauri-apps/api/event', () => ({
     listeners.set(name, cb);
     return Promise.resolve(() => listeners.delete(name));
   },
+  emit: (...args: unknown[]) => emit(...args),
 }));
 vi.mock('../tauri', () => ({
   AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
@@ -224,6 +226,17 @@ describe('SettingsView first-time local models prompt', () => {
 
     expect(wrapper.find('.download-confirm').exists()).toBe(true);
     expect(wrapper.text()).toContain('Download on-device models');
+  });
+
+  it('broadcasts a backend-changed event so other windows can react', async () => {
+    // Already-prompted so the switch runs clean without the download modal.
+    hasPromptedLocalModels.mockResolvedValue(true);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await switchToLocal(wrapper);
+
+    expect(emit).toHaveBeenCalledWith('backend://changed');
   });
 
   it('downloads both models and persists the flag on confirm', async () => {
