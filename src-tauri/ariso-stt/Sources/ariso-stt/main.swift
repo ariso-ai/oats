@@ -149,8 +149,7 @@ func loadNotesModel(modelsURL: URL) async throws -> ModelContainer {
 }
 
 /// Run the notes model on `transcript` and return the full Markdown notes.
-func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
-    let container = try await loadNotesModel(modelsURL: modelsURL)
+func generateNotes(container: ModelContainer, transcript: String) async throws -> String {
     // System instructions describe the format in prose — with NO copyable
     // placeholder lines — so a small model writes real content instead of
     // echoing the template (which it did when the format was a fill-in scaffold).
@@ -178,6 +177,71 @@ func generateNotes(transcript: String, modelsURL: URL) async throws -> String {
             repetitionPenalty: 1.15, repetitionContextSize: 64))
     let raw = try await session.respond(to: "Transcript:\n\(transcript)")
     return stripCodeFence(raw)
+}
+
+/// A meeting-notes result: the Markdown notes plus a short generated title.
+struct NotesResult: Codable {
+    let title: String
+    let notes: String
+}
+
+/// Generate a short, plain-text title from already-generated notes, reusing the
+/// loaded model container. Returns "" if nothing usable comes back.
+func generateTitle(container: ModelContainer, notes: String) async throws -> String {
+    let instructions = """
+        You write a short title for a meeting, given its notes.
+
+        Rules:
+        - Output ONLY the title text — no quotes, no Markdown, no preamble, no trailing punctuation.
+        - Keep it short and specific: at most 6 words and 40 characters.
+        - Use Title Case. Use only facts present in the notes; never invent names.
+        - Do not start with "Meeting", "Notes", "Summary", or a date.
+        """
+    let session = ChatSession(
+        container,
+        instructions: instructions,
+        generateParameters: GenerateParameters(
+            maxTokens: 32, temperature: 0.3,
+            repetitionPenalty: 1.15, repetitionContextSize: 64))
+    let raw = try await session.respond(to: "Notes:\n\(notes)")
+    return sanitizeTitle(raw)
+}
+
+/// Reduce a model's title output to one clean line: take the first non-empty
+/// non-fence line, strip surrounding quotes / leading Markdown markers, collapse
+/// whitespace, drop trailing sentence punctuation, and cap at 40 characters on a
+/// word boundary. Returns "" when nothing usable remains.
+func sanitizeTitle(_ raw: String) -> String {
+    let firstLine = raw
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .components(separatedBy: "\n")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .first(where: { !$0.isEmpty && !$0.hasPrefix("```") }) ?? ""
+    var s = firstLine
+    while let f = s.first, "#*->\"'`".contains(f) { s.removeFirst() }
+    s = s.trimmingCharacters(in: .whitespaces)
+    while let l = s.last, "\"'`".contains(l) { s.removeLast() }
+    s = s.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
+    while let l = s.last, ".,;:".contains(l) { s.removeLast() }
+    s = s.trimmingCharacters(in: .whitespaces)
+    let maxChars = 40
+    if s.count > maxChars {
+        let capped = String(s.prefix(maxChars))
+        if let lastSpace = capped.lastIndex(of: " ") {
+            s = String(capped[..<lastSpace]).trimmingCharacters(in: .whitespaces)
+        } else {
+            s = capped
+        }
+    }
+    return s
+}
+
+/// Load the model once, generate notes, then a title from those notes.
+func generateNotesAndTitle(transcript: String, modelsURL: URL) async throws -> NotesResult {
+    let container = try await loadNotesModel(modelsURL: modelsURL)
+    let notes = try await generateNotes(container: container, transcript: transcript)
+    let title = try await generateTitle(container: container, notes: notes)
+    return NotesResult(title: title, notes: notes)
 }
 
 /// The small notes model often wraps its whole answer in a ```markdown … ```
@@ -217,8 +281,9 @@ if isNotes {
     }
     runToCompletion {
         do {
-            let notes = try await generateNotes(transcript: transcript, modelsURL: modelsURL)
-            FileHandle.standardOutput.write(Data(notes.utf8))
+            let result = try await generateNotesAndTitle(transcript: transcript, modelsURL: modelsURL)
+            let data = try JSONEncoder().encode(result)
+            FileHandle.standardOutput.write(data)
         } catch {
             fail("notes error: \(error)")
         }
