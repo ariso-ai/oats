@@ -307,7 +307,7 @@
   The campaign opened 31 draft PRs in external repositories and skipped 17
   targets after repo-specific rule/scope checks. No OATS repository PR is
   required; the accidental OATS-side PR was closed, and this branch is used only
-  to host the campaign report linked from the external PRs.
+  to keep the source campaign artifacts and review report in one place.
 - Report: replaced `docs/outreach/listing-pr-batch-report.md` with the final
   review table linking every draft PR and every skip reason.
 - Final validation: JSON receipt counts passed (`31 + 17 = 48`), all 31
@@ -319,3 +319,17 @@
   local/offline behavior. Star/adoption thresholds should be checked live before
   posting, because several otherwise plausible lists correctly rejected young
   projects.
+
+### External PR body cleanup
+
+- Approach: remove internal campaign/report framing from all external draft PR
+  descriptions while preserving each target repository's existing PR template,
+  checklist, and short fit explanation.
+- Steps taken: edited all 31 external draft PR bodies with `gh pr edit` to
+  remove `Campaign report`, `Campaign context`, the branch report URL, and the
+  explicit outreach-campaign disclosure line.
+- Validation: searched all 31 PR bodies for `listing-pr-batch-report`,
+  `Campaign report`, `Campaign context`, `outreach campaign`, and `submitted as
+  part`; no matches remained. Reconfirmed all 31 PRs are still open drafts.
+- Lessons learned: external list PR bodies should follow the destination repo's
+  PR style and should not expose internal orchestration or campaign language.
