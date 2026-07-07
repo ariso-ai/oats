@@ -1,0 +1,27 @@
+progress.md
+  s_cf3c9812e7fc2c::t_523a88cfe7e7d4 355-385
+  s_cf3c9812e7fc2c::t_5ad73930bd8ae1 25-26,40,158,188-189
+docs/outreach/oats-listing-profile.md
+  s_cf3c9812e7fc2c::t_5ad73930bd8ae1 23
+  s_cf3c9812e7fc2c::t_89fdcf54dbd540 14,16
+docs/outreach/listing-targets.json
+  s_cf3c9812e7fc2c::t_89fdcf54dbd540 15-16
+docs/outreach/oats-listing-target-research.md
+  s_cf3c9812e7fc2c::t_1752f279e37139 246-251,254,259,269
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e1d4416c3ad80ce4328ca599ce70dfee9600bd35",
+  "prompts": {},
+  "sessions": {
+    "s_cf3c9812e7fc2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d22-876f-7442-961e-bb24e65d0362",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
