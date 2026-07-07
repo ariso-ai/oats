@@ -108,6 +108,13 @@ pub struct RecordingMeta {
     /// auto-regeneration guard); v1 does not branch on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_written: Option<String>,
+    /// True while `title` is still the auto-generated default (the frontend
+    /// timestamp label). Set when a fresh recording is created; cleared when the
+    /// user renames it or when AI notes regenerate the title. Absent on
+    /// pre-feature meta.json (migrates to `false`, so those are never
+    /// auto-retitled).
+    #[serde(default)]
+    pub title_is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -653,12 +660,22 @@ mod tests {
         assert_eq!(format_hms(2533.0), "00:42:13");
     }
 
+    #[test]
+    fn title_is_default_defaults_false_when_absent() {
+        // A pre-feature meta.json has no titleIsDefault field; it must migrate to false
+        // so existing recordings are never auto-retitled.
+        let json = r#"{"id":"x","title":"Old Title","createdAt":"2026-06-02T14:30:05.000Z","durationSeconds":12,"status":"done"}"#;
+        let meta: RecordingMeta = serde_json::from_str(json).unwrap();
+        assert!(!meta.title_is_default);
+    }
+
     fn meta_with(id: &str, created: &str) -> RecordingMeta {
         RecordingMeta {
             id: id.into(), title: format!("T {id}"), created_at: created.into(),
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         }
     }
 
@@ -834,6 +851,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            title_is_default: false,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -855,6 +873,7 @@ mod tests {
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -1035,6 +1054,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            title_is_default: false,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();

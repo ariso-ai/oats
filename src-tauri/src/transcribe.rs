@@ -278,6 +278,7 @@ async fn fresh_recording_core(
         last_clip_end_at: None,
         audio_file: Some(audio_file.clone()),
         notes_written: None,
+        title_is_default: true,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -379,6 +380,7 @@ fn save_failed_clip(
                 last_clip_end_at: None,
                 audio_file,
                 notes_written: None,
+                title_is_default: false,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -870,6 +872,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -906,6 +909,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -929,6 +933,7 @@ mod tests {
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -968,6 +973,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1384,6 +1390,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1410,6 +1417,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
