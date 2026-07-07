@@ -265,6 +265,7 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
     await vi.advanceTimersByTimeAsync(2000);
     expect(closeWin).toHaveBeenCalled();
+    wrapper.unmount();
     vi.useRealTimers();
   });
 
@@ -309,8 +310,8 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('show_silence_prompt', {});
     expect(stopRecording).not.toHaveBeenCalled();
-    vi.useRealTimers();
     wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it('never shows the silence prompt when silence detection is disabled', async () => {
@@ -328,8 +329,8 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(invoke.mock.calls.some(([cmd]) => cmd === 'show_silence_prompt')).toBe(false);
     expect(stopRecording).not.toHaveBeenCalled();
-    vi.useRealTimers();
     wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it('auto-stops 60s after an unanswered silence prompt', async () => {
@@ -350,8 +351,8 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('dismiss_silence_prompt');
     expect(stopRecording).toHaveBeenCalled();
-    vi.useRealTimers();
     wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it('silence-prompt://keep reseeds the silence clock so auto-stop is deferred', async () => {
@@ -377,8 +378,8 @@ describe('WaveformView vertical pill', () => {
     await vi.advanceTimersByTimeAsync(SILENCE_GRACE_MS + 1_000);
     await flushPromises();
     expect(stopRecording).not.toHaveBeenCalled();
-    vi.useRealTimers();
     wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it('silence-prompt://stop immediately stops the recording', async () => {
@@ -398,8 +399,8 @@ describe('WaveformView vertical pill', () => {
     await eventHandlers['silence-prompt://stop']?.({});
     await flushPromises();
     expect(stopRecording).toHaveBeenCalled();
-    vi.useRealTimers();
     wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it('does not broadcast a recording phase before capture has started', async () => {
@@ -407,12 +408,13 @@ describe('WaveformView vertical pill', () => {
     vi.setSystemTime(0);
     // getUserMedia still pending: the recorder reports not-recording.
     recorderIsRecording.value = false;
-    mount(WaveformView);
+    const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
     emitEvent.mockClear();
     await vi.advanceTimersByTimeAsync(2_100); // heartbeats fire
     const states = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state');
     expect(states).toHaveLength(0);
+    wrapper.unmount();
     vi.useRealTimers();
   });
 
@@ -438,13 +440,14 @@ describe('WaveformView vertical pill', () => {
     await vi.advanceTimersByTimeAsync(2000);
     const last = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state').at(-1);
     expect((last?.[1] as { phase: string }).phase).toBe('closed');
+    wrapper.unmount();
     vi.useRealTimers();
   });
 
   it('broadcasts the deterministic local recording id for the local backend', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    mount(WaveformView);
+    const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
     await vi.advanceTimersByTimeAsync(1_100); // heartbeat
 
@@ -454,6 +457,7 @@ describe('WaveformView vertical pill', () => {
       .at(-1);
     // Mirrors Rust sanitize_iso_to_id over the mocked startedAt.
     expect(state?.localRecordingId).toBe('2026-06-09T10-00-00Z');
+    wrapper.unmount();
     vi.useRealTimers();
   });
 
@@ -463,7 +467,7 @@ describe('WaveformView vertical pill', () => {
     // Rust resolves this session to an EXISTING recording (append within window),
     // so the strip must dock to that recording's row, not a new-session id.
     recordingIdForStart.mockResolvedValueOnce('2026-06-02T10-00-00Z');
-    mount(WaveformView);
+    const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
     await vi.advanceTimersByTimeAsync(1_100); // heartbeat
 
@@ -473,6 +477,7 @@ describe('WaveformView vertical pill', () => {
       .at(-1);
     expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z');
     expect(state?.localRecordingId).toBe('2026-06-02T10-00-00Z');
+    wrapper.unmount();
     vi.useRealTimers();
   });
 
@@ -655,6 +660,7 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
     await vi.advanceTimersByTimeAsync(2000);
     expect(closeWin).toHaveBeenCalled();
+    wrapper.unmount();
     vi.useRealTimers();
   });
 
@@ -679,6 +685,7 @@ describe('WaveformView vertical pill', () => {
       .map(([, p]) => (p as { phase: string }).phase);
     expect(phases).toContain('uploading');
     expect(phases).toContain('success');
+    wrapper.unmount();
     vi.useRealTimers();
   });
 

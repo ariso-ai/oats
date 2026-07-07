@@ -95,6 +95,12 @@ function item(over: Record<string, unknown>) {
 const detailStub = {
   name: 'MeetingDetailView',
   emits: ['close', 'title-updated'],
+  setup(_props: unknown, { expose }: { expose: (exposed: { saveNotesNow: () => Promise<void> }) => void }) {
+    expose({
+      saveNotesNow: () => writeRecordingNote('stub', ''),
+    });
+    return {};
+  },
   template: '<div class="detail-stub"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
 };
 function mountWithDetailStub() {
@@ -118,6 +124,7 @@ beforeEach(() => {
       isLocal: true,
       durationSeconds: meeting.durationSeconds,
       hasTranscript: meeting.files?.hasTranscript ?? false,
+      audioClips: [],
     })
   );
   invoke.mockResolvedValue(undefined);
@@ -885,19 +892,19 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
     // The recording transition also collapses the sidebar immediately.
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
   });
 
   it('leaves the detail panel unchanged when a recording starts without a meeting', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
-    const wrapper = mount(LibraryView);
+    const wrapper = mountWithDetailStub();
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
 
     emitEvent('recording://started', { meetingId: null });
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
   });
 
   it('reloads the meeting list when the picked meeting is not loaded yet', async () => {

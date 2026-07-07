@@ -44,6 +44,8 @@ vi.mock('../tauri', () => ({
 
 import UpdateView from './UpdateView.vue';
 
+const currentVersion = __APP_VERSION__;
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.listeners.clear();
@@ -56,7 +58,7 @@ describe('UpdateView', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('Oats is up to date');
-    expect(wrapper.text()).toContain('Version 0.4.0 is installed.');
+    expect(wrapper.text()).toContain(`Version ${currentVersion} is installed.`);
     expect(wrapper.text()).not.toContain('Install Update');
     expect(wrapper.text()).toContain('Done');
   });
@@ -82,7 +84,7 @@ describe('UpdateView', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('What’s new for Oats?');
-    expect(wrapper.text()).toContain('Version 0.4.1 is ready. You have 0.4.0.');
+    expect(wrapper.text()).toContain(`Version 0.4.1 is ready. You have ${currentVersion}.`);
     expect(wrapper.text()).toContain('Features');
     expect(wrapper.text()).toContain('Release-note powered highlights');
     expect(wrapper.text()).toContain('Smaller native update window');
@@ -95,7 +97,7 @@ describe('UpdateView', () => {
     mocks.state = {
       ...mocks.defaultState,
       latest_known: {
-        version: '0.4.0',
+        version: currentVersion,
         mandatory: false,
         notes: '- Should not show as pending',
       },

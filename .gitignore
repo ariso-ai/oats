@@ -1,6 +1,11 @@
 dist/
 node_modules/
 output/
+.outreach/
+.agents/prose/deps/
+.agents/prose/dist/
+.agents/prose/runs/
+.agents/prose/.env
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/ariso-stt/.build/

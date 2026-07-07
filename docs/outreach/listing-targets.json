@@ -1,0 +1,2808 @@
+{
+  "$schema": "https://ariso.ai/schemas/oats-listing-targets.schema.json",
+  "generatedAt": "2026-07-07T00:00:00-04:00",
+  "source": {
+    "title": "OATS Listing Target Research Report",
+    "note": "Derived from the attached research report supplied to the Codex session on 2026-07-07."
+  },
+  "oats": {
+    "name": "oats",
+    "repository": "https://github.com/ariso-ai/oats",
+    "website": "https://ariso.ai",
+    "download": "https://github.com/ariso-ai/oats/releases/latest",
+    "license": "MIT",
+    "platform": "macOS 14+ on Apple Silicon",
+    "pitch": "oats is an open-source macOS menu bar app that records meetings, streams transcripts, labels speakers, and writes clean Markdown notes, with a free cloud backend or a fully offline on-device mode.",
+    "shortPitch": "Open-source macOS menu bar meeting-notes app with live transcription, speaker labels, AI summaries, and a fully offline on-device mode.",
+    "tags": [
+      "macos",
+      "meeting-notes",
+      "speech-to-text",
+      "transcription",
+      "ai-notes",
+      "local-first",
+      "privacy",
+      "menubar-app",
+      "apple-silicon",
+      "tauri",
+      "rust",
+      "vue"
+    ]
+  },
+  "targets": [
+    {
+      "id": "tauri-apps-awesome-tauri",
+      "name": "tauri-apps/awesome-tauri",
+      "url": "https://github.com/tauri-apps/awesome-tauri",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "ecosystem-sprint",
+      "primaryAudience": "Tauri builders",
+      "intent": "ecosystem showcase",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "tauri-apps/awesome-tauri",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact framework fit"
+      },
+      "tags": [
+        "tauri",
+        "desktop-app",
+        "rust",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 1
+    },
+    {
+      "id": "jaywcjlove-awesome-mac",
+      "name": "jaywcjlove/awesome-mac",
+      "url": "https://github.com/jaywcjlove/awesome-mac",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac users",
+      "intent": "Mac app discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "jaywcjlove/awesome-mac",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "strong Mac/deskop fit, PRs welcome"
+      },
+      "tags": [
+        "macos",
+        "productivity",
+        "menubar",
+        "open-source"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 2
+    },
+    {
+      "id": "serhii-londar-open-source-mac-os-apps",
+      "name": "serhii-londar/open-source-mac-os-apps",
+      "url": "https://github.com/serhii-londar/open-source-mac-os-apps",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac OSS users",
+      "intent": "open-source Mac apps",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "serhii-londar/open-source-mac-os-apps",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact scope match"
+      },
+      "tags": [
+        "macos",
+        "open-source",
+        "productivity",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 3
+    },
+    {
+      "id": "ichait-awesome-macos",
+      "name": "iCHAIT/awesome-macOS",
+      "url": "https://github.com/iCHAIT/awesome-macOS",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac users",
+      "intent": "Mac software discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "iCHAIT/awesome-macOS",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "Mac app list with contribution guide"
+      },
+      "tags": [
+        "macos",
+        "menubar",
+        "productivity",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 4
+    },
+    {
+      "id": "phmullins-awesome-macos",
+      "name": "phmullins/awesome-macos",
+      "url": "https://github.com/phmullins/awesome-macos",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac users",
+      "intent": "categorized Mac apps",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "phmullins/awesome-macos",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "broad Mac coverage"
+      },
+      "tags": [
+        "macos",
+        "productivity",
+        "communication",
+        "docs"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 5
+    },
+    {
+      "id": "viraat-awesome-mac-apps",
+      "name": "viraat/awesome-mac-apps",
+      "url": "https://github.com/viraat/awesome-mac-apps",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac developers",
+      "intent": "free/open-source Mac apps",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR / issue",
+        "githubRepo": "viraat/awesome-mac-apps",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "open-source Mac apps focus"
+      },
+      "tags": [
+        "macos",
+        "open-source",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 6
+    },
+    {
+      "id": "jordanbaird-awesome-menubar",
+      "name": "jordanbaird/awesome-menubar",
+      "url": "https://github.com/jordanbaird/awesome-menubar",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "menubar-app users",
+      "intent": "menu bar app discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "jordanbaird/awesome-menubar",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact UI pattern fit"
+      },
+      "tags": [
+        "menubar-app",
+        "macos",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 7
+    },
+    {
+      "id": "tborychowski-awesome-mac",
+      "name": "tborychowski/awesome-mac",
+      "url": "https://github.com/tborychowski/awesome-mac",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac power users",
+      "intent": "personal Mac app curation",
+      "submission": {
+        "kind": "github-pr",
+        "method": "issue / PR",
+        "githubRepo": "tborychowski/awesome-mac",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "subjective list, but OATS fits"
+      },
+      "tags": [
+        "macos",
+        "ai",
+        "notes",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 8
+    },
+    {
+      "id": "antelle-my-awesome-mac-apps",
+      "name": "antelle/my-awesome-mac-apps",
+      "url": "https://github.com/antelle/my-awesome-mac-apps",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac power users",
+      "intent": "curated Mac app picks",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "antelle/my-awesome-mac-apps",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "personal list, still accepts contributions"
+      },
+      "tags": [
+        "macos",
+        "productivity",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 9
+    },
+    {
+      "id": "feep-awesome-apple-silicon",
+      "name": "feep/awesome-apple-silicon",
+      "url": "https://github.com/feep/awesome-apple-silicon",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Apple Silicon users",
+      "intent": "Apple Silicon software resources",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "feep/awesome-apple-silicon",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS requires Apple Silicon"
+      },
+      "tags": [
+        "apple-silicon",
+        "macos",
+        "native"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 10
+    },
+    {
+      "id": "smashism-awesome-macadmin-tools",
+      "name": "smashism/awesome-macadmin-tools",
+      "url": "https://github.com/smashism/awesome-macadmin-tools",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Mac admins",
+      "intent": "Mac tooling discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "smashism/awesome-macadmin-tools",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "audience is admins, not end users"
+      },
+      "tags": [
+        "macos",
+        "utility",
+        "menubar"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 11
+    },
+    {
+      "id": "rust-unofficial-awesome-rust",
+      "name": "rust-unofficial/awesome-rust",
+      "url": "https://github.com/rust-unofficial/awesome-rust",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "ecosystem-sprint",
+      "primaryAudience": "Rust developers",
+      "intent": "Rust project discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "rust-unofficial/awesome-rust",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad, but OATS is a Rust app"
+      },
+      "tags": [
+        "rust",
+        "desktop-app",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 12
+    },
+    {
+      "id": "awesome-rust-com-awesome-rust",
+      "name": "awesome-rust-com/awesome-rust",
+      "url": "https://github.com/awesome-rust-com/awesome-rust",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "ecosystem-sprint",
+      "primaryAudience": "Rust developers",
+      "intent": "Rust frameworks and software",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "awesome-rust-com/awesome-rust",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad but apps section exists"
+      },
+      "tags": [
+        "rust",
+        "application",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 13
+    },
+    {
+      "id": "vuejs-awesome-vue",
+      "name": "vuejs/awesome-vue",
+      "url": "https://github.com/vuejs/awesome-vue",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "ecosystem-sprint",
+      "primaryAudience": "Vue developers",
+      "intent": "Vue ecosystem discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "vuejs/awesome-vue",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad framework list"
+      },
+      "tags": [
+        "vue",
+        "tauri-frontend",
+        "desktop-ui"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 14
+    },
+    {
+      "id": "sonicoder86-awesome-vue-3",
+      "name": "sonicoder86/awesome-vue-3",
+      "url": "https://github.com/sonicoder86/awesome-vue-3",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "ecosystem-sprint",
+      "primaryAudience": "Vue 3 developers",
+      "intent": "Vue 3 tooling and examples",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "sonicoder86/awesome-vue-3",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad, but OATS uses Vue"
+      },
+      "tags": [
+        "vue3",
+        "desktop-ui",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 15
+    },
+    {
+      "id": "sudhakar3697-awesome-electron-alternatives",
+      "name": "sudhakar3697/awesome-electron-alternatives",
+      "url": "https://github.com/sudhakar3697/awesome-electron-alternatives",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "ecosystem-sprint",
+      "primaryAudience": "desktop-app builders",
+      "intent": "Electron alternatives",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "sudhakar3697/awesome-electron-alternatives",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "Tauri app is an exact alt-to-Electron ecosystem fit"
+      },
+      "tags": [
+        "tauri",
+        "desktop-app",
+        "rust",
+        "performance"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 16
+    },
+    {
+      "id": "pluja-awesome-privacy",
+      "name": "pluja/awesome-privacy",
+      "url": "https://github.com/pluja/awesome-privacy",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "privacy-focused users",
+      "intent": "privacy-respecting services/tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "pluja/awesome-privacy",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "privacy/on-device positioning aligns closely"
+      },
+      "tags": [
+        "privacy",
+        "local-first",
+        "on-device"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 17
+    },
+    {
+      "id": "lissy93-awesome-privacy",
+      "name": "lissy93/awesome-privacy",
+      "url": "https://github.com/lissy93/awesome-privacy",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "privacy-focused users",
+      "intent": "privacy tools discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "lissy93/awesome-privacy",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "strong privacy-first fit"
+      },
+      "tags": [
+        "privacy",
+        "macos",
+        "notes",
+        "local"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 18
+    },
+    {
+      "id": "ianonymous3000-awesome-privacy-tools",
+      "name": "iAnonymous3000/awesome-privacy-tools",
+      "url": "https://github.com/iAnonymous3000/awesome-privacy-tools",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "privacy users",
+      "intent": "privacy tool catalog",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "iAnonymous3000/awesome-privacy-tools",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS’s privacy story is central"
+      },
+      "tags": [
+        "privacy",
+        "note-taking",
+        "local-first"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 19
+    },
+    {
+      "id": "janhq-awesome-local-ai",
+      "name": "janhq/awesome-local-ai",
+      "url": "https://github.com/janhq/awesome-local-ai",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-AI users",
+      "intent": "run AI locally",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "janhq/awesome-local-ai",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS can run fully on-device"
+      },
+      "tags": [
+        "local-ai",
+        "on-device",
+        "privacy",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 20
+    },
+    {
+      "id": "msb-msb-awesome-local-ai",
+      "name": "msb-msb/awesome-local-ai",
+      "url": "https://github.com/msb-msb/awesome-local-ai",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-AI users",
+      "intent": "consumer local AI resources",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "msb-msb/awesome-local-ai",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "privacy/local hardware angle matches"
+      },
+      "tags": [
+        "local-ai",
+        "on-device",
+        "apple-silicon"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 21
+    },
+    {
+      "id": "rafska-awesome-local-llm",
+      "name": "rafska/awesome-local-llm",
+      "url": "https://github.com/rafska/awesome-local-llm",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-LLM users",
+      "intent": "local model tools/platforms",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "rafska/awesome-local-llm",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "OATS is app-layer, not model infra"
+      },
+      "tags": [
+        "local-llm",
+        "local-ai",
+        "on-device"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 22
+    },
+    {
+      "id": "vince-lam-awesome-local-llms",
+      "name": "vince-lam/awesome-local-llms",
+      "url": "https://github.com/vince-lam/awesome-local-llms",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-LLM users",
+      "intent": "compare local-LLM projects",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "vince-lam/awesome-local-llms",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "infra-adjacent but still relevant"
+      },
+      "tags": [
+        "local-ai",
+        "privacy",
+        "on-device"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 23
+    },
+    {
+      "id": "awesome-selfhosted-awesome-selfhosted",
+      "name": "awesome-selfhosted/awesome-selfhosted",
+      "url": "https://github.com/awesome-selfhosted/awesome-selfhosted",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "self-hosting users",
+      "intent": "self-hosted software discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "awesome-selfhosted/awesome-selfhosted",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "OATS is desktop-first, not a hosted service"
+      },
+      "tags": [
+        "local-first",
+        "privacy",
+        "self-hosted-ish"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 24
+    },
+    {
+      "id": "haiiiiiyun-awesome-selfhosted-cn",
+      "name": "haiiiiiyun/awesome-selfhosted-cn",
+      "url": "https://github.com/haiiiiiyun/awesome-selfhosted-cn",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Chinese self-hosting users",
+      "intent": "localized self-hosted catalog",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "haiiiiiyun/awesome-selfhosted-cn",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "same mismatch as above"
+      },
+      "tags": [
+        "privacy",
+        "local",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "China / Chinese",
+      "priority": 25
+    },
+    {
+      "id": "alexanderop-awesome-local-first",
+      "name": "alexanderop/awesome-local-first",
+      "url": "https://github.com/alexanderop/awesome-local-first",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-first builders/users",
+      "intent": "local-first software catalog",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "alexanderop/awesome-local-first",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact architectural fit"
+      },
+      "tags": [
+        "local-first",
+        "privacy",
+        "offline",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 26
+    },
+    {
+      "id": "schickling-awesome-local-first",
+      "name": "schickling/awesome-local-first",
+      "url": "https://github.com/schickling/awesome-local-first",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-first builders",
+      "intent": "local-first projects",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "schickling/awesome-local-first",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact fit"
+      },
+      "tags": [
+        "local-first",
+        "collaboration",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 27
+    },
+    {
+      "id": "alantriesagain-awesome-local-first",
+      "name": "alantriesagain/awesome-local-first",
+      "url": "https://github.com/alantriesagain/awesome-local-first",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-first builders",
+      "intent": "local-first apps/resources",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "alantriesagain/awesome-local-first",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct fit"
+      },
+      "tags": [
+        "local-first",
+        "privacy",
+        "offline"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 28
+    },
+    {
+      "id": "zhongkechen-awesome-local-first",
+      "name": "zhongkechen/awesome-local-first",
+      "url": "https://github.com/zhongkechen/awesome-local-first",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "local-first builders",
+      "intent": "local-first software list",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "zhongkechen/awesome-local-first",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact fit"
+      },
+      "tags": [
+        "local-first",
+        "note-taking",
+        "privacy"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 29
+    },
+    {
+      "id": "sindresorhus-awesome-whisper",
+      "name": "sindresorhus/awesome-whisper",
+      "url": "https://github.com/sindresorhus/awesome-whisper",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Whisper / ASR users",
+      "intent": "Whisper ecosystem discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "sindresorhus/awesome-whisper",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS directly uses transcription value prop"
+      },
+      "tags": [
+        "whisper",
+        "speech-to-text",
+        "transcription"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 30
+    },
+    {
+      "id": "danielrosehill-awesome-whisper-apps",
+      "name": "danielrosehill/Awesome-Whisper-Apps",
+      "url": "https://github.com/danielrosehill/Awesome-Whisper-Apps",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "speech-tool users",
+      "intent": "Whisper-powered app showcase",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "danielrosehill/Awesome-Whisper-Apps",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "app-layer match is excellent"
+      },
+      "tags": [
+        "whisper",
+        "transcription",
+        "meeting-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 31
+    },
+    {
+      "id": "ancs21-awesome-openai-whisper",
+      "name": "ancs21/awesome-openai-whisper",
+      "url": "https://github.com/ancs21/awesome-openai-whisper",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Whisper users",
+      "intent": "Whisper resources/apps",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "ancs21/awesome-openai-whisper",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS is in-scope technically"
+      },
+      "tags": [
+        "whisper",
+        "speech-recognition",
+        "stt"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 32
+    },
+    {
+      "id": "miblue119-awesome-whisper-application",
+      "name": "MIBlue119/awesome-whisper-application",
+      "url": "https://github.com/MIBlue119/awesome-whisper-application",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Whisper hackers",
+      "intent": "application examples",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "MIBlue119/awesome-whisper-application",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "smaller list, but direct fit"
+      },
+      "tags": [
+        "whisper",
+        "asr",
+        "meeting notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 33
+    },
+    {
+      "id": "primaprashant-awesome-voice-typing",
+      "name": "primaprashant/awesome-voice-typing",
+      "url": "https://github.com/primaprashant/awesome-voice-typing",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "dictation users",
+      "intent": "voice typing and STT tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "primaprashant/awesome-voice-typing",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact speech-to-text utility fit"
+      },
+      "tags": [
+        "voice-typing",
+        "speech-to-text",
+        "offline"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 34
+    },
+    {
+      "id": "zzw922cn-awesome-speech-recognition-speech-synthesis-papers",
+      "name": "zzw922cn/awesome-speech-recognition-speech-synthesis-papers",
+      "url": "https://github.com/zzw922cn/awesome-speech-recognition-speech-synthesis-papers",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "speech researchers",
+      "intent": "ASR/TTS paper roadmap",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "zzw922cn/awesome-speech-recognition-speech-synthesis-papers",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "research list, not product-first"
+      },
+      "tags": [
+        "speech-recognition",
+        "asr"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 35
+    },
+    {
+      "id": "goldsmith-awesome-speech-recognition-papers",
+      "name": "goldsmith/awesome-speech-recognition-papers",
+      "url": "https://github.com/goldsmith/awesome-speech-recognition-papers",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "speech researchers",
+      "intent": "ASR roadmap",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "goldsmith/awesome-speech-recognition-papers",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "paper list, low user acquisition value"
+      },
+      "tags": [
+        "asr",
+        "speech-recognition"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 36
+    },
+    {
+      "id": "wq2012-awesome-diarization",
+      "name": "wq2012/awesome-diarization",
+      "url": "https://github.com/wq2012/awesome-diarization",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "diarization researchers",
+      "intent": "speaker diarization resources",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "wq2012/awesome-diarization",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "speaker separation is adjacent to meeting notes"
+      },
+      "tags": [
+        "speaker-diarization",
+        "transcription"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 37
+    },
+    {
+      "id": "steven2358-awesome-generative-ai",
+      "name": "steven2358/awesome-generative-ai",
+      "url": "https://github.com/steven2358/awesome-generative-ai",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "AI builders",
+      "intent": "GenAI applications landscape",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "steven2358/awesome-generative-ai",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad AI list, but OATS is AI app"
+      },
+      "tags": [
+        "generative-ai",
+        "ai-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 38
+    },
+    {
+      "id": "alvinreal-awesome-opensource-ai",
+      "name": "alvinreal/awesome-opensource-ai",
+      "url": "https://github.com/alvinreal/awesome-opensource-ai",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "open-source AI users",
+      "intent": "open-source AI projects",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "alvinreal/awesome-opensource-ai",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "OATS is an AI-enabled app"
+      },
+      "tags": [
+        "open-source-ai",
+        "local-ai",
+        "privacy"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 39
+    },
+    {
+      "id": "suncloudsmoon-awesome-open-source-ai",
+      "name": "suncloudsmoon/awesome-open-source-ai",
+      "url": "https://github.com/suncloudsmoon/awesome-open-source-ai",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "open-source AI users",
+      "intent": "useful AI tools and models",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "suncloudsmoon/awesome-open-source-ai",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad but relevant"
+      },
+      "tags": [
+        "open-source-ai",
+        "stt",
+        "tools"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 40
+    },
+    {
+      "id": "swiftsimplify-awesome-open-source-ai-tools",
+      "name": "swiftsimplify/awesome-open-source-ai-tools",
+      "url": "https://github.com/swiftsimplify/awesome-open-source-ai-tools",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "AI-tool seekers",
+      "intent": "open-source AI tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "swiftsimplify/awesome-open-source-ai-tools",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broader than OATS, still plausible"
+      },
+      "tags": [
+        "ai-tools",
+        "note-taking",
+        "local-ai"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 41
+    },
+    {
+      "id": "tehtbl-awesome-note-taking",
+      "name": "tehtbl/awesome-note-taking",
+      "url": "https://github.com/tehtbl/awesome-note-taking",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "notes / PKM users",
+      "intent": "note-taking app discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR / issue",
+        "githubRepo": "tehtbl/awesome-note-taking",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact category fit and active additions"
+      },
+      "tags": [
+        "note-taking",
+        "meeting-notes",
+        "ai-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 42
+    },
+    {
+      "id": "nil0x42-awesome-hacker-note-taking",
+      "name": "nil0x42/awesome-hacker-note-taking",
+      "url": "https://github.com/nil0x42/awesome-hacker-note-taking",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "technical users",
+      "intent": "note-taking tools for technical work",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "nil0x42/awesome-hacker-note-taking",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "niche audience, but note-capture fit exists"
+      },
+      "tags": [
+        "note-taking",
+        "markdown",
+        "knowledge base"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 43
+    },
+    {
+      "id": "spsdco-notes",
+      "name": "spsdco/notes",
+      "url": "https://github.com/spsdco/notes",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "note-taking users",
+      "intent": "note-taking app list",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "spsdco/notes",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "older repo, but fit is direct"
+      },
+      "tags": [
+        "note-taking",
+        "markdown",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 44
+    },
+    {
+      "id": "knowfox-awesome-pkm",
+      "name": "knowfox/awesome-pkm",
+      "url": "https://github.com/knowfox/awesome-pkm",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "PKM users",
+      "intent": "tools for thought, PKM",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "knowfox/awesome-pkm",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "PKM adjacent, not purely meetings"
+      },
+      "tags": [
+        "pkm",
+        "note-taking",
+        "knowledge-management"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 45
+    },
+    {
+      "id": "doanhthong-awesome-pkm",
+      "name": "doanhthong/awesome-pkm",
+      "url": "https://github.com/doanhthong/awesome-pkm",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "PKM users",
+      "intent": "PKM and note-taking tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "doanhthong/awesome-pkm",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "strong conceptual fit"
+      },
+      "tags": [
+        "pkm",
+        "note-taking",
+        "second-brain"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 46
+    },
+    {
+      "id": "brettkromkamp-awesome-knowledge-management",
+      "name": "brettkromkamp/awesome-knowledge-management",
+      "url": "https://github.com/brettkromkamp/awesome-knowledge-management",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "KM / PKM users",
+      "intent": "knowledge management apps",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "brettkromkamp/awesome-knowledge-management",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad KM scope"
+      },
+      "tags": [
+        "knowledge-management",
+        "notes",
+        "ai-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 47
+    },
+    {
+      "id": "githubkusi-awesome-knowledge-management-tools",
+      "name": "githubkusi/awesome-knowledge-management-tools",
+      "url": "https://github.com/githubkusi/awesome-knowledge-management-tools",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "KM users",
+      "intent": "compare KM tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "githubkusi/awesome-knowledge-management-tools",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "direct category alignment"
+      },
+      "tags": [
+        "knowledge-management",
+        "notes",
+        "markdown"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 48
+    },
+    {
+      "id": "jyguyomarch-awesome-productivity",
+      "name": "jyguyomarch/awesome-productivity",
+      "url": "https://github.com/jyguyomarch/awesome-productivity",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "productivity users",
+      "intent": "productivity resources and tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "jyguyomarch/awesome-productivity",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad productivity list"
+      },
+      "tags": [
+        "productivity",
+        "notes",
+        "collaboration"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 49
+    },
+    {
+      "id": "productivitydirectory-awesome-productivity-tools",
+      "name": "ProductivityDirectory/awesome-productivity-tools",
+      "url": "https://github.com/productivitydirectory/awesome-productivity-tools",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "productivity users",
+      "intent": "productivity software list",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "productivitydirectory/awesome-productivity-tools",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "fit is broad but reasonable"
+      },
+      "tags": [
+        "productivity",
+        "note-taking",
+        "ai"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 50
+    },
+    {
+      "id": "areknawo-awesome-productivity-software",
+      "name": "areknawo/awesome-productivity-software",
+      "url": "https://github.com/areknawo/awesome-productivity-software",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "productivity users",
+      "intent": "life-management and productivity apps",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "areknawo/awesome-productivity-software",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "category fit is clear"
+      },
+      "tags": [
+        "productivity",
+        "notes",
+        "meeting tools"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 51
+    },
+    {
+      "id": "mundimark-awesome-markdown",
+      "name": "mundimark/awesome-markdown",
+      "url": "https://github.com/mundimark/awesome-markdown",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Markdown users",
+      "intent": "markdown tooling discovery",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "mundimark/awesome-markdown",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "if OATS exports / works with markdown story is emphasized"
+      },
+      "tags": [
+        "markdown",
+        "notes",
+        "editors"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 52
+    },
+    {
+      "id": "mundimark-awesome-markdown-editors",
+      "name": "mundimark/awesome-markdown-editors",
+      "url": "https://github.com/mundimark/awesome-markdown-editors",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Markdown users",
+      "intent": "markdown editors/viewers",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "mundimark/awesome-markdown-editors",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "only if OATS’s markdown workflow is foregrounded"
+      },
+      "tags": [
+        "markdown",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 53
+    },
+    {
+      "id": "bubuanabelas-awesome-markdown",
+      "name": "BubuAnabelas/awesome-markdown",
+      "url": "https://github.com/BubuAnabelas/awesome-markdown",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "exact-fit-pr-sprint",
+      "primaryAudience": "Markdown users",
+      "intent": "markdown-related tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "BubuAnabelas/awesome-markdown",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "indirect fit only"
+      },
+      "tags": [
+        "markdown",
+        "note-taking"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 54
+    },
+    {
+      "id": "diegoleme-awesome-open-source-alternatives",
+      "name": "diegoleme/awesome-open-source-alternatives",
+      "url": "https://github.com/diegoleme/awesome-open-source-alternatives",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "OSS switchers",
+      "intent": "alternatives to proprietary tools",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "diegoleme/awesome-open-source-alternatives",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS can be positioned as alternative to Granola / Otter / Plaud-style tools"
+      },
+      "tags": [
+        "open-source-alternative",
+        "notes",
+        "transcription"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 55
+    },
+    {
+      "id": "runacapital-awesome-oss-alternatives",
+      "name": "RunaCapital/awesome-oss-alternatives",
+      "url": "https://github.com/RunaCapital/awesome-oss-alternatives",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "OSS startup watchers",
+      "intent": "open-source SaaS alternatives",
+      "submission": {
+        "kind": "github-pr",
+        "method": "issue / PR",
+        "githubRepo": "RunaCapital/awesome-oss-alternatives",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "startup criteria can be stricter, but category relevance is high"
+      },
+      "tags": [
+        "open-source alternative",
+        "productivity",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 56
+    },
+    {
+      "id": "sfermigier-awesome-foss-alternatives",
+      "name": "sfermigier/awesome-foss-alternatives",
+      "url": "https://github.com/sfermigier/awesome-foss-alternatives",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "business OSS users",
+      "intent": "FOSS alternatives to SaaS",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "sfermigier/awesome-foss-alternatives",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "B2B leaning, still relevant"
+      },
+      "tags": [
+        "foss",
+        "alternative",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 57
+    },
+    {
+      "id": "mustbeperfect-definitive-opensource",
+      "name": "mustbeperfect/definitive-opensource",
+      "url": "https://github.com/mustbeperfect/definitive-opensource",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "consumers seeking “best of” OSS",
+      "intent": "high-quality consumer OSS",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "mustbeperfect/definitive-opensource",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "curated/vetted list; fit is strong but bar is high"
+      },
+      "tags": [
+        "macos",
+        "transcription",
+        "note-taking",
+        "privacy"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 58
+    },
+    {
+      "id": "datadaode-awesome-foss-apps",
+      "name": "DataDaoDe/awesome-foss-apps",
+      "url": "https://github.com/DataDaoDe/awesome-foss-apps",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "developers / OSS users",
+      "intent": "quality FOSS apps by category",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "DataDaoDe/awesome-foss-apps",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "OATS is a desktop OSS app"
+      },
+      "tags": [
+        "foss-apps",
+        "desktop-app",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 59
+    },
+    {
+      "id": "mmachado05-floss-alternatives",
+      "name": "MMachado05/floss-alternatives",
+      "url": "https://github.com/MMachado05/floss-alternatives",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "OSS switchers",
+      "intent": "FLOSS alternatives",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "MMachado05/floss-alternatives",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "good category fit"
+      },
+      "tags": [
+        "floss",
+        "alternative",
+        "note-taking"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 60
+    },
+    {
+      "id": "an-anonymous-coder-open-source-everything",
+      "name": "An-anonymous-coder/Open-Source-Everything",
+      "url": "https://github.com/An-anonymous-coder/Open-Source-Everything",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "broad OSS users",
+      "intent": "best open-source software",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR / discussion",
+        "githubRepo": "An-anonymous-coder/Open-Source-Everything",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad but open-source desktop apps fit"
+      },
+      "tags": [
+        "open-source",
+        "privacy",
+        "notes",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 61
+    },
+    {
+      "id": "piotrkulpinski-openalternative",
+      "name": "piotrkulpinski/openalternative",
+      "url": "https://github.com/piotrkulpinski/openalternative",
+      "sourceLabel": "GitHub",
+      "type": "awesome list",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "OSS switchers",
+      "intent": "curated OSS alternatives",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "piotrkulpinski/openalternative",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact alternative-positioning fit"
+      },
+      "tags": [
+        "open-source-alternative",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 62
+    },
+    {
+      "id": "andrew-ultimate-awesome",
+      "name": "andrew/ultimate-awesome",
+      "url": "https://github.com/andrew/ultimate-awesome",
+      "sourceLabel": "GitHub",
+      "type": "other",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "list curators / discoverers",
+      "intent": "meta discovery of awesome lists",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "andrew/ultimate-awesome",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "indirect, but can expose OATS-relevant list surfaces"
+      },
+      "tags": [
+        "awesome-lists",
+        "discovery"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 63
+    },
+    {
+      "id": "best-of-lists-best-of",
+      "name": "best-of-lists/best-of",
+      "url": "https://github.com/best-of-lists/best-of",
+      "sourceLabel": "GitHub",
+      "type": "other",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "OSS discoverers",
+      "intent": "meta-catalog of best-of lists",
+      "submission": {
+        "kind": "github-pr",
+        "method": "issue / PR",
+        "githubRepo": "best-of-lists/best-of",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "indirect, but useful amplifier"
+      },
+      "tags": [
+        "best-of",
+        "open-source",
+        "discovery"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 64
+    },
+    {
+      "id": "lyz-code-best-of-digital-gardens",
+      "name": "lyz-code/best-of-digital-gardens",
+      "url": "https://github.com/lyz-code/best-of-digital-gardens",
+      "sourceLabel": "GitHub",
+      "type": "other",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "knowledge-sharing users",
+      "intent": "digital garden meta-list",
+      "submission": {
+        "kind": "github-pr",
+        "method": "issue / PR",
+        "githubRepo": "lyz-code/best-of-digital-gardens",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "indirect fit unless public-note workflow is emphasized"
+      },
+      "tags": [
+        "notes",
+        "pkm",
+        "knowledge"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 65
+    },
+    {
+      "id": "richardlitt-meta-knowledge",
+      "name": "RichardLitt/meta-knowledge",
+      "url": "https://github.com/RichardLitt/meta-knowledge",
+      "sourceLabel": "GitHub",
+      "type": "other",
+      "phase": "long-tail-sweep",
+      "primaryAudience": "knowledge-repo users",
+      "intent": "meta list of knowledge repos",
+      "submission": {
+        "kind": "github-pr",
+        "method": "PR",
+        "githubRepo": "RichardLitt/meta-knowledge",
+        "draftPullRequest": true
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "indirect; better for public-knowledge angle than app discovery"
+      },
+      "tags": [
+        "knowledge",
+        "notes",
+        "markdown"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 66
+    },
+    {
+      "id": "github-topic-meeting-notes",
+      "name": "GitHub Topic: meeting-notes",
+      "url": "https://github.com/topics/meeting-notes",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "GitHub users",
+      "intent": "browse meeting-note repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/meeting-notes",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct tag match, self-managed"
+      },
+      "tags": [
+        "meeting-notes",
+        "ai-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 67
+    },
+    {
+      "id": "github-topic-speech-to-text",
+      "name": "GitHub Topic: speech-to-text",
+      "url": "https://github.com/topics/speech-to-text",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "STT users",
+      "intent": "browse STT repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/speech-to-text",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact function"
+      },
+      "tags": [
+        "speech-to-text",
+        "transcription"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 68
+    },
+    {
+      "id": "github-topic-automatic-speech-recognition",
+      "name": "GitHub Topic: automatic-speech-recognition",
+      "url": "https://github.com/topics/automatic-speech-recognition",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "ASR users",
+      "intent": "browse ASR repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/automatic-speech-recognition",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct technical match"
+      },
+      "tags": [
+        "asr",
+        "whisper",
+        "stt"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 69
+    },
+    {
+      "id": "github-topic-offline-speech-recognition",
+      "name": "GitHub Topic: offline-speech-recognition",
+      "url": "https://github.com/topics/offline-speech-recognition",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "offline-AI users",
+      "intent": "browse offline STT tools",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/offline-speech-recognition",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS’s on-device mode fits exactly"
+      },
+      "tags": [
+        "offline",
+        "on-device",
+        "stt"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 70
+    },
+    {
+      "id": "github-topic-speaker-diarization",
+      "name": "GitHub Topic: speaker-diarization",
+      "url": "https://github.com/topics/speaker-diarization",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "speech-tool users",
+      "intent": "browse diarization tools",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/speaker-diarization",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "adjacent capability, still relevant"
+      },
+      "tags": [
+        "diarization",
+        "transcription"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 71
+    },
+    {
+      "id": "github-topic-transcription",
+      "name": "GitHub Topic: transcription",
+      "url": "https://github.com/topics/transcription",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "transcription seekers",
+      "intent": "browse transcription repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/transcription",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "one of OATS’s core jobs"
+      },
+      "tags": [
+        "transcription",
+        "meeting notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 72
+    },
+    {
+      "id": "github-topic-local-first",
+      "name": "GitHub Topic: local-first",
+      "url": "https://github.com/topics/local-first",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "privacy / local-first users",
+      "intent": "browse local-first apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/local-first",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact architecture fit"
+      },
+      "tags": [
+        "local-first",
+        "privacy",
+        "offline"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 73
+    },
+    {
+      "id": "github-topic-local-first-ai",
+      "name": "GitHub Topic: local-first-ai",
+      "url": "https://github.com/topics/local-first-ai",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "local-AI users",
+      "intent": "browse local-first AI apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/local-first-ai",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact positioning fit"
+      },
+      "tags": [
+        "local-first-ai",
+        "privacy",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 74
+    },
+    {
+      "id": "github-topic-personal-knowledge-management",
+      "name": "GitHub Topic: personal-knowledge-management",
+      "url": "https://github.com/topics/personal-knowledge-management",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "PKM users",
+      "intent": "browse PKM software",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/personal-knowledge-management",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "good fit if notes/search are emphasized"
+      },
+      "tags": [
+        "pkm",
+        "notes",
+        "second-brain"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 75
+    },
+    {
+      "id": "github-topic-note-taking",
+      "name": "GitHub Topic: note-taking",
+      "url": "https://github.com/topics/note-taking",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "note-taking users",
+      "intent": "browse note apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/note-taking",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct product category"
+      },
+      "tags": [
+        "note-taking",
+        "ai-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 76
+    },
+    {
+      "id": "github-topic-ai-notes",
+      "name": "GitHub Topic: ai-notes",
+      "url": "https://github.com/topics/ai-notes",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "AI-note users",
+      "intent": "browse AI note apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/ai-notes",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct positioning fit"
+      },
+      "tags": [
+        "ai-notes",
+        "meeting-notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 77
+    },
+    {
+      "id": "github-topic-knowledge-management",
+      "name": "GitHub Topic: knowledge-management",
+      "url": "https://github.com/topics/knowledge-management",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "KM users",
+      "intent": "browse KM repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/knowledge-management",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broader but valid"
+      },
+      "tags": [
+        "knowledge-management",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 78
+    },
+    {
+      "id": "github-topic-menubar-app",
+      "name": "GitHub Topic: menubar-app",
+      "url": "https://github.com/topics/menubar-app",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Mac utility users",
+      "intent": "browse menubar apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/menubar-app",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact UI pattern"
+      },
+      "tags": [
+        "menubar-app",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 79
+    },
+    {
+      "id": "github-topic-macos-apps",
+      "name": "GitHub Topic: macos-apps",
+      "url": "https://github.com/topics/macos-apps",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Mac users",
+      "intent": "browse macOS apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/macos-apps",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact platform fit"
+      },
+      "tags": [
+        "macos",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 80
+    },
+    {
+      "id": "github-topic-macos-application",
+      "name": "GitHub Topic: macos-application",
+      "url": "https://github.com/topics/macos-application",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Mac users",
+      "intent": "browse macOS application repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/macos-application",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact platform fit"
+      },
+      "tags": [
+        "macos-application",
+        "apple-silicon"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 81
+    },
+    {
+      "id": "github-topic-macos-menubar",
+      "name": "GitHub Topic: macos-menubar",
+      "url": "https://github.com/topics/macos-menubar",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Mac utility users",
+      "intent": "browse top-bar apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/macos-menubar",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact pattern fit"
+      },
+      "tags": [
+        "macos-menubar",
+        "menubar"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 82
+    },
+    {
+      "id": "github-topic-menu-bar",
+      "name": "GitHub Topic: menu-bar",
+      "url": "https://github.com/topics/menu-bar",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "utility-app users",
+      "intent": "browse menu-bar software",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/menu-bar",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct pattern match"
+      },
+      "tags": [
+        "menu-bar",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 83
+    },
+    {
+      "id": "github-topic-mac-setup",
+      "name": "GitHub Topic: mac-setup",
+      "url": "https://github.com/topics/mac-setup",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Mac enthusiasts",
+      "intent": "“my setup” discovery",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/mac-setup",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "indirect but discoverable"
+      },
+      "tags": [
+        "macos",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 84
+    },
+    {
+      "id": "github-topic-tauri",
+      "name": "GitHub Topic: tauri",
+      "url": "https://github.com/topics/tauri",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Tauri builders/users",
+      "intent": "browse Tauri apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/tauri",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "core framework fit"
+      },
+      "tags": [
+        "tauri",
+        "rust",
+        "vue"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 85
+    },
+    {
+      "id": "github-topic-tauri-app",
+      "name": "GitHub Topic: tauri-app",
+      "url": "https://github.com/topics/tauri-app",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Tauri users",
+      "intent": "browse shipping Tauri apps",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/tauri-app",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact fit"
+      },
+      "tags": [
+        "tauri-app",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 86
+    },
+    {
+      "id": "github-topic-rust-lang",
+      "name": "GitHub Topic: rust-lang",
+      "url": "https://github.com/topics/rust-lang",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "Rust users",
+      "intent": "browse Rust repos",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/rust-lang",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad language topic"
+      },
+      "tags": [
+        "rust",
+        "desktop-app"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 87
+    },
+    {
+      "id": "github-topic-privacy",
+      "name": "GitHub Topic: privacy",
+      "url": "https://github.com/topics/privacy",
+      "sourceLabel": "GitHub",
+      "type": "software catalog",
+      "phase": "metadata-sprint",
+      "primaryAudience": "privacy users",
+      "intent": "browse privacy projects",
+      "submission": {
+        "kind": "github-topic",
+        "method": "manual topic edit",
+        "githubRepo": "topics/privacy",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "OATS’s privacy story is strong"
+      },
+      "tags": [
+        "privacy",
+        "on-device",
+        "local-first"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 88
+    },
+    {
+      "id": "alternativeto",
+      "name": "AlternativeTo",
+      "url": "https://alternativeto.net/",
+      "sourceLabel": "Site",
+      "type": "alternative-to",
+      "phase": "directory-sprint",
+      "primaryAudience": "end users replacing software",
+      "intent": "app comparison and alternatives",
+      "submission": {
+        "kind": "form",
+        "method": "form / account",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "direct app discovery; OATS can be framed vs Otter/Granola/Plaid-type tools"
+      },
+      "tags": [
+        "alternative",
+        "note-taking",
+        "transcription",
+        "privacy"
+      ],
+      "geographicOrLanguageFocus": "Global / English-first",
+      "priority": 89
+    },
+    {
+      "id": "saashub",
+      "name": "SaaSHub",
+      "url": "https://www.saashub.com/submit",
+      "sourceLabel": "Site",
+      "type": "alternative-to",
+      "phase": "directory-sprint",
+      "primaryAudience": "startup / software buyers",
+      "intent": "alternatives and startup directory",
+      "submission": {
+        "kind": "form",
+        "method": "form",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad SaaS framing, but category coverage is wide"
+      },
+      "tags": [
+        "productivity",
+        "communication",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 90
+    },
+    {
+      "id": "openalternative",
+      "name": "OpenAlternative",
+      "url": "https://openalternative.co/",
+      "sourceLabel": "Site",
+      "type": "alternative-to",
+      "phase": "directory-sprint",
+      "primaryAudience": "OSS switchers",
+      "intent": "curated open-source alternatives",
+      "submission": {
+        "kind": "form",
+        "method": "submit / login",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "strong thematic fit, but submission appears gated"
+      },
+      "tags": [
+        "open-source-alternative",
+        "ai",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 91
+    },
+    {
+      "id": "opensourcealternative-to",
+      "name": "OpenSourceAlternative.to",
+      "url": "https://www.opensourcealternative.to/",
+      "sourceLabel": "Site",
+      "type": "alternative-to",
+      "phase": "directory-sprint",
+      "primaryAudience": "OSS switchers",
+      "intent": "proprietary-to-OSS replacement discovery",
+      "submission": {
+        "kind": "form",
+        "method": "submit",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact audience and positioning fit"
+      },
+      "tags": [
+        "open-source alternative",
+        "privacy",
+        "notes"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 92
+    },
+    {
+      "id": "open-hub",
+      "name": "Open Hub",
+      "url": "https://openhub.net/",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "directory-sprint",
+      "primaryAudience": "OSS developers/users",
+      "intent": "track and compare OSS projects",
+      "submission": {
+        "kind": "manual",
+        "method": "manual add project",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "community-driven FOSS project directory"
+      },
+      "tags": [
+        "open-source",
+        "project metrics",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 93
+    },
+    {
+      "id": "free-software-directory",
+      "name": "Free Software Directory",
+      "url": "https://directory.fsf.org/wiki/Main_Page",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "directory-sprint",
+      "primaryAudience": "free-software users",
+      "intent": "FSF-style software discovery",
+      "submission": {
+        "kind": "form",
+        "method": "form",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "strong OSS fit, but licensing review standards are stricter"
+      },
+      "tags": [
+        "free-software",
+        "privacy",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 94
+    },
+    {
+      "id": "awesome-open-source",
+      "name": "Awesome Open Source",
+      "url": "https://awesomeopensource.com/",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "directory-sprint",
+      "primaryAudience": "developers",
+      "intent": "open-source project discovery / comparisons",
+      "submission": {
+        "kind": "manual",
+        "method": "listing request / indirect",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "strong discoverability, submission path less explicit"
+      },
+      "tags": [
+        "open-source",
+        "rust",
+        "vue",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 95
+    },
+    {
+      "id": "open-apps",
+      "name": "Open Apps",
+      "url": "https://openapps.pro/",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "directory-sprint",
+      "primaryAudience": "OSS switchers / teams",
+      "intent": "curated OSS apps by category",
+      "submission": {
+        "kind": "manual",
+        "method": "contact / editorial",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "strong fit, but editorial submission path is not explicit"
+      },
+      "tags": [
+        "productivity",
+        "ai-assistants",
+        "notes",
+        "privacy"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 96
+    },
+    {
+      "id": "macmenubar-com",
+      "name": "MacMenuBar.com",
+      "url": "https://macmenubar.com/",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "directory-sprint",
+      "primaryAudience": "Mac end users",
+      "intent": "discover menu bar apps",
+      "submission": {
+        "kind": "form",
+        "method": "submit page",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "High",
+        "rationale": "exact UI/form-factor fit"
+      },
+      "tags": [
+        "menubar-app",
+        "macos",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 97
+    },
+    {
+      "id": "sourceforge-directory",
+      "name": "SourceForge Directory",
+      "url": "https://sourceforge.net/directory/",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "directory-sprint",
+      "primaryAudience": "OSS users",
+      "intent": "browse open-source projects",
+      "submission": {
+        "kind": "manual",
+        "method": "project listing",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "broad OSS directory, less targeted than Mac/notes lists"
+      },
+      "tags": [
+        "open-source",
+        "productivity"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 98
+    },
+    {
+      "id": "libhunt",
+      "name": "LibHunt",
+      "url": "https://www.libhunt.com/repo/submit",
+      "sourceLabel": "Site",
+      "type": "directory",
+      "phase": "packaging-sprint",
+      "primaryAudience": "developers",
+      "intent": "find packages / projects by language & topic",
+      "submission": {
+        "kind": "form",
+        "method": "submit project",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "more dev-facing and library-centric, but still useful"
+      },
+      "tags": [
+        "rust",
+        "vue",
+        "self-hosted",
+        "macos"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 99
+    },
+    {
+      "id": "switching-software",
+      "name": "switching.software",
+      "url": "https://switching.software/use/",
+      "sourceLabel": "Site",
+      "type": "alternative-to",
+      "phase": "directory-sprint",
+      "primaryAudience": "privacy / anti-lock-in users",
+      "intent": "recommend free/open alternatives",
+      "submission": {
+        "kind": "manual",
+        "method": "editorial / source-linked suggestion",
+        "githubRepo": null,
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "strong philosophical fit, but curation is editorial"
+      },
+      "tags": [
+        "privacy",
+        "note-taking",
+        "alternatives"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 100
+    },
+    {
+      "id": "homebrew-cask",
+      "name": "Homebrew Cask",
+      "url": "https://github.com/Homebrew/homebrew-cask",
+      "sourceLabel": "GitHub",
+      "type": "package index",
+      "phase": "packaging-sprint",
+      "primaryAudience": "Mac developers/users",
+      "intent": "install Mac apps via brew",
+      "submission": {
+        "kind": "package-pr",
+        "method": "PR",
+        "githubRepo": "Homebrew/homebrew-cask",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Medium",
+        "rationale": "valuable channel, but packaging/review work required"
+      },
+      "tags": [
+        "macos",
+        "cask",
+        "apple-silicon"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 101
+    },
+    {
+      "id": "macports",
+      "name": "MacPorts",
+      "url": "https://github.com/macports/macports-ports",
+      "sourceLabel": "GitHub",
+      "type": "package index",
+      "phase": "packaging-sprint",
+      "primaryAudience": "Mac technical users",
+      "intent": "install packaged software",
+      "submission": {
+        "kind": "package-pr",
+        "method": "PR",
+        "githubRepo": "macports/macports-ports",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "packaging-heavy and more technical audience"
+      },
+      "tags": [
+        "macos",
+        "package",
+        "rust"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 102
+    },
+    {
+      "id": "nixpkgs",
+      "name": "Nixpkgs",
+      "url": "https://github.com/NixOS/nixpkgs",
+      "sourceLabel": "GitHub",
+      "type": "package index",
+      "phase": "packaging-sprint",
+      "primaryAudience": "Nix / reproducibility users",
+      "intent": "packaged software distribution",
+      "submission": {
+        "kind": "package-pr",
+        "method": "PR",
+        "githubRepo": "NixOS/nixpkgs",
+        "draftPullRequest": false
+      },
+      "acceptance": {
+        "likelihood": "Low",
+        "rationale": "packaging overhead, narrower user base"
+      },
+      "tags": [
+        "nix",
+        "macos",
+        "package",
+        "rust"
+      ],
+      "geographicOrLanguageFocus": "Global / English",
+      "priority": 103
+    }
+  ]
+}
