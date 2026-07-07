@@ -553,10 +553,10 @@ async function startRecording(): Promise<void> {
     });
 
     if (plan.kind === 'ariso-picker') {
-      // Ariso: always the picker; feature the shown meeting as default when present.
-      const args: Record<string, unknown> = {};
-      if (plan.defaultMeetingId != null) args.defaultMeetingId = plan.defaultMeetingId;
-      if (plan.defaultMeetingTitle != null) args.defaultMeetingTitle = plan.defaultMeetingTitle;
+      // Ariso: always the picker; feature the shown meeting as default when
+      // present. The command takes only the id — the picker resolves the title
+      // from its fetched list (matches the pre-existing #206 wiring).
+      const args = plan.defaultMeetingId != null ? { defaultMeetingId: plan.defaultMeetingId } : {};
       await invoke('open_meeting_picker', args);
       return;
     }
