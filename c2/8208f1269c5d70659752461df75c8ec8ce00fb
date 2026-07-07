@@ -1,0 +1,40 @@
+docs/outreach/listing-pr-batch-report.md
+  s_cf3c9812e7fc2c::t_c92602448223b4 1-107
+progress.md
+  s_cf3c9812e7fc2c::t_fc0d4ef606a816 116-119,127-128,135-136
+  s_cf3c9812e7fc2c::t_0546195e0736d0 257-272
+  s_cf3c9812e7fc2c::t_32d4dc2ff3070d 303-321
+  s_cf3c9812e7fc2c::t_6b837b6bd65dac 5-9,13
+  s_cf3c9812e7fc2c::t_7dcb754f975d44 208-229
+  s_cf3c9812e7fc2c::t_ac1410541665b8 273-286
+  s_cf3c9812e7fc2c::t_0226d2485159bf 287-302
+  s_cf3c9812e7fc2c::t_4edcfef773cfaa 244-256
+  s_cf3c9812e7fc2c::t_9213479c221ccb 10-12
+  s_cf3c9812e7fc2c::t_1a51b7a3c75010 122-125,137-140
+  s_cf3c9812e7fc2c::t_9e59a0decbc84a 141-171
+  s_cf3c9812e7fc2c::t_dd5f4d4a926824 172-207
+  s_cf3c9812e7fc2c::t_498177a2b03d4b 230-243
+  s_cf3c9812e7fc2c::t_65ca1127496b7c 120-121,129-132
+  s_cf3c9812e7fc2c::t_88e75829599176 34-53
+  s_cf3c9812e7fc2c::t_86688e09517d80 14-33,54
+  s_cf3c9812e7fc2c::t_2e1436e0df937b 113-115
+  s_cf3c9812e7fc2c::t_563bc5117dcb36 126
+  s_cf3c9812e7fc2c::t_67fddefb825851 133-134
+  s_cf3c9812e7fc2c::t_69e591c3ac31d6 105-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c28208f1269c5d70659752461df75c8ec8ce00fb",
+  "prompts": {},
+  "sessions": {
+    "s_cf3c9812e7fc2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d22-876f-7442-961e-bb24e65d0362",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
