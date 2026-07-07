@@ -165,6 +165,29 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// If the recording still carries its auto-generated default title, replace it
+/// with the model-generated `title` and rename the vault artifacts to match.
+/// Best-effort: any failure leaves the (already-written) note under the default
+/// title. On success updates `meta.title`, `meta.audio_file`, and clears
+/// `title_is_default`. No-op when the title is user-set, blank, or unchanged.
+fn maybe_apply_generated_title(meta: &mut RecordingMeta, audio_file: &str, title: Option<String>) {
+    if !meta.title_is_default {
+        return;
+    }
+    let new_title = match title {
+        Some(t) if !t.trim().is_empty() && t.trim() != meta.title => t.trim().to_string(),
+        _ => return,
+    };
+    match crate::vault::rename_recording_artifacts(&meta.id, &meta.created_at, audio_file, &new_title) {
+        Ok(new_audio_file) => {
+            meta.audio_file = Some(new_audio_file);
+            meta.title = new_title;
+            meta.title_is_default = false;
+        }
+        Err(e) => eprintln!("title regeneration: rename artifacts: {e}"),
+    }
+}
+
 /// Best-effort notes generation: runs the sidecar and writes either the vault
 /// note or `meta.notes_error`. Failures here never affect the recording's
 /// `Done` status. A third outcome exists: if the transcript changes mid-run
@@ -208,6 +231,9 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                 let _ = storage::write_meta(&dir, &meta);
                 return;
             }
+            // Regenerate the note title from the notes, but only while the title
+            // is still the auto-generated default (never clobber a user rename).
+            maybe_apply_generated_title(&mut meta, &audio_file, output.title);
             meta.notes_error = None;
             meta.notes_written = Some(now_rfc3339());
             let _ = storage::write_meta(&dir, &meta);
@@ -1587,6 +1613,85 @@ mod tests {
         let attachments = crate::vault::attachments_dir(&crate::vault::vault_root().unwrap());
         let count = std::fs::read_dir(&attachments).unwrap().count();
         assert_eq!(count, 1, "retry must not orphan a duplicate attachment");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn generated_title_skipped_when_not_default() {
+        let mut meta = RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "User Title".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 12,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some("2026-06-02 User Title.mp3".into()),
+            notes_written: None,
+            title_is_default: false,
+        };
+        maybe_apply_generated_title(&mut meta, "2026-06-02 User Title.mp3", Some("Generated".into()));
+        assert_eq!(meta.title, "User Title");
+        assert!(!meta.title_is_default);
+    }
+
+    #[test]
+    fn generated_title_skipped_when_blank() {
+        let mut meta = RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "Mon Jul 6 @ 959AM".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 12,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some("2026-06-02 default.mp3".into()),
+            notes_written: None,
+            title_is_default: true,
+        };
+        maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", None);
+        assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
+        assert!(meta.title_is_default);
+    }
+
+    #[tokio::test]
+    async fn notes_regenerate_default_title_and_rename_vault_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let asr = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        // notes subcommand emits the {title,notes} JSON; transcribe path emits ASR JSON.
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo '{{\"title\":\"Budget Planning\",\"notes\":\"## Summary body\"}}'; exit 0; fi\ncat <<'EOF'\n{asr}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Mon Jul 6 @ 959AM".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Budget Planning");
+        assert!(!meta.title_is_default);
+        // The vault note file was renamed to the generated-title basename.
+        let vault = crate::vault::vault_root().unwrap();
+        assert!(
+            vault.join("2026-06-02 Budget Planning.md").exists(),
+            "expected renamed vault note; vault had: {:?}",
+            std::fs::read_dir(&vault).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>()
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }
