@@ -1,0 +1,25 @@
+AGENTS.md
+  s_1d7e9611628d32::t_c8c4c31e6dbf50 1,7-9,56-66
+.agents/skills/oats-debugging/SKILL.md
+  s_1d7e9611628d32::t_c8c4c31e6dbf50 15-18
+.claude/skills
+  s_1d7e9611628d32::t_87b9f08f79958b 1
+CLAUDE.md
+  s_1d7e9611628d32::t_2e00af17d59701 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "63ddbee4ad96e64cb0b26abb7d9ee20b2130569e",
+  "prompts": {},
+  "sessions": {
+    "s_1d7e9611628d32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3cfa-050a-7191-89b4-a3aa8c6faada",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
