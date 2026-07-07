@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.15.0](https://github.com/ariso-ai/oats/compare/v0.14.0...v0.15.0) (2026-07-07)
+
+
+### Features
+
+* configurable Obsidian vault directory for local backend ([#200](https://github.com/ariso-ai/oats/issues/200)) ([30a7103](https://github.com/ariso-ai/oats/commit/30a71032abea5c5a5301e0f1a685bbe1dc9d514c))
+* continue an existing meeting when Start recording is clicked with a meeting open ([eea4353](https://github.com/ariso-ai/oats/commit/eea435348f6319aa80a584685556af8016e9abaa))
+* **library:** decideStartRecording helper for new-vs-continue branching ([8c3848f](https://github.com/ariso-ai/oats/commit/8c3848f59604e68d61ea4b1ea5ed16a8d678bb5f))
+* **library:** New-vs-Continue choice dialog + promise driver ([2efe069](https://github.com/ariso-ai/oats/commit/2efe0693b0fd71d0dc2daca0989d9740b0aef8e5))
+* **library:** prompt New-vs-Continue when a meeting is open on Start ([eccacd0](https://github.com/ariso-ai/oats/commit/eccacd08710926e6f80e35931ed88023e84d4b9d))
+* local-backend Obsidian vault for notes + audio ([e0d231d](https://github.com/ariso-ai/oats/commit/e0d231d2dcfc4f51ee0ead6a7dc3370511714933))
+* **local:** force-append seam in finalize_core for continue-recording ([133ca41](https://github.com/ariso-ai/oats/commit/133ca41333fc465a4f1075a3db016079c685b74b))
+* **local:** thread localAppendId from waveform window into finalize ([c6a137c](https://github.com/ariso-ai/oats/commit/c6a137ca5df9649d2a03ba82145367b9437e1909))
+* **picker:** feature the open meeting as the default choice ([64dc333](https://github.com/ariso-ai/oats/commit/64dc33363fa61c9052bf3f615f9e4d964809b50c))
+* **recorder:** thread localAppendId into the waveform window URL ([41fec5a](https://github.com/ariso-ai/oats/commit/41fec5a408501e5935604e3b5506d6809b76e0bd))
+* **settings:** front-truncate vault path under 20 chars ([a1b12c7](https://github.com/ariso-ai/oats/commit/a1b12c7cd4751c9e80566f8ccb19e454cd79bcd5))
+* **settings:** refine vault-location UX ([00ee9f8](https://github.com/ariso-ai/oats/commit/00ee9f8fe831815d6c3dda32aeae07ff25c203e5))
+* **vault:** add audio_file and notes_written to RecordingMeta ([d36f71d](https://github.com/ariso-ai/oats/commit/d36f71d2bdff9e51bba4a113782435b6fc871329))
+* **vault:** add dialog plugin + vault dir tauri wrappers ([9f8c0d0](https://github.com/ariso-ai/oats/commit/9f8c0d0cfd2b1060f9e2c4d33fff6d406626b29b))
+* **vault:** audio attachment read/write ([00ae951](https://github.com/ariso-ai/oats/commit/00ae951bd7c69c82910a372963d91cca18432770))
+* **vault:** configurable vault root override + .oats meta dir ([8ca2249](https://github.com/ariso-ai/oats/commit/8ca2249b6900e0fcec88b5c929f1ed539eb4bc3c))
+* **vault:** create the vault at startup ([acf56d9](https://github.com/ariso-ai/oats/commit/acf56d9d1444e99153afaad0eb24f1cc6b41a919))
+* **vault:** get_vault_dir / set_vault_dir commands ([b65aa61](https://github.com/ariso-ai/oats/commit/b65aa61b16831dbe8ffd091b724a04cd4ff10f2b))
+* **vault:** has_note/has_audio reflect vault artifacts ([a029dc6](https://github.com/ariso-ai/oats/commit/a029dc6a47955c9e3d3f9ae59e093ef13a76cfff))
+* **vault:** note vault location and sync privacy in Settings ([8142f11](https://github.com/ariso-ai/oats/commit/8142f11916624cc00a65b9289706fed6718bc6ff))
+* **vault:** note_basename and collision-safe unique_basename ([25c8bdc](https://github.com/ariso-ai/oats/commit/25c8bdc113a7a47cc9891cd7ca8146e108de695c))
+* **vault:** notes regeneration replaces the vault note ([200ebc8](https://github.com/ariso-ai/oats/commit/200ebc8fdc3943bb4805b34cbeae7cbde5d16755))
+* **vault:** one-time legacy-recordings migration + startup override wiring ([47ec4a0](https://github.com/ariso-ai/oats/commit/47ec4a03b063ba3572d2b0ab0cc00f0ca43791b2))
+* **vault:** play audio from the vault with legacy fallback ([8844f7a](https://github.com/ariso-ai/oats/commit/8844f7a96c5da44899c8763e30749185f0781b76))
+* **vault:** read/open notes from the vault with legacy fallback ([0730d95](https://github.com/ariso-ai/oats/commit/0730d95117abb03bead7c50c178fa9b1a371384c))
+* **vault:** render_note and note_body ([154a426](https://github.com/ariso-ai/oats/commit/154a4265a66616a8673ace345318027c1c9c40fa))
+* **vault:** resolve local recordings under the vault's .oats dir ([cb6f15f](https://github.com/ariso-ai/oats/commit/cb6f15f9b914ebdec7fc9c5d2f79276165ab5582))
+* **vault:** scan_vault, find_note, read_note by oats_id ([8f95341](https://github.com/ariso-ai/oats/commit/8f953419e3a3d5b06f3751be4714c03124e74a05))
+* **vault:** Settings vault-location control + Library refresh on change ([568b9b9](https://github.com/ariso-ai/oats/commit/568b9b914b7abe52b1309985afc92ed9eb5aeb19))
+* **vault:** store local recording audio only in the vault ([6c5fc5c](https://github.com/ariso-ai/oats/commit/6c5fc5cf02812b6ca0daf168d8c09fd71ae4f028))
+* **vault:** vault root and ensure_vault bootstrap ([952252f](https://github.com/ariso-ai/oats/commit/952252f7dbebced8ef05d41295161d157b1a2222))
+* **vault:** write generated notes into the vault ([c2cee38](https://github.com/ariso-ai/oats/commit/c2cee382fd3cf28f2fbc277c89a41502e67741c7))
+* **vault:** write_note and delete_recording_artifacts cascade ([7d2392b](https://github.com/ariso-ai/oats/commit/7d2392b82ae3fb01ecbcc7cd4d298b7da26ebb65))
+
+
+### Bug Fixes
+
+* **ci:** stop CodeQL Swift from starving the runner + skip no-Swift runs ([f5754fd](https://github.com/ariso-ai/oats/commit/f5754fd9281f7d38425e86ace51c5c19f8dfc313))
+* **ci:** stop CodeQL Swift from starving the runner + skip no-Swift runs ([af000e7](https://github.com/ariso-ai/oats/commit/af000e771ab377484e517262c32aa4a7f6d4528e))
+* close open meeting when switching backend ([f8b1e3b](https://github.com/ariso-ai/oats/commit/f8b1e3bd216bcc370457a7c0a7cdbba4ce700a51))
+* **deps:** adapt to tungstenite 0.29 Utf8Bytes Message API ([a246787](https://github.com/ariso-ai/oats/commit/a246787a0d3f2f4df0ca940d87a9a0b53a2b6f7b))
+* **library:** correct attendees popover a11y semantics ([27bbde8](https://github.com/ariso-ai/oats/commit/27bbde8ff5f50ae82a6b223526fa0d6eb1c2f7f1))
+* **library:** relabel choice dialog buttons + pointer cursor on hover ([a5eb1e7](https://github.com/ariso-ai/oats/commit/a5eb1e7833141baf793b218c6c2a6b90bfdc10ab))
+* **library:** show attendees dropdown in meeting detail ([99a9715](https://github.com/ariso-ai/oats/commit/99a9715426388ace870cfb13e8999af005111997))
+* **library:** show attendees dropdown in meeting detail ([f62aa2d](https://github.com/ariso-ai/oats/commit/f62aa2dca9f2e8fdfe8641fc7633eb66bc9630d0)), closes [#143](https://github.com/ariso-ai/oats/issues/143)
+* **local:** validate forced append-target id before path join ([e282aa8](https://github.com/ariso-ai/oats/commit/e282aa8d712717e490dacea8f0750bd8aa0baa28))
+* **menu:** open Settings window from the app menu ([daeea65](https://github.com/ariso-ai/oats/commit/daeea6586ef151983c3fee2134d7d89ea3f1073f))
+* **menu:** open Settings window from the app menu ([e4fb6a7](https://github.com/ariso-ai/oats/commit/e4fb6a76d52bfc6a7ed7afbbfad034216bf6b33d)), closes [#212](https://github.com/ariso-ai/oats/issues/212)
+* **notes:** migrate to @tiptap/markdown and fix list/checkbox rendering ([4104f95](https://github.com/ariso-ai/oats/commit/4104f9592f22d36c463ce65dd80f248b776e2fef))
+* **notes:** migrate to @tiptap/markdown and fix list/checkbox rendering ([ddc5cad](https://github.com/ariso-ai/oats/commit/ddc5cad2b9363c7ece0d7dd48f64627424d20705))
+* **picker:** shared View-all list + real forced-default fallback; reject id 0 ([a0dd738](https://github.com/ariso-ai/oats/commit/a0dd738fe84ff9dbc7287f46de01b2c37d24f54f))
+* propagate in-app rename to the vault note + attachment ([bc33230](https://github.com/ariso-ai/oats/commit/bc332306d21393e99546ddd578fc872fc830c88b))
+* reset meeting in detail section when switching backend ([e13827f](https://github.com/ariso-ai/oats/commit/e13827f66392566d76dc79f6db330a5a8ecf4b22))
+* **vault:** gate test-only clear_vault_override behind #[cfg(test)] ([aacfaf0](https://github.com/ariso-ai/oats/commit/aacfaf06c7f6b826518a283ced6d478e7d87e387))
+* **vault:** has_audio reflects vault attachment existence ([dc35fe4](https://github.com/ariso-ai/oats/commit/dc35fe47307be634971d91e91a5cb45df8bbd453))
+* **vault:** keep failed clips durable when vault creation fails ([e45e5fc](https://github.com/ariso-ai/oats/commit/e45e5fcb4ce67a95616ed95844b4d5b2c8417cce))
+* **vault:** propagate in-app rename to the vault note and attachment ([4425246](https://github.com/ariso-ai/oats/commit/4425246e2c502c0b1522cc7bc6c1ff47e63e1d07))
+* **vault:** restore note in place when attachment rename fails ([552433b](https://github.com/ariso-ai/oats/commit/552433bdbaf1814de580f16061d3eb0d3a8a2196))
+* **vault:** scope dialog capability to settings window; path overflow + test-mock hygiene ([1251a2e](https://github.com/ariso-ai/oats/commit/1251a2e8e007b4ee62f889eb3dace0cbd1a6addc))
+
 ## [0.14.0](https://github.com/ariso-ai/oats/compare/v0.13.0...v0.14.0) (2026-07-03)
 
 
