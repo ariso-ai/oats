@@ -33,16 +33,16 @@ source campaign artifacts that external maintainers can inspect.
 
 | Target repo | Draft PR | Placement | Validation notes |
 |---|---|---|---|
-| `jaywcjlove/awesome-mac` | [#2268](https://github.com/jaywcjlove/awesome-mac/pull/2268) | Voice-to-Text | `git diff --check`, `npm run build`, and `npm run create:ast` passed. Hosted FOSSA check was still pending. |
+| `jaywcjlove/awesome-mac` | [#2268](https://github.com/jaywcjlove/awesome-mac/pull/2268) | Note-taking | Follow-up placement fix moved OATS out of Voice-to-Text across all four README languages; `git diff --check`, `npm run build`, and `npm run create:ast` passed. Hosted FOSSA check was still pending. |
 | `serhii-londar/open-source-mac-os-apps` | [#1188](https://github.com/serhii-londar/open-source-mac-os-apps/pull/1188) | `applications.json` notes app block | `git diff --check` passed. Swift generator passed; full awesome_bot failed on pre-existing unrelated target links. |
 | `iCHAIT/awesome-macOS` | [#909](https://github.com/iCHAIT/awesome-macOS/pull/909) | Applications / Productivity | Upstream awesome_bot fails on pre-existing broken links; rerun with unrelated failures whitelisted passed. |
 | `phmullins/awesome-macos` | [#210](https://github.com/phmullins/awesome-macos/pull/210) | Notes | No configured tests, lints, builds, or typechecks; `git diff --check` passed. |
-| `viraat/awesome-mac-apps` | [#1](https://github.com/viraat/awesome-mac-apps/pull/1) | Menu bar apps | No configured tests, lints, builds, or typechecks; `git diff --check` passed. |
+| `viraat/awesome-mac-apps` | [#1](https://github.com/viraat/awesome-mac-apps/pull/1) | Studying/Researching | Follow-up placement fix moved OATS from Menu bar apps beside the existing notetaking/audio-notes entry; no configured tests, lints, builds, or typechecks; `git diff --check` passed. |
 | `jordanbaird/awesome-menubar` | [#1](https://github.com/jordanbaird/awesome-menubar/pull/1) | Apps | Added first Apps section; no configured tests, lints, builds, or typechecks; `git diff --check` passed. |
 | `tborychowski/awesome-mac` | [#5](https://github.com/tborychowski/awesome-mac/pull/5) | Notes and writing / Contenders | No contribution guide or configured checks; `git diff --check` passed. |
 | `feep/awesome-apple-silicon` | [#3](https://github.com/feep/awesome-apple-silicon/pull/3) | Native ARM software / Native apps | No configured tests, lints, builds, or typechecks; `git diff --check` passed. |
 | `smashism/awesome-macadmin-tools` | [#57](https://github.com/smashism/awesome-macadmin-tools/pull/57) | Productivity | Low-likelihood Mac-admin fit; `git diff --check` passed. |
-| `pluja/awesome-privacy` | [#912](https://github.com/pluja/awesome-privacy/pull/912) | Artificial Intelligence / Speech to Text | Local format and whitespace checks passed. New OATS link passed lychee; full README lychee fails on baseline links. |
+| `pluja/awesome-privacy` | [#912](https://github.com/pluja/awesome-privacy/pull/912) | Notes and Tasks | Follow-up placement fix moved OATS from Speech to Text apps to Notes and Tasks. Local format and whitespace checks passed; follow-up `git diff --check` passed and the OATS link resolved. Full README lychee fails on baseline links. |
 | `iAnonymous3000/awesome-privacy-tools` | [#33](https://github.com/iAnonymous3000/awesome-privacy-tools/pull/33) | Notes | README-only repo with no configured checks; `git diff --check` passed. |
 | `janhq/awesome-local-ai` | [#132](https://github.com/janhq/awesome-local-ai/pull/132) | User Tools | No configured tests, lints, builds, or typechecks; `git diff --check` passed. |
 | `msb-msb/awesome-local-ai` | [#19](https://github.com/msb-msb/awesome-local-ai/pull/19) | User Interfaces / Desktop Applications | Used a renamed fork because the default fork name belonged to another fork network; `git diff --check` passed. |
@@ -99,6 +99,13 @@ follow-up.
 All opened PRs were created as drafts where GitHub allowed draft mode. Review
 should focus on whether each entry accurately fits that list's scope and whether
 any low-likelihood placements should be closed before maintainers review them.
+
+A post-creation placement audit corrected three stronger-fit category misses:
+`jaywcjlove/awesome-mac#2268` now uses Note-taking instead of Voice-to-Text,
+`pluja/awesome-privacy#912` now uses Notes and Tasks instead of Speech to Text,
+and `viraat/awesome-mac-apps#1` now uses Studying/Researching instead of Menu
+bar apps. The remaining generic placements did not have an available
+notes/meeting-notes section in their target repo structure.
 
 The lowest-confidence live PRs are:
 

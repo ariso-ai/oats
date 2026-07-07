@@ -333,3 +333,22 @@
   part`; no matches remained. Reconfirmed all 31 PRs are still open drafts.
 - Lessons learned: external list PR bodies should follow the destination repo's
   PR style and should not expose internal orchestration or campaign language.
+
+### External PR placement audit
+
+- Approach: audit the open external draft PRs for cases where OATS landed in a
+  voice/transcription/menu/generic bucket even though the target repo had a
+  stronger notes, meeting-notes, tasks, or studying category.
+- Steps taken: updated and pushed `jaywcjlove/awesome-mac#2268` so OATS appears
+  in Note-taking across the English, Chinese, Japanese, and Korean READMEs;
+  updated `pluja/awesome-privacy#912` so OATS appears in Notes and Tasks; and
+  updated `viraat/awesome-mac-apps#1` so OATS appears in Studying/Researching
+  beside the existing OneNote entry. Edited the three draft PR titles/bodies to
+  match the corrected placements and kept them free of campaign/report wording.
+- Validation: all three target repos passed `git diff --check`;
+  `jaywcjlove/awesome-mac` also passed `npm run build` and
+  `npm run create:ast`; the OATS GitHub link resolved with `curl -I -L --fail`;
+  and all three PRs were reconfirmed as draft PRs after the updates.
+- Lessons learned: when OATS is submitted to broad app lists, the primary
+  category should be notes, meeting notes, recorder, or studying before generic
+  voice-to-text, transcription, or menu-bar categories if the list offers both.
