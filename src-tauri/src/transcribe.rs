@@ -261,13 +261,20 @@ pub async fn finalize_core(
     created_at: String,
     duration_seconds: u64,
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
-    finalize_core_with_target(root, audio, title, created_at, duration_seconds, None).await
+    finalize_core_with_target(root, audio, title, created_at, duration_seconds, None, false).await
 }
 
 /// Like [`finalize_core`], but an explicit `append_to` forces the clip to append
 /// to that recording id, bypassing the time-window auto-append decision (used by
 /// the "Continue this meeting" flow). `append_recording_core` still re-validates
 /// the target is `Done` with audio and falls back to a fresh recording otherwise.
+///
+/// `force_new` lets a caller skip the 5-minute auto-append window entirely and
+/// always start a brand-new recording — used by the "force a new recording"
+/// affordance so the user can start fresh even right after a recent meeting
+/// ended. Precedence: an explicit `append_to` always wins (an explicit
+/// "continue this meeting" request is never overridden by `force_new`); then
+/// `force_new`; then the default `most_recent_appendable` auto-append check.
 pub async fn finalize_core_with_target(
     root: &Path,
     audio: Vec<u8>,
@@ -275,6 +282,7 @@ pub async fn finalize_core_with_target(
     created_at: String,
     duration_seconds: u64,
     append_to: Option<String>,
+    force_new: bool,
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     if let Some(target_id) = append_to {
         // Defense-in-depth: an explicit append target is externally influenced
@@ -285,6 +293,9 @@ pub async fn finalize_core_with_target(
         if storage::validate_recording_id(&target_id).is_ok() {
             return append_recording_core(root, &target_id, audio, title, created_at, duration_seconds).await;
         }
+        return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+    }
+    if force_new {
         return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
     }
     match storage::most_recent_appendable(root, &created_at)? {
@@ -659,8 +670,19 @@ pub async fn retry_local_notes(id: String) -> Result<(), String> {
 /// recording) or the new recording's own id. The recorder calls this at start so
 /// the library shows the correct row (the current meeting on a resume, a new row
 /// otherwise) instead of a phantom new note that vanishes when the append lands.
+///
+/// `force_new` (default `false` when omitted) mirrors `finalize_core_with_target`'s
+/// `force_new`: when `true`, the append-target resolve is skipped entirely and
+/// this returns the new recording's own sanitized id, matching what
+/// `finalize_core_with_target(..., None, true)` will actually finalize into.
 #[tauri::command]
-pub async fn local_recording_id_for_start(created_at: String) -> Result<String, String> {
+pub async fn local_recording_id_for_start(
+    created_at: String,
+    force_new: Option<bool>,
+) -> Result<String, String> {
+    if force_new.unwrap_or(false) {
+        return Ok(storage::sanitize_iso_to_id(&created_at));
+    }
     let root = crate::vault::meta_root()?;
     storage::resolve_local_recording_id(&root, &created_at)
 }
@@ -672,11 +694,20 @@ pub async fn local_finalize_recording(
     created_at: String,
     duration_seconds: u64,
     append_to: Option<String>,
+    force_new: Option<bool>,
 ) -> Result<FinalizeResult, String> {
     let root = crate::vault::meta_root()?;
     // Drop the notes JoinHandle: notes are best-effort and continue running
     // in the background, writing their outcome to meta.json directly.
-    finalize_core_with_target(&root, audio, title, created_at, duration_seconds, append_to)
+    finalize_core_with_target(
+        &root,
+        audio,
+        title,
+        created_at,
+        duration_seconds,
+        append_to,
+        force_new.unwrap_or(false),
+    )
         .await
         .map(|(res, _notes)| res)
 }
@@ -1276,7 +1307,7 @@ mod tests {
         // but with an explicit append target, it must still append to r1.
         let (r2, h2) = finalize_core_with_target(
             tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:20:00.000Z".into(), 15,
-            Some(r1.id.clone()),
+            Some(r1.id.clone()), false,
         ).await.unwrap();
         h2.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
@@ -1308,7 +1339,7 @@ mod tests {
         // back to a fresh recording keyed by the clip's own created_at.
         let (r, h) = finalize_core_with_target(
             tmp.path(), b"bbb".to_vec(), "T".into(), "2026-06-02T10:01:00.000Z".into(), 15,
-            Some("2026-01-01T00-00-00Z".into()),
+            Some("2026-01-01T00-00-00Z".into()), false,
         ).await.unwrap();
         h.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
@@ -1333,7 +1364,7 @@ mod tests {
         // same as an explicit target that fails validate_recording_id.
         let (r, h) = finalize_core_with_target(
             tmp.path(), b"bbb".to_vec(), "T".into(), "2026-06-02T10:01:00.000Z".into(), 15,
-            Some("../evil".into()),
+            Some("../evil".into()), false,
         ).await.unwrap();
         h.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
@@ -1343,6 +1374,134 @@ mod tests {
         let dir = crate::storage::recordings_dir(tmp.path()).join(&r.id);
         assert_eq!(crate::vault::read_audio(
             crate::storage::read_meta(&dir).unwrap().audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn force_new_starts_fresh_recording_even_within_append_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        // First recording: 30s, ends 10:00:30.
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        // Second clip starts 10:01:00 — well WITHIN the 5-min auto-append
+        // window — but force_new=true must skip most_recent_appendable and
+        // start its own fresh recording instead of merging into r1.
+        let (r2, h2) = finalize_core_with_target(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+            None, true,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_ne!(r2.id, r1.id, "force_new must bypass the auto-append target");
+        assert_eq!(r2.id, "2026-06-02T10-01-00Z");
+        let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(count, 2, "two distinct recording directories, no merge");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn force_new_false_still_auto_appends_within_window() {
+        // Regression: force_new=false with no explicit append_to must preserve
+        // the existing 5-minute auto-append behavior.
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (r1, h1) = finalize_core_with_target(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+            None, false,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        let (r2, h2) = finalize_core_with_target(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+            None, false,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(r2.id, r1.id, "force_new=false must still auto-append within the window");
+        let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(count, 1);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn explicit_append_to_wins_over_force_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+
+        // force_new=true AND an explicit append_to target: the explicit
+        // continue-this-meeting request must win over force_new.
+        let (r2, h2) = finalize_core_with_target(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:20:00.000Z".into(), 15,
+            Some(r1.id.clone()), true,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(r2.id, r1.id, "explicit append_to must win over force_new");
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
+        let seg = crate::storage::read_segments(&dir).unwrap().unwrap();
+        assert_eq!(seg.segments.len(), 2, "both clips stitched into the explicit target");
+        let count = std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(count, 1, "no second recording directory");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn local_recording_id_for_start_force_new_returns_own_id_not_append_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+
+        // Seed a recent Done recording that would normally be the append
+        // target: created 10:00:00, ran 60s, so it's "appendable" through
+        // 10:06:00 (60s + 300s window).
+        let id = "2026-06-02T10-00-00Z";
+        let dir = storage::create_recording_dir(&root, id).unwrap();
+        let meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-02T10:00:00.000Z".into(),
+            duration_seconds: 60, status: RecordingStatus::Done, language: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+
+        // Without force_new: resolves to the append target (regression check,
+        // mirrors storage::resolve_local_recording_id_targets_recent_else_new).
+        let resolved = local_recording_id_for_start("2026-06-02T10:02:00.000Z".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(resolved, id);
+
+        // With force_new=true: bypasses most_recent_appendable entirely and
+        // returns the new recording's own sanitized id.
+        let forced = local_recording_id_for_start("2026-06-02T10:02:00.000Z".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(forced, storage::sanitize_iso_to_id("2026-06-02T10:02:00.000Z"));
+        assert_ne!(forced, id);
+
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

@@ -102,7 +102,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                     return;
                                 }
                                 let _ = crate::commands::open_waveform_window(
-                                    &app_main, None, None, false,
+                                    &app_main, None, None, false, false,
                                 );
                             });
                             return;
@@ -158,6 +158,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                                 &app_main,
                                 Some(meeting_id),
                                 None,
+                                false,
                                 false,
                             );
                         });

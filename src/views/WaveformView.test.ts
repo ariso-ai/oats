@@ -471,8 +471,31 @@ describe('WaveformView vertical pill', () => {
       .filter(([name]) => name === 'recorder://state')
       .map(([, payload]) => payload as { localRecordingId: string | null })
       .at(-1);
-    expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z');
+    // Second arg is forceNew, false here — this route has no forceNew=1 query.
+    expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z', false);
     expect(state?.localRecordingId).toBe('2026-06-02T10-00-00Z');
+    vi.useRealTimers();
+  });
+
+  it('resolves a forced-new id when the route carries forceNew=1, and finalizes with forceNew', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    routeQuery = { forceNew: '1' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+
+    // The empty-detail Start button routes here with forceNew=1: recordingIdForStart
+    // must be asked for a brand-new id, never an append target.
+    expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z', true);
+
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    const meta = finalizeRecording.mock.calls[0][1] as { forceNew?: boolean };
+    expect(meta.forceNew).toBe(true);
+    routeQuery = {};
     vi.useRealTimers();
   });
 

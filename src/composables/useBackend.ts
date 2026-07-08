@@ -29,6 +29,9 @@ export interface RecordingMeta {
   /** Local "Continue this meeting": append into this existing recording id,
    *  bypassing the 5-minute auto-append window. */
   localAppendId?: string;
+  /** Local "start fresh": force a brand-new recording, skipping the 5-minute
+   *  auto-append. Set when the detail pane was empty at Start. */
+  forceNew?: boolean;
 }
 
 export interface FinalizeResult {
@@ -408,7 +411,8 @@ export class LocalBackend implements Backend {
       timestampTitle(createdAt),
       createdAt,
       meta.durationSeconds,
-      meta.localAppendId
+      meta.localAppendId,
+      meta.forceNew
     );
     return { backend: 'local', ...res };
   }

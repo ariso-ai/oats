@@ -159,6 +159,9 @@ const localAppendIdRaw = route.query.localAppendId;
 // local recording id here so finalize appends to it regardless of elapsed time.
 const localAppendId =
   typeof localAppendIdRaw === 'string' && localAppendIdRaw.length > 0 ? localAppendIdRaw : null;
+// When the detail pane was empty at Start, the Library passes this so finalize
+// forces a brand-new recording and skips the 5-minute auto-append.
+const forceNew = route.query.forceNew === '1';
 const isAuto = route.query.auto === '1';
 // Born hidden when the meetings window is the visible UI: the window must still
 // exist (and stay visible to WebKit so getUserMedia resolves), but the pill
@@ -251,7 +254,9 @@ watch(
       return;
     }
     try {
-      const id = await local.recordingIdForStart(startAt);
+      // forceNew makes the backend return this session's own new id (never an
+      // append target), so the recorder docks to a fresh row.
+      const id = await local.recordingIdForStart(startAt, forceNew);
       if (token === idResolveToken) effectiveLocalRecordingId.value = id;
     } catch (e) {
       // Fall back to this session's own id so recording still works if the
@@ -485,6 +490,7 @@ async function handleStop() {
         (prevMeta?.durationSeconds ?? 0) + recorder.durationSeconds.value,
       meetingId: prevMeta?.meetingId ?? effectiveMeetingId.value ?? undefined,
       localAppendId: prevMeta?.localAppendId ?? localAppendId ?? undefined,
+      forceNew: prevMeta?.forceNew ?? forceNew ?? undefined,
     };
     await runFinalize();
   } else {
