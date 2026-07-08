@@ -86,10 +86,33 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
     })
 }
 
+/// Parsed output of `ariso-stt notes`: the Markdown notes plus an optional
+/// generated title. `title` is `None` when the sidecar emits no title (blank,
+/// or a non-JSON/older binary whose whole stdout is treated as the notes body).
+#[derive(Debug, Clone)]
+pub struct NotesOutput {
+    pub title: Option<String>,
+    pub notes: String,
+}
+
+/// JSON contract emitted by `ariso-stt notes`: `{ "title": ..., "notes": ... }`.
+#[derive(Deserialize)]
+struct NotesJson {
+    #[serde(default)]
+    title: String,
+    notes: String,
+}
+
+/// Trimmed title, or `None` when empty.
+fn normalize_title(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
 /// Run the sidecar in notes mode and return the generated markdown (stdout).
 /// Bounded by [`NOTES_TIMEOUT`]; on timeout the child process is killed
 /// (via `kill_on_drop`) so a hung sidecar can't keep a caller pending.
-pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, String> {
+pub async fn run_notes(transcript: &Path, models: &Path) -> Result<NotesOutput, String> {
     let bin = sidecar_path()?;
     let mut cmd = Command::new(&bin);
     cmd.arg("notes")
@@ -115,7 +138,20 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<String, Strin
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ariso-stt notes failed: {}", stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    // Tolerant parse: prefer the {title, notes} JSON contract; fall back to
+    // treating raw stdout as the notes body (non-JSON / older sidecar binary).
+    match serde_json::from_str::<NotesJson>(trimmed) {
+        Ok(j) => Ok(NotesOutput {
+            title: normalize_title(&j.title),
+            notes: j.notes.trim().to_string(),
+        }),
+        Err(_) => Ok(NotesOutput {
+            title: None,
+            notes: trimmed.to_string(),
+        }),
+    }
 }
 
 /// Whether the transcript's on-disk bytes differ between two reads. Used to
@@ -127,6 +163,29 @@ fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool
 /// Current instant as an RFC3339 string.
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// If the recording still carries its auto-generated default title, replace it
+/// with the model-generated `title` and rename the vault artifacts to match.
+/// Best-effort: any failure leaves the (already-written) note under the default
+/// title. On success updates `meta.title`, `meta.audio_file`, and clears
+/// `title_is_default`. No-op when the title is user-set, blank, or unchanged.
+fn maybe_apply_generated_title(meta: &mut RecordingMeta, audio_file: &str, title: Option<String>) {
+    if !meta.title_is_default {
+        return;
+    }
+    let new_title = match title {
+        Some(t) if !t.trim().is_empty() && t.trim() != meta.title => t.trim().to_string(),
+        _ => return,
+    };
+    match crate::vault::rename_recording_artifacts(&meta.id, &meta.created_at, audio_file, &new_title) {
+        Ok(new_audio_file) => {
+            meta.audio_file = Some(new_audio_file);
+            meta.title = new_title;
+            meta.title_is_default = false;
+        }
+        Err(e) => eprintln!("title regeneration: rename artifacts: {e}"),
+    }
 }
 
 /// Best-effort notes generation: runs the sidecar and writes either the vault
@@ -146,18 +205,18 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     match outcome {
         // Empty output is a silent failure: it would write a blank note with
         // notes_error unset, reading as success. Record it.
-        Ok(notes) if notes.trim().is_empty() => {
+        Ok(output) if output.notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
             let _ = storage::write_meta(&dir, &meta);
         }
-        Ok(notes) => {
+        Ok(output) => {
             let audio_file = match &meta.audio_file {
                 Some(a) => a.clone(),
                 // Legacy recording with no vault audio: keep the old location so
                 // its note stays alongside its audio.
                 None => {
-                    if let Err(e) = storage::write_notes(&dir, &notes) {
+                    if let Err(e) = storage::write_notes(&dir, &output.notes) {
                         eprintln!("write notes: {e}");
                         meta.notes_error = Some(e);
                         let _ = storage::write_meta(&dir, &meta);
@@ -166,12 +225,15 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                 }
             };
             let basename = audio_file.strip_suffix(".mp3").unwrap_or(audio_file.as_str());
-            if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &notes) {
+            if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &output.notes) {
                 eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
                 let _ = storage::write_meta(&dir, &meta);
                 return;
             }
+            // Regenerate the note title from the notes, but only while the title
+            // is still the auto-generated default (never clobber a user rename).
+            maybe_apply_generated_title(&mut meta, &audio_file, output.title);
             meta.notes_error = None;
             meta.notes_written = Some(now_rfc3339());
             let _ = storage::write_meta(&dir, &meta);
@@ -278,6 +340,7 @@ async fn fresh_recording_core(
         last_clip_end_at: None,
         audio_file: Some(audio_file.clone()),
         notes_written: None,
+        title_is_default: true,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -379,6 +442,7 @@ fn save_failed_clip(
                 last_clip_end_at: None,
                 audio_file,
                 notes_written: None,
+                title_is_default: false,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -638,6 +702,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_notes_parses_title_and_notes_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(
+            tmp.path(),
+            "echo '{\"title\":\"Budget Planning\",\"notes\":\"## Summary body\"}'",
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let transcript = tmp.path().join("transcript.md");
+        std::fs::write(&transcript, b"hi").unwrap();
+        let out = run_notes(&transcript, tmp.path()).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(out.title.as_deref(), Some("Budget Planning"));
+        assert_eq!(out.notes, "## Summary body");
+    }
+
+    #[tokio::test]
+    async fn run_notes_falls_back_to_raw_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), "echo '# Notes'");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let transcript = tmp.path().join("transcript.md");
+        std::fs::write(&transcript, b"hi").unwrap();
+        let out = run_notes(&transcript, tmp.path()).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(out.title, None);
+        assert_eq!(out.notes, "# Notes");
+    }
+
+    #[tokio::test]
+    async fn run_notes_blank_title_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), "echo '{\"title\":\"   \",\"notes\":\"## Summary\"}'");
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let transcript = tmp.path().join("transcript.md");
+        std::fs::write(&transcript, b"hi").unwrap();
+        let out = run_notes(&transcript, tmp.path()).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(out.title, None);
+        assert_eq!(out.notes, "## Summary");
+    }
+
+    #[tokio::test]
     async fn parses_stub_transcript_json() {
         let tmp = tempfile::tempdir().unwrap();
         let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
@@ -870,6 +976,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -906,6 +1013,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -929,6 +1037,7 @@ mod tests {
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -968,6 +1077,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1384,6 +1494,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1410,6 +1521,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1501,6 +1613,109 @@ mod tests {
         let attachments = crate::vault::attachments_dir(&crate::vault::vault_root().unwrap());
         let count = std::fs::read_dir(&attachments).unwrap().count();
         assert_eq!(count, 1, "retry must not orphan a duplicate attachment");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn generated_title_skipped_when_not_default() {
+        let mut meta = RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "User Title".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 12,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some("2026-06-02 User Title.mp3".into()),
+            notes_written: None,
+            title_is_default: false,
+        };
+        maybe_apply_generated_title(&mut meta, "2026-06-02 User Title.mp3", Some("Generated".into()));
+        assert_eq!(meta.title, "User Title");
+        assert!(!meta.title_is_default);
+    }
+
+    #[test]
+    fn generated_title_skipped_when_blank() {
+        let mut meta = RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "Mon Jul 6 @ 959AM".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 12,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some("2026-06-02 default.mp3".into()),
+            notes_written: None,
+            title_is_default: true,
+        };
+        maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", None);
+        assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
+        assert!(meta.title_is_default);
+    }
+
+    #[test]
+    fn generated_title_skipped_when_whitespace() {
+        let mut meta = RecordingMeta {
+            id: "2026-06-02T14-30-05Z".into(),
+            title: "Mon Jul 6 @ 959AM".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 12,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some("2026-06-02 default.mp3".into()),
+            notes_written: None,
+            title_is_default: true,
+        };
+        maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", Some("   ".to_string()));
+        assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
+        assert!(meta.title_is_default);
+    }
+
+    #[tokio::test]
+    async fn notes_regenerate_default_title_and_rename_vault_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let asr = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        // notes subcommand emits the {title,notes} JSON; transcribe path emits ASR JSON.
+        let body = format!(
+            "if [ \"$1\" = notes ]; then echo '{{\"title\":\"Budget Planning\",\"notes\":\"## Summary body\"}}'; exit 0; fi\ncat <<'EOF'\n{asr}\nEOF"
+        );
+        let stub = write_stub(tmp.path(), &body);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Mon Jul 6 @ 959AM".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Budget Planning");
+        assert!(!meta.title_is_default);
+        assert_eq!(meta.audio_file.as_deref(), Some("2026-06-02 Budget Planning.mp3"));
+        // The vault note file was renamed to the generated-title basename.
+        let vault = crate::vault::vault_root().unwrap();
+        assert!(
+            vault.join("2026-06-02 Budget Planning.md").exists(),
+            "expected renamed vault note; vault had: {:?}",
+            std::fs::read_dir(&vault).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>()
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }

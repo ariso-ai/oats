@@ -1144,6 +1144,8 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
     let dir = recording_dir(&id)?;
     let mut meta = crate::storage::read_meta(&dir)?;
     meta.title = title.to_string();
+    // A user rename makes the title intentional — never auto-retitle again.
+    meta.title_is_default = false;
     // Propagate the rename into the vault: rename the note file + audio
     // attachment to match the new title (preserving the note body), and store
     // the new attachment name. Legacy recordings (no `audio_file`) have their
@@ -1513,7 +1515,29 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            title_is_default: false,
         }
+    }
+
+    #[test]
+    fn rename_clears_title_is_default() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
+        let mut meta = test_meta(id);
+        meta.title_is_default = true;
+        meta.audio_file = None; // legacy path: skip vault propagation
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        rename_local_recording(id.to_string(), "My Real Title".to_string()).unwrap();
+
+        let after = crate::storage::read_meta(&dir).unwrap();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert_eq!(after.title, "My Real Title");
+        assert!(!after.title_is_default);
     }
 
     #[test]
@@ -1773,6 +1797,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            title_is_default: false,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();
