@@ -50,7 +50,7 @@ fn local_backend() -> LocalBackendCapability {
         }
     } else if cfg!(target_os = "windows") {
         LocalBackendCapability {
-            supported: false,
+            supported: true,
             engine: Some("cpp-sidecar"),
         }
     } else {
@@ -135,10 +135,10 @@ mod tests {
     }
 
     #[test]
-    fn windows_local_backend_is_pending_not_supported() {
+    fn windows_local_backend_uses_cpp_sidecar() {
         let caps = capabilities();
         if cfg!(target_os = "windows") {
-            assert!(!caps.local_backend.supported);
+            assert!(caps.local_backend.supported);
             assert_eq!(caps.local_backend.engine, Some("cpp-sidecar"));
         }
     }

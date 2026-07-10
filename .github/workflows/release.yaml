@@ -261,7 +261,10 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
-      - name: Build Windows ariso-stt sidecar placeholder
+      - name: Test Windows ariso-stt sidecar
+        run: cargo test --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --locked
+
+      - name: Build Windows ariso-stt sidecar
         shell: pwsh
         run: |
           cargo build --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --release --locked

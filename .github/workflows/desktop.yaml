@@ -108,7 +108,11 @@ jobs:
           cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
           cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 
-      - name: Build Windows ariso-stt sidecar placeholder
+      - name: Test Windows ariso-stt sidecar
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --locked
+
+      - name: Build Windows ariso-stt sidecar
         if: runner.os == 'Windows'
         shell: pwsh
         run: |

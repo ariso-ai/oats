@@ -16,7 +16,7 @@ export function defaultPlatformCapabilities(): PlatformCapabilities {
   return {
     os,
     localBackend: {
-      supported: isMac,
+      supported: isMac || isWindows,
       engine: isMac ? 'swift-mlx' : isWindows ? 'cpp-sidecar' : null,
     },
     systemAudio: {

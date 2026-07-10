@@ -7,6 +7,8 @@ src-tauri/ariso-stt/.build/
 src-tauri/ariso-stt/.xcode/
 src-tauri/ariso-stt/.xcode-metallib/
 src-tauri/ariso-stt/.swiftpm/
+src-tauri/ariso-stt-cross/target/
+.codex-artifacts/
 .superpowers/
 docs/superpowers/plans/
 .DS_Store

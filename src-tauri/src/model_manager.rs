@@ -37,7 +37,7 @@ fn manifest_path(root: &Path) -> std::path::PathBuf {
 /// late failure at transcribe time (recording is retained as `failed`) rather
 /// than being gated up front — an accepted v1 simplification.
 pub fn is_ready(root: &Path) -> bool {
-    read_manifest(root).is_some()
+    read_manifest(root).is_some() || (cfg!(target_os = "windows") && windows_stt_is_ready(root))
 }
 
 pub fn read_manifest(root: &Path) -> Option<ModelManifest> {
@@ -59,6 +59,7 @@ pub fn write_manifest(root: &Path, downloaded_at: &str) -> Result<(), String> {
 /// The notes LLM is downloaded (from the app CDN) into this directory and
 /// loaded by the sidecar `notes` command via a directory-based config.
 const LLM_MODEL_NAME: &str = "gemma-3-1b-it-qat-4bit";
+const WINDOWS_MODEL_VERSION: &str = "v1";
 
 fn llm_dir(root: &Path) -> std::path::PathBuf {
     crate::storage::models_dir(root)
@@ -66,11 +67,116 @@ fn llm_dir(root: &Path) -> std::path::PathBuf {
         .join(LLM_MODEL_NAME)
 }
 
+const WINDOWS_PARAKEET_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+const WINDOWS_DIARIZATION_DIR: &str = "speaker-diarization";
+const WINDOWS_DIARIZATION_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
+const WINDOWS_DIARIZATION_REVERB_DIR: &str = "sherpa-onnx-reverb-diarization-v1";
+const WINDOWS_DIARIZATION_3D_SPEAKER: &str =
+    "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+const WINDOWS_DIARIZATION_NEMO_SPEAKER: &str = "nemo_en_titanet_small.onnx";
+const WINDOWS_GEMMA_QAT_GGUF: &str = "gemma-3-1b-it-q4_0.gguf";
+const WINDOWS_GEMMA_LEGACY_GGUF: &str = "gemma-3-1b-it-qat-q4_0.gguf";
+
+fn windows_parakeet_dirs(root: &Path) -> [PathBuf; 4] {
+    let models = crate::storage::models_dir(root);
+    [
+        windows_versioned_dir(&models, "parakeet-tdt-0.6b-v3"),
+        windows_unversioned_dir(&models, "parakeet-tdt-0.6b-v3"),
+        models.join(WINDOWS_PARAKEET_DIR),
+        models.join("parakeet-tdt-0.6b-v3"),
+    ]
+}
+
+fn windows_stt_is_ready(root: &Path) -> bool {
+    let has_parakeet = windows_parakeet_dirs(root).iter().any(|dir| {
+        dir.join("encoder.int8.onnx").is_file()
+            && dir.join("decoder.int8.onnx").is_file()
+            && dir.join("joiner.int8.onnx").is_file()
+            && dir.join("tokens.txt").is_file()
+    });
+    has_parakeet && windows_diarization_is_ready(root)
+}
+
+fn windows_diarization_is_ready(root: &Path) -> bool {
+    let models = crate::storage::models_dir(root);
+    let roots = [
+        windows_versioned_dir(&models, WINDOWS_DIARIZATION_DIR),
+        windows_unversioned_dir(&models, WINDOWS_DIARIZATION_DIR),
+        models.join(WINDOWS_DIARIZATION_DIR),
+        models,
+    ];
+    roots.iter().any(|dir| {
+        let has_segmentation = [
+            dir.join(WINDOWS_DIARIZATION_SEGMENTATION_DIR)
+                .join("model.int8.onnx"),
+            dir.join(WINDOWS_DIARIZATION_SEGMENTATION_DIR)
+                .join("model.onnx"),
+            dir.join(WINDOWS_DIARIZATION_REVERB_DIR)
+                .join("model.int8.onnx"),
+            dir.join(WINDOWS_DIARIZATION_REVERB_DIR).join("model.onnx"),
+            dir.join("segmentation").join("model.int8.onnx"),
+            dir.join("segmentation").join("model.onnx"),
+        ]
+        .iter()
+        .any(|path| path.is_file());
+        let has_embedding = [
+            dir.join(WINDOWS_DIARIZATION_3D_SPEAKER),
+            dir.join(WINDOWS_DIARIZATION_NEMO_SPEAKER),
+            dir.join("embedding").join(WINDOWS_DIARIZATION_3D_SPEAKER),
+            dir.join("embedding").join(WINDOWS_DIARIZATION_NEMO_SPEAKER),
+        ]
+        .iter()
+        .any(|path| path.is_file());
+        has_segmentation && has_embedding
+    })
+}
+
+fn windows_gemma_dirs(root: &Path) -> [PathBuf; 3] {
+    let models = crate::storage::models_dir(root);
+    [
+        windows_versioned_dir(&models, LLM_MODEL_NAME),
+        windows_unversioned_dir(&models, LLM_MODEL_NAME),
+        models.join(LLM_MODEL_NAME),
+    ]
+}
+
+fn windows_versioned_dir(models: &Path, name: &str) -> PathBuf {
+    windows_unversioned_dir(models, name).join(WINDOWS_MODEL_VERSION)
+}
+
+fn windows_unversioned_dir(models: &Path, name: &str) -> PathBuf {
+    models.join("windows").join(name)
+}
+
+fn windows_llm_is_ready(root: &Path) -> bool {
+    let llama = if cfg!(target_os = "windows") {
+        "llama-cli.exe"
+    } else {
+        "llama-cli"
+    };
+    let runner = if cfg!(target_os = "windows") {
+        "ariso-gemma-notes.exe"
+    } else {
+        "ariso-gemma-notes"
+    };
+    windows_gemma_dirs(root).iter().any(|dir| {
+        let has_model = dir.join(WINDOWS_GEMMA_QAT_GGUF).is_file()
+            || dir.join(WINDOWS_GEMMA_LEGACY_GGUF).is_file();
+        let has_llama_runtime = dir.join(llama).is_file()
+            && (!cfg!(target_os = "windows")
+                || (dir.join("llama-cli-impl.dll").is_file()
+                    && dir.join("llama.dll").is_file()
+                    && dir.join("ggml.dll").is_file()));
+        has_model && (has_llama_runtime || dir.join(runner).is_file())
+    })
+}
+
 /// Readiness for the notes LLM. Marker-based (not mere presence): the marker is
 /// written only after every file finishes downloading, so an interrupted
 /// download is not mistaken for a ready model.
 pub fn llm_is_ready(root: &Path) -> bool {
     llm_dir(root).join(".complete").exists()
+        || (cfg!(target_os = "windows") && windows_llm_is_ready(root))
 }
 
 /// Both on-device models are downloaded and ready to record with: the STT
@@ -83,9 +189,22 @@ pub fn local_models_ready(root: &Path) -> bool {
 
 pub fn status(root: &Path) -> ModelStatus {
     let llm_ready = Some(llm_is_ready(root));
-    match read_manifest(root) {
-        Some(m) => ModelStatus { state: "ready".into(), version: Some(m.version), llm_ready },
-        None => ModelStatus { state: "not_downloaded".into(), version: None, llm_ready },
+    if is_ready(root) {
+        ModelStatus {
+            state: "ready".into(),
+            version: Some(
+                read_manifest(root)
+                    .map(|m| m.version)
+                    .unwrap_or_else(|| MODEL_VERSION.to_string()),
+            ),
+            llm_ready,
+        }
+    } else {
+        ModelStatus {
+            state: "not_downloaded".into(),
+            version: None,
+            llm_ready,
+        }
     }
 }
 
@@ -119,7 +238,7 @@ impl Drop for DownloadGuard<'_> {
 
 #[tauri::command]
 pub fn local_model_status() -> Result<ModelStatus, String> {
-    if !cfg!(target_os = "macos") {
+    if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
         return Ok(ModelStatus {
             state: "unsupported".into(),
             version: None,
@@ -136,10 +255,7 @@ pub fn local_model_status() -> Result<ModelStatus, String> {
 #[tauri::command]
 pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     if cfg!(target_os = "windows") {
-        let msg = "Windows local speech models are not published yet; the cpp-sidecar model bundle is still pending"
-            .to_string();
-        let _ = app.emit("model://stt/error", msg.clone());
-        return Err(msg);
+        return validate_windows_stt(app).await;
     }
     if !cfg!(target_os = "macos") {
         let msg = "Local STT is not supported on this platform".to_string();
@@ -173,6 +289,44 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
             Err(e)
         }
     }
+}
+
+async fn validate_windows_stt(app: tauri::AppHandle) -> Result<(), String> {
+    let _guard = DownloadGuard::acquire(&STT_DOWNLOAD_IN_PROGRESS)
+        .ok_or_else(|| "a model download is already in progress".to_string())?;
+    let root = crate::storage::ariso_root()?;
+    let models = crate::storage::models_dir(&root);
+    std::fs::create_dir_all(&models).map_err(|e| format!("create models dir: {e}"))?;
+
+    let bin = crate::transcribe::sidecar_path()?;
+    let output = tokio::process::Command::new(&bin)
+        .arg("download")
+        .arg("--models")
+        .arg(&models)
+        .output()
+        .await
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let msg = if stderr.is_empty() {
+            "Windows Parakeet model validation failed".to_string()
+        } else {
+            stderr
+        };
+        let _ = app.emit("model://stt/error", msg.clone());
+        return Err(msg);
+    }
+
+    if !windows_stt_is_ready(&root) {
+        let msg = "Windows Parakeet model files are missing after sidecar validation".to_string();
+        let _ = app.emit("model://stt/error", msg.clone());
+        return Err(msg);
+    }
+
+    write_manifest(&root, &now_marker())?;
+    let _ = app.emit("model://stt/progress", 1.0);
+    let _ = app.emit("model://stt/done", ());
+    Ok(())
 }
 
 /// Public base host for all app CDN assets (Cloudflare R2, r2.dev managed
@@ -311,10 +465,7 @@ fn verify_pinned(file: &str, actual_hex: &str) -> Result<(), String> {
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     if cfg!(target_os = "windows") {
-        let msg = "Windows local language models are not published yet; the cpp-sidecar model bundle is still pending"
-            .to_string();
-        let _ = app.emit("model://llm/error", msg.clone());
-        return Err(msg);
+        return validate_windows_llm(app).await;
     }
     if !cfg!(target_os = "macos") {
         let msg = "Local LLM is not supported on this platform".to_string();
@@ -342,6 +493,48 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
             Err(e)
         }
     }
+}
+
+async fn validate_windows_llm(app: tauri::AppHandle) -> Result<(), String> {
+    let _guard = DownloadGuard::acquire(&LLM_DOWNLOAD_IN_PROGRESS)
+        .ok_or_else(|| "a model download is already in progress".to_string())?;
+    let root = crate::storage::ariso_root()?;
+    let models = crate::storage::models_dir(&root);
+    std::fs::create_dir_all(&models).map_err(|e| format!("create models dir: {e}"))?;
+
+    let bin = crate::transcribe::sidecar_path()?;
+    let output = tokio::process::Command::new(&bin)
+        .arg("download-notes")
+        .arg("--models")
+        .arg(&models)
+        .output()
+        .await
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let msg = if stderr.is_empty() {
+            "Windows Gemma model validation failed".to_string()
+        } else {
+            stderr
+        };
+        let _ = app.emit("model://llm/error", msg.clone());
+        return Err(msg);
+    }
+
+    if !windows_llm_is_ready(&root) {
+        let msg = format!(
+            "Windows Gemma artifacts are missing; expected {WINDOWS_GEMMA_QAT_GGUF} and llama-cli.exe under models/windows/{LLM_MODEL_NAME}"
+        );
+        let _ = app.emit("model://llm/error", msg.clone());
+        return Err(msg);
+    }
+
+    let marker_dir = llm_dir(&root);
+    std::fs::create_dir_all(&marker_dir).map_err(|e| format!("create llm marker dir: {e}"))?;
+    crate::storage::write_atomic(&marker_dir.join(".complete"), now_marker().as_bytes())?;
+    let _ = app.emit("model://llm/progress", 1.0);
+    let _ = app.emit("model://llm/done", ());
+    Ok(())
 }
 
 /// Download every `LLM_FILES` entry from the CDN into `dir`, reporting byte
@@ -799,9 +992,63 @@ mod tests {
     }
 
     #[test]
-    fn local_model_status_is_unsupported_off_macos() {
-        if !cfg!(target_os = "macos") {
+    fn local_model_status_is_unsupported_on_unknown_platforms() {
+        if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
             assert_eq!(local_model_status().unwrap().state, "unsupported");
+        }
+    }
+
+    #[test]
+    fn windows_stt_ready_requires_parakeet_and_diarization_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let models = crate::storage::models_dir(root);
+        let dir = windows_versioned_dir(&models, "parakeet-tdt-0.6b-v3");
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ] {
+            std::fs::write(dir.join(file), b"fixture").unwrap();
+        }
+        assert!(!windows_stt_is_ready(root));
+
+        let diarization = windows_versioned_dir(&models, WINDOWS_DIARIZATION_DIR);
+        let segmentation = diarization.join(WINDOWS_DIARIZATION_SEGMENTATION_DIR);
+        std::fs::create_dir_all(&segmentation).unwrap();
+        std::fs::write(segmentation.join("model.int8.onnx"), b"fixture").unwrap();
+        std::fs::write(
+            diarization.join(WINDOWS_DIARIZATION_3D_SPEAKER),
+            b"fixture",
+        )
+        .unwrap();
+
+        assert!(windows_stt_is_ready(root));
+        if cfg!(target_os = "windows") {
+            assert!(is_ready(root));
+            assert_eq!(status(root).state, "ready");
+        }
+    }
+
+    #[test]
+    fn windows_llm_ready_requires_gemma_model_and_runner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let models = crate::storage::models_dir(root);
+        let dir = windows_versioned_dir(&models, LLM_MODEL_NAME);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(WINDOWS_GEMMA_QAT_GGUF), b"fixture").unwrap();
+        assert!(!windows_llm_is_ready(root));
+        std::fs::write(dir.join("llama-cli.exe"), b"runner").unwrap();
+        assert!(!windows_llm_is_ready(root));
+        std::fs::write(dir.join("llama-cli-impl.dll"), b"runtime").unwrap();
+        std::fs::write(dir.join("llama.dll"), b"runtime").unwrap();
+        std::fs::write(dir.join("ggml.dll"), b"runtime").unwrap();
+        assert!(windows_llm_is_ready(root));
+        if cfg!(target_os = "windows") {
+            assert!(llm_is_ready(root));
         }
     }
 
