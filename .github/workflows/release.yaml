@@ -234,11 +234,11 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
 
   package-windows:
-    name: Build Windows NSIS artifact
+    name: Build Windows installer artifacts
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: windows-latest
-    # Internal QA artifact only until the Windows local sidecar and installer
+    # Internal QA artifacts only until the Windows local sidecar and installer
     # signing path are complete.
     environment: release
     permissions:
@@ -266,17 +266,32 @@ jobs:
 
       - name: Build Windows ariso-stt sidecar
         shell: pwsh
-        run: |
-          cargo build --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --release --locked
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          Copy-Item src-tauri/ariso-stt-cross/target/release/ariso-stt.exe src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
-          New-Item -ItemType Directory -Force src-tauri/binaries/mlx-swift_Cmlx.bundle | Out-Null
+        run: ./scripts/build-windows-sidecar.ps1
 
-      - name: Build Windows NSIS bundle
+      - name: Build Windows installer bundles
+        shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build -- --bundles nsis -- --features prod-api
+        run: ./scripts/build-windows-installers.ps1
+
+      - name: Verify Windows installer artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundleRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+
+          $nsis = Get-ChildItem "$bundleRoot/nsis" -Filter *.exe -File
+          $msi = Get-ChildItem "$bundleRoot/msi" -Filter *.msi -File
+          $sigs = Get-ChildItem $bundleRoot -Recurse -Filter *.sig -File
+
+          if ($nsis.Count -lt 1) { throw "Missing NSIS .exe artifact" }
+          if ($msi.Count -lt 1) { throw "Missing MSI artifact" }
+          if ($sigs.Count -lt 2) { throw "Expected updater signature artifacts for Windows installers" }
+
+          $nsis | ForEach-Object { "NSIS: $($_.FullName)" }
+          $msi | ForEach-Object { "MSI: $($_.FullName)" }
+          $sigs | ForEach-Object { "SIG: $($_.FullName)" }
 
       - name: Upload Windows NSIS bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -286,7 +301,17 @@ jobs:
           compression-level: 0
           retention-days: 7
           path: |
-            src-tauri/target/release/bundle/nsis/**
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/**
+
+      - name: Upload Windows MSI bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-msi-internal
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/**
 
   publish:
     name: Generate manifest and publish artifacts to R2

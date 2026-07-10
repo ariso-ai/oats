@@ -10,6 +10,26 @@ AWS_PROFILE=r2 ./sync-stt-models.sh
 
 ## Windows Local smoke harness
 
+`import-windows-build-env.ps1` loads the Visual Studio C++ build environment when `link.exe` is not
+already on `PATH`.
+
+`build-windows-sidecar.ps1` builds the Windows `ariso-stt.exe` sidecar for
+`x86_64-pc-windows-msvc` and copies it to Tauri's target-named external binary path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-sidecar.ps1
+```
+
+`build-windows-installers.ps1` builds the Windows installer artifacts through Tauri:
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "C:\path\to\tauri.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1
+```
+
+Release and desktop CI use these helpers before building or validating the Windows app.
+
 `windows-local-smoke.ps1` runs the Windows `ariso-stt.exe` sidecar against already-staged
 model artifacts and reports JSON timing/output checks. It does not download models. The
 output includes a hardware summary plus STT audio duration and real-time factor when the

@@ -11,7 +11,9 @@ Add Windows support without weakening oats' existing backend boundary:
   Swift/MLX sidecar.
 
 The public Windows release target is Windows 11 first, NSIS installer first. Windows 10 support
-requires at least one smoke pass before public support is claimed.
+requires at least one smoke pass before public support is claimed. MSI is built as an internal
+artifact for enterprise/admin validation, but it is not a public installer until signing, updater,
+install, upgrade, and uninstall behavior have been smoke tested.
 
 ## Platform Capability Layer
 
@@ -90,9 +92,16 @@ the real sidecar into Tauri's expected target-named path:
 
 - `src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe`
 
-The release workflow builds an internal NSIS artifact on `windows-latest`. It is not a public
-release artifact until the real Windows Local sidecar, system-audio capture, and installer signing
-are complete.
+The release workflow builds internal NSIS and MSI artifacts on `windows-latest` from the same
+Windows sidecar build:
+
+- `windows-nsis-internal`
+- `windows-msi-internal`
+
+NSIS remains the primary consumer installer. MSI remains internal until Windows signing, updater,
+install, upgrade, and uninstall behavior are verified. Windows packaging uses
+`src-tauri/tauri.windows.conf.json` to remove macOS-only bundle resources instead of creating an
+empty `mlx-swift_Cmlx.bundle` placeholder in CI.
 
 ## Remaining Native Work
 
@@ -103,5 +112,5 @@ are complete.
   acceptance/mirroring.
 - Implement WASAPI loopback while preserving the existing `system-audio-data` event contract.
 - Implement Windows external microphone activity detection for auto-record.
-- Split macOS-only bundle resources out of the shared Tauri config instead of creating CI-only
-  placeholders for Windows builds.
+- Finish public Windows signing, updater, install, upgrade, and uninstall verification for NSIS.
+- Decide whether MSI should graduate from internal enterprise/admin validation to a public artifact.

@@ -115,11 +115,7 @@ jobs:
       - name: Build Windows ariso-stt sidecar
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo build --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --release --locked
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          Copy-Item src-tauri/ariso-stt-cross/target/release/ariso-stt.exe src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
-          New-Item -ItemType Directory -Force src-tauri/binaries/mlx-swift_Cmlx.bundle | Out-Null
+        run: ./scripts/build-windows-sidecar.ps1
 
       - name: Build Rust
         working-directory: src-tauri
