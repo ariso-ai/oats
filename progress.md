@@ -383,3 +383,23 @@
   `alvinreal/awesome-opensource-ai`
   (`python3 tools/validate_awesome.py --skip-remote`), and
   `tehtbl/awesome-note-taking` (markdownlint).
+
+### zhongkechen/awesome-local-first maintainer feedback
+
+- Approach: follow the maintainer's requested accuracy correction without
+  changing the established `Oats` product casing in human-facing copy.
+- Steps taken: revised the entry in `zhongkechen/awesome-local-first#7` so it
+  no longer calls Oats local-first by default and explicitly describes its
+  fully offline on-device workflow as an optional mode for local recording,
+  transcription, and notes. Updated the PR body to use the same distinction.
+  The target's `master` branch had moved and conflicted at the Applications
+  section, so merged current upstream, retained its new categories and entries,
+  and placed Meeting Notes between Knowledge Management and Productivity.
+- Validation: the external checkout passed `git diff --check`; the updated
+  branch was pushed; GitHub's live diff contains only the four-line Meeting
+  Notes addition; and the live draft PR entry/body were re-read from GitHub.
+  GitHub reports the updated branch as mergeable with a clean merge state.
+  Replied to the maintainer after applying the correction.
+- Lessons learned: local-first list copy must distinguish Oats' optional Local
+  mode from its default Cloud mode; `local-first meeting-notes app` is not
+  accurate as an unqualified product description.
