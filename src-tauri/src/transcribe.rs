@@ -300,6 +300,9 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    const SHARED_TRANSCRIPT_FIXTURE: &str =
+        include_str!("../ariso-stt-shared/fixtures/transcript.json");
+
     // SAFETY (all set_var/remove_var below): tests run with `--test-threads=1`,
     // so there is no concurrent env mutation while these calls execute.
 
@@ -377,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn parses_stub_transcript_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let json = SHARED_TRANSCRIPT_FIXTURE;
         let stub = write_stub(tmp.path(), &format!("cat <<'EOF'\n{json}\nEOF"));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
@@ -408,7 +411,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_transcript_and_marks_done() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let json = SHARED_TRANSCRIPT_FIXTURE;
         // Branch on the `notes` subcommand so the stub's transcript JSON isn't
         // dumped into ari-note.md; this test exercises only the transcribe path.
         let body =
@@ -456,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_ari_note_md_when_notes_succeed() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let json = SHARED_TRANSCRIPT_FIXTURE;
         // Stub: `notes` subcommand prints markdown; otherwise print transcript JSON.
         let body = format!(
             "if [ \"$1\" = notes ]; then echo '# Notes'; echo '- did a thing'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
@@ -481,7 +484,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_stays_done_when_notes_fail() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let json = SHARED_TRANSCRIPT_FIXTURE;
         // Stub: `notes` subcommand fails; transcribe still succeeds.
         let body = format!(
             "if [ \"$1\" = notes ]; then echo 'notes boom' >&2; exit 1; fi\ncat <<'EOF'\n{json}\nEOF"
@@ -528,7 +531,7 @@ mod tests {
         storage::write_meta(&dir, &meta).unwrap();
 
         // Stub: notes subcommand prints markdown; otherwise transcript JSON.
-        let json = r#"{"language":"en","durationSeconds":5.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
+        let json = SHARED_TRANSCRIPT_FIXTURE;
         let body = format!(
             "if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
         );

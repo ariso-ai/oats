@@ -1,118 +1,97 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$Models,
-  [string]$SegmentationArchive,
-  [string]$LlamaRuntimeArchive,
-  [string]$GemmaGguf,
-  [string]$StageDir = (Join-Path ([System.IO.Path]::GetTempPath()) "oats-windows-local-r2"),
-  [string]$PublicBase = "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev",
-  [string]$Prefix = "models/windows",
+  [string]$StageDir = (Join-Path ([System.IO.Path]::GetTempPath()) "oats-windows-models"),
+  [string]$PublicBase = "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev",
+  [string]$Prefix = "models",
+  [string]$SpeechVersion = "v1",
+  [string]$NotesVersion = "v2",
   [switch]$Upload,
+  [switch]$Force,
   [string]$R2Endpoint = $env:R2_ENDPOINT,
   [string]$R2Bucket = $env:R2_BUCKET
 )
 
 $ErrorActionPreference = "Stop"
 
-$SegmentationArchiveUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
-$SegmentationArchiveBytes = 6958444
-$SegmentationArchiveSha256 = "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488"
-$LlamaRuntimeUrl = "https://github.com/ggml-org/llama.cpp/releases/download/b9940/llama-b9940-bin-win-cpu-x64.zip"
-$LlamaRuntimeBytes = 18216976
-$LlamaRuntimeSha256 = "d5d7248c7aacaeb0c8f15311acb0f1081874aa7a5de55843702e9e2394a05788"
+function Find-FirstDirectory {
+  param([Parameter(Mandatory = $true)][string[]]$Candidates)
 
-function Find-FirstFile {
-  param([string[]]$Candidates)
-  foreach ($candidate in $Candidates) {
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      return (Resolve-Path -LiteralPath $candidate).Path
-    }
-  }
-  throw "Missing required file. Checked: $($Candidates -join ', ')"
-}
-
-function Find-FirstDir {
-  param([string[]]$Candidates)
   foreach ($candidate in $Candidates) {
     if (Test-Path -LiteralPath $candidate -PathType Container) {
       return (Resolve-Path -LiteralPath $candidate).Path
     }
   }
-  throw "Missing required directory. Checked: $($Candidates -join ', ')"
+  throw "Missing model directory. Checked: $($Candidates -join ', ')"
 }
 
-function Copy-RequiredFile {
-  param(
-    [Parameter(Mandatory = $true)][string]$Source,
-    [Parameter(Mandatory = $true)][string]$Destination
-  )
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
-  Copy-Item -LiteralPath $Source -Destination $Destination -Force
-}
+function Find-FirstFile {
+  param([Parameter(Mandatory = $true)][string[]]$Candidates)
 
-function Get-Sha256 {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-
-function Assert-FileDigest {
-  param(
-    [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][int64]$Bytes,
-    [Parameter(Mandatory = $true)][string]$Sha256
-  )
-  $item = Get-Item -LiteralPath $Path
-  $actualSha = Get-Sha256 -Path $Path
-  if ($item.Length -ne $Bytes -or $actualSha -ne $Sha256) {
-    throw "Integrity check failed for $Path; expected $Bytes bytes sha256 $Sha256, got $($item.Length) bytes sha256 $actualSha"
-  }
-}
-
-function Download-VerifiedFile {
-  param(
-    [Parameter(Mandatory = $true)][string]$Url,
-    [Parameter(Mandatory = $true)][string]$Destination,
-    [Parameter(Mandatory = $true)][int64]$Bytes,
-    [Parameter(Mandatory = $true)][string]$Sha256
-  )
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
-  $part = "$Destination.part"
-  if (Test-Path -LiteralPath $part) {
-    Remove-Item -LiteralPath $part -Force
-  }
-  try {
-    Invoke-WebRequest -Uri $Url -OutFile $part
-  } catch {
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-      & curl.exe -L --fail --output $part $Url
-      if ($LASTEXITCODE -ne 0) {
-        throw "curl.exe failed while downloading $Url"
-      }
-    } else {
-      throw
+  foreach ($candidate in $Candidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return (Resolve-Path -LiteralPath $candidate).Path
     }
   }
-  Assert-FileDigest -Path $part -Bytes $Bytes -Sha256 $Sha256
-  Move-Item -LiteralPath $part -Destination $Destination -Force
+  throw "Missing model file. Checked: $($Candidates -join ', ')"
 }
 
-function Add-Artifact {
+function Copy-BundleFile {
   param(
-    [System.Collections.ArrayList]$Artifacts,
-    [string]$Name,
-    [string]$EnvVar,
-    [string]$RelativePath,
-    [string]$Path
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Bundle,
+    [Parameter(Mandatory = $true)][string]$RelativePath
   )
-  $item = Get-Item -LiteralPath $Path
-  [void]$Artifacts.Add([pscustomobject]@{
-    name = $Name
-    env = $EnvVar
-    path = ($RelativePath -replace "\\", "/")
-    bytes = $item.Length
-    sha256 = Get-Sha256 -Path $Path
-    url = (($PublicBase.TrimEnd("/") + "/" + $Prefix.Trim("/") + "/" + ($RelativePath -replace "\\", "/")))
-  })
+
+  $destination = Join-Path $Bundle $RelativePath
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+  Copy-Item -LiteralPath $Source -Destination $destination -Force
+}
+
+function Write-BundleManifest {
+  param([Parameter(Mandatory = $true)][string]$Bundle)
+
+  $root = (Resolve-Path -LiteralPath $Bundle).Path
+  $entries = Get-ChildItem -LiteralPath $root -Recurse -File |
+    Where-Object { $_.Name -ne "SHA256SUMS" } |
+    ForEach-Object {
+      $relative = $_.FullName.Substring($root.Length + 1).Replace("\", "/")
+      [pscustomobject]@{
+        Path = $relative
+        Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+      }
+    } |
+    Sort-Object Path
+
+  if (-not $entries) {
+    throw "Bundle contains no files: $Bundle"
+  }
+
+  $body = (($entries | ForEach-Object { "$($_.Hash)  $($_.Path)" }) -join "`n") + "`n"
+  $manifest = Join-Path $root "SHA256SUMS"
+  [System.IO.File]::WriteAllText($manifest, $body, [System.Text.UTF8Encoding]::new($false))
+  (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-PublicBytes {
+  param([Parameter(Mandatory = $true)][string]$Url)
+
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+      return (New-Object System.Net.WebClient).DownloadData($Url)
+    } catch {
+      if ($attempt -eq 5) { throw }
+      Start-Sleep -Seconds 2
+    }
+  }
+}
+
+function Get-BytesSha256 {
+  param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+  [System.BitConverter]::ToString(
+    [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
+  ).Replace('-', '').ToLowerInvariant()
 }
 
 if (-not (Test-Path -LiteralPath $Models -PathType Container)) {
@@ -120,123 +99,139 @@ if (-not (Test-Path -LiteralPath $Models -PathType Container)) {
 }
 
 $modelsRoot = (Resolve-Path -LiteralPath $Models).Path
-$stageRoot = Join-Path $StageDir $Prefix
+$stageBase = [System.IO.Path]::GetFullPath($StageDir)
+$stageRoot = [System.IO.Path]::GetFullPath((Join-Path $stageBase $Prefix))
+$stagePrefix = $stageBase.TrimEnd('\') + '\'
+if (-not $stageRoot.StartsWith($stagePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Stage path escapes StageDir: $stageRoot"
+}
 if (Test-Path -LiteralPath $stageRoot) {
   Remove-Item -LiteralPath $stageRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
 
-$parakeetSource = Find-FirstDir @(
+$parakeetSource = Find-FirstDirectory @(
+  (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3\$SpeechVersion"),
   (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3\v1"),
   (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3"),
   (Join-Path $modelsRoot "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"),
   (Join-Path $modelsRoot "parakeet-tdt-0.6b-v3")
 )
-$parakeetRel = "parakeet-tdt-0.6b-v3\v1"
+$parakeetPath = "windows/parakeet-tdt-0.6b-v3/$SpeechVersion"
+$parakeetBundle = Join-Path $stageRoot $parakeetPath
 foreach ($file in @("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")) {
-  Copy-RequiredFile -Source (Join-Path $parakeetSource $file) -Destination (Join-Path $stageRoot (Join-Path $parakeetRel $file))
+  Copy-BundleFile -Source (Join-Path $parakeetSource $file) -Bundle $parakeetBundle -RelativePath $file
 }
 
-$diarSource = Find-FirstDir @(
+$diarizationSource = Find-FirstDirectory @(
+  (Join-Path $modelsRoot "windows\speaker-diarization\$SpeechVersion"),
   (Join-Path $modelsRoot "windows\speaker-diarization\v1"),
   (Join-Path $modelsRoot "windows\speaker-diarization"),
   (Join-Path $modelsRoot "speaker-diarization")
 )
-$segArchive = Join-Path $diarSource "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
-if ($SegmentationArchive) {
-  $segArchive = (Resolve-Path -LiteralPath $SegmentationArchive).Path
-  Assert-FileDigest -Path $segArchive -Bytes $SegmentationArchiveBytes -Sha256 $SegmentationArchiveSha256
-} elseif (-not (Test-Path -LiteralPath $segArchive -PathType Leaf)) {
-  $segArchive = Join-Path $StageDir "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
-  Download-VerifiedFile -Url $SegmentationArchiveUrl -Destination $segArchive -Bytes $SegmentationArchiveBytes -Sha256 $SegmentationArchiveSha256
-} else {
-  Assert-FileDigest -Path $segArchive -Bytes $SegmentationArchiveBytes -Sha256 $SegmentationArchiveSha256
-}
-$diarRel = "speaker-diarization\v1"
-Copy-RequiredFile -Source $segArchive -Destination (Join-Path $stageRoot (Join-Path $diarRel "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"))
-$embedding = Find-FirstFile @(
-  (Join-Path $diarSource "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
-  (Join-Path $diarSource "embedding\3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx")
+$diarizationPath = "windows/speaker-diarization/$SpeechVersion"
+$diarizationBundle = Join-Path $stageRoot $diarizationPath
+$segmentationName = "sherpa-onnx-pyannote-segmentation-3-0"
+$segmentation = Find-FirstFile @(
+  (Join-Path $diarizationSource "$segmentationName\model.int8.onnx"),
+  (Join-Path $diarizationSource "$segmentationName\model.onnx"),
+  (Join-Path $diarizationSource "segmentation\model.int8.onnx"),
+  (Join-Path $diarizationSource "segmentation\model.onnx")
 )
-Copy-RequiredFile -Source $embedding -Destination (Join-Path $stageRoot (Join-Path $diarRel "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"))
+Copy-BundleFile -Source $segmentation -Bundle $diarizationBundle -RelativePath "$segmentationName/model.int8.onnx"
+$embeddingName = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+$embedding = Find-FirstFile @(
+  (Join-Path $diarizationSource $embeddingName),
+  (Join-Path $diarizationSource "embedding\$embeddingName")
+)
+Copy-BundleFile -Source $embedding -Bundle $diarizationBundle -RelativePath $embeddingName
 
-$gemmaSource = Find-FirstDir @(
+$gemmaSource = Find-FirstDirectory @(
+  (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\$NotesVersion"),
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\v1"),
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit"),
   (Join-Path $modelsRoot "gemma-3-1b-it-qat-4bit")
 )
-$gemmaRel = "gemma-3-1b-it-qat-4bit\v1"
-if ($GemmaGguf) {
-  $gemma = (Resolve-Path -LiteralPath $GemmaGguf).Path
-} else {
-  $gemma = Find-FirstFile @(
-    (Join-Path $gemmaSource "gemma-3-1b-it-q4_0.gguf"),
-    (Join-Path $gemmaSource "gemma-3-1b-it-qat-q4_0.gguf")
-  )
-}
-Copy-RequiredFile -Source $gemma -Destination (Join-Path $stageRoot (Join-Path $gemmaRel "gemma-3-1b-it-q4_0.gguf"))
-$runtimeZip = Join-Path $gemmaSource "llama-b9940-bin-win-cpu-x64.zip"
-if ($LlamaRuntimeArchive) {
-  $runtimeZip = (Resolve-Path -LiteralPath $LlamaRuntimeArchive).Path
-  Assert-FileDigest -Path $runtimeZip -Bytes $LlamaRuntimeBytes -Sha256 $LlamaRuntimeSha256
-} elseif (-not (Test-Path -LiteralPath $runtimeZip -PathType Leaf)) {
-  $runtimeZip = Join-Path $StageDir "llama-b9940-bin-win-cpu-x64.zip"
-  Download-VerifiedFile -Url $LlamaRuntimeUrl -Destination $runtimeZip -Bytes $LlamaRuntimeBytes -Sha256 $LlamaRuntimeSha256
-} else {
-  Assert-FileDigest -Path $runtimeZip -Bytes $LlamaRuntimeBytes -Sha256 $LlamaRuntimeSha256
-}
-Copy-RequiredFile -Source $runtimeZip -Destination (Join-Path $stageRoot (Join-Path $gemmaRel "llama-b9940-bin-win-cpu-x64.zip"))
+$gemmaPath = "windows/gemma-3-1b-it-qat-4bit/$NotesVersion"
+$gemmaBundle = Join-Path $stageRoot $gemmaPath
+$gemma = Find-FirstFile @(
+  (Join-Path $gemmaSource "gemma-3-1b-it-q4_0.gguf"),
+  (Join-Path $gemmaSource "gemma-3-1b-it-qat-q4_0.gguf")
+)
+Copy-BundleFile -Source $gemma -Bundle $gemmaBundle -RelativePath "gemma-3-1b-it-q4_0.gguf"
 
-$artifacts = [System.Collections.ArrayList]::new()
-foreach ($file in @("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")) {
-  Add-Artifact $artifacts "parakeet-$file" "" (Join-Path $parakeetRel $file) (Join-Path $stageRoot (Join-Path $parakeetRel $file))
+$runtimeFiles = @(
+  "llama-cli.exe",
+  "llama-cli-impl.dll",
+  "llama-server-impl.dll",
+  "llama-common.dll",
+  "llama.dll",
+  "ggml.dll",
+  "ggml-base.dll",
+  "libomp140.x86_64.dll",
+  "mtmd.dll"
+)
+foreach ($file in $runtimeFiles) {
+  Copy-BundleFile -Source (Find-FirstFile @((Join-Path $gemmaSource $file))) -Bundle $gemmaBundle -RelativePath $file
 }
-Add-Artifact $artifacts "diarization-segmentation" "ARISO_WINDOWS_DIARIZATION_SEGMENTATION_URL" (Join-Path $diarRel "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2") (Join-Path $stageRoot (Join-Path $diarRel "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"))
-Add-Artifact $artifacts "diarization-embedding" "ARISO_WINDOWS_DIARIZATION_EMBEDDING_URL" (Join-Path $diarRel "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx") (Join-Path $stageRoot (Join-Path $diarRel "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"))
-Add-Artifact $artifacts "gemma-gguf" "ARISO_WINDOWS_GEMMA_GGUF_URL" (Join-Path $gemmaRel "gemma-3-1b-it-q4_0.gguf") (Join-Path $stageRoot (Join-Path $gemmaRel "gemma-3-1b-it-q4_0.gguf"))
-Add-Artifact $artifacts "llama-runtime" "ARISO_WINDOWS_LLAMA_RUNTIME_URL" (Join-Path $gemmaRel "llama-b9940-bin-win-cpu-x64.zip") (Join-Path $stageRoot (Join-Path $gemmaRel "llama-b9940-bin-win-cpu-x64.zip"))
+$cpuBackends = @(Get-ChildItem -LiteralPath $gemmaSource -Filter "ggml-cpu-*.dll" -File)
+if (-not $cpuBackends) {
+  throw "No llama.cpp CPU backend DLLs found under $gemmaSource"
+}
+foreach ($backend in $cpuBackends) {
+  Copy-BundleFile -Source $backend.FullName -Bundle $gemmaBundle -RelativePath $backend.Name
+}
 
-$manifest = [pscustomobject]@{
-  generatedAt = (Get-Date).ToUniversalTime().ToString("o")
-  sourceModels = $modelsRoot
-  stage = $stageRoot
-  publicBase = $PublicBase
-  prefix = $Prefix
-  artifacts = $artifacts
+$bundles = @(
+  [pscustomobject]@{ Path = $parakeetPath; Directory = $parakeetBundle },
+  [pscustomobject]@{ Path = $diarizationPath; Directory = $diarizationBundle },
+  [pscustomobject]@{ Path = $gemmaPath; Directory = $gemmaBundle }
+)
+foreach ($bundle in $bundles) {
+  $bundle | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue (Write-BundleManifest $bundle.Directory)
 }
-$manifestPath = Join-Path $stageRoot "windows-local-manifest.json"
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-$pinsPath = Join-Path $stageRoot "windows-local-sidecar-pins.txt"
-$pins = @()
-$pins += "# Update src-tauri/ariso-stt-cross/src/main.rs pins if any artifact changes."
-$pins += "# Generated from $manifestPath"
-$pins += ""
-foreach ($artifact in $artifacts) {
-  if ($artifact.name -like "parakeet-*") {
-    $file = Split-Path -Leaf $artifact.path
-    $pins += "Parakeet $file => size $($artifact.bytes), sha256 `"$($artifact.sha256)`""
-  } else {
-    $pins += "$($artifact.name) => size $($artifact.bytes), sha256 `"$($artifact.sha256)`""
-  }
-}
-$pins | Set-Content -LiteralPath $pinsPath -Encoding UTF8
 
 if ($Upload) {
   if (-not $R2Endpoint -or -not $R2Bucket) {
     throw "Upload requires R2_ENDPOINT and R2_BUCKET."
   }
-  aws s3 cp $stageRoot "s3://$R2Bucket/$Prefix/" --recursive --endpoint-url $R2Endpoint
-  if ($LASTEXITCODE -ne 0) {
-    throw "aws s3 cp failed."
+  if ($R2Bucket.Contains('.')) {
+    throw "R2_BUCKET must be a bucket name, not a public domain."
+  }
+  if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+    throw "Upload requires the AWS CLI."
+  }
+
+  foreach ($bundle in $bundles) {
+    $key = "$($Prefix.Trim('/'))/$($bundle.Path)"
+    $existing = & aws s3 ls "s3://$R2Bucket/$key/" --endpoint-url $R2Endpoint 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Could not inspect s3://$R2Bucket/$key/"
+    }
+    if ($existing -and -not $Force) {
+      $publicManifest = "$($PublicBase.TrimEnd('/'))/$key/SHA256SUMS"
+      $publicHash = Get-BytesSha256 (Get-PublicBytes $publicManifest)
+      if ($publicHash -eq $bundle.ManifestSha256) {
+        Write-Host "Already published: s3://$R2Bucket/$key/"
+        continue
+      }
+      throw "Immutable R2 prefix already exists with different bytes: s3://$R2Bucket/$key/"
+    }
+    & aws s3 cp $bundle.Directory "s3://$R2Bucket/$key/" --recursive --endpoint-url $R2Endpoint
+    if ($LASTEXITCODE -ne 0) {
+      throw "Upload failed for s3://$R2Bucket/$key/"
+    }
+
+    $publicManifest = "$($PublicBase.TrimEnd('/'))/$key/SHA256SUMS"
+    $publicHash = Get-BytesSha256 (Get-PublicBytes $publicManifest)
+    if ($publicHash -ne $bundle.ManifestSha256) {
+      throw "Public manifest hash mismatch for $publicManifest"
+    }
   }
 }
 
-Write-Host "Staged Windows Local artifacts: $stageRoot"
-Write-Host "Manifest: $manifestPath"
-Write-Host "Sidecar pins: $pinsPath"
-Write-Host ""
-Write-Host "Sidecar override environment:"
-Write-Host "`$env:ARISO_WINDOWS_PARAKEET_BASE_URL = `"$PublicBase/$Prefix/parakeet-tdt-0.6b-v3/v1`""
-foreach ($artifact in $artifacts | Where-Object { $_.env -and $_.env -ne "ARISO_WINDOWS_PARAKEET_BASE_URL" }) {
-  Write-Host "`$env:$($artifact.env) = `"$($artifact.url)`""
+Write-Host "Windows model bundles staged under $stageRoot"
+foreach ($bundle in $bundles) {
+  Write-Host "$($bundle.Path) => $($bundle.ManifestSha256)"
+  Write-Host "  $($PublicBase.TrimEnd('/'))/$($Prefix.Trim('/'))/$($bundle.Path)/"
 }

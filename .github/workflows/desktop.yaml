@@ -89,7 +89,7 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt-mac/Package.resolved', 'src-tauri/ariso-stt-mac/Sources/**') }}
 
       # On a cache miss, build once with xcodebuild. It emits both the
       # executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle, referenced
@@ -99,7 +99,7 @@ jobs:
       # metallib bundle beside it — so build once and copy both products out.
       - name: Build ariso-stt sidecar
         if: runner.os == 'macOS' && steps.sidecar-cache.outputs.cache-hit != 'true'
-        working-directory: src-tauri/ariso-stt
+        working-directory: src-tauri/ariso-stt-mac
         run: |
           mkdir -p ../binaries
           xcodebuild build -scheme ariso-stt -configuration Release \
@@ -110,7 +110,7 @@ jobs:
 
       - name: Test Windows ariso-stt sidecar
         if: runner.os == 'Windows'
-        run: cargo test --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --locked
+        run: cargo test --manifest-path src-tauri/ariso-stt-windows/Cargo.toml --locked
 
       - name: Build Windows ariso-stt sidecar
         if: runner.os == 'Windows'

@@ -7,7 +7,7 @@
 
 # oats
 
-**Your meetings, written up for you on desktop.**
+**Your meetings, written up for you on macOS and Windows.**
 
 *You talk. It listens. You get notes. Free in the cloud, or 100% offline on supported hardware.*
 
@@ -16,7 +16,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&logo=apple&color=000000)](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](https://github.com/ariso-ai/oats/releases/latest)
-[![Windows in progress](https://img.shields.io/badge/Windows-11%20in%20progress-0078D4?logo=windows&logoColor=white)](docs/superpowers/specs/2026-06-27-windows-full-parity-design.md)
+[![Windows internal QA](https://img.shields.io/badge/Windows-11%20internal%20QA-0078D4?logo=windows&logoColor=white)](CONTRIBUTING.md#local-backend-on-device-transcription)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
@@ -54,7 +54,7 @@ You decide where the work happens:
 | Platform | Public support | Notes |
 | --- | --- | --- |
 | macOS 14+ on Apple Silicon | Supported | Full Ariso and Local backend support. |
-| Windows 11 | In progress | CI and packaging scaffolding exist; public release is blocked on the native Windows Local sidecar and audio capture. |
+| Windows 11 | Internal QA | Local transcription and notes plus NSIS/MSI installers are implemented; public support remains blocked on system-audio capture, auto-record detection, native sharing, Authenticode signing, and updater publication. |
 | Windows 10 | Planned smoke coverage | Not public-support ready. |
 
 ### 🍺 Homebrew
@@ -91,7 +91,7 @@ The default. Sign in, hit record. Audio streams to the Ariso backend, which tran
 Sensitive conversation? Switch the backend to **Local** and oats does *everything* on-device:
 
 - **Recording** is captured and saved locally.
-- **Transcription** runs locally: Apple Neural Engine on macOS today; a Windows cpp sidecar is in progress.
+- **Transcription** runs locally: CoreML on Apple Neural Engine for macOS, and Parakeet ONNX on CPU for Windows 11 internal QA.
 - **Notes** are written by an on-device language model — no API calls.
 
 No login, no upload — your audio, transcripts, and notes never leave your machine. There's a one-time download for the models: open **Settings → On-device models** and install the **speech voice model** and **language model** (each shows a green tick when ready). After that, oats works completely offline.
@@ -111,7 +111,7 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | **Cost** | Free | Free |
 | **Account / login** | Required | None |
 | **Audio leaves your device** | Your account (encrypted with your key) | **Never** |
-| **Transcription** | Ariso backend (no model training) | Apple Neural Engine on macOS; Windows local sidecar in progress |
+| **Transcription** | Ariso backend (no model training) | Apple Neural Engine on macOS; native CPU sidecar on Windows |
 | **Summary notes** | Ariso backend (no model training) | On-device LLM |
 | **Works offline** | No | **Yes** |
 | **Best for** | Convenience and sharing | Confidential meetings, air-gapped use |

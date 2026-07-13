@@ -29,7 +29,7 @@ Be kind, be constructive, and assume good intent. We want oats to be a welcoming
 
 ## Ways to contribute
 
-- 🐛 **Report bugs** — open an [issue](https://github.com/ariso-ai/oats/issues) with steps to reproduce, your macOS version, and which transcription backend you were using.
+- 🐛 **Report bugs** — open an [issue](https://github.com/ariso-ai/oats/issues) with steps to reproduce, your OS version, and which transcription backend you were using.
 - 💡 **Suggest features** — open an issue describing the problem you'd like solved.
 - 🔧 **Send pull requests** — fix a bug, improve docs, or build a feature. See [Submitting changes](#submitting-changes).
 
@@ -47,7 +47,7 @@ config lives in `.claude/` and `.claude-plugin/`.
 - Node.js + npm
 - From the monorepo root: `npm install`
 - **macOS Local backend:** [Xcode](https://apps.apple.com/app/xcode/id497799835) (full install, not just Command Line Tools) and **Apple Silicon, macOS 14+**. `xcodebuild` is required to compile the sidecar's MLX Metal shaders (`mlx-swift_Cmlx.bundle`); `swift build` alone cannot.
-- **Windows work:** Windows 11 is the first support target. The app can build internal Windows artifacts, but public Windows support is blocked on the real cpp local sidecar and WASAPI capture work described in `docs/superpowers/specs/2026-06-27-windows-full-parity-design.md`.
+- **Windows Local backend:** Windows 11, the Visual Studio 2022 C++ build tools, and the `x86_64-pc-windows-msvc` Rust target. The native Parakeet/Gemma sidecar and internal installers are implemented; public support still requires system-audio capture, auto-record detection, native sharing, Authenticode signing, and updater publication.
 
 ## Development scripts
 
@@ -89,12 +89,12 @@ Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and no
 
 The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. On macOS it uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording).
 
-Windows Local is being implemented as a separate cpp sidecar that preserves the same CLI contract. The current `src-tauri/ariso-stt-cross` crate is a buildable placeholder for CI/package plumbing only; it must fail clearly rather than emit fake transcripts until the real whisper/diarization/llama engines land.
+On Windows, the same contract is implemented by the Rust `src-tauri/ariso-stt-windows` sidecar using Parakeet and speaker diarization through sherpa-onnx, plus Gemma GGUF through llama.cpp. The macOS source package lives in `src-tauri/ariso-stt-mac`, while language-neutral contract artifacts live in `src-tauri/ariso-stt-shared`. Both sidecars are inference-only: the Tauri host downloads immutable, hash-pinned model bundles directly from Cloudflare R2 and writes the same readiness markers on both platforms.
 
 Build the sidecar before `tauri:build` / `tauri:dev` (these are build artifacts, not committed):
 
 ```bash
-cd src-tauri/ariso-stt
+cd src-tauri/ariso-stt-mac
 swift build -c release
 mkdir -p ../binaries
 cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
@@ -110,27 +110,23 @@ cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
 
 Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources; the sidecar itself resolves next to the app executable or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../target/debug/`.
 
-For Windows validation, build the placeholder sidecar into Tauri's expected target-specific name:
+For Windows validation, build the sidecar into Tauri's expected target-specific name:
 
 ```powershell
-cargo build --manifest-path src-tauri/ariso-stt-cross/Cargo.toml --release
-New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-Copy-Item src-tauri/ariso-stt-cross/target/release/ariso-stt.exe src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
-New-Item -ItemType Directory -Force src-tauri/binaries/mlx-swift_Cmlx.bundle | Out-Null
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-sidecar.ps1
 ```
 
-The sidecar contract (stdout carries only the result — transcript JSON, progress JSON-lines, or notes Markdown; all logs go to stderr):
+The sidecar contract (stdout carries only transcript JSON or notes Markdown; all logs go to stderr):
 
 - `ariso-stt --audio <path> --models <dir> --format json` → one `{language, durationSeconds, participants[], segments[]}` object.
-- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`. Downloads the speech models — ASR (`0–0.66`) and diarizer (`0.66–1.0`) — into `<dir>`. The notes LLM is NOT downloaded here.
-- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Loads the LLM from `<dir>/llm/gemma-3-1b-it-qat-4bit/` (a local directory; no network). The Rust app downloads that model directly from the project CDN (Cloudflare R2) — the published weights are HuggingFace Xet-backed, which the Swift HF client can't fetch.
+- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Loads the platform-native Gemma model from `<dir>` with no network access.
 
 Storage layout under `~/.ariso/`:
 
-- `models/` — CoreML speech bundles (`asr/`, `diarizer/`) + `manifest.json` ready-marker; the notes LLM in `llm/gemma-3-1b-it-qat-4bit/` (with a `.complete` marker written only after a full download)
+- `models/` — platform-native speech and notes bundles plus their readiness markers; `manifest.json` marks speech ready and a versioned `.complete` file marks notes ready
 - `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `note.md` (meeting notes), `meta.json`
 
-In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs each model independently: the speech voice model (ASR + diarizer, from the sidecar) downloads automatically, and the language model (for notes, from the project CDN) installs from its own **Install** button. Each shows a green tick when ready. Past local recordings appear in the tray **Library…** window.
+In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs speech (ASR + diarizer) and notes independently from the project R2 CDN. Each shows a green tick after the host has verified every file and written its completion marker. Past local recordings appear in the tray **Library…** window.
 
 ## Testing transcription with a virtual audio device
 
