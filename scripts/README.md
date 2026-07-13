@@ -28,6 +28,13 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1
 ```
 
+The MSI uses branded WiX dialog and banner bitmaps under `src-tauri/windows/installer`.
+Regenerate them from the checked-in oats logo after changing the brand artwork:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\generate-windows-installer-art.ps1
+```
+
 Release and desktop CI use these helpers before building or validating the Windows app.
 
 `windows-local-smoke.ps1` runs the Windows `ariso-stt.exe` sidecar against already-staged

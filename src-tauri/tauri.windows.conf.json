@@ -1,5 +1,11 @@
 {
   "bundle": {
-    "resources": null
+    "resources": null,
+    "windows": {
+      "wix": {
+        "bannerPath": "windows/installer/wix-banner.bmp",
+        "dialogImagePath": "windows/installer/wix-dialog.bmp"
+      }
+    }
   }
 }
