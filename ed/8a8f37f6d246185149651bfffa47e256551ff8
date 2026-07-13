@@ -1,0 +1,21 @@
+progress.md
+  s_cf3c9812e7fc2c::t_911c125cf76aa6 401
+  s_cf3c9812e7fc2c::t_31e3646816ca85 386-394,398,403-405
+  s_cf3c9812e7fc2c::t_cb6d9f186f1b13 395-397,399-400,402
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "ed8a8f37f6d246185149651bfffa47e256551ff8",
+  "prompts": {},
+  "sessions": {
+    "s_cf3c9812e7fc2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d22-876f-7442-961e-bb24e65d0362",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
