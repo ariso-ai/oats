@@ -403,3 +403,21 @@
 - Lessons learned: local-first list copy must distinguish Oats' optional Local
   mode from its default Cloud mode; `local-first meeting-notes app` is not
   accurate as an unqualified product description.
+
+### External PR readiness
+
+- Approach: query the live state of every distinct PR URL in the campaign
+  report and mark only open drafts as ready for review.
+- Steps taken: audited all 31 tracked URLs. Twenty-six open PRs were already
+  ready; marked `zhongkechen/awesome-local-first#7`, the only remaining open
+  draft, as ready. Left two merged PRs and one closed PR unchanged.
+- Failure handled: `tborychowski/awesome-mac#5` is no longer accessible because
+  the target repository is archived and has pull requests disabled. Both its
+  REST endpoint and public URL return 404, so it is not an open draft that can
+  be transitioned.
+- Validation: repeated the complete live audit after the mutation. Of the 31
+  tracked URLs, 27 are open and ready for review, zero open PRs are drafts, two
+  are merged, one is closed, and one is inaccessible in the archived target.
+- Lesson learned: campaign receipts are historical evidence, not a live status
+  source; readiness transitions should always be followed by a fresh GitHub
+  query across every tracked PR.
