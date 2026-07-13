@@ -1,0 +1,19 @@
+progress.md
+  s_cf3c9812e7fc2c::t_b92ae1bb2d70ee 406-423
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "e0d42d83704ac14a3f970dc8eea3d7b4fcaace20",
+  "prompts": {},
+  "sessions": {
+    "s_cf3c9812e7fc2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d22-876f-7442-961e-bb24e65d0362",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Michael Geiger <michaelgeiger@hey.com>"
+    }
+  }
+}
