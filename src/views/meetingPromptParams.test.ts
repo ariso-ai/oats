@@ -53,15 +53,26 @@ describe('parseMeetingEndPromptParams', () => {
     expect(parseMeetingEndPromptParams('?seconds=30&subtitle=Weekly%20sync')).toEqual({
       seconds: 30,
       subtitle: 'Weekly sync',
+      title: 'Meeting ended',
     });
   });
 
-  it('defaults seconds to 30 and subtitle to empty when absent', () => {
-    expect(parseMeetingEndPromptParams('')).toEqual({ seconds: 30, subtitle: '' });
+  it('defaults seconds to 30, subtitle to empty, and title to "Meeting ended"', () => {
+    expect(parseMeetingEndPromptParams('')).toEqual({
+      seconds: 30,
+      subtitle: '',
+      title: 'Meeting ended',
+    });
   });
 
   it('falls back to 30 when seconds is non-positive or NaN', () => {
     expect(parseMeetingEndPromptParams('?seconds=0').seconds).toBe(30);
     expect(parseMeetingEndPromptParams('?seconds=abc').seconds).toBe(30);
+  });
+
+  it('reads the title so the card can say why it appeared (next meeting started)', () => {
+    expect(
+      parseMeetingEndPromptParams('?seconds=30&title=Next%20meeting%20started').title,
+    ).toBe('Next meeting started');
   });
 });

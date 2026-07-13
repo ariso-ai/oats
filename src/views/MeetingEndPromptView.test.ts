@@ -21,9 +21,18 @@ beforeEach(() => {
 });
 
 describe('MeetingEndPromptView', () => {
-  it('renders the fixed title and the meeting subtitle', () => {
+  it('renders the default title and the meeting subtitle', () => {
     const wrapper = mount(MeetingEndPromptView);
     expect(wrapper.text()).toContain('Meeting ended');
+    expect(wrapper.find('[data-test="subtitle"]').text()).toBe('Weekly sync');
+  });
+
+  it('renders the title param so the card can say the next meeting started', () => {
+    window.location.hash =
+      '#/meeting-end-prompt?seconds=30&title=Next%20meeting%20started&subtitle=Weekly%20sync';
+    const wrapper = mount(MeetingEndPromptView);
+    expect(wrapper.text()).toContain('Next meeting started');
+    expect(wrapper.text()).not.toContain('Meeting ended');
     expect(wrapper.find('[data-test="subtitle"]').text()).toBe('Weekly sync');
   });
 

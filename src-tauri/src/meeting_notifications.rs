@@ -1119,19 +1119,28 @@ pub async fn resize_silence_prompt(app: AppHandle, expanded: bool) -> Result<(),
 const MEETING_END_PROMPT_SECONDS: u64 = 30;
 
 /// Route + params for the meeting-end prompt window. `seconds` drives the
-/// cosmetic countdown bar; `subtitle`, when present, is the meeting title.
-fn meeting_end_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
+/// cosmetic countdown bar; `subtitle`, when present, is the meeting title;
+/// `title`, when present, overrides the card's "Meeting ended" heading (e.g.
+/// "Next meeting started" when the next calendar meeting is the trigger).
+fn meeting_end_prompt_url(seconds: u64, subtitle: Option<&str>, title: Option<&str>) -> String {
     let mut ser = url::form_urlencoded::Serializer::new(String::new());
     ser.append_pair("seconds", &seconds.to_string());
     if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
         ser.append_pair("subtitle", s);
+    }
+    if let Some(t) = title.filter(|t| !t.is_empty()) {
+        ser.append_pair("title", t);
     }
     format!("/#/meeting-end-prompt?{}", ser.finish())
 }
 
 /// Build (or replace) the borderless top-right meeting-end prompt window. Same
 /// chrome as the silence prompt. Must run on the main thread.
-fn open_meeting_end_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
+fn open_meeting_end_prompt_window(
+    app: &AppHandle,
+    subtitle: Option<&str>,
+    title: Option<&str>,
+) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     if let Some(existing) = app.get_webview_window("meeting-end-prompt") {
@@ -1140,7 +1149,9 @@ fn open_meeting_end_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Re
     let win = WebviewWindowBuilder::new(
         app,
         "meeting-end-prompt",
-        WebviewUrl::App(meeting_end_prompt_url(MEETING_END_PROMPT_SECONDS, subtitle).into()),
+        WebviewUrl::App(
+            meeting_end_prompt_url(MEETING_END_PROMPT_SECONDS, subtitle, title).into(),
+        ),
     )
     .title("")
     .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
@@ -1174,13 +1185,16 @@ fn close_meeting_end_prompt_window(app: &AppHandle) {
     }
 }
 
-/// Show the meeting-end prompt. `subtitle`, when present, is the meeting title.
-/// Window creation must happen on the main thread.
+/// Show the meeting-end prompt. `subtitle`, when present, is the meeting title;
+/// `title`, when present, overrides the card heading to say why the prompt
+/// appeared. Window creation must happen on the main thread.
 #[tauri::command]
-pub fn show_meeting_end_prompt(app: AppHandle, subtitle: Option<String>) {
+pub fn show_meeting_end_prompt(app: AppHandle, subtitle: Option<String>, title: Option<String>) {
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Err(e) = open_meeting_end_prompt_window(&app_main, subtitle.as_deref()) {
+        if let Err(e) =
+            open_meeting_end_prompt_window(&app_main, subtitle.as_deref(), title.as_deref())
+        {
             eprintln!("meeting-end-prompt: failed to open prompt window: {e}");
         }
     });
@@ -1380,7 +1394,7 @@ mod tests {
     #[test]
     fn meeting_end_prompt_url_carries_the_seconds() {
         assert_eq!(
-            super::meeting_end_prompt_url(30, None),
+            super::meeting_end_prompt_url(30, None, None),
             "/#/meeting-end-prompt?seconds=30"
         );
     }
@@ -1388,13 +1402,28 @@ mod tests {
     #[test]
     fn meeting_end_prompt_url_encodes_the_subtitle_and_omits_when_empty() {
         assert_eq!(
-            super::meeting_end_prompt_url(30, Some("Q3 Plan & Review")),
+            super::meeting_end_prompt_url(30, Some("Q3 Plan & Review"), None),
             "/#/meeting-end-prompt?seconds=30&subtitle=Q3+Plan+%26+Review"
         );
         assert_eq!(
-            super::meeting_end_prompt_url(30, Some("")),
+            super::meeting_end_prompt_url(30, Some(""), None),
             "/#/meeting-end-prompt?seconds=30"
         );
-        assert_eq!(super::meeting_end_prompt_url(30, None), "/#/meeting-end-prompt?seconds=30");
+        assert_eq!(
+            super::meeting_end_prompt_url(30, None, None),
+            "/#/meeting-end-prompt?seconds=30"
+        );
+    }
+
+    #[test]
+    fn meeting_end_prompt_url_encodes_the_title_and_omits_when_empty() {
+        assert_eq!(
+            super::meeting_end_prompt_url(30, Some("Standup"), Some("Next meeting started")),
+            "/#/meeting-end-prompt?seconds=30&subtitle=Standup&title=Next+meeting+started"
+        );
+        assert_eq!(
+            super::meeting_end_prompt_url(30, None, Some("")),
+            "/#/meeting-end-prompt?seconds=30"
+        );
     }
 }

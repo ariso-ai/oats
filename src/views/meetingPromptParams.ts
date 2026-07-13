@@ -45,16 +45,28 @@ export function parseSilencePromptParams(search: string): SilencePromptParams {
 
 /** Cosmetic countdown for the meeting-end prompt; mirrors the FE timeout. */
 const MEETING_END_DEFAULT_SECONDS = 30;
+/** Default card title; overridden (e.g. "Next meeting started") to say why. */
+const MEETING_END_DEFAULT_TITLE = 'Meeting ended';
+
+export interface MeetingEndPromptParams extends SilencePromptParams {
+  /** Why the card appeared — "Meeting ended" unless the trigger says otherwise. */
+  title: string;
+}
 
 /**
  * Params for the meeting-end stop prompt window. Same shape as the silence
- * prompt (fixed title in the view; subtitle blank when absent), but a 30s
- * default countdown.
+ * prompt (subtitle blank when absent) plus a title that defaults to
+ * "Meeting ended" — the next-meeting-start trigger overrides it so the card
+ * says why it appeared — and a 30s default countdown.
  */
-export function parseMeetingEndPromptParams(search: string): SilencePromptParams {
+export function parseMeetingEndPromptParams(search: string): MeetingEndPromptParams {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const rawSeconds = Number(params.get('seconds'));
   const seconds =
     Number.isFinite(rawSeconds) && rawSeconds > 0 ? rawSeconds : MEETING_END_DEFAULT_SECONDS;
-  return { seconds, subtitle: params.get('subtitle') || '' };
+  return {
+    seconds,
+    subtitle: params.get('subtitle') || '',
+    title: params.get('title') || MEETING_END_DEFAULT_TITLE,
+  };
 }
