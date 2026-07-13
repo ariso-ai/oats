@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.16.0](https://github.com/ariso-ai/oats/compare/v0.15.0...v0.16.0) (2026-07-08)
+
+
+### Features
+
+* **local:** force-new recording seam in finalize/start-window ([#174](https://github.com/ariso-ai/oats/issues/174)-followup) ([e4c91fc](https://github.com/ariso-ai/oats/commit/e4c91fc74727f45207752bc925d7185144fe189e))
+* **local:** regenerate default note title from AI notes ([#208](https://github.com/ariso-ai/oats/issues/208)) ([fe35395](https://github.com/ariso-ai/oats/commit/fe35395662175c9eb0df670984e29002f1219101))
+* **recording:** empty detail starts fresh; wire forceNew seam (both backends) ([1c0be7b](https://github.com/ariso-ai/oats/commit/1c0be7b0a181d8efebeb30054d73f63842047009))
+
+
+### Bug Fixes
+
+* **recording:** empty detail pane starts a fresh recording (both backends) ([cda7cfb](https://github.com/ariso-ai/oats/commit/cda7cfb6c595f7304e79484317bd2ca871388aed))
+* **recording:** open_meeting_picker takes only defaultMeetingId ([b12444f](https://github.com/ariso-ai/oats/commit/b12444fd82845d07630834dd76c6ab96a92d7c5b))
+* **search:** time-box cmd-K search so it can't hang ([380a4c8](https://github.com/ariso-ai/oats/commit/380a4c860e616ab523609ac61e374a2355be3caf))
+* share agent instructions through symlinks ([63ddbee](https://github.com/ariso-ai/oats/commit/63ddbee4ad96e64cb0b26abb7d9ee20b2130569e))
+
 ## [0.15.0](https://github.com/ariso-ai/oats/compare/v0.14.0...v0.15.0) (2026-07-07)
 
 
