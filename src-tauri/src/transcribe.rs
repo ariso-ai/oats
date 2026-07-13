@@ -1484,6 +1484,7 @@ mod tests {
             duration_seconds: 60, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
