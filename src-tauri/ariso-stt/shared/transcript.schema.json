@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ariso-ai/oats/blob/main/src-tauri/ariso-stt-shared/transcript.schema.json",
+  "$id": "https://github.com/ariso-ai/oats/blob/main/src-tauri/ariso-stt/shared/transcript.schema.json",
   "title": "ariso-stt transcript output",
   "type": "object",
   "additionalProperties": false,

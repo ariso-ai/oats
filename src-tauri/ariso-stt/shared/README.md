@@ -3,8 +3,8 @@
 This directory owns the language-neutral contract between the oats Tauri host
 and its platform-specific local-inference sidecars:
 
-- `../ariso-stt-mac`: Swift, FluidAudio, and MLX for macOS.
-- `../ariso-stt-windows`: Rust, sherpa-onnx, and llama.cpp for Windows.
+- `../macos`: Swift, FluidAudio, and MLX for macOS.
+- `../windows`: Rust, sherpa-onnx, and llama.cpp for Windows.
 
 Both source packages produce the same runtime executable name and accept the
 same argv-based commands:

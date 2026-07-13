@@ -44,9 +44,9 @@ Published version prefixes are immutable. The helper refuses to overwrite an exi
 
 ## Windows sidecar
 
-The platform source packages live in `src-tauri/ariso-stt-mac` and
-`src-tauri/ariso-stt-windows`. Their language-neutral CLI and transcript
-contract is documented under `src-tauri/ariso-stt-shared`.
+The platform targets live in `src-tauri/ariso-stt/macos` and
+`src-tauri/ariso-stt/windows`. Their language-neutral CLI and transcript
+contract is documented under `src-tauri/ariso-stt/shared`.
 
 `build-windows-sidecar.ps1` builds the x64 Windows `ariso-stt.exe` and copies it to Tauri's target-specific external-binary path:
 

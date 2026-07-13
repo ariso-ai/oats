@@ -1,5 +1,5 @@
 param(
-  [string]$Sidecar = (Join-Path (Get-Location) "src-tauri\ariso-stt-windows\target\debug\ariso-stt.exe"),
+  [string]$Sidecar = (Join-Path (Get-Location) "src-tauri\ariso-stt\windows\target\debug\ariso-stt.exe"),
   [Parameter(Mandatory = $true)]
   [string]$Models,
   [string]$Audio,

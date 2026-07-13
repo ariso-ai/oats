@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn shared_fixture_matches_windows_output_contract() {
-        let fixture = include_str!("../../ariso-stt-shared/fixtures/transcript.json");
+        let fixture = include_str!("../../shared/fixtures/transcript.json");
         let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
         let output: TranscriptOutput = serde_json::from_str(fixture).unwrap();
 
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn shared_transcript_schema_is_valid_json() {
-        let schema = include_str!("../../ariso-stt-shared/transcript.schema.json");
+        let schema = include_str!("../../shared/transcript.schema.json");
         serde_json::from_str::<serde_json::Value>(schema).unwrap();
     }
 }

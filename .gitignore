@@ -3,11 +3,11 @@ node_modules/
 output/
 src-tauri/target/
 src-tauri/binaries/
-src-tauri/ariso-stt-mac/.build/
-src-tauri/ariso-stt-mac/.xcode/
-src-tauri/ariso-stt-mac/.xcode-metallib/
-src-tauri/ariso-stt-mac/.swiftpm/
-src-tauri/ariso-stt-windows/target/
+src-tauri/ariso-stt/macos/.build/
+src-tauri/ariso-stt/macos/.xcode/
+src-tauri/ariso-stt/macos/.xcode-metallib/
+src-tauri/ariso-stt/macos/.swiftpm/
+src-tauri/ariso-stt/windows/target/
 .superpowers/
 docs/superpowers/plans/
 .DS_Store

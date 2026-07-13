@@ -89,15 +89,15 @@ Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and no
 
 The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. On macOS it uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording).
 
-On Windows, the same contract is implemented by the Rust `src-tauri/ariso-stt-windows` sidecar using Parakeet and speaker diarization through sherpa-onnx, plus Gemma GGUF through llama.cpp. The macOS source package lives in `src-tauri/ariso-stt-mac`, while language-neutral contract artifacts live in `src-tauri/ariso-stt-shared`. Both sidecars are inference-only: the Tauri host downloads immutable, hash-pinned model bundles directly from Cloudflare R2 and writes the same readiness markers on both platforms.
+On Windows, the same contract is implemented by the Rust `src-tauri/ariso-stt/windows` target using Parakeet and speaker diarization through sherpa-onnx, plus Gemma GGUF through llama.cpp. The macOS Swift target lives in `src-tauri/ariso-stt/macos`, while language-neutral contract artifacts live in `src-tauri/ariso-stt/shared`. Both targets are inference-only: the Tauri host downloads immutable, hash-pinned model bundles directly from Cloudflare R2 and writes the same readiness markers on both platforms.
 
 Build the sidecar before `tauri:build` / `tauri:dev` (these are build artifacts, not committed):
 
 ```bash
-cd src-tauri/ariso-stt-mac
+cd src-tauri/ariso-stt/macos
 swift build -c release
-mkdir -p ../binaries
-cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+mkdir -p ../../binaries
+cp .build/release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
 
 # The notes backend uses MLX (Metal). `swift build` CANNOT compile MLX's Metal
 # shaders — only xcodebuild can — so build the metallib bundle separately and
@@ -105,10 +105,10 @@ cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
 # "Failed to load the default metallib".
 xcodebuild build -scheme ariso-stt -configuration Release \
   -destination 'generic/platform=macOS' -derivedDataPath .xcode -skipMacroValidation
-cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
+cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 ```
 
-Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources; the sidecar itself resolves next to the app executable or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../target/debug/`.
+Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources; the sidecar itself resolves next to the app executable or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../target/debug/`.
 
 For Windows validation, build the sidecar into Tauri's expected target-specific name:
 

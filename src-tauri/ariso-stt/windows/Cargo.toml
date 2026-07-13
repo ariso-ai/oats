@@ -1,5 +1,5 @@
 [package]
-name = "ariso-stt-windows"
+name = "ariso-stt"
 version = "0.10.0"
 edition = "2024"
 

@@ -1,17 +1,17 @@
 # Windows local inference sidecar
 
-`ariso-stt-windows` is the Rust implementation of oats' local transcription and
+The `windows/` target is the Rust implementation of oats' local transcription and
 notes process for Windows. It is a separate executable because native model
 runtimes and their dependencies should not run inside the Tauri application
 process.
 
 The desktop host uses one `ariso-stt` command contract on both platforms:
 
-- macOS packages the Swift implementation from `src-tauri/ariso-stt-mac`.
+- macOS packages the Swift implementation from `src-tauri/ariso-stt/macos`.
 - Windows packages this crate as `ariso-stt.exe`.
 
 The language-neutral CLI and transcript contract lives in
-`src-tauri/ariso-stt-shared`. The platform package names describe source
+`src-tauri/ariso-stt/shared`. The platform package names describe source
 ownership; the packaged executable name stays `ariso-stt` on both platforms so
 the Tauri integration and external CLI contract remain stable.
 

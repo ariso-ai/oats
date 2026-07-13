@@ -51,7 +51,7 @@ returns data on stdout and Rust persists it.
 
 ## Components
 
-### Swift sidecar (`src-tauri/ariso-stt-mac`)
+### Swift sidecar (`src-tauri/ariso-stt/macos`)
 
 **Dependency:** add `https://github.com/ml-explore/mlx-swift-lm` to `Package.swift`
 (products `MLXLLM`, `MLXLMCommon`, `MLXHuggingFace`), which transitively pulls in

@@ -301,7 +301,7 @@ mod tests {
     use std::io::Write;
 
     const SHARED_TRANSCRIPT_FIXTURE: &str =
-        include_str!("../ariso-stt-shared/fixtures/transcript.json");
+        include_str!("../ariso-stt/shared/fixtures/transcript.json");
 
     // SAFETY (all set_var/remove_var below): tests run with `--test-threads=1`,
     // so there is no concurrent env mutation while these calls execute.
