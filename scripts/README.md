@@ -71,11 +71,13 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1
 ```
 
-The MSI uses branded WiX bitmaps under `src-tauri/windows/installer`. Regenerate them after changing the source logo:
+The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\generate-windows-installer-art.ps1
-```
+- `wix-dialog.bmp` is the 493 x 312 dialog image.
+- `wix-banner.bmp` is the 493 x 58 banner image.
+
+Replace these assets directly when updating the installer artwork, preserving
+their dimensions and 24-bit BMP format.
 
 Release and desktop CI call the same sidecar and installer helpers.
 
