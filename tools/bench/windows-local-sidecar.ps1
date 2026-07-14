@@ -5,17 +5,20 @@ probe, not the installed-app smoke test: it does not download models, drive the
 Tauri UI, or validate installer and updater behavior.
 #>
 param(
-  [string]$Sidecar = (Join-Path (Get-Location) "src-tauri\ariso-stt\windows\target\debug\ariso-stt.exe"),
+  [string]$Sidecar,
   [Parameter(Mandatory = $true)]
   [string]$Models,
   [string]$Audio,
   [int]$RepeatAudio = 1,
-  [string]$Transcript,
-  [int]$NotesMaxTokens = 160,
-  [int]$NotesCtxSize = 2048
+  [string]$Transcript
 )
 
 $ErrorActionPreference = "Stop"
+
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+if (-not $Sidecar) {
+  $Sidecar = Join-Path $Root "src-tauri\binaries\ariso-stt-x86_64-pc-windows-msvc.exe"
+}
 
 # Wraps a sidecar operation in report-friendly timing without deciding whether
 # its result is semantically correct. Each caller performs command-specific
@@ -59,35 +62,54 @@ function Get-HardwareSummary {
   }
 }
 
-# Reads RIFF metadata solely to calculate real-time factor. It is intentionally
-# not the application's audio parser and returns null for formats or layouts the
-# lightweight probe cannot understand.
-function Get-WavDurationSeconds {
+# Locates the format and data chunks once for both timing and fixture expansion.
+# This deliberately remains a lightweight benchmark parser, not an alternative
+# to the application's codec-aware audio decoder.
+function Get-WavLayout {
   param([Parameter(Mandatory = $true)][string]$Path)
 
   $bytes = [System.IO.File]::ReadAllBytes($Path)
-  if ($bytes.Length -lt 44) { return $null }
+  if ($bytes.Length -lt 12) { return $null }
   $riff = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4)
   $wave = [System.Text.Encoding]::ASCII.GetString($bytes, 8, 4)
   if ($riff -ne "RIFF" -or $wave -ne "WAVE") { return $null }
 
   $offset = 12
   $byteRate = $null
-  $dataBytes = $null
+  $dataOffset = $null
+  $dataSize = $null
   while ($offset + 8 -le $bytes.Length) {
     $chunkId = [System.Text.Encoding]::ASCII.GetString($bytes, $offset, 4)
-    $chunkSize = [BitConverter]::ToUInt32($bytes, $offset + 4)
+    $chunkSize = [int64][BitConverter]::ToUInt32($bytes, $offset + 4)
+    $payloadOffset = $offset + 8
+    if ($payloadOffset + $chunkSize -gt $bytes.Length) { return $null }
     if ($chunkId -eq "fmt " -and $chunkSize -ge 16) {
       $byteRate = [BitConverter]::ToUInt32($bytes, $offset + 16)
-    } elseif ($chunkId -eq "data") {
-      $dataBytes = $chunkSize
+    } elseif ($chunkId -eq "data" -and $null -eq $dataOffset) {
+      $dataOffset = $payloadOffset
+      $dataSize = [int]$chunkSize
     }
-    $offset += 8 + [int]$chunkSize
+    $offset = $payloadOffset + [int]$chunkSize
     if (($chunkSize % 2) -eq 1) { $offset += 1 }
   }
 
-  if (-not $byteRate -or -not $dataBytes) { return $null }
-  [math]::Round($dataBytes / $byteRate, 3)
+  if ($null -eq $dataOffset) { return $null }
+  [pscustomobject]@{
+    Bytes = $bytes
+    ByteRate = $byteRate
+    DataOffset = $dataOffset
+    DataSize = $dataSize
+  }
+}
+
+# Reads RIFF metadata solely to calculate real-time factor and returns null for
+# formats or layouts the lightweight probe cannot understand.
+function Get-WavDurationSeconds {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $layout = Get-WavLayout -Path $Path
+  if (-not $layout -or -not $layout.ByteRate) { return $null }
+  [math]::Round($layout.DataSize / $layout.ByteRate, 3)
 }
 
 # Creates a longer deterministic fixture by repeating PCM payload bytes while
@@ -103,35 +125,15 @@ function New-RepeatedWav {
 
   if ($Repeat -le 1) { return $Path }
 
-  $bytes = [System.IO.File]::ReadAllBytes($Path)
-  if ($bytes.Length -lt 44) {
-    throw "-RepeatAudio requires a WAV fixture."
-  }
-  $riff = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4)
-  $wave = [System.Text.Encoding]::ASCII.GetString($bytes, 8, 4)
-  if ($riff -ne "RIFF" -or $wave -ne "WAVE") {
+  $layout = Get-WavLayout -Path $Path
+  if (-not $layout) {
     throw "-RepeatAudio requires a RIFF/WAVE fixture."
   }
+  $bytes = $layout.Bytes
+  $dataOffset = $layout.DataOffset
+  $dataSize = $layout.DataSize
 
-  $offset = 12
-  $dataOffset = $null
-  $dataSize = $null
-  while ($offset + 8 -le $bytes.Length) {
-    $chunkId = [System.Text.Encoding]::ASCII.GetString($bytes, $offset, 4)
-    $chunkSize = [BitConverter]::ToUInt32($bytes, $offset + 4)
-    if ($chunkId -eq "data") {
-      $dataOffset = $offset + 8
-      $dataSize = [int]$chunkSize
-      break
-    }
-    $offset += 8 + [int]$chunkSize
-    if (($chunkSize % 2) -eq 1) { $offset += 1 }
-  }
-  if ($null -eq $dataOffset) {
-    throw "WAV data chunk not found: $Path"
-  }
-
-  $outDir = Join-Path ([System.IO.Path]::GetTempPath()) "oats-windows-local-smoke"
+  $outDir = Join-Path ([System.IO.Path]::GetTempPath()) "oats-windows-local-benchmark"
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $baseName = [System.IO.Path]::GetFileNameWithoutExtension($Path)
   $outPath = Join-Path $outDir "$baseName-repeat-$Repeat.wav"
@@ -174,7 +176,7 @@ $results += [pscustomobject]@{
 }
 
 # Transcription validation focuses on the shared JSON contract and timing. Text
-# quality remains a manual/model-evaluation concern outside this smoke script.
+# quality remains a manual/model-evaluation concern outside this benchmark.
 if ($Audio) {
   $ranWork = $true
   if (-not (Test-Path -LiteralPath $Audio)) {
@@ -190,6 +192,9 @@ if ($Audio) {
     $json | ConvertFrom-Json
   }
   $audioSeconds = Get-WavDurationSeconds -Path $effectiveAudio
+  if ($stt.result.segments.Count -lt 1) {
+    throw "transcription returned no segments"
+  }
   $results += [pscustomobject]@{
     step = $stt.name
     elapsedSeconds = $stt.elapsedSeconds
@@ -204,34 +209,26 @@ if ($Audio) {
   }
 }
 
-# Notes validation confirms the llama/Gemma process contract and Markdown shape.
-# Smaller token/context overrides keep developer smoke runs bounded and are not
-# the production notes policy.
+# Notes validation exercises the same fixed generation policy as the app.
 if ($Transcript) {
   $ranWork = $true
   if (-not (Test-Path -LiteralPath $Transcript)) {
     throw "Transcript fixture not found: $Transcript"
   }
 
-  $oldMaxTokens = $env:ARISO_NOTES_MAX_TOKENS
-  $oldCtxSize = $env:ARISO_NOTES_CTX_SIZE
-  $env:ARISO_NOTES_MAX_TOKENS = "$NotesMaxTokens"
-  $env:ARISO_NOTES_CTX_SIZE = "$NotesCtxSize"
-  try {
-    $notes = Invoke-Timed "notes" {
-      $out = & $Sidecar notes --transcript $Transcript --models $Models
-      if ($LASTEXITCODE -ne 0) {
-        throw "notes failed with exit code $LASTEXITCODE"
-      }
-      $joined = ($out -join "`n").Trim()
-      if (-not $joined) {
-        throw "notes produced empty output"
-      }
-      $joined
+  $notes = Invoke-Timed "notes" {
+    $out = & $Sidecar notes --transcript $Transcript --models $Models
+    if ($LASTEXITCODE -ne 0) {
+      throw "notes failed with exit code $LASTEXITCODE"
     }
-  } finally {
-    $env:ARISO_NOTES_MAX_TOKENS = $oldMaxTokens
-    $env:ARISO_NOTES_CTX_SIZE = $oldCtxSize
+    $joined = ($out -join "`n").Trim()
+    if (-not $joined) {
+      throw "notes produced empty output"
+    }
+    if (-not $joined.TrimStart().StartsWith("## ")) {
+      throw "notes output does not begin with a Markdown heading"
+    }
+    $joined
   }
 
   $results += [pscustomobject]@{

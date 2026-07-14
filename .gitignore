@@ -8,6 +8,7 @@ src-tauri/ariso-stt/macos/.xcode/
 src-tauri/ariso-stt/macos/.xcode-metallib/
 src-tauri/ariso-stt/macos/.swiftpm/
 src-tauri/ariso-stt/windows/target/
+src-tauri/gen/schemas/windows-schema.json
 .superpowers/
 docs/superpowers/plans/
 .DS_Store

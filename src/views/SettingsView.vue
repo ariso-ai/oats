@@ -874,10 +874,14 @@ async function refreshSignedInAccount() {
 }
 
 onMounted(async () => {
-  // Load capabilities first because the following model and recording bootstrap
-  // paths consume them. A failed native call resolves to the composable fallback
-  // instead of preventing the rest of Settings from mounting.
-  platformCapabilities.value = await loadPlatformCapabilities();
+  // Native capabilities are authoritative. Keep the conservative initial state
+  // and report an integration failure instead of guessing support from the UA.
+  try {
+    platformCapabilities.value = await loadPlatformCapabilities();
+  } catch (error) {
+    console.error('Failed to load platform capabilities', error);
+    errorMessage.value = 'Platform features are unavailable. Restart oats and try again.';
+  }
   await refreshSignedInAccount();
 
   // Bootstrap recording toggles in its own try/catch so a settings-store or

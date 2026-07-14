@@ -4,7 +4,6 @@ import {
   deriveRecordingMode,
   permissionStatus,
   applyToggle,
-  supportedRecordingEnabled,
 } from './recordingSettings';
 
 describe('deriveEnabledFromLegacy', () => {
@@ -27,17 +26,6 @@ describe('deriveRecordingMode', () => {
     expect(deriveRecordingMode({ mic: true, systemAudio: false })).toBe('mic');
     expect(deriveRecordingMode({ mic: false, systemAudio: true })).toBe('system');
     expect(deriveRecordingMode({ mic: false, systemAudio: false })).toBeNull();
-  });
-});
-
-describe('supportedRecordingEnabled', () => {
-  it('replaces an unsupported system-only preference with microphone capture', () => {
-    expect(
-      supportedRecordingEnabled({ mic: false, systemAudio: true }, false),
-    ).toEqual({ mic: true, systemAudio: false });
-    expect(
-      supportedRecordingEnabled({ mic: false, systemAudio: true }, true),
-    ).toEqual({ mic: false, systemAudio: true });
   });
 });
 

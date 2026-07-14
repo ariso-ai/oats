@@ -7,7 +7,7 @@
 
 use crate::audio::{Audio, decode_audio, resample_linear, slice_audio};
 use crate::models::{DiarizationPaths, ParakeetPaths};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{
     FastClusteringConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineSpeakerDiarization,
@@ -17,6 +17,11 @@ use sherpa_onnx::{
 };
 use std::env;
 use std::path::Path;
+
+const DIARIZATION_SEGMENT_PADDING_SECONDS: f64 = 0.2;
+const FALLBACK_ASR_WINDOW_SECONDS: f64 = 30.0;
+const FALLBACK_ASR_OVERLAP_SECONDS: f64 = 1.0;
+const FALLBACK_DEDUP_MAX_WORDS: usize = 24;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,23 +44,13 @@ struct Segment {
     end: f64,
 }
 
-/// Coordinates decoding, Parakeet, and optional diarization into one host-facing
-/// result. If speaker models are unavailable or yield no usable spans, the
-/// contract still degrades to a complete single-speaker transcript.
+/// Coordinates decoding, Parakeet, and required diarization into one host-facing
+/// result. When speaker-level recognition is unreliable, the complete recording
+/// is transcribed as one speaker so a diarization problem cannot omit speech.
 pub(crate) fn transcribe(audio_path: &Path, models: &Path) -> Result<TranscriptOutput> {
     let paths = ParakeetPaths::discover(models)?;
     let audio = decode_audio(audio_path)?;
     let diarization = DiarizationPaths::discover(models);
-    if debug_diarization_enabled() {
-        eprintln!(
-            "diarization models: {}",
-            if diarization.is_some() {
-                "found"
-            } else {
-                "missing"
-            }
-        );
-    }
 
     let mut config = OfflineRecognizerConfig::default();
     config.model_config.transducer = OfflineTransducerModelConfig {
@@ -78,25 +73,10 @@ pub(crate) fn transcribe(audio_path: &Path, models: &Path) -> Result<TranscriptO
         OfflineRecognizer::create(&config).ok_or_else(|| anyhow!("create Parakeet recognizer"))?;
     let duration = audio.duration_seconds();
 
-    if let Some(diarization) = diarization {
-        let diarized = transcribe_diarized(&recognizer, &audio, &diarization, duration)?;
-        if !diarized.segments.is_empty() {
-            return Ok(diarized);
-        }
+    match diarization.and_then(|paths| transcribe_diarized(&recognizer, &audio, &paths, duration)) {
+        Ok(output) => Ok(output),
+        Err(error) => fall_back_to_whole_audio(&recognizer, &audio, duration, error),
     }
-
-    let text = recognize_text(&recognizer, audio.sample_rate, &audio.samples)?;
-
-    Ok(TranscriptOutput {
-        language: "en".to_string(),
-        duration_seconds: duration,
-        segments: vec![Segment {
-            speaker: "0".to_string(),
-            text,
-            start: 0.0,
-            end: duration,
-        }],
-    })
 }
 
 /// Provides the smallest reusable ASR operation for both whole recordings and
@@ -106,7 +86,7 @@ fn recognize_text(
     recognizer: &OfflineRecognizer,
     sample_rate: i32,
     samples: &[f32],
-) -> Result<String> {
+) -> Result<Option<String>> {
     if samples.is_empty() {
         bail!("cannot transcribe an empty audio segment");
     }
@@ -117,10 +97,127 @@ fn recognize_text(
         .get_result()
         .ok_or_else(|| anyhow!("Parakeet recognizer returned no result"))?;
     let text = result.text.trim().to_string();
-    if text.is_empty() {
+    Ok((!text.is_empty()).then_some(text))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AsrWindow {
+    output_start: f64,
+    clip_start: f64,
+    end: f64,
+}
+
+/// Bounds Parakeet input duration when the speaker pipeline cannot be used.
+/// Neighboring windows share a short prefix so speech crossing a boundary is
+/// available in full to the later decode rather than being cut in half.
+fn fallback_asr_windows(duration: f64) -> Vec<AsrWindow> {
+    if !duration.is_finite() || duration <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut windows = Vec::new();
+    let mut output_start = 0.0;
+    while output_start < duration {
+        let end = (output_start + FALLBACK_ASR_WINDOW_SECONDS).min(duration);
+        windows.push(AsrWindow {
+            output_start,
+            clip_start: if output_start == 0.0 {
+                0.0
+            } else {
+                (output_start - FALLBACK_ASR_OVERLAP_SECONDS).max(0.0)
+            },
+            end,
+        });
+        if end >= duration {
+            break;
+        }
+        output_start = end;
+    }
+    windows
+}
+
+/// Removes words emitted twice because adjacent fallback windows overlap. The
+/// comparison is deliberately bounded and exact so ordinary repetition later
+/// in a meeting is not treated as an ASR boundary artifact.
+fn remove_repeated_prefix(previous: &str, current: &str) -> String {
+    let previous_words: Vec<&str> = previous.split_whitespace().collect();
+    let current_words: Vec<&str> = current.split_whitespace().collect();
+    let max_overlap = previous_words
+        .len()
+        .min(current_words.len())
+        .min(FALLBACK_DEDUP_MAX_WORDS);
+
+    for count in (1..=max_overlap).rev() {
+        let previous_start = previous_words.len() - count;
+        if previous_words[previous_start..]
+            .iter()
+            .zip(&current_words[..count])
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        {
+            return current_words[count..].join(" ");
+        }
+    }
+    current.trim().to_string()
+}
+
+/// Preserves the recording when diarization cannot provide trustworthy speaker
+/// clips. Fixed-size, overlapping windows avoid the empty result Parakeet can
+/// return for long recordings while retaining one generic speaker identity.
+fn transcribe_whole_audio(
+    recognizer: &OfflineRecognizer,
+    audio: &Audio,
+    duration: f64,
+) -> Result<TranscriptOutput> {
+    let mut segments: Vec<Segment> = Vec::new();
+    for window in fallback_asr_windows(duration) {
+        let clip = slice_audio(audio, window.clip_start, window.end);
+        let text = recognize_text(recognizer, audio.sample_rate, &clip).with_context(|| {
+            format!(
+                "transcribe fallback window {:.3}-{:.3}",
+                window.clip_start, window.end
+            )
+        })?;
+        let Some(mut text) = text else {
+            continue;
+        };
+        if let Some(previous) = segments.last() {
+            text = remove_repeated_prefix(&previous.text, &text);
+        }
+        if text.is_empty() {
+            continue;
+        }
+        segments.push(Segment {
+            speaker: "0".to_string(),
+            text,
+            start: window.output_start,
+            end: window.end,
+        });
+    }
+    if segments.is_empty() {
         bail!("Parakeet recognizer returned an empty transcript");
     }
-    Ok(text)
+
+    Ok(TranscriptOutput {
+        language: "en".to_string(),
+        duration_seconds: duration,
+        segments,
+    })
+}
+
+/// Records why speaker labels were abandoned while keeping stdout reserved for
+/// the sidecar's JSON contract. Failure context includes both the regional and
+/// whole-recording attempts if ASR cannot recover.
+fn fall_back_to_whole_audio(
+    recognizer: &OfflineRecognizer,
+    audio: &Audio,
+    duration: f64,
+    reason: impl std::fmt::Display,
+) -> Result<TranscriptOutput> {
+    eprintln!(
+        "speaker-level transcription unavailable ({reason}); transcribing complete audio in bounded windows"
+    );
+    transcribe_whole_audio(recognizer, audio, duration)
+        .with_context(|| format!("whole-audio fallback after {reason}"))
 }
 
 /// Turns anonymous speaker spans into independently recognized transcript
@@ -158,11 +255,7 @@ fn transcribe_diarized(
             ..Default::default()
         },
         clustering: FastClusteringConfig {
-            num_clusters: env::var("ARISO_DIARIZATION_SPEAKERS")
-                .ok()
-                .and_then(|value| value.parse::<i32>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(-1),
+            num_clusters: -1,
             ..Default::default()
         },
         ..Default::default()
@@ -183,54 +276,43 @@ fn transcribe_diarized(
         .ok_or_else(|| anyhow!("speaker diarizer returned no result"))?;
     let diarization_segments =
         sanitize_diarization_segments(diarization_result.sort_by_start_time(), duration);
-    if debug_diarization_enabled() {
-        eprintln!(
-            "diarization speakers={} segments={}",
-            diarization_result.num_speakers(),
-            diarization_segments.len()
-        );
-        for segment in &diarization_segments {
-            eprintln!(
-                "diarization segment {:.3}-{:.3} speaker {}",
-                segment.start, segment.end, segment.speaker
-            );
-        }
+    if diarization_segments.is_empty() {
+        bail!("speaker diarizer returned no usable segments");
     }
 
-    let mut segments = Vec::new();
-    let segment_padding = env_float("ARISO_DIARIZATION_SEGMENT_PADDING", 0.2);
+    let mut segments = Vec::with_capacity(diarization_segments.len());
     for diarization_segment in &diarization_segments {
         let clip = slice_audio(
             audio,
-            diarization_segment.start - segment_padding,
-            diarization_segment.end + segment_padding,
+            diarization_segment.start - DIARIZATION_SEGMENT_PADDING_SECONDS,
+            diarization_segment.end + DIARIZATION_SEGMENT_PADDING_SECONDS,
         );
         if clip.len() < audio.sample_rate.max(1) as usize / 4 {
-            continue;
+            bail!(
+                "diarized segment {:.3}-{:.3} is too short to transcribe",
+                diarization_segment.start,
+                diarization_segment.end
+            );
         }
-        match recognize_text(recognizer, audio.sample_rate, &clip) {
-            Ok(text) => segments.push(Segment {
-                speaker: diarization_segment.speaker.to_string(),
-                text,
-                start: diarization_segment.start,
-                end: diarization_segment.end,
-            }),
-            Err(err) => {
-                if debug_diarization_enabled() {
-                    eprintln!(
-                        "skipping diarized segment {:.3}-{:.3}: {err:#}",
-                        diarization_segment.start, diarization_segment.end
-                    );
-                }
-            }
-        }
-    }
-
-    if segments.is_empty() {
-        return Ok(TranscriptOutput {
-            language: "en".to_string(),
-            duration_seconds: duration,
-            segments,
+        let text = recognize_text(recognizer, audio.sample_rate, &clip)
+            .with_context(|| {
+                format!(
+                    "transcribe diarized segment {:.3}-{:.3}",
+                    diarization_segment.start, diarization_segment.end
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow!(
+                    "diarized segment {:.3}-{:.3} produced no speech",
+                    diarization_segment.start,
+                    diarization_segment.end
+                )
+            })?;
+        segments.push(Segment {
+            speaker: diarization_segment.speaker.to_string(),
+            text,
+            start: diarization_segment.start,
+            end: diarization_segment.end,
         });
     }
 
@@ -276,13 +358,6 @@ fn sanitize_diarization_segments(
         .collect()
 }
 
-/// Keeps verbose model diagnostics opt-in and on stderr so stdout remains valid
-/// JSON for the host. This switch is for development and smoke tests, not a
-/// persisted application preference.
-fn debug_diarization_enabled() -> bool {
-    env::var("ARISO_DEBUG_DIARIZATION").is_ok_and(|value| value != "0")
-}
-
 /// Caps default CPU parallelism to leave the desktop responsive during local
 /// inference. Benchmark tooling can override it; maximum throughput is not the
 /// production default on general-purpose laptops.
@@ -292,20 +367,9 @@ fn default_threads() -> i32 {
         .unwrap_or(2)
 }
 
-/// Exposes bounded numeric tuning to diagnostics without broadening the public
-/// CLI contract. Invalid or negative values fall back so environment mistakes
-/// cannot create nonsensical model spans.
-fn env_float(name: &str, default: f64) -> f64 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .unwrap_or(default)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::TranscriptOutput;
+    use super::{AsrWindow, TranscriptOutput, fallback_asr_windows, remove_repeated_prefix};
 
     #[test]
     fn shared_fixture_matches_windows_output_contract() {
@@ -320,5 +384,41 @@ mod tests {
     fn shared_transcript_schema_is_valid_json() {
         let schema = include_str!("../../shared/transcript.schema.json");
         serde_json::from_str::<serde_json::Value>(schema).unwrap();
+    }
+
+    #[test]
+    fn fallback_windows_bound_long_recordings_and_overlap_boundaries() {
+        assert_eq!(
+            fallback_asr_windows(64.0),
+            vec![
+                AsrWindow {
+                    output_start: 0.0,
+                    clip_start: 0.0,
+                    end: 30.0,
+                },
+                AsrWindow {
+                    output_start: 30.0,
+                    clip_start: 29.0,
+                    end: 60.0,
+                },
+                AsrWindow {
+                    output_start: 60.0,
+                    clip_start: 59.0,
+                    end: 64.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_deduplicates_only_a_shared_boundary_prefix() {
+        assert_eq!(
+            remove_repeated_prefix("We approved the launch plan", "the launch plan Next topic"),
+            "Next topic"
+        );
+        assert_eq!(
+            remove_repeated_prefix("We approved the launch plan", "A different launch plan"),
+            "A different launch plan"
+        );
     }
 }

@@ -1,55 +1,138 @@
 <#
-Normalizes already-acquired Windows inference artifacts into the immutable R2
-layout compiled into `model_manager.rs`. This is release-maintainer tooling: it
-does not download upstream models, modify a user's installed model directory, or
-upload unless `-Upload` is explicitly supplied.
+Builds the Windows model bundles from the exact upstream artifacts pinned in
+`src-tauri/ariso-stt/shared/windows-models.json`. No installed oats model tree
+is consulted, so a release cannot inherit stale files from its build machine.
 #>
 param(
-  [Parameter(Mandatory = $true)]
-  [string]$Models,
   [string]$StageDir = (Join-Path ([System.IO.Path]::GetTempPath()) "oats-windows-models"),
-  [string]$PublicBase = "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev",
-  [string]$Prefix = "models",
-  [string]$SpeechVersion = "v1",
-  [string]$NotesVersion = "v2",
+  [string]$CacheDir = (Join-Path ([System.IO.Path]::GetTempPath()) "oats-windows-model-cache"),
   [switch]$Upload,
-  [switch]$Force,
   [string]$R2Endpoint = $env:R2_ENDPOINT,
   [string]$R2Bucket = $env:R2_BUCKET
 )
 
 $ErrorActionPreference = "Stop"
 
-# Accepts a small set of known source layouts so maintainers can stage either a
-# previous oats bundle or an upstream export. The first match is a source
-# discovery convenience, not runtime fallback behavior.
-function Find-FirstDirectory {
-  param([Parameter(Mandatory = $true)][string[]]$Candidates)
-
-  foreach ($candidate in $Candidates) {
-    if (Test-Path -LiteralPath $candidate -PathType Container) {
-      return (Resolve-Path -LiteralPath $candidate).Path
-    }
-  }
-  throw "Missing model directory. Checked: $($Candidates -join ', ')"
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$LockPath = Join-Path $Root "src-tauri\ariso-stt\shared\windows-models.json"
+$Lock = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json
+if ($Lock.schemaVersion -ne 1) {
+  throw "Unsupported Windows model lock schema: $($Lock.schemaVersion)"
 }
 
-# Applies the same source-layout tolerance to individual artifacts. Every
-# selected file is copied into one canonical bundle name before hashing.
-function Find-FirstFile {
-  param([Parameter(Mandatory = $true)][string[]]$Candidates)
+function Get-LockSource {
+  param([Parameter(Mandatory = $true)][string]$Name)
 
-  foreach ($candidate in $Candidates) {
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      return (Resolve-Path -LiteralPath $candidate).Path
-    }
+  $property = $Lock.sources.PSObject.Properties[$Name]
+  if (-not $property) {
+    throw "Windows model lock has no source named '$Name'."
   }
-  throw "Missing model file. Checked: $($Candidates -join ', ')"
+  $property.Value
 }
 
-# Creates the canonical relative path inside a staging bundle. This helper does
-# not preserve unrelated source-tree files, which keeps published manifests
-# limited to runtime dependencies the app actually expects.
+function Get-LockBundle {
+  param(
+    [Parameter(Mandatory = $true)]$Bundles,
+    [Parameter(Mandatory = $true)][string]$Id
+  )
+
+  $matches = @($Bundles | Where-Object { $_.id -eq $Id })
+  if ($matches.Count -ne 1) {
+    throw "Windows model lock must contain exactly one '$Id' bundle."
+  }
+  $matches[0]
+}
+
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-PinnedFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)]$Source
+  )
+
+  $actualSize = (Get-Item -LiteralPath $Path).Length
+  if ($actualSize -ne [long]$Source.size) {
+    throw "Size mismatch for $Path. Expected $($Source.size), got $actualSize."
+  }
+  $actualHash = Get-FileSha256 $Path
+  if ($actualHash -ne $Source.sha256) {
+    throw "SHA-256 mismatch for $Path. Expected $($Source.sha256), got $actualHash."
+  }
+}
+
+function Get-PinnedArtifact {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  $source = Get-LockSource $Name
+  $fileName = [System.IO.Path]::GetFileName(([Uri]$source.url).AbsolutePath)
+  $sourceDir = Join-Path $CacheDir $Name
+  $destination = Join-Path $sourceDir $fileName
+  New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
+
+  if (Test-Path -LiteralPath $destination -PathType Leaf) {
+    try {
+      Assert-PinnedFile -Path $destination -Source $source
+      return $destination
+    } catch {
+      Remove-Item -LiteralPath $destination -Force
+    }
+  }
+
+  $partial = "$destination.part"
+  Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+  Write-Host "Downloading pinned $Name artifact..."
+  if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+    throw "Downloading pinned model artifacts requires curl.exe."
+  }
+  & curl.exe `
+    --fail `
+    --location `
+    --retry 3 `
+    --retry-all-errors `
+    --connect-timeout 30 `
+    --output $partial `
+    $source.url
+  if ($LASTEXITCODE -ne 0) {
+    throw "Download failed for pinned $Name artifact."
+  }
+  Assert-PinnedFile -Path $partial -Source $source
+  Move-Item -LiteralPath $partial -Destination $destination
+  $destination
+}
+
+function Expand-PinnedArchive {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  $source = Get-LockSource $Name
+  if (-not $source.archiveRoot) {
+    throw "Source '$Name' is not an archive."
+  }
+  $archive = Get-PinnedArtifact $Name
+  $extractRoot = Join-Path (Join-Path $CacheDir "expanded") "$Name-$($source.sha256)"
+  $modelRoot = Join-Path $extractRoot $source.archiveRoot
+  if (Test-Path -LiteralPath $modelRoot -PathType Container) {
+    return $modelRoot
+  }
+
+  if (Test-Path -LiteralPath $extractRoot) {
+    Remove-Item -LiteralPath $extractRoot -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+  & tar.exe -xf $archive -C $extractRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "Could not extract pinned $Name artifact."
+  }
+  if (-not (Test-Path -LiteralPath $modelRoot -PathType Container)) {
+    throw "Pinned $Name archive did not contain $($source.archiveRoot)."
+  }
+  $modelRoot
+}
+
 function Copy-BundleFile {
   param(
     [Parameter(Mandatory = $true)][string]$Source,
@@ -57,14 +140,14 @@ function Copy-BundleFile {
     [Parameter(Mandatory = $true)][string]$RelativePath
   )
 
+  if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+    throw "Missing pinned source file: $Source"
+  }
   $destination = Join-Path $Bundle $RelativePath
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-  Copy-Item -LiteralPath $Source -Destination $destination -Force
+  Copy-Item -LiteralPath $Source -Destination $destination
 }
 
-# Materializes the manifest format consumed by the Rust downloader and returns
-# its digest for compile-time pinning. The manifest excludes itself so its trust
-# anchor can be stored independently in application code.
 function Write-BundleManifest {
   param([Parameter(Mandatory = $true)][string]$Bundle)
 
@@ -73,13 +156,9 @@ function Write-BundleManifest {
     Where-Object { $_.Name -ne "SHA256SUMS" } |
     ForEach-Object {
       $relative = $_.FullName.Substring($root.Length + 1).Replace("\", "/")
-      [pscustomobject]@{
-        Path = $relative
-        Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-      }
+      [pscustomobject]@{ Path = $relative; Hash = Get-FileSha256 $_.FullName }
     } |
     Sort-Object Path
-
   if (-not $entries) {
     throw "Bundle contains no files: $Bundle"
   }
@@ -87,11 +166,22 @@ function Write-BundleManifest {
   $body = (($entries | ForEach-Object { "$($_.Hash)  $($_.Path)" }) -join "`n") + "`n"
   $manifest = Join-Path $root "SHA256SUMS"
   [System.IO.File]::WriteAllText($manifest, $body, [System.Text.UTF8Encoding]::new($false))
-  (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+  Get-FileSha256 $manifest
 }
 
-# Reads a just-published public object with bounded retries so the upload path
-# verifies the user-facing CDN, not only the private S3-compatible endpoint.
+function New-Bundle {
+  param([Parameter(Mandatory = $true)]$Definition)
+
+  $relativePath = "$($Definition.folder)/$($Definition.prefix)"
+  $directory = Join-Path $StageDir $relativePath
+  New-Item -ItemType Directory -Force -Path $directory | Out-Null
+  [pscustomobject]@{
+    Definition = $Definition
+    Path = $relativePath
+    Directory = $directory
+  }
+}
+
 function Get-PublicBytes {
   param([Parameter(Mandatory = $true)][string]$Url)
 
@@ -105,126 +195,64 @@ function Get-PublicBytes {
   }
 }
 
-# Hashes downloaded manifest bytes exactly as the Rust trust-anchor check does.
-# It intentionally accepts bytes rather than text to avoid newline conversion.
 function Get-BytesSha256 {
   param([Parameter(Mandatory = $true)][byte[]]$Bytes)
 
-  [System.BitConverter]::ToString(
-    [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
-  ).Replace('-', '').ToLowerInvariant()
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    [System.BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $sha.Dispose()
+  }
 }
 
-if (-not (Test-Path -LiteralPath $Models -PathType Container)) {
-  throw "Models directory not found: $Models"
-}
-
-$modelsRoot = (Resolve-Path -LiteralPath $Models).Path
-$stageBase = [System.IO.Path]::GetFullPath($StageDir)
-$stageRoot = [System.IO.Path]::GetFullPath((Join-Path $stageBase $Prefix))
-$stagePrefix = $stageBase.TrimEnd('\') + '\'
-if (-not $stageRoot.StartsWith($stagePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-  throw "Stage path escapes StageDir: $stageRoot"
+$stageRoot = [System.IO.Path]::GetFullPath($StageDir)
+$stageLeaf = $stageRoot.TrimEnd('\')
+$driveRoot = [System.IO.Path]::GetPathRoot($stageRoot).TrimEnd('\')
+$protectedRoots = @(
+  $driveRoot,
+  $Root.TrimEnd('\'),
+  [System.IO.Path]::GetFullPath($HOME).TrimEnd('\')
+)
+if ($protectedRoots -contains $stageLeaf) {
+  throw "Refusing to use protected directory as model staging root: $stageRoot"
 }
 if (Test-Path -LiteralPath $stageRoot) {
   Remove-Item -LiteralPath $stageRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
 
-# Canonicalize Parakeet into the versioned layout `ParakeetPaths` discovers. No
-# model conversion occurs here; exports must already be Windows ONNX artifacts.
-$parakeetSource = Find-FirstDirectory @(
-  (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3\$SpeechVersion"),
-  (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3\v1"),
-  (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3"),
-  (Join-Path $modelsRoot "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"),
-  (Join-Path $modelsRoot "parakeet-tdt-0.6b-v3")
-)
-$parakeetPath = "windows/parakeet-tdt-0.6b-v3/$SpeechVersion"
-$parakeetBundle = Join-Path $stageRoot $parakeetPath
-foreach ($file in @("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")) {
-  Copy-BundleFile -Source (Join-Path $parakeetSource $file) -Bundle $parakeetBundle -RelativePath $file
+$parakeet = New-Bundle (Get-LockBundle $Lock.speech "parakeet")
+$parakeetSource = Expand-PinnedArchive "parakeet"
+foreach ($file in $parakeet.Definition.files) {
+  Copy-BundleFile -Source (Join-Path $parakeetSource $file) -Bundle $parakeet.Directory -RelativePath $file
 }
 
-# Package segmentation and embeddings together because Settings presents
-# diarization as part of the speech install, even though the runtime can fall
-# back to a single-speaker transcript when these files are absent.
-$diarizationSource = Find-FirstDirectory @(
-  (Join-Path $modelsRoot "windows\speaker-diarization\$SpeechVersion"),
-  (Join-Path $modelsRoot "windows\speaker-diarization\v1"),
-  (Join-Path $modelsRoot "windows\speaker-diarization"),
-  (Join-Path $modelsRoot "speaker-diarization")
-)
-$diarizationPath = "windows/speaker-diarization/$SpeechVersion"
-$diarizationBundle = Join-Path $stageRoot $diarizationPath
-$segmentationName = "sherpa-onnx-pyannote-segmentation-3-0"
-$segmentation = Find-FirstFile @(
-  (Join-Path $diarizationSource "$segmentationName\model.int8.onnx"),
-  (Join-Path $diarizationSource "$segmentationName\model.onnx"),
-  (Join-Path $diarizationSource "segmentation\model.int8.onnx"),
-  (Join-Path $diarizationSource "segmentation\model.onnx")
-)
-Copy-BundleFile -Source $segmentation -Bundle $diarizationBundle -RelativePath "$segmentationName/model.int8.onnx"
-$embeddingName = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
-$embedding = Find-FirstFile @(
-  (Join-Path $diarizationSource $embeddingName),
-  (Join-Path $diarizationSource "embedding\$embeddingName")
-)
-Copy-BundleFile -Source $embedding -Bundle $diarizationBundle -RelativePath $embeddingName
+$diarization = New-Bundle (Get-LockBundle $Lock.speech "diarization")
+$segmentationSource = Expand-PinnedArchive "segmentation"
+$embeddingSource = Get-PinnedArtifact "embedding"
+Copy-BundleFile `
+  -Source (Join-Path $segmentationSource "model.int8.onnx") `
+  -Bundle $diarization.Directory `
+  -RelativePath "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"
+Copy-BundleFile `
+  -Source $embeddingSource `
+  -Bundle $diarization.Directory `
+  -RelativePath "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
 
-# Keep the GGUF and the exact llama.cpp executable/DLL family in one revision.
-# End-user machines therefore need no global llama installation or ABI matching.
-$gemmaSource = Find-FirstDirectory @(
-  (Join-Path $modelsRoot "llm\gemma-3-1b-it-qat-4bit"),
-  (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\$NotesVersion"),
-  (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\v1"),
-  (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit"),
-  (Join-Path $modelsRoot "gemma-3-1b-it-qat-4bit")
-)
-$gemmaPath = "windows/gemma-3-1b-it-qat-4bit/$NotesVersion"
-$gemmaBundle = Join-Path $stageRoot $gemmaPath
-$gemma = Find-FirstFile @(
-  (Join-Path $gemmaSource "gemma-3-1b-it-q4_0.gguf"),
-  (Join-Path $gemmaSource "gemma-3-1b-it-qat-q4_0.gguf")
-)
-Copy-BundleFile -Source $gemma -Bundle $gemmaBundle -RelativePath "gemma-3-1b-it-q4_0.gguf"
+$notes = New-Bundle (Get-LockBundle $Lock.notes "gemma")
+$gemmaSource = Get-PinnedArtifact "gemma"
+Copy-BundleFile -Source $gemmaSource -Bundle $notes.Directory -RelativePath $notes.Definition.files[0]
 
-$runtimeFiles = @(
-  "llama-cli.exe",
-  "llama-cli-impl.dll",
-  "llama-server-impl.dll",
-  "llama-common.dll",
-  "llama.dll",
-  "ggml.dll",
-  "ggml-base.dll",
-  "libomp140.x86_64.dll",
-  "mtmd.dll"
-)
-foreach ($file in $runtimeFiles) {
-  Copy-BundleFile -Source (Find-FirstFile @((Join-Path $gemmaSource $file))) -Bundle $gemmaBundle -RelativePath $file
-}
-$cpuBackends = @(Get-ChildItem -LiteralPath $gemmaSource -Filter "ggml-cpu-*.dll" -File)
-if (-not $cpuBackends) {
-  throw "No llama.cpp CPU backend DLLs found under $gemmaSource"
-}
-foreach ($backend in $cpuBackends) {
-  Copy-BundleFile -Source $backend.FullName -Bundle $gemmaBundle -RelativePath $backend.Name
-}
-
-# Each directory gets an independent trust anchor so a speech-only or notes-only
-# app download can verify exactly the bundle it requested.
-$bundles = @(
-  [pscustomobject]@{ Path = $parakeetPath; Directory = $parakeetBundle },
-  [pscustomobject]@{ Path = $diarizationPath; Directory = $diarizationBundle },
-  [pscustomobject]@{ Path = $gemmaPath; Directory = $gemmaBundle }
-)
+$bundles = @($parakeet, $diarization, $notes)
 foreach ($bundle in $bundles) {
-  $bundle | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue (Write-BundleManifest $bundle.Directory)
+  $manifestHash = Write-BundleManifest $bundle.Directory
+  if ($manifestHash -ne $bundle.Definition.manifestSha256) {
+    throw "Bundle $($bundle.Path) produced $manifestHash, but the lock pins $($bundle.Definition.manifestSha256)."
+  }
+  $bundle | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue $manifestHash
 }
 
-# Publication is opt-in and treats versioned prefixes as immutable. `-Force`
-# exists for controlled recovery, while the normal path refuses to replace bytes
-# already visible at a pinned URL.
 if ($Upload) {
   if (-not $R2Endpoint -or -not $R2Bucket) {
     throw "Upload requires R2_ENDPOINT and R2_BUCKET."
@@ -236,30 +264,31 @@ if ($Upload) {
     throw "Upload requires the AWS CLI."
   }
 
+  $prefix = ([Uri]$Lock.cdnBase).AbsolutePath.Trim('/')
   foreach ($bundle in $bundles) {
-    $key = "$($Prefix.Trim('/'))/$($bundle.Path)"
+    $key = "$prefix/$($bundle.Path)"
     $existing = & aws s3 ls "s3://$R2Bucket/$key/" --endpoint-url $R2Endpoint 2>$null
     if ($LASTEXITCODE -ne 0) {
-      throw "Could not inspect s3://$R2Bucket/$key/"
+      throw "Could not inspect s3://$R2Bucket/$key/."
     }
-    if ($existing -and -not $Force) {
-      $publicManifest = "$($PublicBase.TrimEnd('/'))/$key/SHA256SUMS"
+    if ($existing) {
+      $publicManifest = "$($Lock.cdnBase.TrimEnd('/'))/$($bundle.Path)/SHA256SUMS"
       $publicHash = Get-BytesSha256 (Get-PublicBytes $publicManifest)
       if ($publicHash -eq $bundle.ManifestSha256) {
         Write-Host "Already published: s3://$R2Bucket/$key/"
         continue
       }
-      throw "Immutable R2 prefix already exists with different bytes: s3://$R2Bucket/$key/"
-    }
-    & aws s3 cp $bundle.Directory "s3://$R2Bucket/$key/" --recursive --endpoint-url $R2Endpoint
-    if ($LASTEXITCODE -ne 0) {
-      throw "Upload failed for s3://$R2Bucket/$key/"
+      throw "Immutable R2 prefix already contains different bytes: s3://$R2Bucket/$key/"
     }
 
-    $publicManifest = "$($PublicBase.TrimEnd('/'))/$key/SHA256SUMS"
+    & aws s3 cp $bundle.Directory "s3://$R2Bucket/$key/" --recursive --endpoint-url $R2Endpoint
+    if ($LASTEXITCODE -ne 0) {
+      throw "Upload failed for s3://$R2Bucket/$key/."
+    }
+    $publicManifest = "$($Lock.cdnBase.TrimEnd('/'))/$($bundle.Path)/SHA256SUMS"
     $publicHash = Get-BytesSha256 (Get-PublicBytes $publicManifest)
     if ($publicHash -ne $bundle.ManifestSha256) {
-      throw "Public manifest hash mismatch for $publicManifest"
+      throw "Public manifest hash mismatch for $publicManifest."
     }
   }
 }
@@ -267,5 +296,5 @@ if ($Upload) {
 Write-Host "Windows model bundles staged under $stageRoot"
 foreach ($bundle in $bundles) {
   Write-Host "$($bundle.Path) => $($bundle.ManifestSha256)"
-  Write-Host "  $($PublicBase.TrimEnd('/'))/$($Prefix.Trim('/'))/$($bundle.Path)/"
+  Write-Host "  $($Lock.cdnBase.TrimEnd('/'))/$($bundle.Path)/"
 }

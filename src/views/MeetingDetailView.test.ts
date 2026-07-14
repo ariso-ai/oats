@@ -314,7 +314,7 @@ describe('MeetingDetailView inline title editing', () => {
     await flushPromises();
 
     await vi.advanceTimersByTimeAsync(800);
-    expect(saveNote).not.toHaveBeenCalledWith(localItem, { content: '', title: '' });
+    expect(saveNote).not.toHaveBeenCalled();
 
     vi.useRealTimers();
   });
@@ -417,10 +417,7 @@ describe('MeetingDetailView inline title editing', () => {
 
     wrapper.findComponent(MeetingNotesEditor).vm.$emit('update:modelValue', 'draft from call');
     await flushPromises();
-    expect(saveNote).not.toHaveBeenCalledWith(first, {
-      content: 'draft from call',
-      title: '',
-    });
+    expect(saveNote).not.toHaveBeenCalled();
 
     await wrapper.setProps({ item: second });
     await flushPromises();

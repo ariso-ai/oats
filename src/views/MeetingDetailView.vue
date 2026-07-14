@@ -353,7 +353,11 @@ async function onShareClick(): Promise<void> {
 }
 
 onMounted(async () => {
-  nativeShareSupported.value = (await loadPlatformCapabilities()).nativeShare.supported;
+  try {
+    nativeShareSupported.value = (await loadPlatformCapabilities()).nativeShare.supported;
+  } catch (error) {
+    console.error('Failed to load platform capabilities', error);
+  }
 });
 
 async function shareLocal(d: MeetingDetail): Promise<void> {
@@ -782,8 +786,13 @@ async function loadIndividualNote(): Promise<void> {
     saveState.value = 'error';
   } finally {
     if (my === noteReqId) {
-      loadingIndividualNote.value = false;
-      suppressAutoSave = false;
+      // Let watchers consume persistence-driven ref updates while autosave is
+      // still suppressed, so loaded content cannot be mistaken for an edit.
+      await nextTick();
+      if (my === noteReqId) {
+        loadingIndividualNote.value = false;
+        suppressAutoSave = false;
+      }
     }
   }
 }

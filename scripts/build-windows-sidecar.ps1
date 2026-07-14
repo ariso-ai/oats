@@ -18,17 +18,27 @@ Push-Location $Root
 try {
   Import-WindowsBuildEnvironment
 
-  cargo "+$Toolchain" build `
+  $output = Join-Path $Root "src-tauri\ariso-stt\windows\target\$Target\release\ariso-stt.exe"
+  Remove-Item -LiteralPath $output -Force -ErrorAction SilentlyContinue
+  & cargo "+$Toolchain" build `
     --manifest-path src-tauri/ariso-stt/windows/Cargo.toml `
     --release `
     --locked `
     --target $Target
+  if ($LASTEXITCODE -ne 0) {
+    throw "Windows sidecar build failed with exit code $LASTEXITCODE."
+  }
+  if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
+    throw "Windows sidecar build did not produce $output."
+  }
 
   New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
   Copy-Item `
-    "src-tauri/ariso-stt/windows/target/$Target/release/ariso-stt.exe" `
+    $output `
     "src-tauri/binaries/ariso-stt-$Target.exe" `
     -Force
+
+  & (Join-Path $PSScriptRoot "prepare-windows-llama-runtime.ps1")
 } finally {
   Pop-Location
 }

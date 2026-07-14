@@ -1,5 +1,37 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+const WINDOWS_MODEL_LOCK_JSON: &str = include_str!("../ariso-stt/shared/windows-models.json");
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsModelLock {
+    schema_version: u32,
+    cdn_base: String,
+    speech: Vec<LockedModelBundle>,
+    notes: Vec<LockedModelBundle>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LockedModelBundle {
+    folder: String,
+    prefix: String,
+    install_path: String,
+    manifest_sha256: String,
+    files: Vec<String>,
+}
+
+static WINDOWS_MODEL_LOCK: LazyLock<WindowsModelLock> = LazyLock::new(|| {
+    let lock: WindowsModelLock =
+        serde_json::from_str(WINDOWS_MODEL_LOCK_JSON).expect("valid embedded Windows model lock");
+    assert_eq!(
+        lock.schema_version, 1,
+        "supported Windows model lock schema"
+    );
+    lock
+});
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,12 +86,12 @@ pub fn write_manifest(root: &Path, downloaded_at: &str) -> Result<(), String> {
 
 /// Stable macOS recording/model identity retained for existing manifests. The
 /// exact CoreML and diarization revisions are pinned separately by the commit
-/// prefixes in `MACOS_STT_BUNDLES`.
+/// prefixes returned by `macos_stt_bundles()`.
 const MACOS_STT_MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
 
 /// Both platforms install their runtime-specific Gemma files under this shared
 /// logical model directory. The contents differ (MLX/safetensors on macOS,
-/// GGUF/llama.cpp on Windows), but callers never need a platform-specific path.
+/// GGUF on Windows), but callers never need a platform-specific model path.
 const LLM_MODEL_NAME: &str = "gemma-3-1b-it-qat-4bit";
 
 /// Existing macOS installs write `1` into `.complete`; treating it as the
@@ -86,12 +118,12 @@ fn bundle_version(bundles: &[ModelBundle]) -> String {
 
 /// Produces the readiness identity recorded in the shared STT manifest and each
 /// completed recording. macOS retains its established product-level identity;
-/// its exact CDN URLs use the upstream commit prefixes in `MACOS_STT_BUNDLES`.
+/// its exact CDN URLs use the upstream prefixes from `macos_stt_bundles()`.
 /// Windows has no legacy installs, so its identity joins every `folder@tag`
 /// component and a change to either ASR or diarization requires a fresh bundle.
 pub(crate) fn stt_model_version() -> String {
     if cfg!(target_os = "windows") {
-        bundle_version(WINDOWS_STT_BUNDLES)
+        bundle_version(&windows_stt_bundles())
     } else {
         MACOS_STT_MODEL_VERSION.to_string()
     }
@@ -100,10 +132,10 @@ pub(crate) fn stt_model_version() -> String {
 /// Version expected in the shared Gemma completion marker. Both targets use the
 /// same model family and local path, while the value identifies the platform's
 /// runtime representation: the existing macOS R2 mirror revision or the exact
-/// Windows GGUF/llama.cpp bundle tag.
+/// Windows GGUF data-bundle tag.
 fn llm_model_version() -> String {
     if cfg!(target_os = "windows") {
-        bundle_version(WINDOWS_LLM_BUNDLES)
+        bundle_version(&windows_llm_bundles())
     } else {
         MACOS_LLM_MARKER_VERSION.to_string()
     }
@@ -217,21 +249,26 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     // Clear any stale readiness marker before (re)downloading: an interrupted
     // run must not leave `manifest.json` claiming the models are ready. It is
     // rewritten only after every file downloads and verifies.
-    let _ = std::fs::remove_file(manifest_path(&root));
+    if let Err(error) = std::fs::remove_file(manifest_path(&root))
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(format!("invalidate STT readiness marker: {error}"));
+    }
 
     let app2 = app.clone();
     let (cdn_base, bundles) = if cfg!(target_os = "windows") {
-        (WINDOWS_MODELS_CDN_BASE, WINDOWS_STT_BUNDLES)
+        (WINDOWS_MODEL_LOCK.cdn_base.clone(), windows_stt_bundles())
     } else {
-        (MODELS_CDN_BASE, MACOS_STT_BUNDLES)
+        (MODELS_CDN_BASE.to_string(), macos_stt_bundles())
     };
-    match download_model_bundles(cdn_base, &models, bundles, &move |f| {
+    let result = download_model_bundles(&cdn_base, &models, &bundles, &move |f| {
         let _ = app2.emit("model://stt/progress", f);
     })
     .await
-    {
+    .and_then(|()| write_manifest(&root, &now_marker()));
+
+    match result {
         Ok(()) => {
-            write_manifest(&root, &now_marker())?;
             let _ = app.emit("model://stt/done", ());
             Ok(())
         }
@@ -377,8 +414,9 @@ fn verify_pinned(file: &str, actual_hex: &str) -> Result<(), String> {
 
 /// Download the platform's notes assets into the shared `<models>/llm/<name>/`
 /// directory, emitting `model://llm/{progress,done,error}`. macOS downloads its
-/// pinned MLX files directly; Windows installs a hash-pinned GGUF/llama.cpp
-/// bundle. Both write the same versioned readiness marker only after success.
+/// pinned MLX files directly; Windows installs a hash-pinned GGUF data bundle
+/// while llama.cpp ships as an installer resource. Both write the same
+/// versioned readiness marker only after success.
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
@@ -396,20 +434,20 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     let result = if cfg!(target_os = "windows") {
         let models = crate::storage::models_dir(&root);
         let marker = llm_marker_path(&root);
-        let _ = tokio::fs::remove_file(&marker).await;
-        let result = download_model_bundles(
-            WINDOWS_MODELS_CDN_BASE,
-            &models,
-            WINDOWS_LLM_BUNDLES,
-            &move |f| {
-                let _ = app2.emit("model://llm/progress", f);
-            },
-        )
-        .await;
-        if result.is_ok() {
-            write_llm_marker(&marker).await?;
+        if let Err(error) = tokio::fs::remove_file(&marker).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!("invalidate LLM readiness marker: {error}"));
         }
-        result
+        let bundles = windows_llm_bundles();
+        match download_model_bundles(&WINDOWS_MODEL_LOCK.cdn_base, &models, &bundles, &move |f| {
+            let _ = app2.emit("model://llm/progress", f);
+        })
+        .await
+        {
+            Ok(()) => write_llm_marker(&marker).await,
+            Err(error) => Err(error),
+        }
     } else {
         download_llm_files(&dir, &move |f| {
             let _ = app2.emit("model://llm/progress", f);
@@ -458,7 +496,11 @@ async fn download_llm_files(dir: &Path, on_progress: &(dyn Fn(f64) + Sync)) -> R
     // reinstall is interrupted, an old `.complete` must not keep `llm_is_ready`
     // true while a model file is partial. Re-written only after a full success.
     let marker = dir.join(".complete");
-    let _ = tokio::fs::remove_file(&marker).await;
+    if let Err(error) = tokio::fs::remove_file(&marker).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(format!("invalidate LLM readiness marker: {error}"));
+    }
     // connect_timeout bounds a stalled handshake; read_timeout bounds the gap
     // *between* received bytes (not total duration), so the 700 MB weights file
     // can take as long as it needs as long as it keeps making progress.
@@ -494,7 +536,9 @@ async fn download_llm_files(dir: &Path, on_progress: &(dyn Fn(f64) + Sync)) -> R
                 continue;
             }
             // Present but wrong or unreadable → discard and re-download.
-            let _ = tokio::fs::remove_file(&dest).await;
+            tokio::fs::remove_file(&dest)
+                .await
+                .map_err(|error| format!("remove invalid {}: {error}", dest.display()))?;
         }
 
         let url = format!("{LLM_CDN_BASE}/{f}");
@@ -552,77 +596,73 @@ async fn download_llm_files(dir: &Path, on_progress: &(dyn Fn(f64) + Sync)) -> R
 
 /// A platform-native model bundle at an immutable R2 prefix. macOS STT prefixes
 /// are upstream commit hashes; Windows prefixes are explicit release tags tied
-/// to the exported commit/runtime set. `bundle_version` joins folder + prefix
+/// to pinned upstream model revisions. `bundle_version` joins folder + prefix
 /// when Windows needs one aggregate readiness identity. A model bump always
 /// publishes a new prefix and pin rather than overwriting one.
+#[derive(Clone, Debug)]
 struct ModelBundle {
     /// R2 path below the shared `models/` base.
-    folder: &'static str,
+    folder: String,
     /// Immutable revision segment below `folder`.
-    prefix: &'static str,
+    prefix: String,
     /// Relative installation directory under the local models root.
-    install_path: &'static str,
+    install_path: String,
     /// SHA-256 (lowercase hex) of the prefix's `SHA256SUMS` over its raw bytes —
     /// the single pinned trust anchor. A tampered file list can't match it, and
     /// every model file is then verified against an entry in that list.
-    manifest_sha256: &'static str,
+    manifest_sha256: String,
+    /// Optional allowlist of model data files. Executable runtimes are installer
+    /// resources and never enter the post-install model download path.
+    files: Option<Vec<String>>,
 }
 
 /// Retains the existing CoreML/FluidAudio installation layout expected by the
 /// Swift sidecar. The generic downloader can therefore serve both platforms
 /// without forcing a shared on-disk model representation.
-const MACOS_STT_BUNDLES: &[ModelBundle] = &[
-    ModelBundle {
-        folder: "parakeet-tdt-0.6b-v3",
-        prefix: "aed027400592",
-        install_path: "parakeet-tdt-0.6b-v3",
-        manifest_sha256: "58ca342f4648ed43233f627200d65a605fc6d97807bc300484bfc01b1cb2aa30",
-    },
-    ModelBundle {
-        folder: "speaker-diarization",
-        prefix: "1ed7a662fdc7",
-        install_path: "speaker-diarization",
-        manifest_sha256: "bc9cf65e567d862fa30aea1e71831d7c1d2dddcf58c22e2f90aaac28dc8baa74",
-    },
-];
+fn macos_stt_bundles() -> Vec<ModelBundle> {
+    vec![
+        ModelBundle {
+            folder: "parakeet-tdt-0.6b-v3".into(),
+            prefix: "aed027400592".into(),
+            install_path: "parakeet-tdt-0.6b-v3".into(),
+            manifest_sha256: "58ca342f4648ed43233f627200d65a605fc6d97807bc300484bfc01b1cb2aa30"
+                .into(),
+            files: None,
+        },
+        ModelBundle {
+            folder: "speaker-diarization".into(),
+            prefix: "1ed7a662fdc7".into(),
+            install_path: "speaker-diarization".into(),
+            manifest_sha256: "bc9cf65e567d862fa30aea1e71831d7c1d2dddcf58c22e2f90aaac28dc8baa74"
+                .into(),
+            files: None,
+        },
+    ]
+}
 
 /// Public CDN base for the STT model mirror (same R2 host as the LLM + updater).
 const MODELS_CDN_BASE: &str = concat!(r2_base!(), "/models");
 
-/// Windows model bundles use the same immutable, hash-pinned manifest lifecycle
-/// as macOS while living on a separate publication host. The host is only a
-/// transport location; the compiled manifest pins remain the trust anchors.
-/// Bump the version and repin these hashes with
-/// `scripts/sync-windows-local-models.ps1` whenever a bundle changes.
-const WINDOWS_MODELS_CDN_BASE: &str = "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev/models";
+fn locked_bundles(definitions: &[LockedModelBundle]) -> Vec<ModelBundle> {
+    definitions
+        .iter()
+        .map(|definition| ModelBundle {
+            folder: definition.folder.clone(),
+            prefix: definition.prefix.clone(),
+            install_path: definition.install_path.clone(),
+            manifest_sha256: definition.manifest_sha256.clone(),
+            files: Some(definition.files.clone()),
+        })
+        .collect()
+}
 
-/// Defines speech readiness as the Parakeet and diarization bundles together.
-/// Settings exposes one speech install action, so these revisions advance as a
-/// product unit even though inference can technically fall back without labels.
-const WINDOWS_STT_BUNDLES: &[ModelBundle] = &[
-    ModelBundle {
-        folder: "windows/parakeet-tdt-0.6b-v3",
-        prefix: "v1",
-        install_path: "windows/parakeet-tdt-0.6b-v3/v1",
-        manifest_sha256: "1fa1182dac99a2191e7df563a180ab7bdfeda4215e6e73d0967e223f9a25a65b",
-    },
-    ModelBundle {
-        folder: "windows/speaker-diarization",
-        prefix: "v1",
-        install_path: "windows/speaker-diarization/v1",
-        manifest_sha256: "d52563844c9eb44f47a556d048f40c6913f2b7d8ebafad1202f5e7e66c2b9c01",
-    },
-];
+fn windows_stt_bundles() -> Vec<ModelBundle> {
+    locked_bundles(&WINDOWS_MODEL_LOCK.speech)
+}
 
-/// Ships the Windows representation of Gemma 3 1B IT QAT 4-bit: GGUF plus its
-/// exact llama.cpp runtime. The immutable CDN tag remains Windows-specific, but
-/// `install_path` is the shared logical Gemma directory used by both sidecars.
-const WINDOWS_LLM_BUNDLES: &[ModelBundle] = &[ModelBundle {
-    folder: "windows/gemma-3-1b-it-qat-4bit",
-    prefix: "v2",
-    install_path: "llm/gemma-3-1b-it-qat-4bit",
-    manifest_sha256: "ce8dd3de8b43e6948ee08144e822d02d8848ad1bf42fef30e3961875bd2e9a00",
-}];
+fn windows_llm_bundles() -> Vec<ModelBundle> {
+    locked_bundles(&WINDOWS_MODEL_LOCK.notes)
+}
 
 /// Per-file disk-fill backstop for bundle downloads. The authoritative integrity gate
 /// is the per-file SHA-256 from the (hash-pinned) manifest; this only bounds how
@@ -632,6 +672,7 @@ const WINDOWS_LLM_BUNDLES: &[ModelBundle] = &[ModelBundle {
 const MODEL_MAX_FILE_BYTES: u64 = 1 << 30; // 1 GiB
 
 /// One `<sha256>  <relpath>` row of a SHA256SUMS manifest.
+#[derive(Clone, Debug)]
 struct ManifestEntry {
     sha256: String,
     path: String,
@@ -675,6 +716,33 @@ fn parse_sha256sums(text: &str) -> Result<Vec<ManifestEntry>, String> {
         return Err("manifest is empty".into());
     }
     Ok(out)
+}
+
+fn select_manifest_entries(
+    entries: Vec<ManifestEntry>,
+    required_files: Option<&[String]>,
+) -> Result<Vec<ManifestEntry>, String> {
+    let Some(required_files) = required_files else {
+        return Ok(entries);
+    };
+
+    let mut selected = Vec::with_capacity(required_files.len());
+    let mut seen = std::collections::HashSet::new();
+    for required in required_files {
+        sanitize_rel_path(required)?;
+        if !seen.insert(required) {
+            return Err(format!("duplicate required model file {required:?}"));
+        }
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == *required)
+            .ok_or_else(|| format!("required model file missing from manifest: {required}"))?;
+        selected.push(entry.clone());
+    }
+    if selected.is_empty() {
+        return Err("bundle selects no model files".into());
+    }
+    Ok(selected)
 }
 
 /// Validate a manifest path is a safe relative path (no absolute root, `.`, `..`,
@@ -749,7 +817,7 @@ async fn download_model_bundles(
             .await
             .map_err(|e| format!("read manifest {}: {e}", m.folder))?;
         let got = sha256_hex(&body);
-        if !got.eq_ignore_ascii_case(m.manifest_sha256) {
+        if !got.eq_ignore_ascii_case(&m.manifest_sha256) {
             return Err(format!(
                 "manifest integrity check failed for {}: expected {}, got {got}",
                 m.folder, m.manifest_sha256
@@ -757,11 +825,14 @@ async fn download_model_bundles(
         }
         let text = std::str::from_utf8(&body)
             .map_err(|_| format!("manifest {} is not UTF-8", m.folder))?;
-        for e in parse_sha256sums(text).map_err(|e| format!("manifest {}: {e}", m.folder))? {
+        let entries = parse_sha256sums(text).map_err(|e| format!("manifest {}: {e}", m.folder))?;
+        let entries = select_manifest_entries(entries, m.files.as_deref())
+            .map_err(|e| format!("manifest {}: {e}", m.folder))?;
+        for e in entries {
             let rel = sanitize_rel_path(&e.path)?;
             pending.push(Pending {
                 url: format!("{prefix}/{}", e.path),
-                dest: models_dir.join(m.install_path).join(rel),
+                dest: models_dir.join(&m.install_path).join(rel),
                 sha256: e.sha256,
             });
         }
@@ -880,12 +951,12 @@ mod tests {
     #[test]
     fn windows_stt_version_joins_each_pinned_bundle_revision() {
         assert_eq!(
-            bundle_version(WINDOWS_STT_BUNDLES),
+            bundle_version(&windows_stt_bundles()),
             "windows/parakeet-tdt-0.6b-v3@v1+windows/speaker-diarization@v1"
         );
         assert_eq!(
-            bundle_version(WINDOWS_LLM_BUNDLES),
-            "windows/gemma-3-1b-it-qat-4bit@v2"
+            bundle_version(&windows_llm_bundles()),
+            "windows/gemma-3-1b-it-qat-4bit@v3"
         );
     }
 
@@ -1102,6 +1173,16 @@ mod tests {
     }
 
     #[test]
+    fn bundle_file_allowlist_excludes_runtime_entries() {
+        let hash = "a".repeat(64);
+        let entries =
+            parse_sha256sums(&format!("{hash}  model.gguf\n{hash}  llama-cli.exe\n")).unwrap();
+        let selected = select_manifest_entries(entries, Some(&["model.gguf".into()])).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, "model.gguf");
+    }
+
+    #[test]
     fn sanitize_rel_path_allows_nested_rejects_escapes() {
         assert_eq!(
             sanitize_rel_path("Encoder.mlmodelc/weights/weight.bin").unwrap(),
@@ -1129,14 +1210,14 @@ mod tests {
     fn model_bundle_cdn_pins_are_well_formed() {
         assert!(MODELS_CDN_BASE.starts_with(r2_base!()));
         assert_eq!(
-            WINDOWS_MODELS_CDN_BASE,
+            WINDOWS_MODEL_LOCK.cdn_base,
             "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev/models"
         );
-        for m in MACOS_STT_BUNDLES
-            .iter()
-            .chain(WINDOWS_STT_BUNDLES)
-            .chain(WINDOWS_LLM_BUNDLES)
-        {
+        let bundles = macos_stt_bundles()
+            .into_iter()
+            .chain(windows_stt_bundles())
+            .chain(windows_llm_bundles());
+        for m in bundles {
             assert_eq!(m.manifest_sha256.len(), 64, "{} hash len", m.folder);
             assert!(
                 m.manifest_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -1158,12 +1239,13 @@ mod tests {
     #[ignore = "network: downloads the STT models (~900MB) from the R2 CDN"]
     async fn stt_r2_download_smoke() {
         let tmp = tempfile::tempdir().unwrap();
-        download_model_bundles(MODELS_CDN_BASE, tmp.path(), MACOS_STT_BUNDLES, &|_| {})
+        let bundles = macos_stt_bundles();
+        download_model_bundles(MODELS_CDN_BASE, tmp.path(), &bundles, &|_| {})
             .await
             .unwrap();
-        for m in MACOS_STT_BUNDLES {
+        for m in &bundles {
             assert!(
-                tmp.path().join(m.install_path).is_dir(),
+                tmp.path().join(&m.install_path).is_dir(),
                 "missing {}",
                 m.install_path
             );
@@ -1178,22 +1260,14 @@ mod tests {
     #[ignore = "network: downloads Windows Local bundles (~1.6GB) from R2"]
     async fn windows_r2_download_smoke() {
         let tmp = tempfile::tempdir().unwrap();
-        download_model_bundles(
-            WINDOWS_MODELS_CDN_BASE,
-            tmp.path(),
-            WINDOWS_STT_BUNDLES,
-            &|_| {},
-        )
-        .await
-        .unwrap();
-        download_model_bundles(
-            WINDOWS_MODELS_CDN_BASE,
-            tmp.path(),
-            WINDOWS_LLM_BUNDLES,
-            &|_| {},
-        )
-        .await
-        .unwrap();
+        let speech = windows_stt_bundles();
+        let notes = windows_llm_bundles();
+        download_model_bundles(&WINDOWS_MODEL_LOCK.cdn_base, tmp.path(), &speech, &|_| {})
+            .await
+            .unwrap();
+        download_model_bundles(&WINDOWS_MODEL_LOCK.cdn_base, tmp.path(), &notes, &|_| {})
+            .await
+            .unwrap();
 
         assert!(
             tmp.path()
@@ -1207,8 +1281,13 @@ mod tests {
         );
         assert!(
             tmp.path()
-                .join("llm/gemma-3-1b-it-qat-4bit/llama-cli.exe")
+                .join("llm/gemma-3-1b-it-qat-4bit/gemma-3-1b-it-qat-Q4_0.gguf")
                 .is_file()
+        );
+        assert!(
+            !tmp.path()
+                .join("llm/gemma-3-1b-it-qat-4bit/llama-cli.exe")
+                .exists()
         );
     }
 }

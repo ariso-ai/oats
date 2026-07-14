@@ -28,19 +28,6 @@ export function deriveRecordingMode(enabled: RecordingEnabled): RecordingMode | 
   return null;
 }
 
-/**
- * Reconcile persisted preferences with the capture sources this binary can
- * actually provide. A platform without system capture must retain one usable
- * source, so a stale system-only preference becomes microphone-only.
- */
-export function supportedRecordingEnabled(
-  enabled: RecordingEnabled,
-  systemAudioSupported: boolean,
-): RecordingEnabled {
-  if (systemAudioSupported) return enabled;
-  return { mic: true, systemAudio: false };
-}
-
 /** Status to show after a permission request resolved. */
 export function permissionStatus(granted: boolean): PermissionStatus {
   return granted ? 'granted' : 'denied';

@@ -1,8 +1,24 @@
 # Normalizes an ordinary PowerShell session into the MSVC build environment
 # expected by Cargo and Tauri. It imports an existing Visual Studio toolchain
 # into the current process; installation remains the caller's responsibility.
+function Get-WindowsBuildEnvironmentGaps {
+  $gaps = @()
+  foreach ($command in @("cl.exe", "link.exe")) {
+    if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+      $gaps += $command
+    }
+  }
+
+  foreach ($variable in @("INCLUDE", "LIB", "VCToolsInstallDir", "WindowsSdkDir", "WindowsSDKVersion")) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($variable, "Process"))) {
+      $gaps += $variable
+    }
+  }
+  return $gaps
+}
+
 function Import-WindowsBuildEnvironment {
-  if (Get-Command link.exe -ErrorAction SilentlyContinue) {
+  if (@(Get-WindowsBuildEnvironmentGaps).Count -eq 0) {
     return
   }
 
@@ -49,13 +65,17 @@ function Import-WindowsBuildEnvironment {
   }
 
   $envLines = & cmd.exe /d /s /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 >nul && set"
+  if ($LASTEXITCODE -ne 0) {
+    throw "VsDevCmd.bat failed to initialize the x64 MSVC environment (exit code $LASTEXITCODE)."
+  }
   foreach ($line in $envLines) {
     if ($line -match "^(.*?)=(.*)$") {
       [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
     }
   }
 
-  if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
-    throw "Visual Studio developer environment loaded, but link.exe is still unavailable. Repair the C++ build tools installation."
+  $gaps = @(Get-WindowsBuildEnvironmentGaps)
+  if ($gaps.Count -gt 0) {
+    throw "Visual Studio developer environment is incomplete (missing: $($gaps -join ', ')). Repair the C++ workload and Windows SDK installation."
   }
 }

@@ -216,7 +216,11 @@ runToCompletion {
 
         // Diarization: needs 16 kHz mono Float samples.
         let samples = try AudioConverter().resampleAudioFile(audioURL)
-        let diarizerModels = try await DiarizerModels.downloadIfNeeded(to: diarizerDir)
+        // Use FluidAudio's strict predownloaded-model API so a missing staged
+        // asset fails locally instead of bypassing the host's explicit download.
+        let diarizerModels = try DiarizerModels.load(
+            localSegmentationModel: diarizerDir.appendingPathComponent("pyannote_segmentation.mlmodelc"),
+            localEmbeddingModel: diarizerDir.appendingPathComponent("wespeaker_v2.mlmodelc"))
         let diarizer = DiarizerManager()
         diarizer.initialize(models: diarizerModels)
         let diarization = try diarizer.performCompleteDiarization(samples, sampleRate: 16000)

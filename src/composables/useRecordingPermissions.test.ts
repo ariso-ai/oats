@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 
 describe('loadRecordingEnabled', () => {
-  it('persists a usable microphone-only mode when system audio is unsupported', async () => {
+  it('clears an existing system-only choice when system audio is unsupported', async () => {
     mocks.values.set('recordMicEnabled', false);
     mocks.values.set('recordSystemAudioEnabled', true);
     mocks.loadPlatformCapabilities.mockResolvedValue({
@@ -37,10 +37,10 @@ describe('loadRecordingEnabled', () => {
     });
 
     await expect(loadRecordingEnabled()).resolves.toEqual({
-      mic: true,
+      mic: false,
       systemAudio: false,
     });
-    expect(mocks.set).toHaveBeenCalledWith('recordMicEnabled', true);
+    expect(mocks.set).toHaveBeenCalledOnce();
     expect(mocks.set).toHaveBeenCalledWith('recordSystemAudioEnabled', false);
   });
 
@@ -56,5 +56,18 @@ describe('loadRecordingEnabled', () => {
       systemAudio: true,
     });
     expect(mocks.set).not.toHaveBeenCalled();
+  });
+
+  it('uses a capability-aware default for a fresh install', async () => {
+    mocks.loadPlatformCapabilities.mockResolvedValue({
+      systemAudio: { supported: false },
+    });
+
+    await expect(loadRecordingEnabled()).resolves.toEqual({
+      mic: true,
+      systemAudio: false,
+    });
+    expect(mocks.set).toHaveBeenCalledWith('recordMicEnabled', true);
+    expect(mocks.set).toHaveBeenCalledWith('recordSystemAudioEnabled', false);
   });
 });

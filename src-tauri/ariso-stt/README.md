@@ -31,13 +31,16 @@ The local Gemma path is identical on both platforms:
 Both implementations use the Gemma 3 1B instruction-tuned QAT 4-bit model family
 from Hugging Face (`gemma-3-1b-it-qat-4bit`), but their runtime files are
 intentionally different. macOS loads the `mlx-community` safetensors mirror;
-Windows loads a GGUF export plus its pinned llama.cpp runtime. The shared
-`.complete` marker records the expected platform bundle identity instead of
-putting that version in the local directory name.
+Windows loads `gemma-3-1b-it-qat-Q4_0.gguf`. Its pinned llama.cpp runtime is an
+installer resource, not a downloaded model file. The shared `.complete` marker
+records the expected platform bundle identity instead of putting that version
+in the local directory name.
 
 STT distribution has two version layers. macOS download URLs use the upstream
-commit-hash prefixes listed in `MACOS_STT_BUNDLES`, while its persisted model
-identity remains `parakeet-tdt-0.6b-v3` for existing installs. Windows publishes
-strongly versioned ONNX bundles and joins every `folder@tag` with `+` to form the
-readiness and recording version. That join means changing either Parakeet or
-diarization invalidates the Windows speech bundle as a unit.
+commit-hash prefixes returned by `macos_stt_bundles()` in
+`src-tauri/src/model_manager.rs`, while its persisted model identity remains
+`parakeet-tdt-0.6b-v3`. Windows resolves source revisions, CDN prefixes,
+manifests, install paths, and the llama.cpp release from
+`shared/windows-models.json`. The host joins the Windows speech bundle
+identities with `+`, so changing either Parakeet or diarization invalidates the
+speech installation as a unit.

@@ -7,8 +7,8 @@ Both desktop platforms follow the same model lifecycle:
 1. Stage the exact files the platform sidecar loads.
 2. Write a deterministic `SHA256SUMS` manifest for each bundle.
 3. Publish to an immutable Cloudflare R2 prefix.
-4. Pin the manifest hash in `src-tauri/src/model_manager.rs`.
-5. Let the Tauri host download and verify the bundle; sidecars never use the network.
+4. Pin the bundle and upstream identities in the platform's reviewed metadata.
+5. Let the Tauri host download and verify the bundle before invoking inference.
 
 macOS stages the FluidAudio CoreML bundles with:
 
@@ -19,11 +19,13 @@ AWS_PROFILE=r2 \
 ./scripts/sync-stt-models.sh
 ```
 
-Windows stages the Parakeet ONNX, diarization, Gemma GGUF, and required llama.cpp CPU runtime files with:
+Windows metadata is centralized in
+`src-tauri/ariso-stt/shared/windows-models.json`. The publisher downloads the
+exact pinned upstream Parakeet, diarization, and Gemma artifacts and stages only
+model data:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\sync-windows-local-models.ps1 `
-  -Models "$HOME\.ariso\models" `
   -StageDir "$env:TEMP\oats-windows-models"
 ```
 
@@ -32,15 +34,16 @@ The command prints the three manifest hashes to pin. To publish after configurin
 ```powershell
 $env:R2_ENDPOINT = "https://<account-id>.r2.cloudflarestorage.com"
 $env:R2_BUCKET = "<bucket-name>"
-$env:AWS_ACCESS_KEY_ID = "..."
-$env:AWS_SECRET_ACCESS_KEY = "..."
+aws configure --profile oats-r2
+$env:AWS_PROFILE = "oats-r2"
 
 powershell -ExecutionPolicy Bypass -File scripts\sync-windows-local-models.ps1 `
-  -Models "$HOME\.ariso\models" `
   -Upload
 ```
 
-Published version prefixes are immutable. The helper refuses to overwrite an existing prefix unless `-Force` is explicitly supplied for a byte-for-byte repair. A model update must use a new version/revision prefix and new pinned manifest hash.
+Published version prefixes are immutable. If an existing prefix does not match
+the lock, the helper fails. A model update requires a new prefix and pinned
+manifest hash; there is no overwrite mode.
 
 ## Windows sidecar
 
@@ -48,11 +51,18 @@ The platform targets live in `src-tauri/ariso-stt/macos` and
 `src-tauri/ariso-stt/windows`. Their language-neutral CLI and transcript
 contract is documented under `src-tauri/ariso-stt/shared`.
 
-`build-windows-sidecar.ps1` builds the x64 Windows `ariso-stt.exe` and copies it to Tauri's target-specific external-binary path:
+`build-windows-sidecar.ps1` builds the x64 Windows `ariso-stt.exe`, copies it to
+Tauri's target-specific external-binary path, and stages the exact llama.cpp
+runtime pinned by the shared lock as an installer resource:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-sidecar.ps1
 ```
+
+Run `prepare-windows-llama-runtime.ps1` directly only when a host build needs
+the resource without rebuilding the sidecar. The runtime is never downloaded
+into the user's model directory; it ships inside the signed application
+installer.
 
 The sidecar is inference-only and supports the same runtime commands as the macOS sidecar:
 
@@ -60,6 +70,20 @@ The sidecar is inference-only and supports the same runtime commands as the macO
 ariso-stt --audio <path> --models <dir> --format json
 ariso-stt notes --transcript <path> --models <dir>
 ```
+
+## Tauri schemas
+
+Regenerate tracked Tauri schemas from the production feature set, after staging
+the platform sidecar/resources required by the host build:
+
+```powershell
+cargo build --manifest-path src-tauri\Cargo.toml --locked --features prod-api
+```
+
+`desktop-schema.json`, `capabilities.json`, and `acl-manifests.json` are the
+canonical tracked outputs. The target-local `windows-schema.json` duplicates
+the desktop schema and is intentionally ignored. Production ACL output must not
+contain the optional debug-only `mcp` plugin entry.
 
 ## Windows installers
 
@@ -75,6 +99,9 @@ Release CI additionally imports the Authenticode certificate and passes a
 generated signing overlay through `-TauriConfig`. The script keeps that input
 optional so local QA builds can remain unsigned while the public release job
 fails unless both Authenticode and Tauri updater signatures validate.
+When `TAURI_SIGNING_PRIVATE_KEY` is absent, the helper uses a temporary config
+overlay to disable updater artifacts for that local build only; the checked-in
+production setting remains enabled.
 
 The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 
@@ -84,14 +111,18 @@ The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 Replace these assets directly when updating the installer artwork, preserving
 their dimensions and 24-bit BMP format.
 
-Release and desktop CI call the same sidecar and installer helpers.
+Desktop and release CI call the same sidecar helper. Release CI calls the
+installer helper to produce the signed distribution artifacts.
 
-## Windows Local smoke test
+## Windows Local benchmark
 
-`windows-local-smoke.ps1` runs transcription and notes against already-installed model artifacts, reports hardware and timing data, and performs no downloads:
+`tools/bench/windows-local-sidecar.ps1` measures transcription and notes against
+already-installed model artifacts. It reports hardware and timing data and
+performs no downloads. This is a sidecar benchmark, not an installed-app smoke
+test:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\windows-local-smoke.ps1 `
+powershell -ExecutionPolicy Bypass -File tools\bench\windows-local-sidecar.ps1 `
   -Models "$HOME\.ariso\models" `
   -Audio "$env:TEMP\oats-smoke\audio.wav" `
   -Transcript "$env:TEMP\oats-smoke\transcript.md"

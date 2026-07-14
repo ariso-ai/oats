@@ -3,7 +3,6 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
 import {
   deriveEnabledFromLegacy,
-  supportedRecordingEnabled,
   type RecordingEnabled,
 } from '../views/recordingSettings';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
@@ -15,11 +14,12 @@ const LEGACY_KEY = 'recordingMode';
 
 /**
  * Load both recording-source flags, migrating from the legacy `recordingMode`
- * key on first run (absent → defaults to both on). The migrated values are
- * written back so the legacy key is never read again.
+ * key on first run. Native capabilities determine whether system audio may
+ * remain enabled; the loader never substitutes a different source.
  */
 export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
   const store = await load(SETTINGS_PATH, { autoSave: true });
+  const capabilities = await loadPlatformCapabilities();
   const mic = await store.get<boolean>(MIC_KEY);
   const sys = await store.get<boolean>(SYS_KEY);
   let persisted: RecordingEnabled;
@@ -27,25 +27,25 @@ export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
   if (typeof mic === 'boolean' && typeof sys === 'boolean') {
     persisted = { mic, systemAudio: sys };
   } else {
-    // At least one new key is missing — migrate the missing one(s) from the
-    // legacy `recordingMode` while preserving any new key already written.
-    const derived = deriveEnabledFromLegacy(await store.get<string>(LEGACY_KEY));
-    persisted = {
-      mic: typeof mic === 'boolean' ? mic : derived.mic,
-      systemAudio: typeof sys === 'boolean' ? sys : derived.systemAudio,
-    };
+    const legacy = await store.get<string>(LEGACY_KEY);
+    persisted = legacy
+      ? deriveEnabledFromLegacy(legacy)
+      : { mic: true, systemAudio: capabilities.systemAudio.supported };
   }
+  persisted = {
+    mic: typeof mic === 'boolean' ? mic : persisted.mic,
+    systemAudio:
+      capabilities.systemAudio.supported &&
+      (typeof sys === 'boolean' ? sys : persisted.systemAudio),
+  };
 
-  // Capability reconciliation lives at the persistence boundary so recorder
-  // windows are safe even when Settings has never been opened on this install.
-  const capabilities = await loadPlatformCapabilities();
-  const supported = supportedRecordingEnabled(
-    persisted,
-    capabilities.systemAudio.supported,
-  );
-  if (mic !== supported.mic) await store.set(MIC_KEY, supported.mic);
-  if (sys !== supported.systemAudio) await store.set(SYS_KEY, supported.systemAudio);
-  return supported;
+  // Initialize missing keys and clear a source this binary cannot capture.
+  // Microphone state is never changed as a substitute for system audio.
+  if (typeof mic !== 'boolean') await store.set(MIC_KEY, persisted.mic);
+  if (typeof sys !== 'boolean' || sys !== persisted.systemAudio) {
+    await store.set(SYS_KEY, persisted.systemAudio);
+  }
+  return persisted;
 }
 
 export async function setMicEnabled(enabled: boolean): Promise<void> {

@@ -76,14 +76,16 @@ afterEach(() => {
 });
 
 describe('useRecorder duration', () => {
-  it('falls back to the microphone when system-only capture is unsupported', async () => {
+  it('rejects system-only capture when it is unsupported', async () => {
     const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
     const rec = useRecorder();
 
-    await rec.startRecording('system');
+    await expect(rec.startRecording('system')).rejects.toThrow(
+      'System audio recording is not supported',
+    );
 
-    expect(getUserMedia).toHaveBeenCalledOnce();
-    expect(rec.isRecording.value).toBe(true);
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(rec.isRecording.value).toBe(false);
   });
 
   it('tracks wall-clock elapsed time even when interval ticks are throttled', async () => {

@@ -132,11 +132,11 @@ export function useRecorder() {
     // before native capture rather than trusting Settings to have been opened.
     const caps = await loadPlatformCapabilities();
     systemAudioSupported.value = hasTauri && caps.systemAudio.supported;
-    const useSystemAudio =
-      (mode === 'mic_and_system' || mode === 'system') && systemAudioSupported.value;
-    // A system-only preference from an older settings snapshot must still
-    // produce a recording when the current platform cannot capture that source.
-    const useMic = mode !== 'system' || !systemAudioSupported.value;
+    const useSystemAudio = mode === 'mic_and_system' || mode === 'system';
+    if (useSystemAudio && !systemAudioSupported.value) {
+      throw new Error('System audio recording is not supported by this oats installation');
+    }
+    const useMic = mode !== 'system';
     if (!useMic && !useSystemAudio) {
       throw new Error('No recording source is available');
     }

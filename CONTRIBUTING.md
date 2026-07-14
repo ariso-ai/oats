@@ -47,7 +47,7 @@ config lives in `.claude/` and `.claude-plugin/`.
 - Node.js + npm
 - From the monorepo root: `npm install`
 - **macOS Local backend:** [Xcode](https://apps.apple.com/app/xcode/id497799835) (full install, not just Command Line Tools) and **Apple Silicon, macOS 14+**. `xcodebuild` is required to compile the sidecar's MLX Metal shaders (`mlx-swift_Cmlx.bundle`); `swift build` alone cannot.
-- **Windows Local backend:** Windows 11, the Visual Studio 2022 C++ build tools, and the `x86_64-pc-windows-msvc` Rust target. The native Parakeet/Gemma sidecar and internal installers are implemented; public support still requires system-audio capture, auto-record detection, native sharing, Authenticode signing, and updater publication.
+- **Windows Local backend:** Windows 11, Visual Studio Build Tools with the C++ workload, and the `x86_64-pc-windows-msvc` Rust target. The build helper discovers the newest compatible Visual Studio installation with `vswhere`.
 
 ## Development scripts
 
@@ -87,9 +87,9 @@ Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and no
 
 ## Local backend (on-device transcription)
 
-The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. On macOS it uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording).
+The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. On macOS it uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `ari-note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording).
 
-On Windows, the same contract is implemented by the Rust `src-tauri/ariso-stt/windows` target using Parakeet and speaker diarization through sherpa-onnx, plus Gemma GGUF through llama.cpp. The macOS Swift target lives in `src-tauri/ariso-stt/macos`, while language-neutral contract artifacts live in `src-tauri/ariso-stt/shared`. Both targets are inference-only: the Tauri host downloads immutable, hash-pinned model bundles directly from Cloudflare R2 and writes the same readiness markers on both platforms.
+On Windows, the same contract is implemented by the Rust `src-tauri/ariso-stt/windows` target using Parakeet and speaker diarization through sherpa-onnx, plus Gemma GGUF through llama.cpp. The macOS Swift target lives in `src-tauri/ariso-stt/macos`, while language-neutral contract artifacts live in `src-tauri/ariso-stt/shared`. Both targets are inference-only: the Tauri host downloads immutable, hash-pinned model data directly from Cloudflare R2 and writes the same readiness markers on both platforms. Windows executable runtime files are pinned in `shared/windows-models.json` and packaged as Tauri installer resources.
 
 Build the sidecar before `tauri:build` / `tauri:dev` (these are build artifacts, not committed):
 
@@ -108,13 +108,16 @@ xcodebuild build -scheme ariso-stt -configuration Release \
 cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 ```
 
-Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources; the sidecar itself resolves next to the app executable or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../target/debug/`.
+Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources. Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../target/debug/`.
 
 For Windows validation, build the sidecar into Tauri's expected target-specific name:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-sidecar.ps1
 ```
+
+The Windows helper also stages the pinned llama.cpp runtime under Tauri's
+resources. It does not download model data.
 
 The sidecar contract (stdout carries only transcript JSON or notes Markdown; all logs go to stderr):
 
@@ -124,7 +127,7 @@ The sidecar contract (stdout carries only transcript JSON or notes Markdown; all
 Storage layout under `~/.ariso/`:
 
 - `models/` — platform-native speech and notes bundles plus their readiness markers; `manifest.json` marks speech ready and a versioned `.complete` file marks notes ready
-- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `note.md` (meeting notes), `meta.json`
+- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `ari-note.md` (meeting notes), `meta.json`
 
 In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs speech (ASR + diarizer) and notes independently from the project R2 CDN. Each shows a green tick after the host has verified every file and written its completion marker. Past local recordings appear in the tray **Library…** window.
 
@@ -196,8 +199,8 @@ Two workflows validate and package the desktop targets:
 | `release-please` | every push to `main`             | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`.                                  |
 | `sync-lock`      | a Release PR was created/updated | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch.                        |
 | `release`        | a GitHub Release was just cut    | Signs + notarizes with `--features prod-api` and uploads the bundle. Gated by the `release` GitHub Environment (required reviewer + scoped secrets). |
-| `package-windows` | a GitHub Release was just cut   | Builds Authenticode-signed NSIS/MSI packages and Tauri updater signatures, then verifies both signature layers. |
-| `publish`        | after both platform packages     | Publishes the DMG, macOS updater tarball, Windows NSIS updater, and multi-platform `latest.json` to Cloudflare R2. |
+| `package-windows` | a GitHub Release was just cut   | Builds Authenticode-signed NSIS/MSI packages and Tauri updater signatures, then verifies both signature layers. Gated by the `release` environment. |
+| `publish`        | after both platform packages     | Publishes the DMG, macOS updater tarball, Windows NSIS updater, and multi-platform `latest.json` to Cloudflare R2. Gated by the `release` environment. |
 
 Because the build runs as downstream jobs in the same `release` run (gated on release-please having cut a release), no cross-workflow trigger is needed — so the default `GITHUB_TOKEN` suffices throughout and no PAT is required.
 
@@ -251,7 +254,7 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 
 1. **Merge feature/fix PRs to `main`** with conventional-commit messages. release-please keeps the Release PR up to date.
 2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so the `release` workflow runs again: release-please creates the `vX.Y.Z` tag and GitHub Release, and the same run continues into the macOS, Windows, and `publish` jobs.
-3. **Approve the `release` environment gate** when the workflow pauses (per the required-reviewer rule). It then builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
+3. **Approve each `release` environment deployment** when the workflow pauses (per the required-reviewer rule). GitHub evaluates protected environments per job, so macOS packaging, Windows packaging, and publication each request approval. The first two may run in parallel; approve publication after both signed bundles are ready.
 
 > **Note:** The signing/publish jobs run from the `release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`).
 

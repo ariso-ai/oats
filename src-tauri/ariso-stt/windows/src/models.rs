@@ -1,50 +1,50 @@
 //! Filesystem contract between the host model manager and Windows inference.
 //!
-//! The host owns downloading, hashing, and readiness markers. This module only
-//! translates the versioned installation layout into runtime paths and rejects
-//! incomplete required bundles before native libraries receive them.
+//! Distribution paths and versions come from the shared Windows model lock.
+//! The host owns acquisition and integrity checks; this module rejects an
+//! incomplete installation before native inference receives any paths.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Mirrors the speech bundle name published by `model_manager`; changing it is
-/// a distribution migration, not merely a local runtime rename.
-pub(crate) const PARAKEET_MODEL_DIR: &str = "parakeet-tdt-0.6b-v3";
-/// Keeps the two diarization models under one independently versioned feature
-/// bundle so speaker labels can evolve without republishing Parakeet.
-pub(crate) const DIARIZATION_DIR: &str = "speaker-diarization";
-/// Preserves the upstream segmentation package boundary inside the bundle;
-/// deployment tooling may replace its files without changing runtime wiring.
-pub(crate) const DIARIZATION_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
-/// Names the embedding artifact shared by clustering configuration and the R2
-/// manifest. It is a deployment identity, not a user-selectable model choice.
-pub(crate) const DIARIZATION_EMBEDDING: &str =
-    "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
-/// Aligns the notes runtime with the model-manager bundle identity while keeping
-/// the Windows GGUF representation separate from macOS MLX assets.
-pub(crate) const GEMMA_MODEL_DIR: &str = "gemma-3-1b-it-qat-4bit";
-/// Pins the runtime-facing GGUF filename; quantization selection is made during
-/// bundle publication rather than dynamically on end-user machines.
-pub(crate) const GEMMA_GGUF: &str = "gemma-3-1b-it-q4_0.gguf";
-/// Invalidates the complete Windows speech bundle as one compatibility unit.
-/// The host must publish and mark this same revision before inference can use it.
-pub(crate) const SPEECH_MODEL_VERSION: &str = "v1";
-/// Encodes the versioned Windows speech namespace shared with the downloader.
-/// Speech assets remain platform-specific because their native representations
-/// differ from CoreML, while Gemma uses the shared logical directory below.
-pub(crate) fn speech_model_dir(models: &Path, name: &str, version: &str) -> PathBuf {
-    models.join("windows").join(name).join(version)
+const WINDOWS_MODEL_LOCK: &str = include_str!("../../shared/windows-models.json");
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsModelLock {
+    speech: Vec<ModelBundle>,
+    notes: Vec<ModelBundle>,
 }
 
-/// Resolves the canonical Gemma directory used by both macOS and Windows. The
-/// host's `.complete` marker records which runtime-specific bundle populated it.
-pub(crate) fn llm_model_dir(models: &Path) -> PathBuf {
-    models.join("llm").join(GEMMA_MODEL_DIR)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelBundle {
+    id: String,
+    install_path: String,
+    files: Vec<String>,
+}
+
+fn model_lock() -> Result<WindowsModelLock> {
+    serde_json::from_str(WINDOWS_MODEL_LOCK).context("parse shared Windows model lock")
+}
+
+fn bundle<'a>(bundles: &'a [ModelBundle], id: &str) -> Result<&'a ModelBundle> {
+    bundles
+        .iter()
+        .find(|bundle| bundle.id == id)
+        .ok_or_else(|| anyhow!("Windows model lock is missing bundle {id}"))
+}
+
+fn require_file(dir: &Path, relative: &str) -> Result<PathBuf> {
+    let path = dir.join(relative);
+    if path.is_file() {
+        return Ok(path);
+    }
+    bail!("missing model file {}", path.display())
 }
 
 #[derive(Debug)]
-/// Carries a complete Parakeet transducer as one value so recognizer setup cannot
-/// accidentally mix encoder, decoder, joiner, or token files across revisions.
 pub(crate) struct ParakeetPaths {
     pub(crate) encoder: PathBuf,
     pub(crate) decoder: PathBuf,
@@ -52,54 +52,62 @@ pub(crate) struct ParakeetPaths {
     pub(crate) tokens: PathBuf,
 }
 
-/// Owns validation of the transducer as one deployable unit; recognizer setup
-/// receives either a complete path set or an error, never a partial option mix.
 impl ParakeetPaths {
-    /// Verifies deployment completeness at the last boundary before sherpa-onnx.
-    /// Cryptographic verification is intentionally absent here because the host
-    /// already performs it during installation and owns repair UX.
     pub(crate) fn discover(models: &Path) -> Result<Self> {
-        let dir = speech_model_dir(models, PARAKEET_MODEL_DIR, SPEECH_MODEL_VERSION);
-        let paths = Self {
-            encoder: dir.join("encoder.int8.onnx"),
-            decoder: dir.join("decoder.int8.onnx"),
-            joiner: dir.join("joiner.int8.onnx"),
-            tokens: dir.join("tokens.txt"),
-        };
-        for path in [&paths.encoder, &paths.decoder, &paths.joiner, &paths.tokens] {
-            if !path.is_file() {
-                bail!("missing Parakeet model file {}", path.display());
+        let lock = model_lock()?;
+        let definition = bundle(&lock.speech, "parakeet")?;
+        let dir = models.join(&definition.install_path);
+        for required in [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ] {
+            if !definition.files.iter().any(|file| file == required) {
+                bail!("Windows model lock omits required Parakeet file {required}");
             }
         }
-        Ok(paths)
+        Ok(Self {
+            encoder: require_file(&dir, "encoder.int8.onnx")?,
+            decoder: require_file(&dir, "decoder.int8.onnx")?,
+            joiner: require_file(&dir, "joiner.int8.onnx")?,
+            tokens: require_file(&dir, "tokens.txt")?,
+        })
     }
 }
 
 #[derive(Debug)]
-/// Groups the segmentation and embedding halves of speaker diarization. Neither
-/// file is useful independently, so callers reason about feature availability
-/// rather than individual artifacts.
 pub(crate) struct DiarizationPaths {
     pub(crate) segmentation: PathBuf,
     pub(crate) embedding: PathBuf,
 }
 
-/// Encapsulates the product's optional-speaker-label policy at model discovery,
-/// before the transcription orchestrator decides whether to use its fallback.
 impl DiarizationPaths {
-    /// Treats diarization as an optional enhancement to the transcript contract:
-    /// missing files allow the caller to produce a single-speaker transcript.
-    /// Download readiness and user-facing repair remain host responsibilities.
-    pub(crate) fn discover(models: &Path) -> Option<Self> {
-        let dir = speech_model_dir(models, DIARIZATION_DIR, SPEECH_MODEL_VERSION);
-        let paths = Self {
-            segmentation: dir
-                .join(DIARIZATION_SEGMENTATION_DIR)
-                .join("model.int8.onnx"),
-            embedding: dir.join(DIARIZATION_EMBEDDING),
-        };
-        (paths.segmentation.is_file() && paths.embedding.is_file()).then_some(paths)
+    pub(crate) fn discover(models: &Path) -> Result<Self> {
+        let lock = model_lock()?;
+        let definition = bundle(&lock.speech, "diarization")?;
+        let dir = models.join(&definition.install_path);
+        Ok(Self {
+            segmentation: require_file(
+                &dir,
+                "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx",
+            )?,
+            embedding: require_file(
+                &dir,
+                "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+            )?,
+        })
     }
+}
+
+pub(crate) fn discover_gemma(models: &Path) -> Result<PathBuf> {
+    let lock = model_lock()?;
+    let definition = bundle(&lock.notes, "gemma")?;
+    let file = definition
+        .files
+        .first()
+        .ok_or_else(|| anyhow!("Windows model lock has no Gemma file"))?;
+    require_file(&models.join(&definition.install_path), file)
 }
 
 #[cfg(test)]
@@ -107,35 +115,73 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn install_bundle(models: &Path, id: &str, files: &[&str]) -> PathBuf {
+        let lock = model_lock().unwrap();
+        let definition = lock
+            .speech
+            .iter()
+            .chain(lock.notes.iter())
+            .find(|bundle| bundle.id == id)
+            .unwrap();
+        let dir = models.join(&definition.install_path);
+        for file in files {
+            let path = dir.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn shared_model_lock_is_valid() {
+        let lock = model_lock().unwrap();
+        assert_eq!(bundle(&lock.speech, "parakeet").unwrap().id, "parakeet");
+        assert_eq!(bundle(&lock.notes, "gemma").unwrap().id, "gemma");
+    }
+
     #[test]
     fn discovers_canonical_parakeet_layout() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = speech_model_dir(temp.path(), PARAKEET_MODEL_DIR, SPEECH_MODEL_VERSION);
-        fs::create_dir_all(&dir).unwrap();
-        for file in [
-            "encoder.int8.onnx",
-            "decoder.int8.onnx",
-            "joiner.int8.onnx",
-            "tokens.txt",
-        ] {
-            fs::write(dir.join(file), b"fixture").unwrap();
-        }
-
+        let dir = install_bundle(
+            temp.path(),
+            "parakeet",
+            &[
+                "encoder.int8.onnx",
+                "decoder.int8.onnx",
+                "joiner.int8.onnx",
+                "tokens.txt",
+            ],
+        );
         let paths = ParakeetPaths::discover(temp.path()).unwrap();
         assert_eq!(paths.encoder, dir.join("encoder.int8.onnx"));
     }
 
     #[test]
-    fn discovers_canonical_diarization_layout() {
+    fn diarization_is_required() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = speech_model_dir(temp.path(), DIARIZATION_DIR, SPEECH_MODEL_VERSION);
-        let segmentation = dir.join(DIARIZATION_SEGMENTATION_DIR);
-        fs::create_dir_all(&segmentation).unwrap();
-        fs::write(segmentation.join("model.int8.onnx"), b"segmentation").unwrap();
-        fs::write(dir.join(DIARIZATION_EMBEDDING), b"embedding").unwrap();
+        let dir = install_bundle(
+            temp.path(),
+            "diarization",
+            &["sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"],
+        );
+        let error = DiarizationPaths::discover(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("3dspeaker"));
 
-        let paths = DiarizationPaths::discover(temp.path()).unwrap();
-        assert_eq!(paths.segmentation, segmentation.join("model.int8.onnx"));
-        assert_eq!(paths.embedding, dir.join(DIARIZATION_EMBEDDING));
+        fs::write(
+            dir.join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
+            b"embedding",
+        )
+        .unwrap();
+        assert!(DiarizationPaths::discover(temp.path()).is_ok());
+    }
+
+    #[test]
+    fn discovers_qat_gemma_from_shared_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = install_bundle(temp.path(), "gemma", &["gemma-3-1b-it-qat-Q4_0.gguf"]);
+        assert_eq!(
+            discover_gemma(temp.path()).unwrap(),
+            dir.join("gemma-3-1b-it-qat-Q4_0.gguf")
+        );
     }
 }

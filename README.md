@@ -94,7 +94,7 @@ Sensitive conversation? Switch the backend to **Local** and oats does *everythin
 - **Transcription** runs locally: CoreML on Apple Neural Engine for macOS, and Parakeet ONNX on CPU for Windows 11 internal QA.
 - **Notes** are written by an on-device language model — no API calls.
 
-No login, no upload — your audio, transcripts, and notes never leave your machine. There's a one-time download for the models: open **Settings → On-device models** and install the **speech voice model** and **language model** (each shows a green tick when ready). After that, oats works completely offline.
+No login, no upload — your audio, transcripts, and notes never leave your machine. There's a one-time download for the models: open **Settings → On-device models** and install the **speech model** and **language model** (each shows a green tick when ready). After that, oats works completely offline.
 
 Everything is stored locally under `~/.ariso/recordings/`:
 
@@ -102,7 +102,7 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | --------------- | --------------------------------- |
 | `recording.mp3` | The audio of your meeting         |
 | `transcript.md` | The full transcript               |
-| `note.md`       | The generated meeting summary     |
+| `ari-note.md`   | The generated meeting summary     |
 
 ## 🔐 Privacy at a glance
 

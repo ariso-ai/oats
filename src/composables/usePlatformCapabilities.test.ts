@@ -15,6 +15,10 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   resetPlatformCapabilitiesCache();
+  Object.defineProperty(globalThis, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {},
+  });
 });
 
 describe('usePlatformCapabilities', () => {
@@ -35,8 +39,15 @@ describe('usePlatformCapabilities', () => {
     expect(getPlatformCapabilities).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to browser-derived defaults when the backend call fails', async () => {
+  it('surfaces backend failures inside Tauri', async () => {
     getPlatformCapabilities.mockRejectedValue(new Error('no backend'));
+    await expect(loadPlatformCapabilities()).rejects.toThrow('no backend');
+  });
+
+  it('uses unsupported defaults only outside Tauri', async () => {
+    delete (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown })
+      .__TAURI_INTERNALS__;
     await expect(loadPlatformCapabilities()).resolves.toEqual(defaultPlatformCapabilities());
+    expect(getPlatformCapabilities).not.toHaveBeenCalled();
   });
 });

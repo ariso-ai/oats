@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $Root
+$generatedConfig = $null
 
 # Cleanup is intentionally constrained to the target bundle directory. This
 # guard exists because installer builds remove stale outputs before packaging;
@@ -47,9 +48,37 @@ try {
   Import-WindowsBuildEnvironment
   $env:RUSTUP_TOOLCHAIN = $Toolchain
 
+  $effectiveConfig = $null
+  if ($TauriConfig) {
+    $effectiveConfig = (Resolve-Path -LiteralPath $TauriConfig).Path
+  }
+  if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    $localConfig = if ($effectiveConfig) {
+      Get-Content -LiteralPath $effectiveConfig -Raw | ConvertFrom-Json
+    } else {
+      [pscustomobject]@{}
+    }
+    if (-not $localConfig.PSObject.Properties["bundle"]) {
+      $localConfig | Add-Member -NotePropertyName bundle -NotePropertyValue ([pscustomobject]@{})
+    }
+    if ($localConfig.bundle.PSObject.Properties["createUpdaterArtifacts"]) {
+      $localConfig.bundle.createUpdaterArtifacts = $false
+    } else {
+      $localConfig.bundle | Add-Member -NotePropertyName createUpdaterArtifacts -NotePropertyValue $false
+    }
+    $generatedConfig = Join-Path ([System.IO.Path]::GetTempPath()) "oats-tauri-local-$PID.json"
+    $localConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $generatedConfig -Encoding utf8
+    $effectiveConfig = $generatedConfig
+  }
+
   $bundleNames = @([regex]::Split($Bundles, "[,\s]+") |
     Where-Object { $_ } |
-    ForEach-Object { $_.ToLowerInvariant() })
+    ForEach-Object { $_.ToLowerInvariant() } |
+    Select-Object -Unique)
+
+  if ($bundleNames.Count -eq 0) {
+    throw "At least one Windows bundle is required. Use 'nsis', 'msi', or 'nsis,msi'."
+  }
 
   foreach ($bundleName in $bundleNames) {
     if ($bundleName -notin @("nsis", "msi")) {
@@ -75,10 +104,9 @@ try {
   if ($VerboseBuild) {
     $tauriArgs += "--verbose"
   }
-  $tauriArgs += @("--ci", "--target", $Target, "--bundles", $Bundles)
-  if ($TauriConfig) {
-    $resolvedConfig = (Resolve-Path -LiteralPath $TauriConfig).Path
-    $tauriArgs += @("--config", $resolvedConfig)
+  $tauriArgs += @("--ci", "--target", $Target, "--bundles", ($bundleNames -join ","))
+  if ($effectiveConfig) {
+    $tauriArgs += @("--config", $effectiveConfig)
   }
   $tauriArgs += @("--", "--features", "prod-api")
 
@@ -87,13 +115,13 @@ try {
     throw "Tauri Windows installer build failed with exit code $LASTEXITCODE."
   }
 
-  $artifactCount = 0
+  $artifacts = @()
   if ($bundleNames -contains "nsis") {
     $nsis = Get-ChildItem (Join-Path $bundleRoot "nsis") -Filter *.exe -File -ErrorAction SilentlyContinue
     if ($nsis.Count -lt 1) {
       throw "Missing NSIS .exe artifact in $bundleRoot\nsis."
     }
-    $artifactCount += $nsis.Count
+    $artifacts += @($nsis)
     $nsis | ForEach-Object { "NSIS: $($_.FullName)" }
   }
 
@@ -102,17 +130,22 @@ try {
     if ($msi.Count -lt 1) {
       throw "Missing MSI artifact in $bundleRoot\msi."
     }
-    $artifactCount += $msi.Count
+    $artifacts += @($msi)
     $msi | ForEach-Object { "MSI: $($_.FullName)" }
   }
 
   if ($env:TAURI_SIGNING_PRIVATE_KEY) {
-    $sigs = Get-ChildItem $bundleRoot -Recurse -Filter *.sig -File -ErrorAction SilentlyContinue
-    if ($sigs.Count -lt $artifactCount) {
-      throw "Expected updater signature artifacts for each Windows installer."
+    foreach ($artifact in $artifacts) {
+      $signaturePath = "$($artifact.FullName).sig"
+      if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+        throw "Missing updater signature for $($artifact.FullName)."
+      }
+      "SIG: $signaturePath"
     }
-    $sigs | ForEach-Object { "SIG: $($_.FullName)" }
   }
 } finally {
+  if ($generatedConfig) {
+    Remove-Item -LiteralPath $generatedConfig -Force -ErrorAction SilentlyContinue
+  }
   Pop-Location
 }

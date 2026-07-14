@@ -4,9 +4,8 @@
 //! a bundled llama.cpp runtime and GGUF model. Model acquisition, readiness UX,
 //! transcript persistence, and retry scheduling remain in the Tauri host.
 
-use crate::models::{GEMMA_GGUF, llm_model_dir};
+use crate::models::discover_gemma;
 use anyhow::{Context, Result, anyhow, bail};
-use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,7 +33,7 @@ const CONSERVATIVE_CHARS_PER_TOKEN: usize = 3;
 /// and owns the durable notes lifecycle shared with macOS.
 pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
     let gemma = discover_gemma(models)?;
-    let llama_cli = discover_notes_runtime(models)?;
+    let llama_cli = discover_notes_runtime()?;
     let prompt_dir = transcript
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -55,8 +54,8 @@ fn run_llama_notes(
     transcript: &str,
     prompt_dir: &Path,
 ) -> Result<String> {
-    let max_tokens = env_positive("ARISO_NOTES_MAX_TOKENS", DEFAULT_MAX_TOKENS);
-    let ctx_size = env_positive("ARISO_NOTES_CTX_SIZE", DEFAULT_CONTEXT_SIZE);
+    let max_tokens = DEFAULT_MAX_TOKENS;
+    let ctx_size = DEFAULT_CONTEXT_SIZE;
     let final_budget = input_char_budget(ctx_size, max_tokens)?;
 
     if transcript.chars().count() <= final_budget {
@@ -279,6 +278,7 @@ fn run_llama_prompt(
         .arg("--simple-io")
         .arg("--log-disable")
         .arg("--no-warmup")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command
@@ -368,17 +368,6 @@ impl KillOnCloseJob {
     }
 }
 
-/// Allows smoke tests and diagnostics to constrain expensive generation without
-/// turning runtime tuning into a persisted product setting. Invalid overrides
-/// intentionally fall back to the supported default.
-fn env_positive(name: &str, default: u32) -> u32 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
 /// Encodes both the product's notes schema and Gemma's turn protocol in one
 /// prompt boundary. The model is asked for content, while this function owns the
 /// section contract consumed by the existing notes UI.
@@ -465,48 +454,43 @@ fn clean_notes(raw: &str) -> String {
     without_fences
 }
 
-/// Resolves only the host-installed GGUF artifact and never reaches the network.
-/// This keeps Local mode auditable: downloads happen through explicit Settings
-/// actions, and inference is filesystem-only once readiness is reported.
-pub(crate) fn discover_gemma(models: &Path) -> Result<PathBuf> {
-    let model = llm_model_dir(models).join(GEMMA_GGUF);
-    model
-        .is_file()
-        .then_some(model)
-        .ok_or_else(|| anyhow!("Gemma GGUF model not found under {}", models.display()))
+/// Finds the llama.cpp executable shipped beside the sidecar as a signed Tauri
+/// resource. Model downloads contain data only and cannot introduce executable
+/// code after the app has been installed.
+pub(crate) fn discover_notes_runtime() -> Result<PathBuf> {
+    let sidecar = std::env::current_exe().context("resolve ariso-stt executable")?;
+    discover_notes_runtime_from(&sidecar)
 }
 
-/// Couples the native llama.cpp executable to the same versioned notes bundle as
-/// the GGUF and DLLs. The sidecar therefore never depends on a machine-global
-/// runtime whose ABI could differ from the packaged model stack.
-pub(crate) fn discover_notes_runtime(models: &Path) -> Result<PathBuf> {
-    let runtime = llm_model_dir(models).join("llama-cli.exe");
-    runtime.is_file().then_some(runtime).ok_or_else(|| {
-        anyhow!(
-            "llama.cpp notes runtime not found under {}",
-            models.display()
+fn discover_notes_runtime_from(sidecar: &Path) -> Result<PathBuf> {
+    let runtime = sidecar
+        .parent()
+        .ok_or_else(|| anyhow!("ariso-stt executable has no parent directory"))?
+        .join("llama")
+        .join("llama-cli.exe");
+    if runtime.is_file() {
+        Ok(runtime)
+    } else {
+        bail!(
+            "packaged llama.cpp notes runtime not found at {}",
+            runtime.display()
         )
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::llm_model_dir;
 
     #[test]
-    fn discovers_gemma_qat_gguf_and_llama_runtime() {
+    fn discovers_packaged_llama_runtime_beside_sidecar() {
         let temp = tempfile::tempdir().unwrap();
-        let model = llm_model_dir(temp.path());
-        fs::create_dir_all(&model).unwrap();
-        fs::write(model.join(GEMMA_GGUF), b"gguf").unwrap();
-        fs::write(model.join("llama-cli.exe"), b"runtime").unwrap();
-
-        assert_eq!(discover_gemma(temp.path()).unwrap(), model.join(GEMMA_GGUF));
-        assert_eq!(
-            discover_notes_runtime(temp.path()).unwrap(),
-            model.join("llama-cli.exe")
-        );
+        let sidecar = temp.path().join("ariso-stt.exe");
+        let runtime = temp.path().join("llama").join("llama-cli.exe");
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        fs::write(&sidecar, b"sidecar").unwrap();
+        fs::write(&runtime, b"runtime").unwrap();
+        assert_eq!(discover_notes_runtime_from(&sidecar).unwrap(), runtime);
     }
 
     #[test]

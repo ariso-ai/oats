@@ -1,6 +1,8 @@
 {
   "bundle": {
-    "resources": null,
+    "resources": {
+      "binaries/llama": "llama"
+    },
     "windows": {
       "wix": {
         "bannerPath": "windows/installer/wix-banner.bmp",

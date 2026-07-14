@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "cdnBase": "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev/models",
+  "speech": [
+    {
+      "id": "parakeet",
+      "folder": "windows/parakeet-tdt-0.6b-v3",
+      "prefix": "v1",
+      "installPath": "windows/parakeet-tdt-0.6b-v3/v1",
+      "manifestSha256": "1fa1182dac99a2191e7df563a180ab7bdfeda4215e6e73d0967e223f9a25a65b",
+      "files": [
+        "decoder.int8.onnx",
+        "encoder.int8.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt"
+      ]
+    },
+    {
+      "id": "diarization",
+      "folder": "windows/speaker-diarization",
+      "prefix": "v1",
+      "installPath": "windows/speaker-diarization/v1",
+      "manifestSha256": "d52563844c9eb44f47a556d048f40c6913f2b7d8ebafad1202f5e7e66c2b9c01",
+      "files": [
+        "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"
+      ]
+    }
+  ],
+  "notes": [
+    {
+      "id": "gemma",
+      "folder": "windows/gemma-3-1b-it-qat-4bit",
+      "prefix": "v3",
+      "installPath": "llm/gemma-3-1b-it-qat-4bit",
+      "manifestSha256": "2ec103aafdaf4460b43c2e770045d0029a39b03354f60adcfe9ae0d747d31fd2",
+      "files": [
+        "gemma-3-1b-it-qat-Q4_0.gguf"
+      ]
+    }
+  ],
+  "sources": {
+    "parakeet": {
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+      "sha256": "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf",
+      "size": 487170055,
+      "archiveRoot": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+    },
+    "segmentation": {
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+      "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+      "size": 6958444,
+      "archiveRoot": "sherpa-onnx-pyannote-segmentation-3-0"
+    },
+    "embedding": {
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+      "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+      "size": 39593761
+    },
+    "gemma": {
+      "url": "https://huggingface.co/ggml-org/gemma-3-1b-it-qat-GGUF/resolve/c2531de/gemma-3-1b-it-qat-Q4_0.gguf?download=true",
+      "sha256": "ef60e4e91a738c99ae9976b050657dfe68a4007a0ccca121b55ec0c413dccd58",
+      "size": 720425600,
+      "revision": "c2531de"
+    }
+  },
+  "llamaRuntime": {
+    "version": "b9940",
+    "commit": "259f2e2a5",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9940/llama-b9940-bin-win-cpu-x64.zip",
+    "sha256": "d5d7248c7aacaeb0c8f15311acb0f1081874aa7a5de55843702e9e2394a05788",
+    "size": 18216976,
+    "files": [
+      "ggml-base.dll",
+      "ggml-cpu-alderlake.dll",
+      "ggml-cpu-cannonlake.dll",
+      "ggml-cpu-cascadelake.dll",
+      "ggml-cpu-cooperlake.dll",
+      "ggml-cpu-haswell.dll",
+      "ggml-cpu-icelake.dll",
+      "ggml-cpu-ivybridge.dll",
+      "ggml-cpu-piledriver.dll",
+      "ggml-cpu-sandybridge.dll",
+      "ggml-cpu-sapphirerapids.dll",
+      "ggml-cpu-skylakex.dll",
+      "ggml-cpu-sse42.dll",
+      "ggml-cpu-x64.dll",
+      "ggml-cpu-zen4.dll",
+      "ggml.dll",
+      "libomp140.x86_64.dll",
+      "llama-cli-impl.dll",
+      "llama-cli.exe",
+      "llama-common.dll",
+      "llama-server-impl.dll",
+      "llama.dll",
+      "mtmd.dll"
+    ]
+  }
+}

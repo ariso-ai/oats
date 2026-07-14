@@ -26,14 +26,18 @@ target-specific sidecar naming convention.
 
 - `main.rs`: parses the shared CLI contract and dispatches commands.
 - `audio.rs`: decodes audio, downmixes it to mono, and resamples clips.
-- `models.rs`: defines the Windows model layout and discovers installed models.
+- `models.rs`: validates the lock-defined Windows model layout before inference.
 - `transcribe.rs`: runs Parakeet and diarization, preserving raw speaker keys.
 - `notes.rs`: runs Gemma through the packaged llama.cpp runtime.
 
-The Windows publication URL remains versioned, but downloaded Gemma files are
-installed at `<models>/llm/gemma-3-1b-it-qat-4bit/`, the same logical path used
-on macOS. `model_manager.rs` writes the platform bundle identity into the shared
-completion marker after every file verifies.
+`../shared/windows-models.json` is the source of truth for upstream artifact
+hashes, immutable CDN prefixes, installed model files, and the packaged
+llama.cpp release. Downloaded Gemma data is installed at
+`<models>/llm/gemma-3-1b-it-qat-4bit/`, the same logical path used on macOS.
+The executable llama.cpp runtime is staged under Tauri resources at build time
+and never enters the downloaded model tree. `model_manager.rs` writes the
+platform bundle identity into the shared completion marker after every model
+file verifies.
 
 Once the models have been explicitly downloaded, transcription and notes run
 locally without network access.

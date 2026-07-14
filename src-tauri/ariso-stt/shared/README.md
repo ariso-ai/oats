@@ -18,6 +18,11 @@ Transcription writes one JSON object matching `transcript.schema.json` to
 stdout. Notes writes Markdown to stdout. Diagnostics go to stderr. Model
 downloads belong to the Tauri host, so sidecar inference remains offline.
 
+`windows-models.json` is Windows distribution metadata, shared by the Tauri
+host, native sidecar, publisher, and installer build. It pins model data and the
+llama.cpp runtime separately so downloaded model bundles cannot introduce
+executable code.
+
 Each segment carries the inference engine's transcript-local speaker key as a
 string. Sidecars do not sort the final transcript, assign numeric speaker IDs,
 deduplicate participants, or create labels. The Tauri host performs that shared
