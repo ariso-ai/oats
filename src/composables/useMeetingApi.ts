@@ -9,11 +9,23 @@ interface TranscriptSegment {
 
 // A single line of a stored transcript: the speaker-attributed `content`
 // (e.g. "Speaker 1: …"), its zero-based `chunk_index`, and `start_ms` offset
-// from the start of the recording.
+// from the start of the recording. `transcript_id` ties the chunk back to the
+// audio clip it came from ('legacy' for pre-multi-clip transcripts).
 interface TranscriptChunk {
   chunk_index: number;
   start_ms: number;
   content: string;
+  transcript_id: string;
+}
+
+// A single recorded audio segment ("clip") within a meeting. Legacy
+// (pre-multi-clip) meetings surface exactly one clip:
+// `{ transcript_id: 'legacy', legacy: true }`.
+export interface MeetingAudioClip {
+  transcript_id: string;
+  duration_ms: number | null;
+  created_at: string;
+  legacy: boolean;
 }
 
 interface Meeting {
@@ -80,6 +92,7 @@ interface MeetingNotes {
   hasTranscript?: boolean;
   // Requester's personal note (authenticated view); null when none written.
   individual_note?: { content?: string | null; title?: string | null } | null;
+  audio_clips?: MeetingAudioClip[];
 }
 
 interface ScheduledMeetingsResponse {
@@ -97,6 +110,7 @@ function parseTranscriptChunks(raw: unknown): TranscriptChunk[] | null {
       chunk_index: typeof c.chunk_index === 'number' ? c.chunk_index : 0,
       start_ms: typeof c.start_ms === 'number' ? c.start_ms : 0,
       content: typeof c.content === 'string' ? c.content.trim() : '',
+      transcript_id: typeof c.transcript_id === 'string' ? c.transcript_id : 'legacy',
     }))
     .filter((c) => c.content.length > 0);
   return chunks.length ? chunks : null;
@@ -279,6 +293,21 @@ export function useMeetingApi() {
     const encodedMeetingId = encodeURIComponent(String(meetingId));
     const res = await api.request('PATCH', `/meeting-notes/${encodedMeetingId}`, { title });
     assertOk(res, 200, 'update meeting title');
+  }
+
+  // Host-only delete of a single recording clip by its transcript id, leaving
+  // the meeting's other clips/transcripts/notes intact.
+  async function deleteMeetingRecordingClip(
+    meetingId: number | string,
+    transcriptId: string
+  ): Promise<void> {
+    const encodedMeetingId = encodeURIComponent(String(meetingId));
+    const encodedTranscriptId = encodeURIComponent(transcriptId);
+    const res = await api.request(
+      'DELETE',
+      `/meeting-notes/${encodedMeetingId}/recording/${encodedTranscriptId}`
+    );
+    assertOk(res, 200, 'delete recording clip');
   }
 
   // Fetch a meeting's stored transcript as an ordered list of chunks. Resolves
@@ -512,6 +541,7 @@ export function useMeetingApi() {
     getMeeting,
     getMeetingNotes,
     updateMeetingNotesTitle,
+    deleteMeetingRecordingClip,
     getMeetingTranscript,
     getMeetingIndividualNote,
     updateMeeting,

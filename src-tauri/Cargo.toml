@@ -1,6 +1,6 @@
 [package]
 name = "oats"
-version = "0.10.0"
+version = "0.16.0"
 edition = "2024"
 
 [dependencies]
@@ -9,13 +9,18 @@ tauri-plugin-store = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "query", "charset", "http2", "rustls-no-provider"] }
+# rustls without a baked-in provider so we can pick one explicitly (see main.rs).
+# ring is used because reqwest, tokio-tungstenite, and the updater all share it,
+# and it avoids aws-lc-rs's cmake/NASM build requirement (matters for Windows).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 sha2 = "0.11"
 hex = "0.4"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 url = "2"
 chrono = "0.4"
@@ -52,6 +57,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSResponder",
     "NSGraphics",
 ] }
+objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
 block2 = "0.6"
 
 [build-dependencies]

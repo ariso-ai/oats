@@ -135,6 +135,43 @@
             </button>
           </div>
         </div>
+        <div class="setting-row" style="margin-top: 16px">
+          <span class="label-with-help">
+            <span class="setting-label">Vault location</span>
+            <span class="help">
+              <button
+                type="button"
+                class="help-btn"
+                data-test="vault-help"
+                aria-label="About vault location"
+                aria-describedby="vault-help-text"
+              >
+                ?
+              </button>
+              <span id="vault-help-text" role="tooltip" class="help-tooltip">
+                Notes and audio are saved as a local Obsidian vault here.
+                Choosing a new folder starts a fresh, empty vault — existing
+                recordings stay in the old folder and aren't moved. If you sync
+                this folder (iCloud, Obsidian Sync, etc.), those notes and audio
+                leave this device.
+              </span>
+            </span>
+          </span>
+          <div class="model-controls">
+            <span class="vault-path" data-test="vault-path" :title="vaultDir">{{ vaultDirDisplay }}</span>
+            <button
+              class="secondary-btn"
+              data-test="change-vault"
+              :disabled="recordingActive"
+              @click="onChangeVault"
+            >
+              Change…
+            </button>
+          </div>
+        </div>
+        <p v-if="vaultError" class="setting-hint" style="color: var(--danger, #c0392b)">
+          {{ vaultError }}
+        </p>
       </div>
     </section>
 
@@ -298,6 +335,25 @@
         >
           Permission not granted
         </p>
+        <div class="setting-row" style="margin-top: 16px">
+          <span id="meeting-end-reminder-label" class="setting-label">Meeting stop reminder</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              aria-labelledby="meeting-end-reminder-label"
+              :checked="meetingEndReminder"
+              @change="onToggleMeetingEndReminder"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p class="setting-hint">
+          Prompts you to keep or stop recording once a calendar meeting's
+          scheduled end has passed.
+        </p>
       </div>
     </section>
 
@@ -343,9 +399,10 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, type ModelStatus } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -374,6 +431,10 @@ import {
   isSilenceDetectionEnabled,
   setSilenceDetectionEnabled,
 } from '../composables/useSilenceDetection';
+import {
+  isMeetingEndReminderEnabled,
+  setMeetingEndReminderEnabled,
+} from '../composables/useMeetingEndReminder';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
@@ -386,6 +447,7 @@ const systemAudioEnabled = ref(true);
 const autoRecordEnabled = ref(true);
 const autoRecordSupported = ref(true);
 const silenceDetectionEnabled = ref(true);
+const meetingEndReminder = ref(true);
 const micStatus = ref<PermissionStatus>('');
 const systemAudioStatus = ref<PermissionStatus>('');
 const micToggling = ref(false);
@@ -424,6 +486,44 @@ async function refreshModelStatus() {
     modelStatus.value = await local.modelStatus();
   } catch {
     modelStatus.value = { state: 'not_downloaded' };
+  }
+}
+
+const vaultDir = ref('');
+const vaultError = ref('');
+
+// Show the tail of the path (its most specific part) under 20 chars, with a
+// leading "..." when truncated. The full path stays available via the `title`
+// attribute on hover.
+const vaultDirDisplay = computed(() => {
+  const path = vaultDir.value;
+  const MAX = 20;
+  if (path.length <= MAX) return path;
+  return '...' + path.slice(-(MAX - 3));
+});
+
+async function loadVaultDir() {
+  try {
+    vaultDir.value = await getVaultDir();
+  } catch (e) {
+    console.error('Failed to read vault dir', e);
+  }
+}
+
+async function onChangeVault() {
+  if (recordingActive.value) return;
+  vaultError.value = '';
+  try {
+    const picked = await pickVaultFolder(vaultDir.value || undefined);
+    if (!picked || picked === vaultDir.value) return;
+    await setVaultDir(picked);
+    vaultDir.value = picked;
+  } catch (e) {
+    vaultError.value = e instanceof Error ? e.message : String(e);
+    // `set_vault_dir` sets the in-memory override before it may fail on
+    // ensure/persist, so resync the displayed path with the true active
+    // vault rather than assuming the old one is still correct.
+    await loadVaultDir();
   }
 }
 
@@ -508,6 +608,11 @@ async function selectBackend(next: 'ariso' | 'local') {
   if (next === backend.value) return;
   backend.value = next;
   await setBackendSetting(next);
+  // Tell other windows (the Library) the active backend changed so they drop
+  // any meeting held open from the previous backend and reload.
+  void emit(BACKEND_CHANGED_EVENT).catch((err) => {
+    console.warn('Failed to broadcast backend change', err);
+  });
   // Native orchestrators (tray next-meeting, notifications) re-evaluate
   // their backend/session gates via the bootstrap window's SYNC listener.
   void emitNotificationsSync().catch((err) => {
@@ -545,6 +650,9 @@ async function cancelDownloadModels() {
   // prompted flag, so a later switch to Local will ask again.
   backend.value = 'ariso';
   await setBackendSetting('ariso');
+  void emit(BACKEND_CHANGED_EVENT).catch((err) => {
+    console.warn('Failed to broadcast backend change', err);
+  });
 }
 
 async function onInstallStt() {
@@ -777,6 +885,17 @@ async function onToggleSilenceDetection(e: Event) {
   }
 }
 
+async function onToggleMeetingEndReminder(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = meetingEndReminder.value;
+  meetingEndReminder.value = checked;
+  try {
+    await setMeetingEndReminderEnabled(checked);
+  } catch {
+    meetingEndReminder.value = previous;
+  }
+}
+
 async function onToggleSystemAudio(e: Event) {
   if (recordingToggleBusy.value) return;
   systemAudioToggling.value = true;
@@ -894,6 +1013,7 @@ onMounted(async () => {
     autoRecordSupported.value = await isAutoRecordSupported();
     autoRecordEnabled.value = await isAutoRecordEnabled();
     silenceDetectionEnabled.value = await isSilenceDetectionEnabled();
+    meetingEndReminder.value = await isMeetingEndReminderEnabled();
     // Both mic and system-audio status are left blank on load: there's no
     // silent preflight for either (getUserMedia prompts; the system-audio
     // probe creates a process tap, which trips the TCC dialog on first use).
@@ -937,6 +1057,7 @@ onMounted(async () => {
     console.error('Failed to read backend setting; defaulting to Ariso', e);
   }
   if (backend.value === 'local') await refreshModelStatus();
+  await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited
   // install calls (onInstallStt / onInstallLlm); these events only feed the bar.
@@ -1213,6 +1334,75 @@ async function handleSignOut() {
   font-size: 16px;
   font-weight: 700;
   line-height: 1;
+}
+
+/* The displayed path is front-truncated to <20 chars in JS (leading "..."),
+   so the tail stays visible; the full path is available via the `title`
+   attribute on hover. Match the "Vault location" label font, not monospace. */
+.vault-path {
+  white-space: nowrap;
+  font-size: 14px;
+  color: #1c1c1c;
+}
+
+.label-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.help {
+  position: relative;
+  display: inline-flex;
+}
+
+.help-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid #d6d6d6;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #6f6f6f;
+  font-size: 11px;
+  line-height: 1;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+}
+
+.help-btn:hover,
+.help-btn:focus-visible {
+  border-color: #1c1c1c;
+  color: #1c1c1c;
+}
+
+/* Description is revealed only when the "?" is hovered or keyboard-focused. */
+.help-tooltip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 260px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #1c1c1c;
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+
+.help:hover .help-tooltip,
+.help-btn:focus-visible + .help-tooltip {
+  opacity: 1;
+  visibility: visible;
 }
 
 .backend-select {

@@ -2,7 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activation;
+mod audio_util;
 mod audio_capture;
+mod mic_capture;
 mod commands;
 mod meeting_notifications;
 mod mic_monitor;
@@ -16,6 +18,8 @@ mod recording_state;
 mod tray;
 mod tray_meeting;
 mod update_manager;
+mod vault;
+mod window_style;
 
 /// Build the macOS application menu. Mirrors Tauri's default menu (so the
 /// standard Edit/Window/View items and their shortcuts still work) but injects
@@ -23,7 +27,7 @@ mod update_manager;
 /// to a generic icon in dev builds where no bundle icon is present.
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::image::Image;
-    use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
     let pkg = app.package_info();
     let config = app.config();
@@ -38,12 +42,24 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         ..Default::default()
     };
 
+    // Standard macOS "Settings…" item (⌘,). Its id matches the tray's settings
+    // menu item so both routes are handled by the same `on_menu_event` arm.
+    let settings_item = MenuItem::with_id(
+        app,
+        "settings",
+        "Settings…",
+        true,
+        Some("Cmd+,"),
+    )?;
+
     let app_menu = Submenu::with_items(
         app,
         "oats",
         true,
         &[
             &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &settings_item,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -92,13 +108,31 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
 }
 
 fn main() {
+    // reqwest 0.13, tokio-tungstenite, and the updater all use rustls 0.23. Install a
+    // single process-wide crypto provider (ring) before any TLS use, otherwise rustls
+    // cannot auto-select one and panics at connect time.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
+        .on_menu_event(|app, event| {
+            use tauri::Manager;
+            // The app menu's "Settings…" (⌘,) opens the same window the tray does.
+            if event.id().as_ref() == "settings" {
+                if let Some(win) = app.get_webview_window("settings") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
             commands::check_session,
@@ -113,6 +147,8 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::get_vault_dir,
+            commands::set_vault_dir,
             commands::local_recording_status,
             commands::create_library_window,
             commands::get_active_recording_meeting_id,
@@ -130,6 +166,7 @@ fn main() {
             commands::combine_pending_audio,
             commands::fetch_meeting_audio,
             commands::share_text_native,
+            transcribe::local_recording_id_for_start,
             transcribe::local_finalize_recording,
             transcribe::retry_local_transcription,
             transcribe::retry_local_notes,
@@ -143,15 +180,24 @@ fn main() {
             meeting_notifications::dismiss_silence_prompt,
             meeting_notifications::resolve_silence_prompt,
             meeting_notifications::resize_silence_prompt,
+            meeting_notifications::show_meeting_end_prompt,
+            meeting_notifications::dismiss_meeting_end_prompt,
+            meeting_notifications::resolve_meeting_end_prompt,
+            meeting_notifications::resize_meeting_end_prompt,
             meeting_notifications::resolve_meeting_prompt,
             meeting_notifications::resize_meeting_prompt,
             tray_meeting::sync_tray_meeting,
             mic_monitor::sync_auto_record,
             mic_monitor::auto_record_supported,
+            mic_monitor::request_mic_monitor_rearm,
             audio_capture::start_system_audio_capture,
             audio_capture::stop_system_audio_capture,
             audio_capture::request_screen_capture_permission,
             audio_capture::check_screen_capture_permission,
+            mic_capture::start_microphone_capture,
+            mic_capture::stop_microphone_capture,
+            mic_capture::request_microphone_permission,
+            mic_capture::check_microphone_permission,
             update_manager::update_check,
             update_manager::update_install_and_relaunch,
             update_manager::update_skip_version,
@@ -161,6 +207,33 @@ fn main() {
         ])
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
+
+            // Seed the configured vault directory from the persisted setting so
+            // the free `vault_root()` (called deep in the transcription
+            // pipeline) resolves it. Empty/missing → default `~/.ariso/vault`.
+            {
+                use tauri_plugin_store::StoreExt;
+                if let Some(dir) = app
+                    .store("settings.json")
+                    .ok()
+                    .and_then(|s| s.get("vaultDir"))
+                    .and_then(|v| v.as_str().map(String::from))
+                    .filter(|s| !s.is_empty())
+                {
+                    crate::vault::set_vault_override(std::path::PathBuf::from(dir));
+                }
+            }
+            // One-time upgrade migration MUST run before ensure_vault (which
+            // creates `.oats/recordings`). Best-effort: log and continue.
+            if let Err(e) = crate::vault::migrate_legacy_recordings() {
+                eprintln!("migrate legacy recordings: {e}");
+            }
+            // Best-effort: create the vault (+ Attachments/, .oats/, .obsidian)
+            // up front so it can be opened in Obsidian before the first
+            // recording. Write paths also call ensure_vault lazily.
+            if let Err(e) = crate::vault::ensure_vault() {
+                eprintln!("ensure vault: {e}");
+            }
 
             // Managed state must exist before the tray is created: tray menu
             // rebuilds and the title refresher read RecordingState and
@@ -219,13 +292,8 @@ fn main() {
             // Pre-create settings window (hidden) — shown on demand from tray.
             // Intercept close requests so the window hides instead of being
             // destroyed; otherwise re-opening from the tray would do nothing.
-            let settings = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/#/settings".into()))
-                .title("Oats Settings")
-                .inner_size(450.0, 800.0)
-                .resizable(false)
-                .center()
+            let settings = crate::window_style::settings_window_builder(app)
                 .visible(false)
-                .skip_taskbar(true)
                 .build()?;
 
             let settings_clone = settings.clone();
@@ -239,15 +307,15 @@ fn main() {
                 }
             });
 
-            // Background update scheduler: wake every hour, but only
-            // actually check once per 24h (or on snooze expiry). The
+            // Background update scheduler: wake every 30 min, but only
+            // actually check once per 2h (or on snooze expiry). The
             // initial 10-second delay lets startup finish first.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 loop {
                     update_manager::run_check(app_handle.clone(), false).await;
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
                 }
             });
 

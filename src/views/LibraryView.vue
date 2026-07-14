@@ -162,6 +162,13 @@
       @confirm="ariConfirm.confirm"
       @cancel="ariConfirm.cancel"
     />
+    <RecordingStartChoiceDialog
+      :open="recordingStartChoice.open.value"
+      :meeting-title="recordingStartChoice.meetingTitle.value"
+      @continue="recordingStartChoice.choose('continue')"
+      @new="recordingStartChoice.choose('new')"
+      @cancel="recordingStartChoice.cancel"
+    />
   </div>
 </template>
 
@@ -170,7 +177,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { getActiveBackend, timestampTitle, type Backend, type MeetingListItem } from '../composables/useBackend';
+import { getActiveBackend, timestampTitle, BACKEND_CHANGED_EVENT, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
 import {
   groupMeetingsByDate,
@@ -185,10 +192,12 @@ import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
-import { decideRecordingAction } from '../composables/decideRecordingAction';
 import { shouldConfirmAriJoin } from '../composables/autoJoin';
 import { useAriJoinConfirm } from '../composables/useAriJoinConfirm';
 import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
+import { decideStartRecording } from '../composables/decideStartRecording';
+import { useRecordingStartChoice } from '../composables/useRecordingStartChoice';
+import RecordingStartChoiceDialog from './RecordingStartChoiceDialog.vue';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
@@ -200,6 +209,7 @@ const selectedItem = ref<MeetingListItem | null>(null);
 // selections must not override Today's "record the live meeting" behavior.
 const userSelectedMeetingId = ref<string | null>(null);
 const ariConfirm = useAriJoinConfirm();
+const recordingStartChoice = useRecordingStartChoice();
 const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
@@ -522,31 +532,6 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
   }
 }
 
-// True when a meeting's start falls on the current local day.
-function isTodayItem(m: MeetingListItem | null): boolean {
-  if (!m) return false;
-  const d = new Date(m.timestamp);
-  if (Number.isNaN(d.getTime())) return false;
-  const n = now.value;
-  return (
-    d.getFullYear() === n.getFullYear() &&
-    d.getMonth() === n.getMonth() &&
-    d.getDate() === n.getDate()
-  );
-}
-
-// The meeting currently in progress (the one the Today list flags with the green
-// "Now" chip): a today meeting with start <= now < end. Earliest start wins so it
-// matches the chip.
-function currentNowItem(): MeetingListItem | null {
-  const live = displayMeetings.value.filter(
-    (m) => isTodayItem(m) && isMeetingInProgress(m, now.value)
-  );
-  if (live.length === 0) return null;
-  live.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  return live[0];
-}
-
 // Open the floating recorder pill (its own always-on-top window). The button's
 // behaviour follows the active nav view: Meetings always asks the picker; Today
 // records the in-progress meeting (or a deliberately selected today meeting),
@@ -556,41 +541,34 @@ async function startRecording(): Promise<void> {
   try {
     const backend = await getActiveBackend();
     const usesPicker = backend.usesMeetingPicker;
-    const selectedTodayId =
-      usesPicker &&
-      activeView.value === 'today' &&
-      selectedItem.value?.id === userSelectedMeetingId.value &&
-      isTodayItem(selectedItem.value)
-        ? numericMeetingId(selectedItem.value)
-        : undefined;
-    const nowMeetingId = usesPicker ? numericMeetingId(currentNowItem()) : undefined;
 
-    const action = decideRecordingAction({
-      view: activeView.value,
+    // Behavior keys on the detail pane, not on a deliberate selection: a meeting
+    // shown (even auto-selected) keeps the "continue" affordance; an empty pane
+    // starts a fresh recording that never attaches to a prior/now meeting.
+    const shown = selectedItem.value;
+    const plan = decideStartRecording({
       usesPicker,
-      selectedTodayId: selectedTodayId ?? null,
-      nowMeetingId: nowMeetingId ?? null,
+      detailOpen: shown != null,
+      shownMeeting: shown ? { numericId: numericMeetingId(shown) } : null,
     });
 
-    if (action.kind === 'picker') {
-      await invoke('open_meeting_picker', {});
+    if (plan.kind === 'ariso-picker') {
+      // Ariso: always the picker; feature the shown meeting as default when
+      // present. The command takes only the id — the picker resolves the title
+      // from its fetched list (matches the pre-existing #206 wiring).
+      const args = plan.defaultMeetingId != null ? { defaultMeetingId: plan.defaultMeetingId } : {};
+      await invoke('open_meeting_picker', args);
       return;
     }
-    if (action.kind === 'record') {
-      const recItem =
-        (selectedTodayId != null && isTodayItem(selectedItem.value) ? selectedItem.value : null) ??
-        currentNowItem();
-      if (
-        shouldConfirmAriJoin(backend.id, recItem?.autoJoinScheduled) &&
-        !(await ariConfirm.requestConfirm())
-      ) {
-        return; // user chose Cancel
-      }
-      await invoke('start_recording_window', { meetingId: action.meetingId });
+
+    if (plan.kind === 'local-new') {
+      // Empty detail: force a brand-new recording, skipping the 5-minute auto-append.
+      await invoke('start_recording_window', { forceNew: true });
       setRecording(true);
       return;
     }
-    // record-adhoc: non-picker (local) backend with no meeting attached.
+
+    // plan.kind === 'local-continue': a meeting is shown — keep the 5-minute auto-append.
     await invoke('start_recording_window', {});
     setRecording(true);
   } catch (e) {
@@ -687,6 +665,8 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
+let unlistenVaultChanged: UnlistenFn | null = null;
+let unlistenBackendChanged: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -715,6 +695,27 @@ onMounted(() => {
   }).then((un) => {
     unlistenRecordingReveal = un;
   });
+  // The local backend's vault directory can change from Settings; clear stale
+  // selection state from the old vault before reloading the meeting list.
+  void listen('vault://changed', () => {
+    selectedItem.value = null;
+    userSelectedMeetingId.value = null;
+    pinnedMeetings.value = new Map();
+    void loadMeetings(true);
+  }).then((un) => {
+    unlistenVaultChanged = un;
+  });
+  // Switching backends (in Settings) changes the whole meeting corpus. Close
+  // any meeting held open from the previous backend — returning the detail to
+  // the neutral Up Next state — and reload against the new backend.
+  void listen(BACKEND_CHANGED_EVENT, () => {
+    selectedItem.value = null;
+    userSelectedMeetingId.value = null;
+    pinnedMeetings.value = new Map();
+    void loadMeetings();
+  }).then((un) => {
+    unlistenBackendChanged = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -728,6 +729,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
   unlistenRecordingReveal?.();
+  unlistenVaultChanged?.();
+  unlistenBackendChanged?.();
 });
 </script>
 

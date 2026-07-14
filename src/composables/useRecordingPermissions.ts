@@ -6,6 +6,10 @@ import {
   type RecordingEnabled,
 } from '../views/recordingSettings';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
+import {
+  requestMicrophonePermission,
+  checkMicrophonePermission,
+} from '../tauri';
 
 const SETTINGS_PATH = 'settings.json';
 const MIC_KEY = 'recordMicEnabled';
@@ -58,12 +62,31 @@ export async function setSystemAudioEnabled(enabled: boolean): Promise<void> {
   await store.set(SYS_KEY, enabled);
 }
 
-/** Prompt for / verify microphone permission by opening and closing a stream. */
+/** Prompt for microphone permission through the platform's capture owner. */
 export async function ensureMicPermission(): Promise<boolean> {
   try {
+    const capabilities = await loadPlatformCapabilities();
+    if (capabilities.os === 'macos') {
+      return await requestMicrophonePermission();
+    }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach((t) => t.stop());
+    stream.getTracks().forEach((track) => track.stop());
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Current microphone permission status (best-effort). */
+export async function checkMicPermission(): Promise<boolean> {
+  try {
+    const capabilities = await loadPlatformCapabilities();
+    if (capabilities.os === 'macos') {
+      return await checkMicrophonePermission();
+    }
+    if (!navigator.permissions) return false;
+    const status = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+    return status.state === 'granted';
   } catch {
     return false;
   }

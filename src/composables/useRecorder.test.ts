@@ -1,12 +1,31 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// Capture every Int16Array passed to encodeBuffer so tests can assert that
+// real mic data reached the encoder.  Hoisted so the mock factory can close
+// over it before any import resolves.
+const encodeCalls = vi.hoisted((): Int16Array[] => []);
+const platformCapabilities = vi.hoisted((): {
+  value: {
+    os: 'macos' | 'windows';
+    systemAudio: { supported: boolean; settingsUrl: string | null };
+  };
+} => ({
+  value: {
+    os: 'macos',
+    systemAudio: { supported: false, settingsUrl: null },
+  },
+}));
+
 // lamejs does real MP3 work we don't need here; stub the encoder.
+// encodeBuffer records its argument and returns a non-empty buffer so that
+// blob.size > 0 after stop (and so the recorded samples are inspectable).
 vi.mock('@breezystack/lamejs', () => ({
   default: {
     Mp3Encoder: class {
-      encodeBuffer(): Int8Array {
-        return new Int8Array(0);
+      encodeBuffer(left: Int16Array): Int8Array {
+        encodeCalls.push(new Int16Array(left));
+        return new Int8Array([0x01]);
       }
       flush(): Int8Array {
         return new Int8Array(0);
@@ -16,9 +35,28 @@ vi.mock('@breezystack/lamejs', () => ({
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
+
+// Capture event listeners by name so tests can push synthetic events.
+const listeners: Record<string, (e: { payload: string }) => void> = {};
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (name: string, cb: (e: { payload: string }) => void) => {
+    listeners[name] = cb;
+    return () => { delete listeners[name]; };
+  }),
+}));
+
+// Mock ../tauri so startMicrophoneCapture / stopMicrophoneCapture are available
+// without pulling in the Tauri plugin-store dependency.
+vi.mock('../tauri', () => ({
+  startMicrophoneCapture: vi.fn(async () => {}),
+  stopMicrophoneCapture: vi.fn(async () => {}),
+}));
+vi.mock('./usePlatformCapabilities', () => ({
+  loadPlatformCapabilities: () => Promise.resolve(platformCapabilities.value),
+}));
 
 import { useRecorder } from './useRecorder';
+import { startMicrophoneCapture } from '../tauri';
 
 type AudioProcCb = ((e: unknown) => void) | null;
 let lastProcessor: { onaudioprocess: AudioProcCb } | null = null;
@@ -60,14 +98,40 @@ function fireAudioFrame(): void {
   });
 }
 
+// Encode n Int16 samples at a fixed peak value as the base64 payload that the
+// native backend sends in each 'mic-audio-data' event.
+function int16ToBase64(samples: Int16Array): string {
+  const bytes = new Uint8Array(samples.buffer);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function pushMicFrame(peak: number, n = 4096): void {
+  const s = new Int16Array(n).fill(peak);
+  listeners['mic-audio-data']?.({ payload: int16ToBase64(s) });
+}
+
 beforeEach(() => {
   lastProcessor = null;
-  (globalThis as unknown as { AudioContext: unknown }).AudioContext =
-    FakeAudioContext;
+  // Clear captured listeners, encoder call records, and mock call counts.
+  for (const k in listeners) delete listeners[k];
+  encodeCalls.length = 0;
+  vi.clearAllMocks();
+  platformCapabilities.value = {
+    os: 'macos',
+    systemAudio: { supported: false, settingsUrl: null },
+  };
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
-    value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [] })) },
+    value: {
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [{ stop: vi.fn() }],
+      })),
+    },
   });
+  (globalThis as unknown as { AudioContext: unknown }).AudioContext =
+    FakeAudioContext;
 });
 
 afterEach(() => {
@@ -158,5 +222,46 @@ describe('useRecorder duration', () => {
     now += 30_000; // still paused
     vi.advanceTimersByTime(1000);
     expect(rec.durationSeconds.value).toBe(8);
+  });
+});
+
+describe('useRecorder mic native capture', () => {
+  it('drains mic-audio-data events and encodes them as PCM', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+
+    // The native backend was engaged, not getUserMedia.
+    expect(startMicrophoneCapture).toHaveBeenCalledOnce();
+
+    // Push a mic audio frame via the native backend event.
+    pushMicFrame(8000);
+
+    // Trigger onaudioprocess, which drains micAudioBuffer and feeds the encoder.
+    fireAudioFrame();
+
+    // Encoder was fed with the actual mic samples: at least one encodeBuffer
+    // call must contain a non-zero value, proving the native event →
+    // micAudioBuffer → drainMic → encodeBuffer path carried the 8000-valued
+    // samples (not just zero-filled silence).
+    expect(encodeCalls.some(buf => buf.some(v => v !== 0))).toBe(true);
+
+    // Blob is also non-empty (encoder returned a byte).
+    const blob = await rec.stopRecording();
+    expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it('uses webview microphone capture on Windows', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
+    };
+    const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
+    const rec = useRecorder();
+
+    await rec.startRecording('mic');
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(startMicrophoneCapture).not.toHaveBeenCalled();
+    await rec.stopRecording();
   });
 });

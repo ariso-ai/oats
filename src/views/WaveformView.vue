@@ -105,12 +105,18 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
 import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
-import { pending } from '../tauri';
+import { pending, local } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
+import { isMeetingEndReminderEnabled } from '../composables/useMeetingEndReminder';
 import { deriveRecordingMode } from './recordingSettings';
 import { centerWeightedBars } from './waveformBars';
 import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/silenceWatch';
+import {
+  shouldPromptMeetingEnd,
+  findMeetingEndAt,
+  MEETING_END_PROMPT_TIMEOUT_MS,
+} from '../composables/meetingEndWatch';
 import { localRecordingIdFromStart } from '../composables/localRecordingId';
 import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
@@ -148,6 +154,14 @@ const effectiveMeetingId = ref<number | null>(
     ? Number(meetingIdQuery)
     : null,
 );
+const localAppendIdRaw = route.query.localAppendId;
+// When the user chose "Continue this meeting", the Library passes the target
+// local recording id here so finalize appends to it regardless of elapsed time.
+const localAppendId =
+  typeof localAppendIdRaw === 'string' && localAppendIdRaw.length > 0 ? localAppendIdRaw : null;
+// When the detail pane was empty at Start, the Library passes this so finalize
+// forces a brand-new recording and skips the 5-minute auto-append.
+const forceNew = route.query.forceNew === '1';
 const isAuto = route.query.auto === '1';
 // Born hidden when the meetings window is the visible UI: the window must still
 // exist (and stay visible to WebKit so getUserMedia resolves), but the pill
@@ -182,6 +196,13 @@ function currentPhase(): RecorderPhase {
 // broadcast and the window's destruction would otherwise revive the strip.
 let closedSent = false;
 
+// The local recording id the current session will finalize into — the append
+// target when resuming the recent recording, or this session's own new id. Rust
+// owns the append decision (5-min window), so we resolve it once when recording
+// starts (the startedAt watcher) rather than deriving a new id from the start
+// time here. Null until resolved.
+const effectiveLocalRecordingId = ref<string | null>(null);
+
 function broadcastState(phase: RecorderPhase = currentPhase()): void {
   if (closedSent) return;
   // Don't announce "recording" while startRecording() is still awaiting
@@ -193,13 +214,14 @@ function broadcastState(phase: RecorderPhase = currentPhase()): void {
     durationSeconds: recorder.durationSeconds.value,
     isPaused: recorder.isPaused.value,
     meetingId: effectiveMeetingId.value,
-    // Local recordings have no meeting id, but their finalized recording id is
-    // deterministic from the start time — broadcast it so the library can pin
-    // the strip / red dot to the row the recording will land on.
+    // Local recordings have no meeting id. Broadcast the id the recording will
+    // finalize INTO — the append target when resuming the recent recording, else
+    // the new recording's own id — so the library pins the strip to the current
+    // meeting on a resume instead of spinning up a phantom new note. Null until
+    // resolved (see the startedAt watcher), which keeps the strip home-less for a
+    // beat rather than briefly selecting the wrong (new) row.
     localRecordingId:
-      backend.value?.id === 'local' && recorder.startedAt.value
-        ? localRecordingIdFromStart(recorder.startedAt.value)
-        : null,
+      backend.value?.id === 'local' ? effectiveLocalRecordingId.value : null,
     phase,
   }).catch(() => { /* no listeners / shutting down */ });
 }
@@ -208,6 +230,42 @@ watch(() => recorder.frameLevels.value, () => broadcastState());
 watch(
   [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
   () => broadcastState(),
+);
+// Re-resolve the scheduled end whenever the attached meeting changes.
+watch(effectiveMeetingId, () => void resolveMeetingEnd());
+// When a local recording starts, ask Rust which recording it will finalize into
+// (append target vs. new) and broadcast that id. Resolving once here — rather
+// than deriving a fresh id from the start time on every heartbeat — is what
+// keeps a resume docked to the current meeting instead of a phantom new note.
+// Depends on the backend too: `startedAt` is set once per session, but the
+// backend resolves asynchronously, so re-run once we know it's local.
+let idResolveToken = 0;
+watch(
+  [() => recorder.startedAt.value, () => backend.value?.id],
+  async ([startAt, backendId]) => {
+    const token = ++idResolveToken;
+    if (!startAt || backendId !== 'local') {
+      effectiveLocalRecordingId.value = null;
+      return;
+    }
+    if (localAppendId) {
+      // Explicit continue: skip the time-window resolve and dock to the target.
+      effectiveLocalRecordingId.value = localAppendId;
+      return;
+    }
+    try {
+      // forceNew makes the backend return this session's own new id (never an
+      // append target), so the recorder docks to a fresh row.
+      const id = await local.recordingIdForStart(startAt, forceNew);
+      if (token === idResolveToken) effectiveLocalRecordingId.value = id;
+    } catch (e) {
+      // Fall back to this session's own id so recording still works if the
+      // resolve fails (worst case: today's behavior, a new-recording row).
+      console.error('Failed to resolve local recording id; using new-recording id', e);
+      if (token === idResolveToken) effectiveLocalRecordingId.value = localRecordingIdFromStart(startAt);
+    }
+  },
+  { immediate: true },
 );
 // Heartbeat so the strip can detect a dead recorder (no events ≈ crashed):
 // frame/duration watchers go quiet during upload and after stop.
@@ -258,6 +316,22 @@ let unlistenSilenceStop: UnlistenFn | null = null;
 let promptShownAt: number | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
 let silenceTimer: ReturnType<typeof setInterval> | null = null;
+
+let unlistenMeetingEndKeep: UnlistenFn | null = null;
+let unlistenMeetingEndStop: UnlistenFn | null = null;
+let meetingEndTimer: ReturnType<typeof setInterval> | null = null;
+// Scheduled end of the attached meeting (epoch ms), or null when the watch is
+// disabled (local / unattached / non-Ariso / no end_at). Meeting title for the
+// card subtitle.
+const meetingEndAt = ref<number | null>(null);
+const meetingEndSubtitle = ref<string | undefined>(undefined);
+let meetingEndPromptShownAt: number | null = null;
+let meetingEndPromptsShown = 0;
+let meetingEndLastPromptAt: number | null = null;
+// Meeting-stop reminder gate (default on). Read once on mount like silence
+// detection; toggling mid-recording only affects the next recording. When off,
+// we skip both the timer and the scheduled-meetings lookup it depends on.
+let meetingEndReminderEnabled = true;
 
 // Reset the tray to idle and close the recording window. Best-effort: a
 // failure of either step must not throw out of the abort/rollback path.
@@ -345,6 +419,14 @@ async function discardRecording() {
     promptShownAt = null;
     void invoke('dismiss_silence_prompt');
   }
+  if (meetingEndTimer) {
+    clearInterval(meetingEndTimer);
+    meetingEndTimer = null;
+  }
+  if (meetingEndPromptShownAt !== null) {
+    meetingEndPromptShownAt = null;
+    void invoke('dismiss_meeting_end_prompt');
+  }
   waveform.stop();
   try {
     await recorder.stopRecording();
@@ -374,6 +456,14 @@ async function handleStop() {
     promptShownAt = null;
     void invoke('dismiss_silence_prompt');
   }
+  if (meetingEndTimer) {
+    clearInterval(meetingEndTimer);
+    meetingEndTimer = null;
+  }
+  if (meetingEndPromptShownAt !== null) {
+    meetingEndPromptShownAt = null;
+    void invoke('dismiss_meeting_end_prompt');
+  }
   collapse();
   isUploading.value = true;
   waveform.stop();
@@ -399,6 +489,8 @@ async function handleStop() {
       durationSeconds:
         (prevMeta?.durationSeconds ?? 0) + recorder.durationSeconds.value,
       meetingId: prevMeta?.meetingId ?? effectiveMeetingId.value ?? undefined,
+      localAppendId: prevMeta?.localAppendId ?? localAppendId ?? undefined,
+      forceNew: prevMeta?.forceNew ?? forceNew ?? undefined,
     };
     await runFinalize();
   } else {
@@ -422,6 +514,29 @@ async function resolveSilenceSubtitle(): Promise<string | undefined> {
   }
 }
 
+// Resolve the attached meeting's scheduled end (Ariso only). end_at lives on the
+// scheduled-meetings list, NOT /desktop/meetings/{id}, so fetch the ±2h window
+// and match by id. Any failure leaves meetingEndAt null → the watch stays off.
+async function resolveMeetingEnd() {
+  if (!meetingEndReminderEnabled || backend.value?.id !== 'ariso' || effectiveMeetingId.value === null) {
+    meetingEndAt.value = null;
+    meetingEndSubtitle.value = undefined;
+    return;
+  }
+  try {
+    const now = new Date();
+    const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const meetings = await useMeetingApi().listScheduledMeetings(start, end);
+    const info = findMeetingEndAt(meetings, effectiveMeetingId.value);
+    meetingEndAt.value = info.endAt;
+    meetingEndSubtitle.value = info.title ?? undefined;
+  } catch (e) {
+    console.error('Failed to resolve meeting end; meeting-end watch disabled', e);
+    meetingEndAt.value = null;
+  }
+}
+
 // User chose "Keep recording": reset the silence clock (same mechanism as
 // resume) so the prompt naturally re-fires after another 10 min of silence.
 // The tap auto-dismisses the notification, so no explicit dismiss is needed.
@@ -434,6 +549,29 @@ function handleSilenceKeep() {
 async function handleSilenceStop() {
   promptShownAt = null;
   await handleStop();
+}
+
+// User chose "Keep recording" (or ignored/timed-out): return to idle. The watch
+// re-prompts once more after MEETING_END_REPROMPT_MS, then stops asking.
+function handleMeetingEndKeep() {
+  meetingEndPromptShownAt = null;
+}
+
+// User chose "Stop": stop this recording, then re-arm the mic monitor so a
+// back-to-back next call records as a fresh, separately-attached session.
+async function handleMeetingEndStop() {
+  meetingEndPromptShownAt = null;
+  // Start stop (which includes upload/finalize) but re-arm the mic monitor
+  // immediately — before waiting for the upload — so a back-to-back call can
+  // be detected without delay. request_mic_monitor_rearm is a simple atomic
+  // flag store in Rust and is safe to call before finalize completes.
+  const stopTask = handleStop();
+  try {
+    await invoke('request_mic_monitor_rearm');
+  } catch (e) {
+    console.error('Failed to re-arm mic monitor after meeting-end stop', e);
+  }
+  await stopTask;
 }
 
 // Upload the stopped recording. Shared by the stop flow and the failed pill's
@@ -598,6 +736,57 @@ onMounted(async () => {
   unlistenSilenceKeep = await listen('silence-prompt://keep', handleSilenceKeep);
   unlistenSilenceStop = await listen('silence-prompt://stop', handleSilenceStop);
   unlistenAutoStop = await listen('auto-record://stop', handleStop);
+
+  // Read the meeting-stop-reminder setting once, before any lookup, so the
+  // disabled path skips both the timer and the scheduled-meetings lookup it
+  // depends on. Defaults to on if the read fails.
+  try {
+    meetingEndReminderEnabled = await isMeetingEndReminderEnabled();
+  } catch {
+    /* keep the safe default (on) */
+  }
+
+  // Resolve the attached meeting's end now (covers the manual param path; the
+  // watcher covers the async auto path). No-op when the reminder is disabled.
+  void resolveMeetingEnd();
+
+  // Meeting-stop reminder: prompts when the attached meeting's scheduled end has
+  // passed; ignoring it keeps recording.
+  if (meetingEndReminderEnabled) {
+    meetingEndTimer = setInterval(() => {
+      if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
+      const now = Date.now();
+      if (meetingEndPromptShownAt === null) {
+        if (
+          shouldPromptMeetingEnd(
+            meetingEndAt.value,
+            now,
+            recorder.isPaused.value,
+            meetingEndPromptsShown,
+            meetingEndLastPromptAt,
+          )
+        ) {
+          meetingEndPromptShownAt = now;
+          meetingEndLastPromptAt = now;
+          meetingEndPromptsShown += 1;
+          void invoke(
+            'show_meeting_end_prompt',
+            meetingEndSubtitle.value ? { subtitle: meetingEndSubtitle.value } : {},
+          );
+        }
+        return;
+      }
+      // Prompt is showing: dismiss on pause or after the timeout (= keep recording).
+      if (recorder.isPaused.value || now - meetingEndPromptShownAt >= MEETING_END_PROMPT_TIMEOUT_MS) {
+        meetingEndPromptShownAt = null;
+        void invoke('dismiss_meeting_end_prompt');
+      }
+    }, 1_000);
+  }
+
+  unlistenMeetingEndKeep = await listen('meeting-end-prompt://keep', handleMeetingEndKeep);
+  unlistenMeetingEndStop = await listen('meeting-end-prompt://stop', handleMeetingEndStop);
+
   if (isAuto) {
     void resolveAuto();
   }
@@ -616,6 +805,13 @@ onUnmounted(() => {
   if (promptShownAt !== null) {
     promptShownAt = null;
     void invoke('dismiss_silence_prompt');
+  }
+  if (meetingEndTimer) clearInterval(meetingEndTimer);
+  unlistenMeetingEndKeep?.();
+  unlistenMeetingEndStop?.();
+  if (meetingEndPromptShownAt !== null) {
+    meetingEndPromptShownAt = null;
+    void invoke('dismiss_meeting_end_prompt');
   }
 });
 </script>

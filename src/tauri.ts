@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { load } from '@tauri-apps/plugin-store';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 // Broadcast when any window completes desktop auth. Settings is pre-created and
 // can mount before onboarding signs in, so it needs a cross-window refresh cue.
@@ -81,8 +82,14 @@ export const api = {
 
   /** Raw audio bytes for an Ariso meeting. Rejects with a message prefixed
    *  by the HTTP status (e.g. "404: …") when the server has no audio. */
-  async fetchMeetingAudio(meetingId: string | number): Promise<ArrayBuffer> {
-    return invoke<ArrayBuffer>('fetch_meeting_audio', { meetingId: String(meetingId) });
+  async fetchMeetingAudio(
+    meetingId: string | number,
+    transcriptId?: string
+  ): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('fetch_meeting_audio', {
+      meetingId: String(meetingId),
+      transcriptId: transcriptId ?? null,
+    });
   },
 };
 
@@ -230,17 +237,28 @@ export const local = {
     audio: number[],
     title: string,
     createdAt: string,
-    durationSeconds: number
+    durationSeconds: number,
+    appendTo?: string,
+    forceNew?: boolean
   ): Promise<LocalFinalizeResult> {
     return invoke<LocalFinalizeResult>('local_finalize_recording', {
       audio,
       title,
       createdAt,
       durationSeconds,
+      appendTo,
+      forceNew,
     });
   },
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
+  },
+  /** Resolve the recording id a new local recording (starting at `createdAt`)
+   *  will finalize into — the append target if it will merge into the recent
+   *  recording, else the new recording's own id. Lets the recorder surface the
+   *  right row up front instead of a phantom new note. */
+  recordingIdForStart(createdAt: string, forceNew?: boolean): Promise<string> {
+    return invoke<string>('local_recording_id_for_start', { createdAt, forceNew });
   },
   /** Cheap single-recording status for the detail panel's generation poller. */
   recordingStatus(id: string): Promise<RecordingStatusView> {
@@ -368,4 +386,40 @@ export async function openOnboardingWindow(): Promise<void> {
 /** Open (or focus) Settings after flows that need the user back in native UI. */
 export async function openSettingsWindow(): Promise<void> {
   await invoke('create_settings_window');
+}
+
+/** Start native microphone capture. */
+export async function startMicrophoneCapture(): Promise<void> {
+  await invoke('start_microphone_capture');
+}
+
+/** Stop native microphone capture. */
+export async function stopMicrophoneCapture(): Promise<void> {
+  await invoke('stop_microphone_capture');
+}
+
+/** Prompt the user for microphone permission via the native OS dialog. */
+export async function requestMicrophonePermission(): Promise<boolean> {
+  return invoke<boolean>('request_microphone_permission');
+}
+
+/** Return the current microphone permission state without prompting. */
+export async function checkMicrophonePermission(): Promise<boolean> {
+  return invoke<boolean>('check_microphone_permission');
+}
+
+/** The active local vault directory (resolved absolute path). */
+export function getVaultDir(): Promise<string> {
+  return invoke<string>('get_vault_dir');
+}
+
+/** Point the local backend at a new vault directory (fresh store, no copy). */
+export function setVaultDir(path: string): Promise<void> {
+  return invoke('set_vault_dir', { path });
+}
+
+/** Open a native folder picker; returns the chosen absolute path or null. */
+export async function pickVaultFolder(current?: string): Promise<string | null> {
+  const picked = await openDialog({ directory: true, multiple: false, defaultPath: current });
+  return typeof picked === 'string' ? picked : null;
 }

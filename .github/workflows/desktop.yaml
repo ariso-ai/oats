@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Windows'
 
       - name: Cache Rust dependencies
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -87,7 +87,7 @@ jobs:
       - name: Cache ariso-stt sidecar artifacts
         if: runner.os == 'macOS'
         id: sidecar-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
@@ -148,6 +148,16 @@ jobs:
         if: runner.os == 'Windows' && steps.windows-sidecar-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./scripts/build-windows-sidecar.ps1
+
+      # Host tests mutate process-scoped test overrides, so keep them serial on
+      # Windows while exercising the same target that Tauri packages.
+      - name: Test Rust host on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/import-windows-build-env.ps1
+          Import-WindowsBuildEnvironment
+          cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 
       - name: Build Rust
         if: runner.os == 'macOS'

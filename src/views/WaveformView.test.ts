@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
+import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const startRecording = vi.fn();
 const stopRecording = vi.fn();
@@ -76,14 +76,27 @@ vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
 }));
 
-const discardPendingAudio = vi.fn(() => Promise.resolve());
+// vi.mock is hoisted before top-level consts, so shared mock handles that the
+// factory closes over must live in vi.hoisted() to avoid TDZ errors.
+const { discardPendingAudio, recordingIdForStart } = vi.hoisted(() => ({
+  discardPendingAudio: vi.fn(() => Promise.resolve()),
+  // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
+  // i.e. a fresh recording. Tests that exercise the append case override this.
+  recordingIdForStart: vi.fn((createdAt: string) =>
+    Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
+  ),
+}));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
+  local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
 }));
 
 import WaveformView from './WaveformView.vue';
 import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch';
 
+// Recorder views own native listeners and timers, so every test must exercise
+// their unmount cleanup before another wrapper can observe those side effects.
+enableAutoUnmount(afterEach);
 beforeEach(() => {
   vi.clearAllMocks();
   for (const k in eventHandlers) delete eventHandlers[k];
@@ -95,7 +108,10 @@ beforeEach(() => {
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe('WaveformView vertical pill', () => {
   it('starts recording on mount and renders 3 waveform bars + 6 drag dots', async () => {
@@ -444,6 +460,48 @@ describe('WaveformView vertical pill', () => {
       .at(-1);
     // Mirrors Rust sanitize_iso_to_id over the mocked startedAt.
     expect(state?.localRecordingId).toBe('2026-06-09T10-00-00Z');
+    vi.useRealTimers();
+  });
+
+  it('broadcasts the append-target id when resuming the recent recording', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    // Rust resolves this session to an EXISTING recording (append within window),
+    // so the strip must dock to that recording's row, not a new-session id.
+    recordingIdForStart.mockResolvedValueOnce('2026-06-02T10-00-00Z');
+    mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await vi.advanceTimersByTimeAsync(1_100); // heartbeat
+
+    const state = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => payload as { localRecordingId: string | null })
+      .at(-1);
+    // Second arg is forceNew, false here — this route has no forceNew=1 query.
+    expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z', false);
+    expect(state?.localRecordingId).toBe('2026-06-02T10-00-00Z');
+    vi.useRealTimers();
+  });
+
+  it('resolves a forced-new id when the route carries forceNew=1, and finalizes with forceNew', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    routeQuery = { forceNew: '1' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+
+    // The empty-detail Start button routes here with forceNew=1: recordingIdForStart
+    // must be asked for a brand-new id, never an append target.
+    expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z', true);
+
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    const meta = finalizeRecording.mock.calls[0][1] as { forceNew?: boolean };
+    expect(meta.forceNew).toBe(true);
+    routeQuery = {};
     vi.useRealTimers();
   });
 

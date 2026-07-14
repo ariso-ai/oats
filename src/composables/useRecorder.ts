@@ -3,6 +3,7 @@ import lamejs from '@breezystack/lamejs';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
+import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
@@ -38,8 +39,8 @@ export function useRecorder() {
   let micSource: MediaStreamAudioSourceNode | null = null;
   let processor: ScriptProcessorNode | null = null;
   let analyserNode: AnalyserNode | null = null;
-  // Silent sink used only in system-audio-only mode to keep the Web Audio graph
-  // pulling (so the ScriptProcessor fires) without playing the captured audio.
+  // Silent sink keeps the Web Audio graph pulling (so the ScriptProcessor fires)
+  // without playing the captured audio through the speakers.
   let systemGain: GainNode | null = null;
   let mp3Encoder: lamejs.Mp3Encoder | null = null;
   let mp3Chunks: Int8Array[] = [];
@@ -57,6 +58,13 @@ export function useRecorder() {
   let systemAudioUnlisten: UnlistenFn | null = null;
   // Ring buffer for incoming system audio (16kHz Int16 PCM)
   let systemAudioBuffer: Int16Array = new Int16Array(0);
+
+  // Mic audio state (native capture, 44.1kHz mono Int16 PCM)
+  let micAudioActive = false;
+  let micAudioUnlisten: UnlistenFn | null = null;
+  let micUsesNativeCapture = false;
+  // Ring buffer for incoming mic audio (already 44.1kHz — no resample needed)
+  let micAudioBuffer: Int16Array = new Int16Array(0);
 
   function getAnalyser(): AnalyserNode | null {
     return analyserNode;
@@ -120,12 +128,25 @@ export function useRecorder() {
     return resampleInt16(chunk, 16000, 44100);
   }
 
+  /**
+   * Drain mic audio buffer (already 44.1kHz — no resample needed).
+   * Returns up to `sampleCount` samples, or null if the buffer is empty.
+   */
+  function drainMic(sampleCount: number): Int16Array | null {
+    if (micAudioBuffer.length === 0) return null;
+    const available = Math.min(sampleCount, micAudioBuffer.length);
+    const chunk = micAudioBuffer.slice(0, available);
+    micAudioBuffer = micAudioBuffer.slice(available);
+    return chunk;
+  }
+
   async function startRecording(mode?: RecordingMode): Promise<void> {
     error.value = null;
     durationSeconds.value = 0;
     startedAt.value = null;
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
+    micAudioBuffer = new Int16Array(0);
 
     // Recording modes come from persisted user choices, but capability support
     // comes from the current binary. Intersecting them here is the final guard
@@ -140,32 +161,45 @@ export function useRecorder() {
     if (!useMic && !useSystemAudio) {
       throw new Error('No recording source is available');
     }
+    micUsesNativeCapture = useMic && caps.os === 'macos';
 
     try {
       audioContext = new AudioContext({ sampleRate: 44100 });
       analyserNode = audioContext.createAnalyser();
 
       if (useMic) {
-        // Capture the mic raw — no echo cancellation, noise suppression, or
-        // auto gain control. Enabling any of these routes the mic through
-        // macOS Voice-Processing I/O, whose AGC drives the *shared* physical
-        // input device gain down. A video-conference app reading the same
-        // microphone then captures a quieter signal, so the remote end hears
-        // the user's voice drop while Oats records. We capture system audio on
-        // a separate channel anyway, so we don't need echo cancellation to keep
-        // the other participants out of the mic channel.
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 44100,
-          },
-        });
-        micSource = audioContext.createMediaStreamSource(micStream);
-        // Analyser for waveform visualization (mic path)
-        micSource.connect(analyserNode);
+        if (micUsesNativeCapture) {
+          // Register first so no frames from the native macOS HAL source are lost.
+          micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
+            if (isPaused.value) return;
+            const binary = atob(event.payload);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const samples = new Int16Array(bytes.buffer);
+            const merged = new Int16Array(micAudioBuffer.length + samples.length);
+            merged.set(micAudioBuffer);
+            merged.set(samples, micAudioBuffer.length);
+            micAudioBuffer = merged;
+          });
+          // The HAL path avoids macOS Voice-Processing I/O and its device-level
+          // gain changes while a conference app is using the same microphone.
+          await startMicrophoneCapture();
+          micAudioActive = true;
+        } else {
+          // Windows keeps microphone capture in the webview; its native mic
+          // command is intentionally macOS-only.
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: 44100,
+            },
+          });
+          micSource = audioContext.createMediaStreamSource(micStream);
+          micSource.connect(analyserNode);
+        }
       }
 
       if (useSystemAudio) {
@@ -219,13 +253,23 @@ export function useRecorder() {
         const frame = e.inputBuffer.length;
         let drainPeakRef: Int16Array = new Int16Array(0);
 
-        // Mic channel (silent zero when mic is disabled)
+        // Mic channel: drain from the native ring buffer (zero-filled if the
+        // mic hasn't started flowing yet). Write the PCM to the processor
+        // output so the analyser (and therefore frameLevels / waveform) sees
+        // the live mic signal even though the output gain is 0.
         const micInt16 = new Int16Array(frame);
         if (useMic) {
-          const samples = e.inputBuffer.getChannelData(0);
-          for (let i = 0; i < samples.length; i++) {
-            const s = Math.max(-1, Math.min(1, samples[i]));
-            micInt16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+          if (micUsesNativeCapture) {
+            const micRaw = drainMic(frame);
+            if (micRaw) micInt16.set(micRaw);
+            const out = e.outputBuffer.getChannelData(0);
+            for (let i = 0; i < frame; i++) out[i] = micInt16[i] / 0x8000;
+          } else {
+            const samples = e.inputBuffer.getChannelData(0);
+            for (let i = 0; i < samples.length; i++) {
+              const sample = Math.max(-1, Math.min(1, samples[i]));
+              micInt16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+            }
           }
         }
 
@@ -280,19 +324,22 @@ export function useRecorder() {
         }
       };
 
-      if (useMic) {
+      // Silent graph for all modes: processor → analyser → gain(0) → destination.
+      // The zero gain keeps playback silent while the connection to the
+      // destination keeps the processor firing. For mic modes the processor's
+      // output buffer is written with mic PCM so the analyser sees real signal
+      // (drives frameLevels / waveform). For system-only, system PCM is written
+      // to the output buffer in onaudioprocess instead.
+      systemGain = audioContext.createGain();
+      systemGain.gain.value = 0;
+      if (useMic && !micUsesNativeCapture) {
         micSource!.connect(processor);
-        processor.connect(audioContext.destination);
+        processor.connect(systemGain);
       } else {
-        // System-audio-only graph: processor → analyser → gain(0) → destination.
-        // The zero gain keeps playback silent while the connection to the
-        // destination keeps the processor firing.
-        systemGain = audioContext.createGain();
-        systemGain.gain.value = 0;
-        processor.connect(analyserNode);
-        analyserNode.connect(systemGain);
-        systemGain.connect(audioContext.destination);
+        processor.connect(analyserNode!);
+        analyserNode!.connect(systemGain);
       }
+      systemGain.connect(audioContext.destination);
 
       isRecording.value = true;
       isPaused.value = false;
@@ -368,23 +415,40 @@ export function useRecorder() {
     }
     systemAudioBuffer = new Int16Array(0);
 
-    if (processor && micSource) {
+    // Stop native mic capture
+    if (micAudioActive) {
+      try {
+        await stopMicrophoneCapture();
+      } catch {
+        // Already stopped or not available
+      }
+      micAudioActive = false;
+    }
+    if (micAudioUnlisten) {
+      micAudioUnlisten();
+      micAudioUnlisten = null;
+    }
+    micAudioBuffer = new Int16Array(0);
+    micUsesNativeCapture = false;
+
+    if (micSource && processor) {
       try {
         micSource.disconnect(processor);
       } catch {
         // Already disconnected
       }
     }
-    if (processor) {
+    if (micSource && analyserNode) {
       try {
-        processor.disconnect();
+        micSource.disconnect(analyserNode);
       } catch {
         // Already disconnected
       }
     }
-    if (analyserNode && micSource) {
+
+    if (processor) {
       try {
-        micSource.disconnect(analyserNode);
+        processor.disconnect();
       } catch {
         // Already disconnected
       }
@@ -410,8 +474,8 @@ export function useRecorder() {
 
     if (micStream) {
       micStream.getTracks().forEach((track) => track.stop());
+      micStream = null;
     }
-    micStream = null;
 
     if (audioContext) {
       try {

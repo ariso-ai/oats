@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => ({
   values: new Map<string, unknown>(),
   set: vi.fn(),
   loadPlatformCapabilities: vi.fn(),
+  requestMicrophonePermission: vi.fn(),
+  checkMicrophonePermission: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/plugin-store', () => ({
@@ -16,8 +18,16 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }));
 vi.mock('./usePlatformCapabilities', () => ({
   loadPlatformCapabilities: () => mocks.loadPlatformCapabilities(),
 }));
+vi.mock('../tauri', () => ({
+  requestMicrophonePermission: () => mocks.requestMicrophonePermission(),
+  checkMicrophonePermission: () => mocks.checkMicrophonePermission(),
+}));
 
-import { loadRecordingEnabled } from './useRecordingPermissions';
+import {
+  checkMicPermission,
+  ensureMicPermission,
+  loadRecordingEnabled,
+} from './useRecordingPermissions';
 
 beforeEach(() => {
   mocks.values.clear();
@@ -26,6 +36,43 @@ beforeEach(() => {
     mocks.values.set(key, value);
   });
   mocks.loadPlatformCapabilities.mockReset();
+  mocks.requestMicrophonePermission.mockReset();
+  mocks.checkMicrophonePermission.mockReset();
+});
+
+describe('microphone permissions', () => {
+  it('uses native permission commands on macOS', async () => {
+    mocks.loadPlatformCapabilities.mockResolvedValue({ os: 'macos' });
+    mocks.requestMicrophonePermission.mockResolvedValue(true);
+    mocks.checkMicrophonePermission.mockResolvedValue(true);
+
+    await expect(ensureMicPermission()).resolves.toBe(true);
+    await expect(checkMicPermission()).resolves.toBe(true);
+    expect(mocks.requestMicrophonePermission).toHaveBeenCalledOnce();
+    expect(mocks.checkMicrophonePermission).toHaveBeenCalledOnce();
+  });
+
+  it('uses browser-owned permission APIs on Windows', async () => {
+    mocks.loadPlatformCapabilities.mockResolvedValue({ os: 'windows' });
+    const stop = vi.fn();
+    const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop }] }));
+    const query = vi.fn(async () => ({ state: 'granted' }));
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    Object.defineProperty(navigator, 'permissions', {
+      configurable: true,
+      value: { query },
+    });
+
+    await expect(ensureMicPermission()).resolves.toBe(true);
+    await expect(checkMicPermission()).resolves.toBe(true);
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledWith({ name: 'microphone' });
+    expect(mocks.requestMicrophonePermission).not.toHaveBeenCalled();
+  });
 });
 
 describe('loadRecordingEnabled', () => {

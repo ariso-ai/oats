@@ -14,7 +14,7 @@ Add a Sparkle-style in-app update experience to the Ariso Mac app: silent backgr
 |---|---|
 | Distribution source | GitHub Releases (existing) — `latest/download/latest.json` |
 | Channels | Stable only (beta channel is a future addition, not in scope) |
-| Check cadence | On launch (after 10s) + every 24h while running |
+| Check cadence | On launch (after 10s) + every 2h while running |
 | User controls | Install Update / Remind Me Later / Skip This Version |
 | Mandatory updates | Supported via a `mandatory: true` flag in the manifest |
 | Download behavior | Prompt first, then download on user confirmation (classic Sparkle) |
@@ -36,7 +36,7 @@ Each decision and the alternatives considered are below.
 │  │  tauri-plugin-process  (relaunch)           │  │
 │  │  update_manager.rs                          │  │
 │  │    • startup check (10s delay)              │  │
-│  │    • hourly tick, runs check at most /24h   │  │
+│  │    • 30-min tick, runs check at most /2h    │  │
 │  │    • commands: update_check,                │  │
 │  │      update_install_and_relaunch,           │  │
 │  │      update_skip_version, update_snooze,    │  │
@@ -224,18 +224,18 @@ spawn(async move {
         if should_check(&state).await {
             check(&state).await;
         }
-        sleep(Duration::from_secs(3600)).await;
+        sleep(Duration::from_secs(1800)).await;
     }
 });
 
 fn should_check(s: &UpdateState) -> bool {
     s.auto_check_enabled
-        && s.last_check.map_or(true, |t| Utc::now() - t > Duration::hours(24))
+        && s.last_check.map_or(true, |t| Utc::now() - t > Duration::hours(2))
         && s.snoozed_until.map_or(true, |t| Utc::now() > t)
 }
 ```
 
-The hourly wake-up keeps the loop simple; sleeping for 24h directly doesn't survive sleep/wake reliably, while a short tick + a cheap predicate does.
+The 30-min wake-up keeps the loop simple; sleeping for 2h directly doesn't survive sleep/wake reliably, while a short tick + a cheap predicate does.
 
 ### 3.5 Skip semantics
 

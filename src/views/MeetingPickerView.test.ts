@@ -5,12 +5,14 @@ import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 const invoke = vi.fn(() => Promise.resolve());
 const listScheduledMeetings = vi.fn(() => Promise.resolve([] as unknown[]));
 const createAudioMeeting = vi.fn(() => Promise.resolve({ meetingId: 77 }));
+const getMeetingNotes = vi.fn(() => Promise.resolve({ id: 5, title: 'Past Sync', start_at: '2026-06-01T09:00:00Z' }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({
     listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a),
     createAudioMeeting: (...a: unknown[]) => createAudioMeeting(...a),
+    getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
   }),
 }));
 
@@ -153,5 +155,54 @@ describe('MeetingPickerView — Ari-join gate', () => {
 
     expect(wrapper.text()).not.toContain('Ari is scheduled to join this meeting');
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 7 });
+  });
+});
+
+describe('MeetingPickerView — forced default from the Library', () => {
+  it('features the default meeting from the hash and records it on click', async () => {
+    listScheduledMeetings.mockResolvedValue([]);
+    getMeetingNotes.mockResolvedValue({ id: 5, title: 'Past Sync', start_at: '2026-06-01T09:00:00Z' });
+    const prevHash = window.location.hash;
+    window.location.hash = '#/meeting-picker?defaultMeetingId=5';
+    try {
+      const wrapper = mount(MeetingPickerView);
+      await flushPromises();
+      expect(getMeetingNotes).toHaveBeenCalledWith(5);
+      expect(wrapper.text()).toContain('Continue meeting');
+      expect(wrapper.text()).toContain('Past Sync');
+      await wrapper.find('.meeting-row').trigger('click');
+      await flushPromises();
+      expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 5 });
+    } finally {
+      window.location.hash = prevHash;
+    }
+  });
+
+  it('"View all" shows the full list instead of a blank screen, and "View less" returns to Continue meeting', async () => {
+    listScheduledMeetings.mockResolvedValue([
+      { id: 9, title: 'Other Meeting', start_at: new Date().toISOString() },
+    ]);
+    getMeetingNotes.mockResolvedValue({ id: 5, title: 'Past Sync', start_at: '2026-06-01T09:00:00Z' });
+    const prevHash = window.location.hash;
+    window.location.hash = '#/meeting-picker?defaultMeetingId=5';
+    try {
+      const wrapper = mount(MeetingPickerView);
+      await flushPromises();
+      expect(wrapper.text()).toContain('Continue meeting');
+
+      await byText(wrapper, 'View all ▾')!.trigger('click');
+      await flushPromises();
+      expect(wrapper.find('.meeting-list').exists()).toBe(true);
+      expect(wrapper.text()).toContain('Other Meeting');
+      expect(wrapper.text()).not.toContain('Continue meeting');
+
+      await byText(wrapper, 'View less ▴')!.trigger('click');
+      await flushPromises();
+      expect(wrapper.text()).toContain('Continue meeting');
+      expect(wrapper.text()).toContain('Past Sync');
+      expect(wrapper.find('.meeting-list').exists()).toBe(false);
+    } finally {
+      window.location.hash = prevHash;
+    }
   });
 });

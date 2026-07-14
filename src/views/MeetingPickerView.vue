@@ -13,24 +13,34 @@
     </div>
 
     <template v-else-if="state === 'list'">
-      <!-- Collapsed default: a single featured meeting (or a prompt) -->
+      <!-- Collapsed default: the forced "Continue" meeting (from the Library),
+           else the heuristic pick. -->
       <template v-if="!showAll">
-        <p v-if="defaultMeeting.kind !== 'none'" class="section-label">
-          {{ defaultMeeting.kind === 'current' ? 'Happening now' : 'Up next' }}
-        </p>
-        <button
-          v-if="defaultMeeting.featured"
-          class="meeting-row"
-          :disabled="isChoosing"
-          @click="choose(defaultMeeting.featured.id)"
-        >
-          <span class="meeting-title">{{ defaultMeeting.featured.title || 'Untitled meeting' }}</span>
-          <span class="meeting-time">{{ formatTime(defaultMeeting.featured.start_at) }}</span>
-        </button>
-        <p v-else class="section-label">No meeting happening now</p>
+        <template v-if="forcedDefault">
+          <p class="section-label">Continue meeting</p>
+          <button class="meeting-row" :disabled="isChoosing" @click="choose(forcedDefault.id)">
+            <span class="meeting-title">{{ forcedDefault.title || 'Untitled meeting' }}</span>
+            <span class="meeting-time">{{ formatTime(forcedDefault.start_at) }}</span>
+          </button>
+        </template>
+        <template v-else>
+          <p v-if="defaultMeeting.kind !== 'none'" class="section-label">
+            {{ defaultMeeting.kind === 'current' ? 'Happening now' : 'Up next' }}
+          </p>
+          <button
+            v-if="defaultMeeting.featured"
+            class="meeting-row"
+            :disabled="isChoosing"
+            @click="choose(defaultMeeting.featured.id)"
+          >
+            <span class="meeting-title">{{ defaultMeeting.featured.title || 'Untitled meeting' }}</span>
+            <span class="meeting-time">{{ formatTime(defaultMeeting.featured.start_at) }}</span>
+          </button>
+          <p v-else class="section-label">No meeting happening now</p>
+        </template>
       </template>
 
-      <!-- Expanded: full flat list of today's meetings -->
+      <!-- Expanded: full flat list of today's meetings (shared by both cases) -->
       <ul v-else class="meeting-list">
         <li v-for="m in meetings" :key="m.id">
           <button class="meeting-row" :disabled="isChoosing" @click="choose(m.id)">
@@ -92,6 +102,7 @@ import { computed, nextTick, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeetingApi, type ScheduledMeeting } from '../composables/useMeetingApi';
 import { pickDefaultMeeting } from '../composables/pickDefaultMeeting';
+import { parseDefaultMeetingId } from '../composables/parseDefaultMeetingId';
 import { arisoTruthy, shouldConfirmAriJoin } from '../composables/autoJoin';
 import { useAriJoinConfirm } from '../composables/useAriJoinConfirm';
 import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
@@ -109,6 +120,11 @@ const titleDraft = ref('');
 const createError = ref<string | null>(null);
 const titleInput = ref<HTMLInputElement | null>(null);
 const now = new Date();
+
+// A meeting the Library asked us to feature as the default choice (the meeting
+// open in its detail pane). May be a PAST meeting not in today's list, so its
+// title/time are resolved from getMeetingNotes when the list doesn't carry it.
+const forcedDefault = ref<{ id: number; title: string; start_at: string } | null>(null);
 
 const defaultMeeting = computed(() => pickDefaultMeeting(meetings.value, now));
 
@@ -182,9 +198,32 @@ async function startNewMeeting(): Promise<void> {
 }
 
 onMounted(async () => {
+  const forcedId = parseDefaultMeetingId(window.location.hash);
   try {
     const { startDate, endDate } = todayBoundsLocal();
     const result = await meetingApi.listScheduledMeetings(startDate, endDate);
+    meetings.value = result;
+
+    if (forcedId != null) {
+      // Prefer the already-fetched today entry; else fetch the (possibly past)
+      // meeting's title + start so we can feature it.
+      const inList = result.find((m) => m.id === forcedId);
+      if (inList) {
+        forcedDefault.value = { id: inList.id, title: inList.title ?? '', start_at: inList.start_at };
+      } else {
+        try {
+          const notes = await meetingApi.getMeetingNotes(forcedId);
+          forcedDefault.value = { id: forcedId, title: notes.title ?? '', start_at: notes.start_at };
+        } catch (e) {
+          console.error('Failed to resolve default meeting for picker', e);
+        }
+      }
+      // With a forced default we always show the list surface (never the
+      // empty→prompt dead-end), so Continue + "Record a new meeting" both show.
+      state.value = 'list';
+      return;
+    }
+
     if (result.length === 0) {
       // No meetings to choose from — go straight to creating one. The optional
       // title prompt becomes the whole UI instead of a dead-end message.
@@ -193,11 +232,22 @@ onMounted(async () => {
       await nextTick();
       titleInput.value?.focus();
     } else {
-      meetings.value = result;
       state.value = 'list';
     }
   } catch (err) {
     console.error('Failed to load scheduled meetings:', err);
+    if (forcedId != null) {
+      // Still let the user continue the intended meeting even if the today-list
+      // fetch failed.
+      try {
+        const notes = await meetingApi.getMeetingNotes(forcedId);
+        forcedDefault.value = { id: forcedId, title: notes.title ?? '', start_at: notes.start_at };
+        state.value = 'list';
+        return;
+      } catch (e) {
+        console.error('Failed to resolve default meeting for picker', e);
+      }
+    }
     state.value = 'error';
   }
 });

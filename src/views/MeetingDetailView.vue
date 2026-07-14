@@ -70,17 +70,56 @@
           <span class="dur">{{ durationLabel }}</span>
         </div>
         <div v-if="detail.participants.length" class="meta-item attendees">
-          <span class="avatars">
-            <span
-              v-for="(p, i) in detail.participants.slice(0, 4)"
-              :key="i"
-              class="avatar"
-              :style="{ background: avatarColor(i) }"
-              :title="p.name || p.email || ''"
-            >{{ initials(p.name || p.email) }}</span>
-            <span v-if="detail.participants.length > 4" class="avatar avatar--more">+{{ detail.participants.length - 4 }}</span>
-          </span>
-          <span class="attendees-label">{{ detail.participants.length }} Attendees</span>
+          <button
+            ref="attendeesBtn"
+            type="button"
+            class="attendees-trigger"
+            aria-haspopup="true"
+            :aria-expanded="showAttendees"
+            title="Show attendees"
+            @click="onAttendeesClick"
+          >
+            <span class="avatars">
+              <span
+                v-for="(p, i) in detail.participants.slice(0, 4)"
+                :key="i"
+                class="avatar"
+                :style="{ background: avatarColor(i) }"
+              >{{ initials(p.name || p.email) }}</span>
+              <span v-if="detail.participants.length > 4" class="avatar avatar--more">+{{ detail.participants.length - 4 }}</span>
+            </span>
+            <span class="attendees-label">{{ detail.participants.length }} Attendees</span>
+            <svg viewBox="0 0 24 24" class="ic attendees-caret" :class="{ open: showAttendees }" aria-hidden="true"><path d="M19 9l-7 7-7-7" /></svg>
+          </button>
+
+          <!-- Attendees dropdown. Fixed-positioned (like the share popover)
+               so it escapes the card's `overflow: hidden`; the full-screen
+               overlay closes it on any outside click, and Escape closes it
+               from the keyboard. -->
+          <template v-if="showAttendees">
+            <div class="attendees-overlay" @click="showAttendees = false" />
+            <div class="attendees-menu" :style="attendeesMenuStyle">
+              <div class="attendees-menu-head">Attendees</div>
+              <ul class="attendees-list">
+                <li
+                  v-for="(p, i) in detail.participants"
+                  :key="i"
+                  class="attendee-row"
+                >
+                  <span class="avatar avatar--sm" :style="{ background: avatarColor(i) }">{{ initials(p.name || p.email) }}</span>
+                  <span class="attendee-info">
+                    <span class="attendee-name">{{ p.name || p.email || 'Guest' }}<span v-if="p.self" class="attendee-me"> (me)</span></span>
+                    <span v-if="p.email && p.name" class="attendee-email">{{ p.email }}</span>
+                  </span>
+                  <span
+                    v-if="p.role"
+                    class="attendee-role"
+                    :class="{ 'attendee-role--host': p.role === 'host' }"
+                  >{{ p.role }}</span>
+                </li>
+              </ul>
+            </div>
+          </template>
         </div>
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
@@ -214,13 +253,41 @@
                read_recording_audio off disk), and the player shows "No audio" when
                that resolves to null. -->
           <div v-if="activeTab === 'transcript'" class="card-audio">
-            <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+            <template v-if="audioClips.length > 1">
+              <div
+                v-for="(clip, i) in audioClips"
+                :key="clip.transcript_id"
+                class="clip-row"
+                :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
+                role="button"
+                tabindex="0"
+                :aria-pressed="clip.transcript_id === activeClipId"
+                @click="activeClipId = clip.transcript_id"
+                @keydown.enter="activeClipId = clip.transcript_id"
+                @keydown.space.prevent="activeClipId = clip.transcript_id"
+              >
+                <span class="clip-label">{{ clipLabel(clip, i) }}</span>
+                <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
+                <button
+                  v-if="showPerClipDelete"
+                  class="clip-del-btn"
+                  type="button"
+                  :disabled="deletingClip"
+                  title="Delete this recording"
+                  @click.stop="askDeleteClip(clip)"
+                >
+                  Delete
+                </button>
+              </div>
+            </template>
+            <RecordingAudioPlayer v-else :key="detail.id" :load="loadAudio" />
+            <p v-if="clipDeleteError" class="clip-delete-error" role="alert">⚠ {{ clipDeleteError }}</p>
           </div>
 
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
-          <ol v-else-if="transcriptChunks" class="transcript">
-            <li v-for="c in transcriptChunks" :key="c.chunk_index" class="transcript-line">
+          <ol v-else-if="displayedChunks" class="transcript">
+            <li v-for="c in displayedChunks" :key="c.chunk_index" class="transcript-line">
               <span class="transcript-ts">{{ formatTimestamp(c.start_ms) }}</span>
               <span class="transcript-content">{{ c.content }}</span>
             </li>
@@ -266,6 +333,12 @@
           />
         </div>
       </div>
+
+      <RecordingDeleteConfirmDialog
+        :open="showClipDeleteConfirm"
+        @confirm="confirmDeleteClip"
+        @cancel="cancelDeleteClip"
+      />
     </template>
   </div>
 </template>
@@ -273,7 +346,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { renderMarkdown, stripFrontmatter } from '../utils/markdown';
-import type { TranscriptChunk } from '../composables/useMeetingApi';
+import type { TranscriptChunk, MeetingAudioClip } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
 import {
   getActiveBackend,
@@ -286,6 +359,7 @@ import {
 import AriWillJoinTag from './AriWillJoinTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
+import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative, local } from '../tauri';
@@ -324,6 +398,38 @@ const showShare = ref(false);
 const shareBtn = ref<HTMLButtonElement | null>(null);
 const shareAnchor = ref<{ bottom: number; right: number } | null>(null);
 const nativeShareSupported = ref(false);
+
+// Attendees dropdown. The card clips overflow, so the menu is fixed-
+// positioned and anchored to the trigger's rect (captured on open),
+// mirroring the share popover.
+const showAttendees = ref(false);
+const attendeesBtn = ref<HTMLButtonElement | null>(null);
+const attendeesAnchor = ref<{ bottom: number; left: number } | null>(null);
+
+function onAttendeesClick(): void {
+  const rect = attendeesBtn.value?.getBoundingClientRect();
+  attendeesAnchor.value = rect ? { bottom: rect.bottom, left: rect.left } : null;
+  showAttendees.value = !showAttendees.value;
+}
+
+// Escape closes the dropdown regardless of where focus sits. The window
+// listener only lives while the dropdown is open.
+function onAttendeesKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') showAttendees.value = false;
+}
+watch(showAttendees, (open) => {
+  if (open) window.addEventListener('keydown', onAttendeesKeydown);
+  else window.removeEventListener('keydown', onAttendeesKeydown);
+});
+onBeforeUnmount(() => window.removeEventListener('keydown', onAttendeesKeydown));
+
+const attendeesMenuStyle = computed<Record<string, string>>(() => {
+  const a = attendeesAnchor.value;
+  const width = 260;
+  if (!a) return { position: 'fixed', top: '120px', left: '24px', width: `${width}px` };
+  const left = Math.max(8, Math.min(a.left, window.innerWidth - width - 8));
+  return { position: 'fixed', top: `${a.bottom + 6}px`, left: `${left}px`, width: `${width}px` };
+});
 
 const isHost = computed(() =>
   (detail.value?.participants ?? []).some((p) => p.role === 'host' && p.self)
@@ -510,7 +616,113 @@ function loadAudio(): Promise<ArrayBuffer | null> {
   return backend.getMeetingAudio(i);
 }
 
+// Meetings recorded across multiple sessions surface one clip per session
+// (oldest-first); legacy and imported-transcript meetings surface none/one.
+// A single clip (legacy or not) keeps today's single-player behavior via the
+// `loadAudio` fallback below, rather than routing through `loadClipAudio`.
+const activeClipId = ref<string | null>(null);
+const audioClips = computed<MeetingAudioClip[]>(() => detail.value?.audioClips ?? []);
+
+// Chunks shown in the transcript pane. With <=1 clip we show everything; with
+// several, we show only the active clip's chunks (partitioned client-side from
+// the already clip-tagged transcript — no extra fetch, no async race).
+const displayedChunks = computed<TranscriptChunk[] | null>(() => {
+  const t = transcript.value;
+  if (!Array.isArray(t)) return null;
+  if (audioClips.value.length <= 1 || !activeClipId.value) return t;
+  return t.filter((c) => c.transcript_id === activeClipId.value);
+});
+
+// Resolve a single clip's audio bytes. Legacy clips use the whole-meeting
+// endpoint (no transcript id).
+function loadClipAudio(clip: MeetingAudioClip): Promise<ArrayBuffer | null> {
+  const i = props.item;
+  const backend = detailBackend;
+  if (!i || !backend) return Promise.resolve(null);
+  return backend.getMeetingAudio(i, clip.legacy ? undefined : clip.transcript_id);
+}
+
+// "Recording N · Mm SSs" (drops the duration when unknown).
+function clipLabel(clip: MeetingAudioClip, index: number): string {
+  const n = index + 1;
+  if (clip.duration_ms == null) return `Recording ${n}`;
+  const total = Math.round(clip.duration_ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `Recording ${n} · ${m}m ${String(s).padStart(2, '0')}s`;
+}
+
+// Host-only, and only when there are >=2 real (non-legacy) clips to choose
+// between — oats has no whole-recording delete, so single-clip (or legacy)
+// meetings simply show no delete affordance.
+const showPerClipDelete = computed(
+  () => isHost.value && audioClips.value.filter((c) => !c.legacy).length > 1
+);
+
+const showClipDeleteConfirm = ref(false);
+const clipPendingDelete = ref<MeetingAudioClip | null>(null);
+const deletingClip = ref(false);
+// Surfaced inline near the clip players when a delete fails — the confirm
+// dialog has already closed by then, so this is the user's only signal that
+// the clip they were told "can't be undone" actually still exists.
+const clipDeleteError = ref<string | null>(null);
+
+function askDeleteClip(clip: MeetingAudioClip): void {
+  clipDeleteError.value = null;
+  clipPendingDelete.value = clip;
+  showClipDeleteConfirm.value = true;
+}
+
+function cancelDeleteClip(): void {
+  showClipDeleteConfirm.value = false;
+  clipPendingDelete.value = null;
+}
+
+async function confirmDeleteClip(): Promise<void> {
+  const clip = clipPendingDelete.value;
+  const item = props.item;
+  const backend = detailBackend;
+  showClipDeleteConfirm.value = false;
+  if (!clip || !item || !backend || deletingClip.value) return;
+  deletingClip.value = true;
+  try {
+    await backend.deleteMeetingClip(item, clip.transcript_id);
+    await refreshAfterClipDelete();
+  } catch (e) {
+    console.error('Failed to delete recording clip', e);
+    clipDeleteError.value = 'Could not delete this recording. Please try again.';
+  } finally {
+    deletingClip.value = false;
+    clipPendingDelete.value = null;
+  }
+}
+
+// Re-pull the detail so the clip list + transcript reflect the deletion, then
+// reload the transcript if that tab is open. Guarded by reqId (same pattern as
+// load()/loadTranscript()) so a meeting switch mid-refetch drops the stale
+// result instead of clobbering the newly-selected meeting's detail.
+async function refreshAfterClipDelete(): Promise<void> {
+  const item = props.item;
+  const backend = detailBackend;
+  if (!item || !backend) return;
+  const my = reqId;
+  const d = await backend.getMeetingDetail(item);
+  if (my !== reqId) return;
+  detail.value = d;
+  // Keep the currently active clip selected if it survived the delete;
+  // otherwise fall back to the first remaining clip (or none).
+  activeClipId.value = d.audioClips.some((c) => c.transcript_id === activeClipId.value)
+    ? activeClipId.value
+    : (d.audioClips[0]?.transcript_id ?? null);
+  transcript.value = null;
+  transcriptLoaded.value = false;
+  if (activeTab.value === 'transcript') void loadTranscript();
+}
+
 async function load(item: MeetingListItem | null): Promise<void> {
+  showClipDeleteConfirm.value = false;
+  clipPendingDelete.value = null;
+  clipDeleteError.value = null;
   await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
@@ -524,9 +736,12 @@ async function load(item: MeetingListItem | null): Promise<void> {
   editingTitle.value = false;
   savingTitle.value = false;
   showShare.value = false;
+  showAttendees.value = false;
+  attendeesAnchor.value = null;
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
+  activeClipId.value = null;
   progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
@@ -552,6 +767,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (my !== reqId) return;
     detail.value = d;
     detailBackend = backend;
+    activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
     activeTab.value = firstTabFor(d, item); // default to the first available tab
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
@@ -664,10 +880,6 @@ const transcriptMarkdown = computed<string | null>(() => {
   if (!detail.value?.isLocal) return null;
   const md = detail.value?.transcript;
   return md ? stripFrontmatter(md) : null;
-});
-const transcriptChunks = computed<TranscriptChunk[] | null>(() => {
-  if (detail.value?.isLocal) return null;
-  return Array.isArray(transcript.value) ? transcript.value : null;
 });
 
 // Render a chunk's `start_ms` offset as M:SS (or H:MM:SS past an hour).
@@ -993,13 +1205,50 @@ const durationLabel = computed<string | null>(() => {
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; border-bottom: 1px solid #e5e6e3; }
 .head-titles { flex: 1; min-width: 0; }
 .head-title { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c; }
-.head-title--editable { cursor: text; }
-.head-title--input {
-  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
-  position: relative; top: -1px;
-  font-family: inherit; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
-  border: none; background: transparent; outline: none; appearance: none;
+/* Editable heading: a rounded, hoverable box plus a persistent pencil cue so the
+   title clearly reads as "click to rename", not just selectable text. */
+.head-title--editable {
+  cursor: text;
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  margin: -3px -8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: background 0.12s, border-color 0.12s;
 }
+.head-title--editable::after {
+  content: "\270E"; /* ✎ */
+  margin-left: 8px;
+  font-size: 15px;
+  font-weight: 400;
+  color: #c4c4c0;
+  transition: color 0.12s;
+}
+.head-title--editable:hover,
+.head-title--editable:focus-visible {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: #e5e6e3;
+}
+/* Keyboard focus needs a clearly visible ring, not just the faint hover tint. */
+.head-title--editable:focus-visible {
+  border-color: #1c1c1c;
+  box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12);
+  outline: none;
+}
+.head-title--editable:hover::after,
+.head-title--editable:focus-visible::after { color: #6f6f6f; }
+/* Editing state: a distinctly boxed field (border + white fill + focus ring) so it
+   reads as "I'm editing", not merely highlighted text. Padding is offset by a
+   matching negative margin so the title text stays put when toggling edit on/off. */
+.head-title--input {
+  display: inline-block; width: calc(100% + 16px); height: calc(1.2em + 8px);
+  margin: -3px -8px; padding: 3px 8px; box-sizing: border-box; vertical-align: baseline;
+  font-family: inherit; font-size: 22px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
+  border: 1px solid #9a9a96; border-radius: 8px; background: #ffffff; outline: none; appearance: none;
+}
+.head-title--input:focus { border-color: #1c1c1c; box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12); }
 .head-title--input:disabled { opacity: 0.6; }
 .head-title-error { margin: 4px 0 0; font-size: 12px; color: #dc2626; }
 .head-sub { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
@@ -1023,11 +1272,39 @@ const durationLabel = computed<string | null>(() => {
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
 .meta-ari { margin-left: auto; }
-.card-audio { display: flex; padding: 0 0 12px; }
+.card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
+.clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.clip-row--active { background: #f7f6f4; }
+.clip-label { flex-shrink: 0; min-width: 120px; font-size: 13px; font-weight: 500; color: #535353; }
+.clip-del-btn {
+  margin-left: auto;
+  height: 26px; padding: 0 10px;
+  background: transparent; border: 1px solid #d6d6d6; border-radius: 6px;
+  font-family: inherit; font-size: 12px; font-weight: 500; color: #6f6f6f; cursor: pointer;
+}
+.clip-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
+.clip-del-btn:disabled { opacity: 0.6; cursor: default; }
+.clip-delete-error { margin: 4px 8px 0; font-size: 12px; color: #dc2626; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
-.attendees { gap: 0; }
+.attendees { gap: 0; position: relative; }
+.attendees-trigger { display: flex; align-items: center; gap: 0; background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; }
+.attendees-trigger:hover { opacity: 0.85; }
+.attendees-caret { width: 14px; height: 14px; margin-left: 4px; color: #9b9b9b; transition: transform 0.15s; }
+.attendees-caret.open { transform: rotate(180deg); }
+.attendees-overlay { position: fixed; inset: 0; z-index: 60; }
+.attendees-menu { z-index: 61; background: #fff; border: 1px solid #e5e6e3; border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); overflow: hidden; }
+.attendees-menu-head { padding: 10px 14px; font-size: 12px; font-weight: 600; color: #6f6f6f; border-bottom: 1px solid #e5e6e3; }
+.attendees-list { list-style: none; margin: 0; padding: 6px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.attendee-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; }
+.attendee-row:hover { background: #f7f6f4; }
+.attendee-info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.attendee-name { font-size: 13px; color: #1f1f1f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attendee-me { color: #9b9b9b; }
+.attendee-email { font-size: 11px; color: #9b9b9b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attendee-role { font-size: 10px; text-transform: capitalize; color: #6f6f6f; background: #ecebe8; border-radius: 999px; padding: 2px 8px; flex-shrink: 0; }
+.attendee-role--host { color: #6c63c0; background: rgba(108, 99, 192, 0.1); }
 .avatars { display: flex; align-items: center; }
 .avatar { width: 23px; height: 23px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; font-weight: 600; border: 2px solid #f7f6f4; margin-left: -5px; }
 .avatar:first-child { margin-left: 0; }
@@ -1089,13 +1366,47 @@ const durationLabel = computed<string | null>(() => {
 .tab-pane--editor { display: flex; flex-direction: column; }
 .notes-head { margin-bottom: 14px; }
 .notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; line-height: 1.2; }
-.notes-title--editable { cursor: text; }
+/* Same click-to-rename affordance as the meeting title (see .head-title--editable). */
+.notes-title--editable {
+  cursor: text;
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  margin: -3px -8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.notes-title--editable::after {
+  content: "\270E"; /* ✎ */
+  margin-left: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  color: #c4c4c0;
+  transition: color 0.12s;
+}
+.notes-title--editable:hover,
+.notes-title--editable:focus-visible {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: #e5e6e3;
+}
+/* Keyboard focus needs a clearly visible ring, not just the faint hover tint. */
+.notes-title--editable:focus-visible {
+  border-color: #1c1c1c;
+  box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12);
+  outline: none;
+}
+.notes-title--editable:hover::after,
+.notes-title--editable:focus-visible::after { color: #6f6f6f; }
 .notes-title--placeholder { color: #9a9a9a; }
 .notes-title--input {
-  display: block; width: 100%; height: 1.2em; margin: 0; padding: 0; box-sizing: border-box;
+  display: inline-block; width: calc(100% + 16px); height: calc(1.2em + 8px);
+  margin: -3px -8px; padding: 3px 8px; box-sizing: border-box; vertical-align: baseline;
   font-family: inherit; font-size: 20px; font-weight: 700; line-height: 1.2; color: #1c1c1c;
-  border: none; background: transparent; outline: none; appearance: none;
+  border: 1px solid #9a9a96; border-radius: 8px; background: #ffffff; outline: none; appearance: none;
 }
+.notes-title--input:focus { border-color: #1c1c1c; box-shadow: 0 0 0 3px rgba(28, 28, 28, 0.12); }
 .notes-title--input::placeholder { color: #9a9a9a; font-weight: 700; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
