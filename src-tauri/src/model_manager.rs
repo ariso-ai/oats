@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::storage::MODEL_VERSION;
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStatus {
@@ -54,8 +52,20 @@ pub fn write_manifest(root: &Path, downloaded_at: &str) -> Result<(), String> {
     crate::storage::write_atomic(&manifest_path(root), json.as_bytes())
 }
 
-/// macOS notes model directory. Windows uses the versioned bundle path below.
+/// Stable macOS recording/model identity retained for existing manifests. The
+/// exact CoreML and diarization revisions are pinned separately by the commit
+/// prefixes in `MACOS_STT_BUNDLES`.
+const MACOS_STT_MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
+
+/// Both platforms install their runtime-specific Gemma files under this shared
+/// logical model directory. The contents differ (MLX/safetensors on macOS,
+/// GGUF/llama.cpp on Windows), but callers never need a platform-specific path.
 const LLM_MODEL_NAME: &str = "gemma-3-1b-it-qat-4bit";
+
+/// Existing macOS installs write `1` into `.complete`; treating it as the
+/// macOS bundle identity preserves those downloads while Windows starts with a
+/// stronger bundle-derived identity from day one.
+const MACOS_LLM_MARKER_VERSION: &str = "1";
 
 fn llm_dir(root: &Path) -> std::path::PathBuf {
     crate::storage::models_dir(root)
@@ -63,39 +73,55 @@ fn llm_dir(root: &Path) -> std::path::PathBuf {
         .join(LLM_MODEL_NAME)
 }
 
-/// Produces the readiness identity recorded in the shared STT manifest. macOS
-/// retains its historical model version, while Windows includes every bundle
-/// revision so changing either ASR or diarization invalidates the old marker.
-fn stt_model_version() -> String {
+/// Join immutable bundle locations into one readiness identity. Folder names
+/// disambiguate independently versioned components that may share a tag such as
+/// `v1`; changing any folder or prefix invalidates the aggregate identity.
+fn bundle_version(bundles: &[ModelBundle]) -> String {
+    bundles
+        .iter()
+        .map(|bundle| format!("{}@{}", bundle.folder, bundle.prefix))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Produces the readiness identity recorded in the shared STT manifest and each
+/// completed recording. macOS retains its established product-level identity;
+/// its exact CDN URLs use the upstream commit prefixes in `MACOS_STT_BUNDLES`.
+/// Windows has no legacy installs, so its identity joins every `folder@tag`
+/// component and a change to either ASR or diarization requires a fresh bundle.
+pub(crate) fn stt_model_version() -> String {
     if cfg!(target_os = "windows") {
-        WINDOWS_STT_BUNDLES
-            .iter()
-            .map(|bundle| format!("{}@{}", bundle.folder, bundle.prefix))
-            .collect::<Vec<_>>()
-            .join("+")
+        bundle_version(WINDOWS_STT_BUNDLES)
     } else {
-        MODEL_VERSION.to_string()
+        MACOS_STT_MODEL_VERSION.to_string()
     }
 }
 
-/// Selects the platform's authoritative notes completion marker. This hides the
-/// macOS/Windows storage-layout difference from recording gates and Settings;
-/// it does not verify individual files on every status poll.
+/// Version expected in the shared Gemma completion marker. Both targets use the
+/// same model family and local path, while the value identifies the platform's
+/// runtime representation: the existing macOS R2 mirror revision or the exact
+/// Windows GGUF/llama.cpp bundle tag.
+fn llm_model_version() -> String {
+    if cfg!(target_os = "windows") {
+        bundle_version(WINDOWS_LLM_BUNDLES)
+    } else {
+        MACOS_LLM_MARKER_VERSION.to_string()
+    }
+}
+
+/// The notes readiness marker has one location on every desktop platform.
+/// Runtime-specific artifact versions live in its contents, not in local paths.
 fn llm_marker_path(root: &Path) -> PathBuf {
-    if cfg!(target_os = "windows") {
-        crate::storage::models_dir(root)
-            .join(WINDOWS_LLM_BUNDLES[0].install_path)
-            .join(".complete")
-    } else {
-        llm_dir(root).join(".complete")
-    }
+    llm_dir(root).join(".complete")
 }
 
-/// Readiness for the notes LLM. Marker-based (not mere presence): the marker is
-/// written only after every file finishes downloading, so an interrupted
-/// download is not mistaken for a ready model.
+/// Readiness for the notes LLM requires the current marker identity, not mere
+/// presence. This rejects interrupted downloads and stale Windows bundles
+/// without carrying compatibility branches for layouts that never shipped.
 pub fn llm_is_ready(root: &Path) -> bool {
-    llm_marker_path(root).exists()
+    let expected = llm_model_version();
+    std::fs::read_to_string(llm_marker_path(root))
+        .is_ok_and(|version| version.trim() == expected.as_str())
 }
 
 /// Both on-device models are downloaded and ready to record with: the STT
@@ -349,12 +375,10 @@ fn verify_pinned(file: &str, actual_hex: &str) -> Result<(), String> {
     }
 }
 
-/// Download the notes LLM directly from the app CDN into `<models>/llm/<name>/`,
-/// emitting `model://llm/{progress,done,error}`. A `.complete` marker is written
-/// only after every file finishes, so an interrupted download is never mistaken
-/// for a ready model. Each file is verified against a pinned SHA-256; an
-/// already-present file is reused only if its digest still matches (idempotent
-/// retry), otherwise it is re-downloaded.
+/// Download the platform's notes assets into the shared `<models>/llm/<name>/`
+/// directory, emitting `model://llm/{progress,done,error}`. macOS downloads its
+/// pinned MLX files directly; Windows installs a hash-pinned GGUF/llama.cpp
+/// bundle. Both write the same versioned readiness marker only after success.
 #[tauri::command]
 pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
@@ -383,15 +407,7 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
         )
         .await;
         if result.is_ok() {
-            let marker_dir = marker
-                .parent()
-                .ok_or_else(|| "invalid llm marker path".to_string())?;
-            tokio::fs::create_dir_all(marker_dir)
-                .await
-                .map_err(|e| format!("create llm marker dir: {e}"))?;
-            tokio::fs::write(&marker, b"1")
-                .await
-                .map_err(|e| format!("write llm marker: {e}"))?;
+            write_llm_marker(&marker).await?;
         }
         result
     } else {
@@ -411,6 +427,21 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
             Err(e)
         }
     }
+}
+
+/// Publish readiness through one marker format after all model assets verify.
+/// Keeping this write shared prevents the macOS and Windows download paths from
+/// drifting into different completion semantics.
+async fn write_llm_marker(marker: &Path) -> Result<(), String> {
+    let marker_dir = marker
+        .parent()
+        .ok_or_else(|| "invalid llm marker path".to_string())?;
+    tokio::fs::create_dir_all(marker_dir)
+        .await
+        .map_err(|e| format!("create llm marker dir: {e}"))?;
+    tokio::fs::write(marker, llm_model_version())
+        .await
+        .map_err(|e| format!("write llm marker: {e}"))
 }
 
 /// Download every `LLM_FILES` entry from the CDN into `dir`, reporting byte
@@ -515,15 +546,15 @@ async fn download_llm_files(dir: &Path, on_progress: &(dyn Fn(f64) + Sync)) -> R
     }
 
     // 3) Mark complete (readiness gate).
-    tokio::fs::write(&marker, b"1")
-        .await
-        .map_err(|e| format!("write marker: {e}"))?;
+    write_llm_marker(&marker).await?;
     Ok(())
 }
 
-/// A platform-native model bundle at an immutable R2 prefix. macOS prefixes use
-/// an upstream commit SHA; Windows prefixes use an explicit bundle version. A
-/// model bump always publishes a new prefix and pin rather than overwriting one.
+/// A platform-native model bundle at an immutable R2 prefix. macOS STT prefixes
+/// are upstream commit hashes; Windows prefixes are explicit release tags tied
+/// to the exported commit/runtime set. `bundle_version` joins folder + prefix
+/// when Windows needs one aggregate readiness identity. A model bump always
+/// publishes a new prefix and pin rather than overwriting one.
 struct ModelBundle {
     /// R2 path below the shared `models/` base.
     folder: &'static str,
@@ -583,12 +614,13 @@ const WINDOWS_STT_BUNDLES: &[ModelBundle] = &[
     },
 ];
 
-/// Ships the GGUF and its exact llama.cpp runtime as one notes bundle. This
-/// avoids relying on a global executable or DLL set that the app cannot version.
+/// Ships the Windows representation of Gemma 3 1B IT QAT 4-bit: GGUF plus its
+/// exact llama.cpp runtime. The immutable CDN tag remains Windows-specific, but
+/// `install_path` is the shared logical Gemma directory used by both sidecars.
 const WINDOWS_LLM_BUNDLES: &[ModelBundle] = &[ModelBundle {
     folder: "windows/gemma-3-1b-it-qat-4bit",
     prefix: "v2",
-    install_path: "windows/gemma-3-1b-it-qat-4bit/v2",
+    install_path: "llm/gemma-3-1b-it-qat-4bit",
     manifest_sha256: "ce8dd3de8b43e6948ee08144e822d02d8848ad1bf42fef30e3961875bd2e9a00",
 }];
 
@@ -846,26 +878,15 @@ mod tests {
     }
 
     #[test]
-    fn windows_readiness_ignores_legacy_unversioned_markers() {
-        if !cfg!(target_os = "windows") {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let models = crate::storage::models_dir(root);
-        std::fs::create_dir_all(&models).unwrap();
-        let legacy = ModelManifest {
-            version: MODEL_VERSION.to_string(),
-            downloaded_at: "legacy".to_string(),
-        };
-        std::fs::write(manifest_path(root), serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(!is_ready(root));
-
-        let legacy_llm_marker = llm_dir(root).join(".complete");
-        std::fs::create_dir_all(legacy_llm_marker.parent().unwrap()).unwrap();
-        std::fs::write(legacy_llm_marker, b"1").unwrap();
-        assert!(!llm_is_ready(root));
+    fn windows_stt_version_joins_each_pinned_bundle_revision() {
+        assert_eq!(
+            bundle_version(WINDOWS_STT_BUNDLES),
+            "windows/parakeet-tdt-0.6b-v3@v1+windows/speaker-diarization@v1"
+        );
+        assert_eq!(
+            bundle_version(WINDOWS_LLM_BUNDLES),
+            "windows/gemma-3-1b-it-qat-4bit@v2"
+        );
     }
 
     #[test]
@@ -883,9 +904,24 @@ mod tests {
         assert!(!llm_is_ready(root));
 
         // Marker written only after a full download → ready.
-        std::fs::write(&marker, b"1").unwrap();
+        std::fs::write(&marker, llm_model_version()).unwrap();
         assert!(llm_is_ready(root));
         assert_eq!(status(root).llm_ready, Some(true));
+
+        std::fs::write(&marker, "obsolete").unwrap();
+        assert!(!llm_is_ready(root));
+    }
+
+    #[test]
+    fn llm_marker_path_is_shared_across_platforms() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            llm_marker_path(tmp.path()),
+            crate::storage::models_dir(tmp.path())
+                .join("llm")
+                .join(LLM_MODEL_NAME)
+                .join(".complete")
+        );
     }
 
     #[test]
@@ -902,7 +938,7 @@ mod tests {
         // Add the LLM completion marker → both ready.
         let marker = llm_marker_path(root);
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        std::fs::write(marker, b"1").unwrap();
+        std::fs::write(marker, llm_model_version()).unwrap();
         assert!(local_models_ready(root));
     }
 
@@ -913,7 +949,7 @@ mod tests {
         // LLM marker present but no STT manifest → not ready.
         let marker = llm_marker_path(root);
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        std::fs::write(marker, b"1").unwrap();
+        std::fs::write(marker, llm_model_version()).unwrap();
         assert!(!local_models_ready(root));
     }
 
@@ -1171,7 +1207,7 @@ mod tests {
         );
         assert!(
             tmp.path()
-                .join("windows/gemma-3-1b-it-qat-4bit/v2/llama-cli.exe")
+                .join("llm/gemma-3-1b-it-qat-4bit/llama-cli.exe")
                 .is_file()
         );
     }

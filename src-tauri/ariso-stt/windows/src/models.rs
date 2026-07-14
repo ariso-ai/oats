@@ -29,15 +29,17 @@ pub(crate) const GEMMA_GGUF: &str = "gemma-3-1b-it-q4_0.gguf";
 /// Invalidates the complete Windows speech bundle as one compatibility unit.
 /// The host must publish and mark this same revision before inference can use it.
 pub(crate) const SPEECH_MODEL_VERSION: &str = "v1";
-/// Versions the Gemma model and its llama.cpp runtime together because native
-/// DLL compatibility is part of notes readiness, not just the GGUF bytes.
-pub(crate) const NOTES_MODEL_VERSION: &str = "v2";
-
-/// Encodes the Windows-only namespace shared with the downloader. Keeping this
-/// composition in one place prevents individual engines from drifting toward
-/// legacy, unversioned model directories.
-pub(crate) fn model_dir(models: &Path, name: &str, version: &str) -> PathBuf {
+/// Encodes the versioned Windows speech namespace shared with the downloader.
+/// Speech assets remain platform-specific because their native representations
+/// differ from CoreML, while Gemma uses the shared logical directory below.
+pub(crate) fn speech_model_dir(models: &Path, name: &str, version: &str) -> PathBuf {
     models.join("windows").join(name).join(version)
+}
+
+/// Resolves the canonical Gemma directory used by both macOS and Windows. The
+/// host's `.complete` marker records which runtime-specific bundle populated it.
+pub(crate) fn llm_model_dir(models: &Path) -> PathBuf {
+    models.join("llm").join(GEMMA_MODEL_DIR)
 }
 
 #[derive(Debug)]
@@ -57,7 +59,7 @@ impl ParakeetPaths {
     /// Cryptographic verification is intentionally absent here because the host
     /// already performs it during installation and owns repair UX.
     pub(crate) fn discover(models: &Path) -> Result<Self> {
-        let dir = model_dir(models, PARAKEET_MODEL_DIR, SPEECH_MODEL_VERSION);
+        let dir = speech_model_dir(models, PARAKEET_MODEL_DIR, SPEECH_MODEL_VERSION);
         let paths = Self {
             encoder: dir.join("encoder.int8.onnx"),
             decoder: dir.join("decoder.int8.onnx"),
@@ -89,7 +91,7 @@ impl DiarizationPaths {
     /// missing files allow the caller to produce a single-speaker transcript.
     /// Download readiness and user-facing repair remain host responsibilities.
     pub(crate) fn discover(models: &Path) -> Option<Self> {
-        let dir = model_dir(models, DIARIZATION_DIR, SPEECH_MODEL_VERSION);
+        let dir = speech_model_dir(models, DIARIZATION_DIR, SPEECH_MODEL_VERSION);
         let paths = Self {
             segmentation: dir
                 .join(DIARIZATION_SEGMENTATION_DIR)
@@ -108,7 +110,7 @@ mod tests {
     #[test]
     fn discovers_canonical_parakeet_layout() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = model_dir(temp.path(), PARAKEET_MODEL_DIR, SPEECH_MODEL_VERSION);
+        let dir = speech_model_dir(temp.path(), PARAKEET_MODEL_DIR, SPEECH_MODEL_VERSION);
         fs::create_dir_all(&dir).unwrap();
         for file in [
             "encoder.int8.onnx",
@@ -126,7 +128,7 @@ mod tests {
     #[test]
     fn discovers_canonical_diarization_layout() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = model_dir(temp.path(), DIARIZATION_DIR, SPEECH_MODEL_VERSION);
+        let dir = speech_model_dir(temp.path(), DIARIZATION_DIR, SPEECH_MODEL_VERSION);
         let segmentation = dir.join(DIARIZATION_SEGMENTATION_DIR);
         fs::create_dir_all(&segmentation).unwrap();
         fs::write(segmentation.join("model.int8.onnx"), b"segmentation").unwrap();

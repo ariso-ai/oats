@@ -54,7 +54,7 @@ You decide where the work happens:
 | Platform | Public support | Notes |
 | --- | --- | --- |
 | macOS 14+ on Apple Silicon | Supported | Full Ariso and Local backend support. |
-| Windows 11 | Internal QA | Local transcription and notes plus NSIS/MSI installers are implemented; public support remains blocked on system-audio capture, auto-record detection, native sharing, Authenticode signing, and updater publication. |
+| Windows 11 | Internal QA | Local transcription, notes, signed NSIS/MSI release packaging, and updater publication are implemented; public support remains blocked on system-audio capture, auto-record detection, and native sharing. |
 | Windows 10 | Planned smoke coverage | Not public-support ready. |
 
 ### 🍺 Homebrew

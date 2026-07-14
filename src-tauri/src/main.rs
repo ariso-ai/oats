@@ -10,6 +10,7 @@ mod platform;
 mod recorder_pill;
 mod storage;
 mod transcribe;
+mod transcript_normalization;
 mod model_manager;
 mod recording_state;
 mod tray;

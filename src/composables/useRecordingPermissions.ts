@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
-import { deriveEnabledFromLegacy, type RecordingEnabled } from '../views/recordingSettings';
+import {
+  deriveEnabledFromLegacy,
+  supportedRecordingEnabled,
+  type RecordingEnabled,
+} from '../views/recordingSettings';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
 
 const SETTINGS_PATH = 'settings.json';
@@ -18,19 +22,30 @@ export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
   const store = await load(SETTINGS_PATH, { autoSave: true });
   const mic = await store.get<boolean>(MIC_KEY);
   const sys = await store.get<boolean>(SYS_KEY);
+  let persisted: RecordingEnabled;
+
   if (typeof mic === 'boolean' && typeof sys === 'boolean') {
-    return { mic, systemAudio: sys };
+    persisted = { mic, systemAudio: sys };
+  } else {
+    // At least one new key is missing — migrate the missing one(s) from the
+    // legacy `recordingMode` while preserving any new key already written.
+    const derived = deriveEnabledFromLegacy(await store.get<string>(LEGACY_KEY));
+    persisted = {
+      mic: typeof mic === 'boolean' ? mic : derived.mic,
+      systemAudio: typeof sys === 'boolean' ? sys : derived.systemAudio,
+    };
   }
-  // At least one new key is missing — migrate the missing one(s) from the
-  // legacy `recordingMode` while preserving any new key already written.
-  const derived = deriveEnabledFromLegacy(await store.get<string>(LEGACY_KEY));
-  const result: RecordingEnabled = {
-    mic: typeof mic === 'boolean' ? mic : derived.mic,
-    systemAudio: typeof sys === 'boolean' ? sys : derived.systemAudio,
-  };
-  if (typeof mic !== 'boolean') await store.set(MIC_KEY, result.mic);
-  if (typeof sys !== 'boolean') await store.set(SYS_KEY, result.systemAudio);
-  return result;
+
+  // Capability reconciliation lives at the persistence boundary so recorder
+  // windows are safe even when Settings has never been opened on this install.
+  const capabilities = await loadPlatformCapabilities();
+  const supported = supportedRecordingEnabled(
+    persisted,
+    capabilities.systemAudio.supported,
+  );
+  if (mic !== supported.mic) await store.set(MIC_KEY, supported.mic);
+  if (sys !== supported.systemAudio) await store.set(SYS_KEY, supported.systemAudio);
+  return supported;
 }
 
 export async function setMicEnabled(enabled: boolean): Promise<void> {

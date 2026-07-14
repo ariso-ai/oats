@@ -1,8 +1,9 @@
 //! Windows transcription and speaker-label orchestration.
 //!
-//! sherpa-onnx supplies the model engines, but this module owns their composition
-//! into the stable `ariso-stt` JSON contract consumed by Tauri storage. It does
-//! not download models, identify real people, or persist recordings.
+//! sherpa-onnx supplies the model engines, while this module translates inference
+//! output into the raw `ariso-stt` contract. Cross-platform ordering, speaker-ID
+//! normalization, participant labels, downloads, and persistence belong to the
+//! Tauri host.
 
 use crate::audio::{Audio, decode_audio, resample_linear, slice_audio};
 use crate::models::{DiarizationPaths, ParakeetPaths};
@@ -25,24 +26,14 @@ use std::path::Path;
 pub(crate) struct TranscriptOutput {
     language: String,
     duration_seconds: f64,
-    participants: Vec<Participant>,
     segments: Vec<Segment>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-/// Represents a transcript-local speaker identity, not a known person. Mapping
-/// names or meeting attendees is intentionally outside offline diarization.
-struct Participant {
-    id: u32,
-    label: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-/// Couples recognized text to a normalized speaker and time span for the host's
-/// existing transcript renderer. It carries no engine confidence or token data
-/// because those are not part of the shared storage contract.
+/// Preserves the model-native speaker key until the host applies the one shared
+/// ordering and participant policy used by both Windows and macOS.
 struct Segment {
-    speaker: u32,
+    speaker: String,
     text: String,
     start: f64,
     end: f64,
@@ -99,12 +90,8 @@ pub(crate) fn transcribe(audio_path: &Path, models: &Path) -> Result<TranscriptO
     Ok(TranscriptOutput {
         language: "en".to_string(),
         duration_seconds: duration,
-        participants: vec![Participant {
-            id: 0,
-            label: "Speaker 1".to_string(),
-        }],
         segments: vec![Segment {
-            speaker: 0,
+            speaker: "0".to_string(),
             text,
             start: 0.0,
             end: duration,
@@ -183,10 +170,16 @@ fn transcribe_diarized(
     .ok_or_else(|| anyhow!("create speaker diarizer"))?;
 
     let diarization_sample_rate = diarizer.sample_rate();
-    let diarization_audio =
-        resample_linear(&audio.samples, audio.sample_rate, diarization_sample_rate);
+    let resampled_audio;
+    let diarization_audio = if diarization_sample_rate == audio.sample_rate {
+        audio.samples.as_slice()
+    } else {
+        resampled_audio =
+            resample_linear(&audio.samples, audio.sample_rate, diarization_sample_rate);
+        resampled_audio.as_slice()
+    };
     let diarization_result = diarizer
-        .process(&diarization_audio)
+        .process(diarization_audio)
         .ok_or_else(|| anyhow!("speaker diarizer returned no result"))?;
     let diarization_segments =
         sanitize_diarization_segments(diarization_result.sort_by_start_time(), duration);
@@ -217,7 +210,7 @@ fn transcribe_diarized(
         }
         match recognize_text(recognizer, audio.sample_rate, &clip) {
             Ok(text) => segments.push(Segment {
-                speaker: diarization_segment.speaker,
+                speaker: diarization_segment.speaker.to_string(),
                 text,
                 start: diarization_segment.start,
                 end: diarization_segment.end,
@@ -237,35 +230,13 @@ fn transcribe_diarized(
         return Ok(TranscriptOutput {
             language: "en".to_string(),
             duration_seconds: duration,
-            participants: Vec::new(),
             segments,
         });
     }
 
-    segments.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let mut speaker_ids = segments
-        .iter()
-        .map(|segment| segment.speaker)
-        .collect::<Vec<_>>();
-    speaker_ids.sort_unstable();
-    speaker_ids.dedup();
-    for segment in &mut segments {
-        segment.speaker = speaker_ids
-            .iter()
-            .position(|speaker| *speaker == segment.speaker)
-            .unwrap_or_default() as u32;
-    }
-    let participants = (0..speaker_ids.len() as u32)
-        .map(|id| Participant {
-            id,
-            label: format!("Speaker {}", id + 1),
-        })
-        .collect();
-
     Ok(TranscriptOutput {
         language: "en".to_string(),
         duration_seconds: duration,
-        participants,
         segments,
     })
 }

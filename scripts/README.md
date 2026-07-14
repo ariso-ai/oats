@@ -71,6 +71,11 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1
 ```
 
+Release CI additionally imports the Authenticode certificate and passes a
+generated signing overlay through `-TauriConfig`. The script keeps that input
+optional so local QA builds can remain unsigned while the public release job
+fails unless both Authenticode and Tauri updater signatures validate.
+
 The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 
 - `wix-dialog.bmp` is the 493 x 312 dialog image.

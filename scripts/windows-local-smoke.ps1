@@ -198,9 +198,8 @@ if ($Audio) {
     audioSeconds = $audioSeconds
     realTimeFactor = if ($audioSeconds) { [math]::Round($stt.elapsedSeconds / $audioSeconds, 3) } else { $null }
     language = $stt.result.language
-    participants = $stt.result.participants.Count
     segments = $stt.result.segments.Count
-    speakers = (($stt.result.segments | ForEach-Object { $_.speaker } | Sort-Object -Unique) -join ",")
+    rawSpeakerKeys = (($stt.result.segments | ForEach-Object { $_.speaker } | Sort-Object -Unique) -join ",")
     firstSegment = if ($stt.result.segments.Count -gt 0) { $stt.result.segments[0].text } else { "" }
   }
 }

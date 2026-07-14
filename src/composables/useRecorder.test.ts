@@ -76,6 +76,16 @@ afterEach(() => {
 });
 
 describe('useRecorder duration', () => {
+  it('falls back to the microphone when system-only capture is unsupported', async () => {
+    const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
+    const rec = useRecorder();
+
+    await rec.startRecording('system');
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(rec.isRecording.value).toBe(true);
+  });
+
   it('tracks wall-clock elapsed time even when interval ticks are throttled', async () => {
     // Fake only the interval; drive Date.now() ourselves to simulate the OS
     // throttling the recorder window's timer in the background.

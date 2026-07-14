@@ -18,6 +18,12 @@ Transcription writes one JSON object matching `transcript.schema.json` to
 stdout. Notes writes Markdown to stdout. Diagnostics go to stderr. Model
 downloads belong to the Tauri host, so sidecar inference remains offline.
 
-`fixtures/transcript.json` is the canonical contract fixture. Host-side and
+Each segment carries the inference engine's transcript-local speaker key as a
+string. Sidecars do not sort the final transcript, assign numeric speaker IDs,
+deduplicate participants, or create labels. The Tauri host performs that shared
+normalization after parsing, so FluidAudio and sherpa-onnx cannot drift into
+different user-visible speaker policies.
+
+`fixtures/transcript.json` is the canonical raw sidecar fixture. Host-side and
 Windows-sidecar tests both consume it. Keep the schema, fixture, Swift output,
 Rust output, and host parser aligned when the contract changes.

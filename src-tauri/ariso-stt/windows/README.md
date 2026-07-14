@@ -27,8 +27,13 @@ target-specific sidecar naming convention.
 - `main.rs`: parses the shared CLI contract and dispatches commands.
 - `audio.rs`: decodes audio, downmixes it to mono, and resamples clips.
 - `models.rs`: defines the Windows model layout and discovers installed models.
-- `transcribe.rs`: runs Parakeet transcription and speaker diarization.
+- `transcribe.rs`: runs Parakeet and diarization, preserving raw speaker keys.
 - `notes.rs`: runs Gemma through the packaged llama.cpp runtime.
+
+The Windows publication URL remains versioned, but downloaded Gemma files are
+installed at `<models>/llm/gemma-3-1b-it-qat-4bit/`, the same logical path used
+on macOS. `model_manager.rs` writes the platform bundle identity into the shared
+completion marker after every file verifies.
 
 Once the models have been explicitly downloaded, transcription and notes run
 locally without network access.

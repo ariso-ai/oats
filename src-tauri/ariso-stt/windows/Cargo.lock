@@ -24,6 +24,7 @@ dependencies = [
  "sherpa-onnx",
  "symphonia",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,13 +1,14 @@
 <#
 Builds Windows installer bundles through the same Tauri path used by release
 CI. This script owns local artifact cleanup and shape validation; it
-does not publish releases or provide Authenticode credentials, and Tauri updater
-signatures are produced only when the caller supplies its signing key.
+does not publish releases or provide signing credentials. Release CI can pass a
+Tauri config overlay that selects its imported Authenticode certificate.
 #>
 param(
   [string]$Bundles = "nsis,msi",
   [string]$Toolchain = "stable-x86_64-pc-windows-msvc",
   [string]$Target = "x86_64-pc-windows-msvc",
+  [string]$TauriConfig,
   [switch]$VerboseBuild
 )
 
@@ -74,7 +75,12 @@ try {
   if ($VerboseBuild) {
     $tauriArgs += "--verbose"
   }
-  $tauriArgs += @("--ci", "--target", $Target, "--bundles", $Bundles, "--", "--features", "prod-api")
+  $tauriArgs += @("--ci", "--target", $Target, "--bundles", $Bundles)
+  if ($TauriConfig) {
+    $resolvedConfig = (Resolve-Path -LiteralPath $TauriConfig).Path
+    $tauriArgs += @("--config", $resolvedConfig)
+  }
+  $tauriArgs += @("--", "--features", "prod-api")
 
   & npm.cmd @tauriArgs
   if ($LASTEXITCODE -ne 0) {

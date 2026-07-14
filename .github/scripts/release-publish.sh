@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # Build the Tauri updater manifest (latest.json) and publish the release
-# artifacts (updater tarball, DMG, manifest) to Cloudflare R2.
+# artifacts (macOS updater tarball, DMG, Windows NSIS installer, manifest) to
+# Cloudflare R2.
 #
 # Invoked by the publish job in .github/workflows/release.yaml after the
-# release job has uploaded the bundler outputs (restored under
-# src-tauri/target/release/bundle/).
+# release jobs have uploaded the bundler outputs into their target directories.
 #
 # Required environment:
 #   RELEASE_TAG    release tag (e.g. v0.3.1); leading 'v' is stripped for VERSION
@@ -55,12 +55,13 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
-BUNDLE_DIR="src-tauri/target/release/bundle"
+MAC_BUNDLE_DIR="src-tauri/target/release/bundle"
+WINDOWS_NSIS_DIR="src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
 
 # Locate the updater artifacts the bundler produced. Tauri v2 writes these to
 # bundle/macos/. Cached builds can leave stale tarballs alongside the fresh
 # one, so require exactly one match and fail loudly otherwise.
-mapfile -t TARBALLS < <(find "${BUNDLE_DIR}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | sort)
+mapfile -t TARBALLS < <(find "${MAC_BUNDLE_DIR}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | sort)
 if [[ "${#TARBALLS[@]}" -ne 1 ]]; then
   echo "Expected exactly 1 updater tarball, found ${#TARBALLS[@]}:" >&2
   printf ' - %s\n' "${TARBALLS[@]}" >&2
@@ -69,22 +70,39 @@ fi
 TARBALL="${TARBALLS[0]}"
 SIGFILE="${TARBALL}.sig"
 
-mapfile -t DMGS < <(find "${BUNDLE_DIR}/dmg" -maxdepth 1 -type f -name '*.dmg' | sort)
+mapfile -t DMGS < <(find "${MAC_BUNDLE_DIR}/dmg" -maxdepth 1 -type f -name '*.dmg' | sort)
 if [[ "${#DMGS[@]}" -ne 1 ]]; then
   echo "Expected exactly 1 DMG, found ${#DMGS[@]}." >&2
   exit 1
 fi
 DMG="${DMGS[0]}"
 
+# Tauri v2 reuses the NSIS installer itself as the Windows updater payload.
+# Require one installer and its adjacent detached signature so an incomplete
+# cross-runner artifact cannot produce a manifest entry that always fails.
+mapfile -t WINDOWS_INSTALLERS < <(find "$WINDOWS_NSIS_DIR" -maxdepth 1 -type f -name '*-setup.exe' | sort)
+if [[ "${#WINDOWS_INSTALLERS[@]}" -ne 1 ]]; then
+  echo "Expected exactly 1 Windows NSIS updater, found ${#WINDOWS_INSTALLERS[@]}." >&2
+  exit 1
+fi
+WINDOWS_INSTALLER="${WINDOWS_INSTALLERS[0]}"
+WINDOWS_SIGFILE="${WINDOWS_INSTALLER}.sig"
+if [[ ! -f "$WINDOWS_SIGFILE" ]]; then
+  echo "Missing Windows updater signature: ${WINDOWS_SIGFILE}" >&2
+  exit 1
+fi
+
 # The version in tauri.conf.json (strip leading 'v' from tag).
 VERSION="${RELEASE_TAG#v}"
 
 # Asset URL is the stable R2 path the updater downloads the payload from. The
 # object at this key is overwritten by the upload below.
-ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz"
+MAC_ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz"
+WINDOWS_ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats-setup.exe"
 
 # Read the detached signature contents (single line of base64).
-SIG=$(cat "$SIGFILE")
+MAC_SIGNATURE=$(cat "$SIGFILE")
+WINDOWS_SIGNATURE=$(cat "$WINDOWS_SIGFILE")
 
 # Mandatory flag: derived from the release title containing "[mandatory]".
 if [[ "${RELEASE_NAME:-}" == *"[mandatory]"* ]]; then
@@ -107,8 +125,10 @@ jq -n \
   --arg notes "$NOTES" \
   --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson mandatory "$MANDATORY" \
-  --arg signature "$SIG" \
-  --arg url "$ASSET_URL" \
+  --arg mac_signature "$MAC_SIGNATURE" \
+  --arg mac_url "$MAC_ASSET_URL" \
+  --arg windows_signature "$WINDOWS_SIGNATURE" \
+  --arg windows_url "$WINDOWS_ASSET_URL" \
   '{
     version: $version,
     notes: $notes,
@@ -116,8 +136,12 @@ jq -n \
     mandatory: $mandatory,
     platforms: {
       "darwin-aarch64": {
-        signature: $signature,
-        url: $url
+        signature: $mac_signature,
+        url: $mac_url
+      },
+      "windows-x86_64": {
+        signature: $windows_signature,
+        url: $windows_url
       }
     }
   }' > latest.json
@@ -134,6 +158,11 @@ aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/desktop/oats.app.tar.gz" \
 aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/oats.dmg" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/x-apple-diskimage \
+  --cache-control "$NOCACHE"
+
+aws s3 cp "$WINDOWS_INSTALLER" "s3://${R2_BUCKET}/desktop/oats-setup.exe" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --content-type application/vnd.microsoft.portable-executable \
   --cache-control "$NOCACHE"
 
 aws s3 cp latest.json "s3://${R2_BUCKET}/desktop/latest.json" \

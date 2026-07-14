@@ -14,3 +14,11 @@ serde_json = "1"
 sherpa-onnx = "1.13.3"
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "pcm"] }
 tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

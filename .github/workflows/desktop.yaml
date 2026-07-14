@@ -115,7 +115,11 @@ jobs:
       # binary is copied into Tauri's externalBin location.
       - name: Test Windows ariso-stt sidecar
         if: runner.os == 'Windows'
-        run: cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml --locked
+        shell: pwsh
+        run: |
+          . ./scripts/import-windows-build-env.ps1
+          Import-WindowsBuildEnvironment
+          cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml --locked
 
       # The following host build expects the target-suffixed external binary to
       # exist even though CI is not producing an installer.
@@ -125,5 +129,14 @@ jobs:
         run: ./scripts/build-windows-sidecar.ps1
 
       - name: Build Rust
+        if: runner.os == 'macOS'
         working-directory: src-tauri
         run: cargo build --locked
+
+      - name: Build Rust
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/import-windows-build-env.ps1
+          Import-WindowsBuildEnvironment
+          cargo build --manifest-path src-tauri/Cargo.toml --locked

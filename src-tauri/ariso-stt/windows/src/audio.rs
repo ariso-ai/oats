@@ -1,9 +1,9 @@
 //! Audio normalization for the Windows inference pipeline.
 //!
 //! Container and codec concerns stop in this module. Downstream ASR and
-//! diarization code receives mono `f32` samples and chooses its own sample-rate
-//! requirements; this module does not know about model layouts or transcript
-//! semantics.
+//! diarization code receives mono 16 kHz `f32` samples, which bounds recording
+//! memory independently of the source device rate. This module does not know
+//! about model layouts or transcript semantics.
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
@@ -16,10 +16,12 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+const INFERENCE_SAMPLE_RATE: i32 = 16_000;
+
 #[derive(Debug)]
 /// The codec-independent audio representation shared by ASR and diarization.
-/// Channels have already been mixed down so model adapters cannot accidentally
-/// disagree about channel ordering or select only one side of a meeting.
+/// Channels have already been mixed down and normalized to the inference rate
+/// so model adapters cannot retain separate full-recording conversions.
 pub(crate) struct Audio {
     pub(crate) sample_rate: i32,
     pub(crate) samples: Vec<f32>,
@@ -41,8 +43,8 @@ impl Audio {
 }
 
 /// Establishes the single decoding boundary for every recording format oats
-/// accepts on Windows. It deliberately preserves the source sample rate; ASR
-/// and diarization may require different rates and own those conversions.
+/// accepts on Windows. Normalizing packet-by-packet avoids retaining the source
+/// rate recording alongside the model-ready copy for the entire inference run.
 pub(crate) fn decode_audio(path: &Path) -> Result<Audio> {
     let file = fs::File::open(path).with_context(|| format!("open audio {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -66,15 +68,17 @@ pub(crate) fn decode_audio(path: &Path) -> Result<Audio> {
         .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| anyhow!("no supported audio track in {}", path.display()))?
         .clone();
-    let sample_rate = track
+    let source_sample_rate = track
         .codec_params
         .sample_rate
         .ok_or_else(|| anyhow!("audio sample rate missing in {}", path.display()))?;
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .with_context(|| format!("create decoder for {}", path.display()))?;
-    let mut samples = Vec::new();
+    let mut resampler =
+        StreamingLinearResampler::new(source_sample_rate as i32, INFERENCE_SAMPLE_RATE)?;
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut mono_packet = Vec::new();
 
     loop {
         let packet = match format.next_packet() {
@@ -101,20 +105,91 @@ pub(crate) fn decode_audio(path: &Path) -> Result<Audio> {
         let buf =
             sample_buf.get_or_insert_with(|| SampleBuffer::new(decoded.capacity() as u64, spec));
         buf.copy_interleaved_ref(decoded);
+        mono_packet.clear();
+        mono_packet.reserve(buf.samples().len() / channels);
         for frame in buf.samples().chunks(channels) {
             let sum: f32 = frame.iter().copied().sum();
-            samples.push(sum / frame.len() as f32);
+            mono_packet.push(sum / frame.len() as f32);
         }
+        resampler.push(&mono_packet);
     }
 
+    let samples = resampler.finish();
     if samples.is_empty() {
         bail!("decoded no samples from {}", path.display());
     }
 
     Ok(Audio {
-        sample_rate: sample_rate as i32,
+        sample_rate: INFERENCE_SAMPLE_RATE,
         samples,
     })
+}
+
+/// Carries interpolation state across decoder packet boundaries. Keeping only
+/// one prior source sample makes chunked conversion equivalent to a whole-file
+/// linear resample without ever retaining the whole source-rate recording.
+struct StreamingLinearResampler {
+    step: f64,
+    target_ratio: f64,
+    next_source_position: f64,
+    previous: Option<f32>,
+    input_samples: usize,
+    output: Vec<f32>,
+}
+
+impl StreamingLinearResampler {
+    fn new(from_rate: i32, to_rate: i32) -> Result<Self> {
+        if from_rate <= 0 || to_rate <= 0 {
+            bail!("audio sample rates must be positive");
+        }
+        Ok(Self {
+            step: from_rate as f64 / to_rate as f64,
+            target_ratio: to_rate as f64 / from_rate as f64,
+            next_source_position: 0.0,
+            previous: None,
+            input_samples: 0,
+            output: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            let current_index = self.input_samples;
+            match self.previous {
+                None => {
+                    self.output.push(sample);
+                    self.next_source_position = self.step;
+                }
+                Some(previous) => {
+                    let previous_index = current_index - 1;
+                    while self.next_source_position <= current_index as f64 {
+                        let fraction = (self.next_source_position - previous_index as f64) as f32;
+                        self.output
+                            .push(previous * (1.0 - fraction) + sample * fraction);
+                        self.next_source_position += self.step;
+                    }
+                }
+            }
+            self.previous = Some(sample);
+            self.input_samples += 1;
+        }
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        if self.input_samples == 0 {
+            return self.output;
+        }
+
+        // Whole-buffer resampling rounds the target length and clamps positions
+        // beyond the final source sample. Mirror that tail policy after the last
+        // packet so chunk boundaries cannot change duration.
+        let expected = ((self.input_samples as f64 * self.target_ratio).round() as usize).max(1);
+        self.output.truncate(expected);
+        if let Some(last) = self.previous {
+            self.output.resize(expected, last);
+        }
+        self.output
+    }
 }
 
 /// Extracts a model time span from normalized audio. Padding and minimum-span
@@ -163,5 +238,28 @@ mod tests {
             resample_linear(&[0.0, 2.0, 4.0], 3, 6),
             vec![0.0, 1.0, 2.0, 3.0, 4.0, 4.0]
         );
+    }
+
+    #[test]
+    fn streaming_resample_matches_whole_buffer_across_packet_boundaries() {
+        let input = vec![0.0, 2.0, 4.0];
+        let mut streaming = StreamingLinearResampler::new(3, 6).unwrap();
+        streaming.push(&input[..2]);
+        streaming.push(&input[2..]);
+
+        assert_eq!(streaming.finish(), resample_linear(&input, 3, 6));
+    }
+
+    #[test]
+    fn streaming_downsample_has_the_expected_model_rate_length() {
+        let input = (0..441).map(|sample| sample as f32).collect::<Vec<_>>();
+        let mut streaming = StreamingLinearResampler::new(44_100, 16_000).unwrap();
+        for packet in input.chunks(37) {
+            streaming.push(packet);
+        }
+
+        let output = streaming.finish();
+        assert_eq!(output.len(), 160);
+        assert_eq!(output, resample_linear(&input, 44_100, 16_000));
     }
 }

@@ -1,23 +1,18 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
+use crate::transcript_normalization::{
+    SidecarTranscriptResult, TranscriptResult, normalize_transcript,
+};
+
 /// Upper bound on how long the notes sidecar may run before we kill it.
 /// Notes generation is best-effort and runs detached from `finalize_core`,
 /// so this only bounds the background task's lifetime.
-const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
-
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptResult {
-    pub language: String,
-    pub participants: Vec<crate::storage::Participant>,
-    pub segments: Vec<crate::storage::Segment>,
-}
+const NOTES_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,14 +60,15 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ariso-stt failed: {}", stderr.trim()));
     }
-    serde_json::from_slice::<TranscriptResult>(&output.stdout).map_err(|e| {
+    let raw = serde_json::from_slice::<SidecarTranscriptResult>(&output.stdout).map_err(|e| {
         // Include a bounded, char-safe preview of stdout for diagnosis.
         let preview: String = String::from_utf8_lossy(&output.stdout)
             .chars()
             .take(200)
             .collect();
         format!("parse transcript json: {e} (stdout: {preview})")
-    })
+    })?;
+    Ok(normalize_transcript(raw))
 }
 
 /// Run the sidecar in notes mode and return the generated markdown (stdout).
@@ -176,7 +172,7 @@ pub async fn finalize_core(
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
-            meta.model_version = Some(storage::MODEL_VERSION.to_string());
+            meta.model_version = Some(crate::model_manager::stt_model_version());
             let md = storage::render_markdown(&meta, &result.segments);
             storage::write_transcript(&dir, &md)?;
             meta.status = RecordingStatus::Done;

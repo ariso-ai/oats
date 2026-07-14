@@ -134,9 +134,9 @@ export function useRecorder() {
     systemAudioSupported.value = hasTauri && caps.systemAudio.supported;
     const useSystemAudio =
       (mode === 'mic_and_system' || mode === 'system') && systemAudioSupported.value;
-    const useMic = mode !== 'system';
-    // Outside Tauri, system-audio-only collapses to no usable input; fail fast
-    // rather than building a silent graph and recording zeroes.
+    // A system-only preference from an older settings snapshot must still
+    // produce a recording when the current platform cannot capture that source.
+    const useMic = mode !== 'system' || !systemAudioSupported.value;
     if (!useMic && !useSystemAudio) {
       throw new Error('No recording source is available');
     }

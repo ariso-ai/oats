@@ -4,7 +4,7 @@
   "title": "ariso-stt transcript output",
   "type": "object",
   "additionalProperties": false,
-  "required": ["language", "durationSeconds", "participants", "segments"],
+  "required": ["language", "durationSeconds", "segments"],
   "properties": {
     "language": {
       "type": "string"
@@ -12,23 +12,6 @@
     "durationSeconds": {
       "type": "number",
       "minimum": 0
-    },
-    "participants": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "label"],
-        "properties": {
-          "id": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "label": {
-            "type": "string"
-          }
-        }
-      }
     },
     "segments": {
       "type": "array",
@@ -38,8 +21,8 @@
         "required": ["speaker", "text", "start", "end"],
         "properties": {
           "speaker": {
-            "type": "integer",
-            "minimum": 0
+            "type": "string",
+            "minLength": 1
           },
           "text": {
             "type": "string"

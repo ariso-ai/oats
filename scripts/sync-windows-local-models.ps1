@@ -175,6 +175,7 @@ Copy-BundleFile -Source $embedding -Bundle $diarizationBundle -RelativePath $emb
 # Keep the GGUF and the exact llama.cpp executable/DLL family in one revision.
 # End-user machines therefore need no global llama installation or ABI matching.
 $gemmaSource = Find-FirstDirectory @(
+  (Join-Path $modelsRoot "llm\gemma-3-1b-it-qat-4bit"),
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\$NotesVersion"),
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\v1"),
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit"),

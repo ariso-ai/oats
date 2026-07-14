@@ -4,13 +4,30 @@
 //! a bundled llama.cpp runtime and GGUF model. Model acquisition, readiness UX,
 //! transcript persistence, and retry scheduling remain in the Tauri host.
 
-use crate::models::{GEMMA_GGUF, GEMMA_MODEL_DIR, NOTES_MODEL_VERSION, model_dir};
+use crate::models::{GEMMA_GGUF, llm_model_dir};
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
+};
+
+const DEFAULT_MAX_TOKENS: u32 = 512;
+const DEFAULT_CONTEXT_SIZE: u32 = 4096;
+const CHUNK_MAX_TOKENS: u32 = 256;
+const PROMPT_RESERVE_TOKENS: u32 = 768;
+const CONSERVATIVE_CHARS_PER_TOKEN: usize = 3;
 
 /// Implements the notes subcommand as a narrow file-to-stdout adapter. It does
 /// not update recording metadata itself; the host interprets success or failure
@@ -38,7 +55,200 @@ fn run_llama_notes(
     transcript: &str,
     prompt_dir: &Path,
 ) -> Result<String> {
-    let prompt = gemma_notes_prompt(transcript);
+    let max_tokens = env_positive("ARISO_NOTES_MAX_TOKENS", DEFAULT_MAX_TOKENS);
+    let ctx_size = env_positive("ARISO_NOTES_CTX_SIZE", DEFAULT_CONTEXT_SIZE);
+    let final_budget = input_char_budget(ctx_size, max_tokens)?;
+
+    if transcript.chars().count() <= final_budget {
+        return run_llama_prompt(
+            llama_cli,
+            gemma,
+            &gemma_notes_prompt(transcript),
+            prompt_dir,
+            max_tokens,
+            ctx_size,
+        );
+    }
+
+    let summary_tokens = max_tokens.min(CHUNK_MAX_TOKENS);
+    let summary_budget = input_char_budget(ctx_size, summary_tokens)?;
+    let transcript_chunks = chunk_text(transcript, summary_budget);
+    let total_chunks = transcript_chunks.len();
+    let mut summaries = Vec::with_capacity(total_chunks);
+
+    for (index, chunk) in transcript_chunks.iter().enumerate() {
+        summaries.push(run_llama_prompt(
+            llama_cli,
+            gemma,
+            &chunk_summary_prompt(chunk, index + 1, total_chunks),
+            prompt_dir,
+            summary_tokens,
+            ctx_size,
+        )?);
+    }
+
+    // Very long recordings can produce enough partial summaries to overflow the
+    // final prompt too. Repeatedly condense bounded groups until one final Gemma
+    // request can see all retained facts at once.
+    loop {
+        let combined = join_summaries(&summaries);
+        if combined.chars().count() <= final_budget {
+            return run_llama_prompt(
+                llama_cli,
+                gemma,
+                &gemma_notes_prompt(&combined),
+                prompt_dir,
+                max_tokens,
+                ctx_size,
+            );
+        }
+
+        let groups = pack_summaries(&summaries, summary_budget);
+        let group_count = groups.len();
+        let mut reduced = Vec::with_capacity(group_count);
+        for (index, group) in groups.iter().enumerate() {
+            reduced.push(run_llama_prompt(
+                llama_cli,
+                gemma,
+                &summary_reduction_prompt(group, index + 1, group_count),
+                prompt_dir,
+                summary_tokens,
+                ctx_size,
+            )?);
+        }
+        summaries = reduced;
+    }
+}
+
+/// Converts the model context into a conservative source-text allowance. The
+/// reserve covers Gemma turn markers, instructions, and generation output; a
+/// deliberately low characters-per-token estimate keeps punctuation-heavy
+/// speaker transcripts away from llama.cpp's hard context boundary.
+fn input_char_budget(ctx_size: u32, output_tokens: u32) -> Result<usize> {
+    let source_tokens = ctx_size
+        .checked_sub(output_tokens)
+        .and_then(|remaining| remaining.checked_sub(PROMPT_RESERVE_TOKENS))
+        .ok_or_else(|| {
+            anyhow!("notes context size {ctx_size} is too small for {output_tokens} output tokens")
+        })?;
+    if source_tokens == 0 {
+        bail!("notes context leaves no room for transcript input");
+    }
+    Ok(source_tokens as usize * CONSERVATIVE_CHARS_PER_TOKEN)
+}
+
+/// Packs source material at word boundaries while measuring in Unicode scalar
+/// values. This avoids slicing UTF-8 or ordinary speaker text mid-word and gives
+/// every model invocation a hard, testable size ceiling.
+fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let max_chars = max_chars.max(1);
+
+    for word in text.split_whitespace() {
+        if word.chars().count() > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            let mut remaining = word;
+            while remaining.chars().count() > max_chars {
+                let split = byte_index_after_chars(remaining, max_chars);
+                chunks.push(remaining[..split].to_string());
+                remaining = &remaining[split..];
+            }
+            current.push_str(remaining);
+            continue;
+        }
+
+        let separator = usize::from(!current.is_empty());
+        if !current.is_empty()
+            && current.chars().count() + separator + word.chars().count() > max_chars
+        {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn byte_index_after_chars(text: &str, char_count: usize) -> usize {
+    text.char_indices()
+        .nth(char_count)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+/// Packs complete partial summaries together instead of splitting their
+/// evidence mid-item. A defensive chunking path handles unexpected model
+/// output that exceeds its requested generation limit.
+fn pack_summaries(summaries: &[String], max_chars: usize) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut current = String::new();
+
+    for summary in summaries {
+        for part in chunk_text(summary, max_chars) {
+            let separator = if current.is_empty() { 0 } else { 2 };
+            if !current.is_empty()
+                && current.chars().count() + separator + part.chars().count() > max_chars
+            {
+                groups.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push_str("\n\n");
+            }
+            current.push_str(&part);
+        }
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+fn join_summaries(summaries: &[String]) -> String {
+    summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| format!("Partial summary {}:\n{summary}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn chunk_summary_prompt(chunk: &str, index: usize, total: usize) -> String {
+    format!(
+        "<bos><start_of_turn>user\n\
+You are preserving evidence from one chunk of a longer meeting transcript. Summarize only facts stated in this chunk. Retain decisions, commitments, action items, unresolved questions, and generic speaker labels. Be concise and do not add a preamble.\n\n\
+Transcript chunk {index} of {total}:\n{chunk}<end_of_turn>\n<start_of_turn>model\n"
+    )
+}
+
+fn summary_reduction_prompt(group: &str, index: usize, total: usize) -> String {
+    format!(
+        "<bos><start_of_turn>user\n\
+Consolidate these partial meeting summaries without dropping decisions, commitments, action items, unresolved questions, or speaker labels. Use only the supplied facts, remove repetition, and return concise Markdown with no preamble.\n\n\
+Summary group {index} of {total}:\n{group}<end_of_turn>\n<start_of_turn>model\n"
+    )
+}
+
+/// Owns one llama.cpp invocation and attaches it to a kill-on-close Windows job.
+/// The Tauri host can therefore enforce its timeout by killing the sidecar;
+/// Windows then tears down this descendant instead of leaving model inference
+/// running invisibly after the recording has already reported a failure.
+fn run_llama_prompt(
+    llama_cli: &Path,
+    gemma: &Path,
+    prompt: &str,
+    prompt_dir: &Path,
+    max_tokens: u32,
+    ctx_size: u32,
+) -> Result<String> {
     let mut prompt_file = tempfile::Builder::new()
         .prefix(".oats-notes-prompt-")
         .suffix(".txt")
@@ -49,9 +259,8 @@ fn run_llama_notes(
         .context("write notes prompt")?;
     prompt_file.flush().context("flush notes prompt")?;
     let prompt_path = prompt_file.into_temp_path();
-    let max_tokens = env_positive("ARISO_NOTES_MAX_TOKENS", 512);
-    let ctx_size = env_positive("ARISO_NOTES_CTX_SIZE", 4096);
-    let output = Command::new(llama_cli)
+    let mut command = Command::new(llama_cli);
+    command
         .arg("-m")
         .arg(gemma)
         .arg("-f")
@@ -71,9 +280,21 @@ fn run_llama_notes(
         .arg("--log-disable")
         .arg("--no-warmup")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
         .with_context(|| format!("spawn llama.cpp notes runtime {}", llama_cli.display()))?;
+    let _job = match KillOnCloseJob::assign(&child) {
+        Ok(job) => job,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err).context("attach llama.cpp notes runtime to Windows job");
+        }
+    };
+    let output = child
+        .wait_with_output()
+        .context("wait for llama.cpp notes runtime")?;
     if !output.status.success() {
         bail!(
             "llama.cpp Gemma notes runtime failed: {}",
@@ -85,6 +306,66 @@ fn run_llama_notes(
         bail!("llama.cpp Gemma notes runtime returned empty notes");
     }
     Ok(notes)
+}
+
+#[cfg(windows)]
+struct KillOnCloseJob(HANDLE);
+
+#[cfg(windows)]
+impl KillOnCloseJob {
+    fn assign(child: &Child) -> Result<Self> {
+        // SAFETY: all handles are checked before use, the information buffer has
+        // the exact Win32 layout and lifetime required by SetInformationJobObject,
+        // and this type closes its sole owned job handle in Drop.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err(std::io::Error::last_os_error()).context("create Windows job object");
+            }
+
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                let error = std::io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(error).context("configure Windows job object");
+            }
+
+            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                let error = std::io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(error).context("assign llama.cpp to Windows job object");
+            }
+            Ok(Self(job))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        // SAFETY: the constructor returns only after taking ownership of a valid
+        // job handle, and Drop runs exactly once for that handle.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct KillOnCloseJob;
+
+#[cfg(not(windows))]
+impl KillOnCloseJob {
+    fn assign(_child: &Child) -> Result<Self> {
+        Ok(Self)
+    }
 }
 
 /// Allows smoke tests and diagnostics to constrain expensive generation without
@@ -188,7 +469,7 @@ fn clean_notes(raw: &str) -> String {
 /// This keeps Local mode auditable: downloads happen through explicit Settings
 /// actions, and inference is filesystem-only once readiness is reported.
 pub(crate) fn discover_gemma(models: &Path) -> Result<PathBuf> {
-    let model = model_dir(models, GEMMA_MODEL_DIR, NOTES_MODEL_VERSION).join(GEMMA_GGUF);
+    let model = llm_model_dir(models).join(GEMMA_GGUF);
     model
         .is_file()
         .then_some(model)
@@ -199,7 +480,7 @@ pub(crate) fn discover_gemma(models: &Path) -> Result<PathBuf> {
 /// the GGUF and DLLs. The sidecar therefore never depends on a machine-global
 /// runtime whose ABI could differ from the packaged model stack.
 pub(crate) fn discover_notes_runtime(models: &Path) -> Result<PathBuf> {
-    let runtime = model_dir(models, GEMMA_MODEL_DIR, NOTES_MODEL_VERSION).join("llama-cli.exe");
+    let runtime = llm_model_dir(models).join("llama-cli.exe");
     runtime.is_file().then_some(runtime).ok_or_else(|| {
         anyhow!(
             "llama.cpp notes runtime not found under {}",
@@ -211,12 +492,12 @@ pub(crate) fn discover_notes_runtime(models: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{GEMMA_MODEL_DIR, model_dir};
+    use crate::models::llm_model_dir;
 
     #[test]
     fn discovers_gemma_qat_gguf_and_llama_runtime() {
         let temp = tempfile::tempdir().unwrap();
-        let model = model_dir(temp.path(), GEMMA_MODEL_DIR, NOTES_MODEL_VERSION);
+        let model = llm_model_dir(temp.path());
         fs::create_dir_all(&model).unwrap();
         fs::write(model.join(GEMMA_GGUF), b"gguf").unwrap();
         fs::write(model.join("llama-cli.exe"), b"runtime").unwrap();
@@ -234,6 +515,34 @@ mod tests {
         assert!(prompt.starts_with("<bos><start_of_turn>user\n"));
         assert!(prompt.contains("Transcript:\nSpeaker 1: Ship it."));
         assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn transcript_chunks_are_unicode_safe_and_bounded() {
+        let transcript = "Speaker 1: Résumé approved.\nSpeaker 2: Ship the café update tomorrow.";
+        let chunks = chunk_text(transcript, 24);
+
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 24));
+        assert_eq!(
+            chunks.join(" ").split_whitespace().collect::<Vec<_>>(),
+            transcript.split_whitespace().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn notes_budget_reserves_prompt_and_generation_space() {
+        assert_eq!(input_char_budget(4096, 512).unwrap(), 8448);
+        assert!(input_char_budget(1024, 512).is_err());
+    }
+
+    #[test]
+    fn partial_summaries_are_packed_without_exceeding_the_limit() {
+        let summaries = vec!["alpha beta".to_string(), "gamma delta".to_string()];
+        let groups = pack_summaries(&summaries, 12);
+
+        assert_eq!(groups, vec!["alpha beta", "gamma delta"]);
+        assert!(groups.iter().all(|group| group.chars().count() <= 12));
     }
 
     #[test]
