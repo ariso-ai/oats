@@ -1,3 +1,7 @@
+# Normalizes an ordinary PowerShell session into the MSVC build environment
+# expected by Cargo and Tauri. It imports an existing Visual Studio toolchain
+# into the current process; installation and toolchain selection remain caller
+# responsibilities.
 function Import-WindowsBuildEnvironment {
   if (Get-Command link.exe -ErrorAction SilentlyContinue) {
     return

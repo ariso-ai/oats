@@ -25,7 +25,9 @@ export async function setAutoRecordEnabled(enabled: boolean): Promise<void> {
   await emit(AUTO_RECORD_SYNC_EVENT);
 }
 
-/** Whether the OS supports per-process mic detection (macOS 14.4+). */
+/** Combines the shared product capability with the native monitor's runtime
+ * probe. The capability avoids invoking an unavailable backend; the command can
+ * still reject an otherwise supported OS version or environment. */
 export async function isAutoRecordSupported(): Promise<boolean> {
   try {
     const caps = await loadPlatformCapabilities();

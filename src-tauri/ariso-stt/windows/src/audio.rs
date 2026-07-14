@@ -1,3 +1,10 @@
+//! Audio normalization for the Windows inference pipeline.
+//!
+//! Container and codec concerns stop in this module. Downstream ASR and
+//! diarization code receives mono `f32` samples and chooses its own sample-rate
+//! requirements; this module does not know about model layouts or transcript
+//! semantics.
+
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::path::Path;
@@ -10,12 +17,20 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 #[derive(Debug)]
+/// The codec-independent audio representation shared by ASR and diarization.
+/// Channels have already been mixed down so model adapters cannot accidentally
+/// disagree about channel ordering or select only one side of a meeting.
 pub(crate) struct Audio {
     pub(crate) sample_rate: i32,
     pub(crate) samples: Vec<f32>,
 }
 
+/// Keeps derived metadata attached to the normalized representation while
+/// leaving transformations in free functions that make allocations explicit.
 impl Audio {
+    /// Supplies timing metadata without carrying container timestamps into the
+    /// inference layer. Invalid rates collapse to zero because callers use this
+    /// value for output metadata, not as an input-validation boundary.
     pub(crate) fn duration_seconds(&self) -> f64 {
         if self.sample_rate <= 0 {
             0.0
@@ -25,6 +40,9 @@ impl Audio {
     }
 }
 
+/// Establishes the single decoding boundary for every recording format oats
+/// accepts on Windows. It deliberately preserves the source sample rate; ASR
+/// and diarization may require different rates and own those conversions.
 pub(crate) fn decode_audio(path: &Path) -> Result<Audio> {
     let file = fs::File::open(path).with_context(|| format!("open audio {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -99,6 +117,9 @@ pub(crate) fn decode_audio(path: &Path) -> Result<Audio> {
     })
 }
 
+/// Extracts a model time span from normalized audio. Padding and minimum-span
+/// policy stay with diarization, while this helper only guarantees clamped,
+/// sample-aligned bounds.
 pub(crate) fn slice_audio(audio: &Audio, start: f64, end: f64) -> Vec<f32> {
     let sample_rate = audio.sample_rate.max(1) as f64;
     let start_index = ((start.max(0.0) * sample_rate).floor() as usize).min(audio.samples.len());
@@ -106,6 +127,9 @@ pub(crate) fn slice_audio(audio: &Audio, start: f64, end: f64) -> Vec<f32> {
     audio.samples[start_index..end_index].to_vec()
 }
 
+/// Provides a dependency-light conversion for model adapters whose required
+/// rate differs from the recording. This is intended for inference inputs, not
+/// mastering-quality audio or user-visible export.
 pub(crate) fn resample_linear(samples: &[f32], from_rate: i32, to_rate: i32) -> Vec<f32> {
     if samples.is_empty() || from_rate <= 0 || to_rate <= 0 || from_rate == to_rate {
         return samples.to_vec();

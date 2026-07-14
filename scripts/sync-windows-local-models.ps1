@@ -1,3 +1,9 @@
+<#
+Normalizes already-acquired Windows inference artifacts into the immutable R2
+layout compiled into `model_manager.rs`. This is release-maintainer tooling: it
+does not download upstream models, modify a user's installed model directory, or
+upload unless `-Upload` is explicitly supplied.
+#>
 param(
   [Parameter(Mandatory = $true)]
   [string]$Models,
@@ -14,6 +20,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Accepts a small set of known source layouts so maintainers can stage either a
+# previous oats bundle or an upstream export. The first match is a source
+# discovery convenience, not runtime fallback behavior.
 function Find-FirstDirectory {
   param([Parameter(Mandatory = $true)][string[]]$Candidates)
 
@@ -25,6 +34,8 @@ function Find-FirstDirectory {
   throw "Missing model directory. Checked: $($Candidates -join ', ')"
 }
 
+# Applies the same source-layout tolerance to individual artifacts. Every
+# selected file is copied into one canonical bundle name before hashing.
 function Find-FirstFile {
   param([Parameter(Mandatory = $true)][string[]]$Candidates)
 
@@ -36,6 +47,9 @@ function Find-FirstFile {
   throw "Missing model file. Checked: $($Candidates -join ', ')"
 }
 
+# Creates the canonical relative path inside a staging bundle. This helper does
+# not preserve unrelated source-tree files, which keeps published manifests
+# limited to runtime dependencies the app actually expects.
 function Copy-BundleFile {
   param(
     [Parameter(Mandatory = $true)][string]$Source,
@@ -48,6 +62,9 @@ function Copy-BundleFile {
   Copy-Item -LiteralPath $Source -Destination $destination -Force
 }
 
+# Materializes the manifest format consumed by the Rust downloader and returns
+# its digest for compile-time pinning. The manifest excludes itself so its trust
+# anchor can be stored independently in application code.
 function Write-BundleManifest {
   param([Parameter(Mandatory = $true)][string]$Bundle)
 
@@ -73,6 +90,8 @@ function Write-BundleManifest {
   (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# Reads a just-published public object with bounded retries so the upload path
+# verifies the user-facing CDN, not only the private S3-compatible endpoint.
 function Get-PublicBytes {
   param([Parameter(Mandatory = $true)][string]$Url)
 
@@ -86,6 +105,8 @@ function Get-PublicBytes {
   }
 }
 
+# Hashes downloaded manifest bytes exactly as the Rust trust-anchor check does.
+# It intentionally accepts bytes rather than text to avoid newline conversion.
 function Get-BytesSha256 {
   param([Parameter(Mandatory = $true)][byte[]]$Bytes)
 
@@ -110,6 +131,8 @@ if (Test-Path -LiteralPath $stageRoot) {
 }
 New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
 
+# Canonicalize Parakeet into the versioned layout `ParakeetPaths` discovers. No
+# model conversion occurs here; exports must already be Windows ONNX artifacts.
 $parakeetSource = Find-FirstDirectory @(
   (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3\$SpeechVersion"),
   (Join-Path $modelsRoot "windows\parakeet-tdt-0.6b-v3\v1"),
@@ -123,6 +146,9 @@ foreach ($file in @("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx"
   Copy-BundleFile -Source (Join-Path $parakeetSource $file) -Bundle $parakeetBundle -RelativePath $file
 }
 
+# Package segmentation and embeddings together because Settings presents
+# diarization as part of the speech install, even though the runtime can fall
+# back to a single-speaker transcript when these files are absent.
 $diarizationSource = Find-FirstDirectory @(
   (Join-Path $modelsRoot "windows\speaker-diarization\$SpeechVersion"),
   (Join-Path $modelsRoot "windows\speaker-diarization\v1"),
@@ -146,6 +172,8 @@ $embedding = Find-FirstFile @(
 )
 Copy-BundleFile -Source $embedding -Bundle $diarizationBundle -RelativePath $embeddingName
 
+# Keep the GGUF and the exact llama.cpp executable/DLL family in one revision.
+# End-user machines therefore need no global llama installation or ABI matching.
 $gemmaSource = Find-FirstDirectory @(
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\$NotesVersion"),
   (Join-Path $modelsRoot "windows\gemma-3-1b-it-qat-4bit\v1"),
@@ -182,6 +210,8 @@ foreach ($backend in $cpuBackends) {
   Copy-BundleFile -Source $backend.FullName -Bundle $gemmaBundle -RelativePath $backend.Name
 }
 
+# Each directory gets an independent trust anchor so a speech-only or notes-only
+# app download can verify exactly the bundle it requested.
 $bundles = @(
   [pscustomobject]@{ Path = $parakeetPath; Directory = $parakeetBundle },
   [pscustomobject]@{ Path = $diarizationPath; Directory = $diarizationBundle },
@@ -191,6 +221,9 @@ foreach ($bundle in $bundles) {
   $bundle | Add-Member -NotePropertyName ManifestSha256 -NotePropertyValue (Write-BundleManifest $bundle.Directory)
 }
 
+# Publication is opt-in and treats versioned prefixes as immutable. `-Force`
+# exists for controlled recovery, while the normal path refuses to replace bytes
+# already visible at a pinned URL.
 if ($Upload) {
   if (-not $R2Endpoint -or -not $R2Bucket) {
     throw "Upload requires R2_ENDPOINT and R2_BUCKET."

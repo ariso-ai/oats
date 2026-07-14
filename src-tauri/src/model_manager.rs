@@ -63,6 +63,9 @@ fn llm_dir(root: &Path) -> std::path::PathBuf {
         .join(LLM_MODEL_NAME)
 }
 
+/// Produces the readiness identity recorded in the shared STT manifest. macOS
+/// retains its historical model version, while Windows includes every bundle
+/// revision so changing either ASR or diarization invalidates the old marker.
 fn stt_model_version() -> String {
     if cfg!(target_os = "windows") {
         WINDOWS_STT_BUNDLES
@@ -75,6 +78,9 @@ fn stt_model_version() -> String {
     }
 }
 
+/// Selects the platform's authoritative notes completion marker. This hides the
+/// macOS/Windows storage-layout difference from recording gates and Settings;
+/// it does not verify individual files on every status poll.
 fn llm_marker_path(root: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         crate::storage::models_dir(root)
@@ -149,6 +155,9 @@ impl Drop for DownloadGuard<'_> {
     }
 }
 
+/// Presents model readiness to the webview without asking unsupported targets to
+/// probe platform-specific layouts. Actual downloads remain separate commands so
+/// merely opening Settings never initiates network activity.
 #[tauri::command]
 pub fn local_model_status() -> Result<ModelStatus, String> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
@@ -163,8 +172,9 @@ pub fn local_model_status() -> Result<ModelStatus, String> {
 }
 
 /// Download and verify the STT models from the R2 mirror, then write the
-/// readiness manifest. See `download_model_bundles` for the integrity model. A guard
-/// serializes against a concurrent STT download.
+/// readiness manifest. See `download_model_bundles` for the integrity model. A
+/// guard serializes against a concurrent STT download. Platform selection here
+/// chooses distribution metadata only; inference remains inside each sidecar.
 #[tauri::command]
 pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
@@ -527,6 +537,9 @@ struct ModelBundle {
     manifest_sha256: &'static str,
 }
 
+/// Retains the existing CoreML/FluidAudio installation layout expected by the
+/// Swift sidecar. The generic downloader can therefore serve both platforms
+/// without forcing a shared on-disk model representation.
 const MACOS_STT_BUNDLES: &[ModelBundle] = &[
     ModelBundle {
         folder: "parakeet-tdt-0.6b-v3",
@@ -546,10 +559,15 @@ const MACOS_STT_BUNDLES: &[ModelBundle] = &[
 const MODELS_CDN_BASE: &str = concat!(r2_base!(), "/models");
 
 /// Windows model bundles use the same immutable, hash-pinned manifest lifecycle
-/// as macOS. Bump the version and repin these hashes with
+/// as macOS while living on a separate publication host. The host is only a
+/// transport location; the compiled manifest pins remain the trust anchors.
+/// Bump the version and repin these hashes with
 /// `scripts/sync-windows-local-models.ps1` whenever a bundle changes.
 const WINDOWS_MODELS_CDN_BASE: &str = "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev/models";
 
+/// Defines speech readiness as the Parakeet and diarization bundles together.
+/// Settings exposes one speech install action, so these revisions advance as a
+/// product unit even though inference can technically fall back without labels.
 const WINDOWS_STT_BUNDLES: &[ModelBundle] = &[
     ModelBundle {
         folder: "windows/parakeet-tdt-0.6b-v3",
@@ -565,6 +583,8 @@ const WINDOWS_STT_BUNDLES: &[ModelBundle] = &[
     },
 ];
 
+/// Ships the GGUF and its exact llama.cpp runtime as one notes bundle. This
+/// avoids relying on a global executable or DLL set that the app cannot version.
 const WINDOWS_LLM_BUNDLES: &[ModelBundle] = &[ModelBundle {
     folder: "windows/gemma-3-1b-it-qat-4bit",
     prefix: "v2",

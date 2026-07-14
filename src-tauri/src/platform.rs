@@ -1,19 +1,39 @@
+//! Native platform capability boundary exposed to the webview.
+//!
+//! Compile-time support belongs here so product code does not infer features
+//! from user-agent strings. These values describe what this build can attempt;
+//! they are not runtime permission checks and do not imply that models are
+//! installed or OS access has been granted.
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// One snapshot of platform support consumed by Settings, recording, and other
+/// frontend workflows. Keeping related flags together lets a new platform enter
+/// through one typed contract instead of scattered conditional branches.
 pub struct PlatformCapabilities {
+    /// Stable product-facing OS family, intentionally coarser than Rust target triples.
     pub os: &'static str,
+    /// Identifies both availability and the implementation family used for diagnostics.
     pub local_backend: LocalBackendCapability,
+    /// Couples feature support with the nearest OS settings destination.
     pub system_audio: UrlCapability,
+    /// Reports native external-capture detection, not the user's enabled preference.
     pub auto_record: SupportedCapability,
+    /// Reports whether the host has a native sharing implementation.
     pub native_share: SupportedCapability,
+    /// Deep links may exist even when permission has already been denied.
     pub notification_settings_url: Option<&'static str>,
+    /// The webview owns microphone capture, while native code supplies the OS link.
     pub microphone_settings_url: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Separates the product promise of Local mode from its platform engine. The
+/// frontend should branch on support; the engine label is descriptive and must
+/// not become a second dispatch mechanism outside native code.
 pub struct LocalBackendCapability {
     pub supported: bool,
     pub engine: Option<&'static str>,
@@ -21,6 +41,9 @@ pub struct LocalBackendCapability {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Models features whose support and settings navigation are related but not
+/// equivalent. Windows can expose Sound settings while system-loopback capture
+/// remains unsupported by this build.
 pub struct UrlCapability {
     pub supported: bool,
     pub settings_url: Option<&'static str>,
@@ -28,10 +51,14 @@ pub struct UrlCapability {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Gives simple native-only features the same extensible object shape as richer
+/// capabilities, avoiding another frontend contract when metadata is added.
 pub struct SupportedCapability {
     pub supported: bool,
 }
 
+/// Reduces target triples to the OS vocabulary shared with TypeScript. Unknown
+/// desktop targets use the conservative Linux bucket until explicitly modeled.
 fn os_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
@@ -42,6 +69,8 @@ fn os_name() -> &'static str {
     }
 }
 
+/// Declares which sidecar family fulfills Local mode on this build. This does
+/// not inspect downloaded files; `model_manager` remains the readiness authority.
 fn local_backend() -> LocalBackendCapability {
     if cfg!(target_os = "macos") {
         LocalBackendCapability {
@@ -61,6 +90,8 @@ fn local_backend() -> LocalBackendCapability {
     }
 }
 
+/// Distinguishes implementation support from discoverability of OS controls.
+/// A settings URL is assistance for the user, not evidence that capture exists.
 fn system_audio() -> UrlCapability {
     if cfg!(target_os = "macos") {
         UrlCapability {
@@ -82,6 +113,9 @@ fn system_audio() -> UrlCapability {
     }
 }
 
+/// Assembles a self-consistent capability snapshot from native compile-time
+/// truth and subsystem probes. No filesystem or permission prompts occur here,
+/// so callers can safely use it during window bootstrap.
 pub fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         os: os_name(),
@@ -110,6 +144,8 @@ pub fn capabilities() -> PlatformCapabilities {
     }
 }
 
+/// Exposes the snapshot as the sole Tauri IPC entry point. The pure constructor
+/// stays separate so native callers and tests do not need an application handle.
 #[tauri::command]
 pub fn platform_capabilities() -> PlatformCapabilities {
     capabilities()

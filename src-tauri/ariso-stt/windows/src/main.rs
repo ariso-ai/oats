@@ -17,6 +17,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use transcribe::transcribe;
 
+/// Keeps the human-facing help text beside the compatibility boundary it
+/// documents. The supported surface intentionally remains smaller than a
+/// general inference CLI because the Tauri host is its only production caller.
 fn usage() -> &'static str {
     "ariso-stt Windows local inference sidecar\n\n\
      Contract:\n\
@@ -24,6 +27,9 @@ fn usage() -> &'static str {
        ariso-stt notes --transcript <path> --models <dir>\n"
 }
 
+/// Converts rich internal errors into the process contract expected by the
+/// Tauri host: stdout is reserved for successful payloads, stderr for diagnosis,
+/// and any failure is represented by a stable non-zero exit.
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -34,6 +40,9 @@ fn main() -> ExitCode {
     }
 }
 
+/// Dispatches the shared `ariso-stt` contract without taking ownership of model
+/// downloads or recording storage. Those lifecycle concerns remain in the host
+/// so macOS and Windows present the same application workflow.
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -59,6 +68,9 @@ fn run() -> Result<()> {
 }
 
 #[derive(Debug, PartialEq)]
+/// Gives the tiny CLI a typed boundary before it reaches inference code. Paths
+/// remain opaque here; existence and bundle completeness are validated by the
+/// model-specific modules that understand those layouts.
 enum SidecarCommand {
     Notes {
         transcript: PathBuf,
@@ -71,6 +83,9 @@ enum SidecarCommand {
     },
 }
 
+/// Preserves the argv shape already used by the macOS sidecar and Rust caller.
+/// This is intentionally not a shell parser, which keeps paths as argv values
+/// and avoids platform-specific quoting behavior.
 fn parse_args(args: &[String]) -> Result<SidecarCommand> {
     if args.first().is_some_and(|arg| arg == "notes") {
         return Ok(SidecarCommand::Notes {
@@ -90,10 +105,15 @@ fn parse_args(args: &[String]) -> Result<SidecarCommand> {
     bail!("{}", usage())
 }
 
+/// Marks path-valued arguments at the parsing boundary while leaving filesystem
+/// policy to the command implementation. A transcript or model path may be
+/// relative in tests even though production callers send absolute paths.
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(required_string_arg(args, flag)?))
 }
 
+/// Centralizes required-value validation so both commands fail in the same
+/// shape and the host can surface one consistent sidecar error contract.
 fn required_string_arg(args: &[String], flag: &str) -> Result<String> {
     let pos = args
         .iter()

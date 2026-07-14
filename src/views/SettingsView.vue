@@ -399,6 +399,9 @@ const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
 const appVersion = __APP_VERSION__;
+// Seed with a render-safe snapshot so the pre-created Settings window never
+// blocks on IPC. `onMounted` replaces it with native truth before model and
+// recording support are evaluated.
 const platformCapabilities = ref(defaultPlatformCapabilities());
 
 const backend = ref<'ariso' | 'local'>('ariso');
@@ -581,6 +584,8 @@ function startMissingDownloads() {
 }
 
 const unsupported = computed(() => modelStatus.value.state === 'unsupported');
+// This value controls availability copy and interaction only; OS permission is
+// a separate concern handled when the user actually enables capture.
 const systemAudioSupported = computed(() => platformCapabilities.value.systemAudio.supported);
 const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
@@ -869,6 +874,9 @@ async function refreshSignedInAccount() {
 }
 
 onMounted(async () => {
+  // Load capabilities first because the following model and recording bootstrap
+  // paths consume them. A failed native call resolves to the composable fallback
+  // instead of preventing the rest of Settings from mounting.
   platformCapabilities.value = await loadPlatformCapabilities();
   await refreshSignedInAccount();
 

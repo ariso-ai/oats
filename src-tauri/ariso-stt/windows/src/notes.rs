@@ -1,3 +1,9 @@
+//! Windows adapter for local meeting-note generation.
+//!
+//! This module preserves the sidecar's Markdown-on-stdout contract while using
+//! a bundled llama.cpp runtime and GGUF model. Model acquisition, readiness UX,
+//! transcript persistence, and retry scheduling remain in the Tauri host.
+
 use crate::models::{GEMMA_GGUF, GEMMA_MODEL_DIR, NOTES_MODEL_VERSION, model_dir};
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
@@ -6,6 +12,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Implements the notes subcommand as a narrow file-to-stdout adapter. It does
+/// not update recording metadata itself; the host interprets success or failure
+/// and owns the durable notes lifecycle shared with macOS.
 pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
     let gemma = discover_gemma(models)?;
     let llama_cli = discover_notes_runtime(models)?;
@@ -20,6 +29,9 @@ pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Isolates llama.cpp process details from the sidecar contract. Prompt-policy
+/// evolution belongs here, while model selection and installation remain fixed
+/// by the versioned bundle discovered below.
 fn run_llama_notes(
     llama_cli: &Path,
     gemma: &Path,
@@ -75,6 +87,9 @@ fn run_llama_notes(
     Ok(notes)
 }
 
+/// Allows smoke tests and diagnostics to constrain expensive generation without
+/// turning runtime tuning into a persisted product setting. Invalid overrides
+/// intentionally fall back to the supported default.
 fn env_positive(name: &str, default: u32) -> u32 {
     env::var(name)
         .ok()
@@ -83,6 +98,9 @@ fn env_positive(name: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// Encodes both the product's notes schema and Gemma's turn protocol in one
+/// prompt boundary. The model is asked for content, while this function owns the
+/// section contract consumed by the existing notes UI.
 fn gemma_notes_prompt(transcript: &str) -> String {
     let instructions = "\
 You are a meeting-notes assistant. You are given a meeting transcript and you write concise meeting notes in Markdown.\n\n\
@@ -101,6 +119,9 @@ Rules:\n\
     )
 }
 
+/// Removes a common model-formatting escape without attempting to parse or
+/// rewrite Markdown. User-visible headings and bullets must otherwise survive
+/// unchanged for the notes editor.
 fn strip_code_fences(raw: &str) -> String {
     raw.replace("\r\n", "\n")
         .lines()
@@ -111,6 +132,9 @@ fn strip_code_fences(raw: &str) -> String {
         .to_string()
 }
 
+/// Separates llama-cli transport chatter from generated content so runtime
+/// upgrades do not leak prompts, timing output, or shutdown text into saved
+/// notes. Content normalization is delegated to `clean_notes`.
 fn clean_llama_output(raw: &str) -> String {
     let normalized = raw.replace("\r\n", "\n");
     let mut seen_prompt = false;
@@ -142,6 +166,9 @@ fn clean_llama_output(raw: &str) -> String {
     }
 }
 
+/// Anchors output at the first supported notes section when the model adds a
+/// preamble. If no known heading exists, preserving the cleaned response gives
+/// the host something diagnosable instead of silently discarding generation.
 fn clean_notes(raw: &str) -> String {
     let without_fences = strip_code_fences(raw);
     for heading in [
@@ -157,6 +184,9 @@ fn clean_notes(raw: &str) -> String {
     without_fences
 }
 
+/// Resolves only the host-installed GGUF artifact and never reaches the network.
+/// This keeps Local mode auditable: downloads happen through explicit Settings
+/// actions, and inference is filesystem-only once readiness is reported.
 pub(crate) fn discover_gemma(models: &Path) -> Result<PathBuf> {
     let model = model_dir(models, GEMMA_MODEL_DIR, NOTES_MODEL_VERSION).join(GEMMA_GGUF);
     model
@@ -165,6 +195,9 @@ pub(crate) fn discover_gemma(models: &Path) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("Gemma GGUF model not found under {}", models.display()))
 }
 
+/// Couples the native llama.cpp executable to the same versioned notes bundle as
+/// the GGUF and DLLs. The sidecar therefore never depends on a machine-global
+/// runtime whose ABI could differ from the packaged model stack.
 pub(crate) fn discover_notes_runtime(models: &Path) -> Result<PathBuf> {
     let runtime = model_dir(models, GEMMA_MODEL_DIR, NOTES_MODEL_VERSION).join("llama-cli.exe");
     runtime.is_file().then_some(runtime).ok_or_else(|| {

@@ -28,8 +28,10 @@ pub struct FinalizeResult {
     pub status: crate::storage::RecordingStatus,
 }
 
-/// Resolve the `ariso-stt` sidecar. `ARISO_STT_BIN` overrides (tests/dev);
-/// otherwise it sits next to the app executable (Tauri externalBin layout).
+/// Resolve the platform's `ariso-stt` sidecar. `ARISO_STT_BIN` overrides
+/// tests/dev; production follows Tauri's externalBin layout and only accounts
+/// for the Windows executable suffix. Engine selection does not leak beyond the
+/// common CLI and JSON contract.
 pub fn sidecar_path() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("ARISO_STT_BIN") {
         return Ok(PathBuf::from(p));

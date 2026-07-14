@@ -233,17 +233,22 @@ jobs:
             src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/release/bundle/dmg/*.dmg
 
+  # Build Windows from the same release tag as macOS, but keep its artifacts in
+  # an isolated QA lane until Authenticode and updater publication are enabled.
+  # This job intentionally does not make Windows public merely by succeeding.
   package-windows:
     name: Build Windows installer artifacts
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: windows-latest
-    # Internal QA artifacts only until the Windows local sidecar and installer
-    # signing path are complete.
+    # The release environment supplies Tauri updater signing credentials. It
+    # does not imply the resulting executable has an Authenticode signature.
     environment: release
     permissions:
       contents: read
     steps:
+      # Pin packaging to the immutable tag produced by release-please rather
+      # than whatever commit happens to be at the branch head.
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -261,13 +266,20 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
+      # Fail before expensive installer work if the platform sidecar no longer
+      # satisfies the contract used by the Tauri host.
       - name: Test Windows ariso-stt sidecar
         run: cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml --locked
 
+      # Materialize Tauri's target-named external binary; model files remain
+      # explicit post-install downloads and are not embedded in the installer.
       - name: Build Windows ariso-stt sidecar
         shell: pwsh
         run: ./scripts/build-windows-sidecar.ps1
 
+      # Produce both distribution shapes from one Tauri invocation and updater
+      # signing key so QA compares identical application payloads. This is not
+      # a substitute for Authenticode signing of the executable and MSI.
       - name: Build Windows installer bundles
         shell: pwsh
         env:
@@ -275,6 +287,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: ./scripts/build-windows-installers.ps1
 
+      # Assert package and updater-signature shape here because upload-artifact
+      # would otherwise happily archive an incomplete bundle directory.
       - name: Verify Windows installer artifacts
         shell: pwsh
         run: |
@@ -293,6 +307,8 @@ jobs:
           $msi | ForEach-Object { "MSI: $($_.FullName)" }
           $sigs | ForEach-Object { "SIG: $($_.FullName)" }
 
+      # Keep installer formats as separate short-lived QA artifacts. The public
+      # updater manifest is still generated exclusively by the publish job.
       - name: Upload Windows NSIS bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -303,6 +319,8 @@ jobs:
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/**
 
+      # MSI remains independently downloadable for enterprise install testing;
+      # it is not selected as the public first-run installer in this workflow.
       - name: Upload Windows MSI bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

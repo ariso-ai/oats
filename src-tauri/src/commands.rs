@@ -1081,10 +1081,12 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
         win.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    #[cfg(target_os = "macos")]
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
-    // the same row, just to the right of them.
+    // the same row, just to the right of them. Other platforms keep native
+    // window chrome because this AppKit-specific composition has no equivalent
+    // role in the library UI.
+    #[cfg(target_os = "macos")]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings")
@@ -1174,6 +1176,9 @@ pub fn share_text_native(
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
+/// Keeps the IPC command registered on every desktop target while making the
+/// unsupported boundary explicit. Capability-aware UI should hide this path;
+/// the error remains defense in depth for stale or direct callers.
 pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), String> {
     Err("native share is only supported on macOS".to_string())
 }

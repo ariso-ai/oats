@@ -313,6 +313,9 @@ fn open_update_window<R: Runtime>(app: &AppHandle<R>) {
         s.latest_known.as_ref().map(|i| i.mandatory).unwrap_or(false)
     };
 
+    // The overlay exists to integrate web content with macOS traffic lights.
+    // Windows and future platforms retain native chrome rather than inheriting
+    // a visual convention that also changes drag and close behavior.
     #[cfg(target_os = "macos")]
     let builder = WebviewWindowBuilder::new(
         app,

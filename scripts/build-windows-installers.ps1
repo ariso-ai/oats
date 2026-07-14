@@ -1,3 +1,9 @@
+<#
+Builds Windows installer bundles through the same Tauri path used by release
+CI. This script owns local artifact cleanup and shape validation; it
+does not publish releases or provide Authenticode credentials, and Tauri updater
+signatures are produced only when the caller supplies its signing key.
+#>
 param(
   [string]$Bundles = "nsis,msi",
   [string]$Toolchain = "stable-x86_64-pc-windows-msvc",
@@ -12,6 +18,9 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $Root
 
+# Cleanup is intentionally constrained to the target bundle directory. This
+# guard exists because installer builds remove stale outputs before packaging;
+# it is not a general path-validation utility for arbitrary repository scripts.
 function Assert-ChildPath {
   param(
     [Parameter(Mandatory = $true)]

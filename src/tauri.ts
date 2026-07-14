@@ -96,9 +96,16 @@ export async function getDesktopConfig(): Promise<DesktopConfig> {
   return invoke<DesktopConfig>('get_desktop_config');
 }
 
+/** Product-level OS vocabulary shared with Rust. It intentionally omits target
+ * architecture because feature decisions should not parse target triples. */
 export type PlatformOs = 'macos' | 'windows' | 'linux';
+
+/** Diagnostic identity of the native Local implementation. Frontend workflows
+ * branch on `supported`; they do not dispatch directly on this engine label. */
 export type LocalBackendEngine = 'swift-mlx' | 'cpp-sidecar' | null;
 
+/** Compile-time feature support reported by the native host. This does not
+ * represent OS permission state or whether local model files are installed. */
 export interface PlatformCapabilities {
   os: PlatformOs;
   localBackend: { supported: boolean; engine: LocalBackendEngine };
@@ -109,6 +116,8 @@ export interface PlatformCapabilities {
   microphoneSettingsUrl: string | null;
 }
 
+/** Thin IPC boundary for callers that need the native source of truth. Caching
+ * and browser/test fallback policy live in `usePlatformCapabilities`. */
 export function getPlatformCapabilities(): Promise<PlatformCapabilities> {
   return invoke<PlatformCapabilities>('platform_capabilities');
 }

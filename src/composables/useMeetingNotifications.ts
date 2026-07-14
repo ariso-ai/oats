@@ -51,7 +51,8 @@ export async function ensureNotificationPermission(): Promise<boolean> {
 
 /**
  * Open the OS notification settings so the user can grant permission manually.
- * Used when a permission request can't surface a prompt.
+ * Used when a permission request can't surface a prompt. Native capabilities
+ * own the exact allowlisted deep link; this layer owns only the user workflow.
  */
 export async function openNotificationSettings(): Promise<void> {
   const url = (await loadPlatformCapabilities()).notificationSettingsUrl;

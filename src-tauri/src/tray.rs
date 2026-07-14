@@ -12,10 +12,17 @@ const TRAY_ICON_TEMPLATE: &[u8] = include_bytes!("../../src/assets/oats-tray.png
 // Windows does not reliably template-tint tray icons, so use concrete color
 // assets and swap them on theme changes.
 #[cfg(target_os = "windows")]
+/// Concrete icon selected when the Windows shell reports a light theme; the
+/// asset, rather than shell tinting, owns the required contrast.
 const TRAY_ICON_WINDOWS_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
 #[cfg(target_os = "windows")]
+/// Companion asset for a dark Windows shell theme. Keeping it bundled avoids
+/// runtime image manipulation and preserves predictable alpha rendering.
 const TRAY_ICON_WINDOWS_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
 
+/// Resolves the platform-appropriate icon bytes behind one tray construction
+/// path. macOS keeps template semantics, while Windows receives already-colored
+/// pixels because its notification area does not honor AppKit-style masks.
 fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
     #[cfg(target_os = "windows")]
     {
@@ -33,8 +40,9 @@ fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
     }
 }
 
-/// Re-apply the template tray icon after startup and theme notifications. The
-/// icon bytes stay constant; macOS owns the actual light/dark tint.
+/// Re-applies the platform icon after startup and theme notifications. macOS
+/// reuses one template mask and delegates tinting to AppKit; Windows swaps the
+/// concrete asset selected above. Menu state is intentionally untouched.
 pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
     let Some(tray) = app.tray_by_id("main") else { return };
     if let Ok(icon) = tray_icon(theme) {

@@ -1,3 +1,8 @@
+<#
+Produces the target-suffixed external binary name Tauri expects when packaging
+Windows. The Rust project remains the implementation source of truth; this
+script does not download inference models or bundle runtime model assets.
+#>
 param(
   [string]$Toolchain = "stable-x86_64-pc-windows-msvc",
   [string]$Target = "x86_64-pc-windows-msvc"

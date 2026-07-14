@@ -1,3 +1,9 @@
+//! Windows transcription and speaker-label orchestration.
+//!
+//! sherpa-onnx supplies the model engines, but this module owns their composition
+//! into the stable `ariso-stt` JSON contract consumed by Tauri storage. It does
+//! not download models, identify real people, or persist recordings.
+
 use crate::audio::{Audio, decode_audio, resample_linear, slice_audio};
 use crate::models::{DiarizationPaths, ParakeetPaths};
 use anyhow::{Result, anyhow, bail};
@@ -13,6 +19,9 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Mirrors the language-neutral sidecar schema shared with macOS. Keeping this
+/// output engine-agnostic lets the host finalize recordings without branching
+/// on Parakeet, CoreML, or future inference backends.
 pub(crate) struct TranscriptOutput {
     language: String,
     duration_seconds: f64,
@@ -21,12 +30,17 @@ pub(crate) struct TranscriptOutput {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+/// Represents a transcript-local speaker identity, not a known person. Mapping
+/// names or meeting attendees is intentionally outside offline diarization.
 struct Participant {
     id: u32,
     label: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+/// Couples recognized text to a normalized speaker and time span for the host's
+/// existing transcript renderer. It carries no engine confidence or token data
+/// because those are not part of the shared storage contract.
 struct Segment {
     speaker: u32,
     text: String,
@@ -34,6 +48,9 @@ struct Segment {
     end: f64,
 }
 
+/// Coordinates decoding, Parakeet, and optional diarization into one host-facing
+/// result. If speaker models are unavailable or yield no usable spans, the
+/// contract still degrades to a complete single-speaker transcript.
 pub(crate) fn transcribe(audio_path: &Path, models: &Path) -> Result<TranscriptOutput> {
     let paths = ParakeetPaths::discover(models)?;
     let audio = decode_audio(audio_path)?;
@@ -95,6 +112,9 @@ pub(crate) fn transcribe(audio_path: &Path, models: &Path) -> Result<TranscriptO
     })
 }
 
+/// Provides the smallest reusable ASR operation for both whole recordings and
+/// diarized clips. Speaker assignment and timestamps stay outside this helper so
+/// Parakeet remains unaware of the transcript composition policy.
 fn recognize_text(
     recognizer: &OfflineRecognizer,
     sample_rate: i32,
@@ -116,6 +136,9 @@ fn recognize_text(
     Ok(text)
 }
 
+/// Turns anonymous speaker spans into independently recognized transcript
+/// segments. It intentionally creates generic labels only; identity resolution
+/// and participant enrichment would require meeting metadata outside the model.
 fn transcribe_diarized(
     recognizer: &OfflineRecognizer,
     audio: &Audio,
@@ -248,12 +271,18 @@ fn transcribe_diarized(
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Normalizes sherpa-onnx diarization output before it enters the shared schema.
+/// Keeping the engine's signed speaker IDs private prevents invalid native
+/// values from leaking into host storage.
 struct SpeakerSpan {
     speaker: u32,
     start: f64,
     end: f64,
 }
 
+/// Clamps native-model spans to the decoded recording and rejects unusable IDs
+/// or ranges. This is a trust boundary around inference output, not an attempt
+/// to merge overlapping speech or improve diarization quality.
 fn sanitize_diarization_segments(
     segments: Vec<OfflineSpeakerDiarizationSegment>,
     duration: f64,
@@ -276,16 +305,25 @@ fn sanitize_diarization_segments(
         .collect()
 }
 
+/// Keeps verbose model diagnostics opt-in and on stderr so stdout remains valid
+/// JSON for the host. This switch is for development and smoke tests, not a
+/// persisted application preference.
 fn debug_diarization_enabled() -> bool {
     env::var("ARISO_DEBUG_DIARIZATION").is_ok_and(|value| value != "0")
 }
 
+/// Caps default CPU parallelism to leave the desktop responsive during local
+/// inference. Benchmark tooling can override it; maximum throughput is not the
+/// production default on general-purpose laptops.
 fn default_threads() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get().clamp(1, 4) as i32)
         .unwrap_or(2)
 }
 
+/// Exposes bounded numeric tuning to diagnostics without broadening the public
+/// CLI contract. Invalid or negative values fall back so environment mistakes
+/// cannot create nonsensical model spans.
 fn env_float(name: &str, default: f64) -> f64 {
     env::var(name)
         .ok()

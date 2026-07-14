@@ -20,6 +20,9 @@ concurrency:
 jobs:
   validate:
     name: Validate (${{ matrix.os }})
+    # Keep frontend and host validation under one cross-platform contract. The
+    # matrix proves each native implementation builds; release signing and
+    # installer publication deliberately remain outside pull-request CI.
     strategy:
       fail-fast: false
       matrix:
@@ -108,10 +111,14 @@ jobs:
           cp .xcode/Build/Products/Release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
           cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 
+      # Exercise the sidecar's shared CLI/JSON contract before its release
+      # binary is copied into Tauri's externalBin location.
       - name: Test Windows ariso-stt sidecar
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml --locked
 
+      # The following host build expects the target-suffixed external binary to
+      # exist even though CI is not producing an installer.
       - name: Build Windows ariso-stt sidecar
         if: runner.os == 'Windows'
         shell: pwsh

@@ -21,6 +21,9 @@ export function useRecorder() {
   const error: Ref<string | null> = ref(null);
   const durationSeconds: Ref<number> = ref(0);
   const startedAt: Ref<string | null> = ref(null);
+  // Starts disabled until the native snapshot arrives so browser previews and
+  // failed IPC cannot accidentally enter the privileged system-audio path.
+  // Permission state is checked later by the native capture command.
   const systemAudioSupported: Ref<boolean> = ref(false);
   // Wall-clock of the last frame that carried real sound, for the silence
   // backstop. Seeded on start and reset on resume so paused gaps don't count.
@@ -124,6 +127,9 @@ export function useRecorder() {
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
 
+    // Recording modes come from persisted user choices, but capability support
+    // comes from the current binary. Intersecting them here is the final guard
+    // before native capture rather than trusting Settings to have been opened.
     const caps = await loadPlatformCapabilities();
     systemAudioSupported.value = hasTauri && caps.systemAudio.supported;
     const useSystemAudio =

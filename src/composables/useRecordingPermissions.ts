@@ -78,7 +78,9 @@ export async function checkSystemAudioPermission(): Promise<boolean> {
   }
 }
 
-/** Open the OS microphone permission pane when the platform exposes one. */
+/** Open the OS microphone permission pane when the platform exposes one. The
+ * native capability layer owns the exact allowlisted URL; this helper remains a
+ * UI action and does not infer whether permission is currently denied. */
 export async function openMicSettings(): Promise<void> {
   const url = (await loadPlatformCapabilities()).microphoneSettingsUrl;
   if (url) await openUrl(url);
@@ -87,6 +89,8 @@ export async function openMicSettings(): Promise<void> {
 /**
  * Open the OS system-audio settings pane when the platform exposes one. On
  * macOS this is Privacy & Security; on Windows this is the Sound settings page.
+ * A URL can exist even when capture is unsupported, so callers must still use
+ * `systemAudio.supported` for feature gating.
  */
 export async function openSystemAudioSettings(): Promise<void> {
   const url = (await loadPlatformCapabilities()).systemAudio.settingsUrl;

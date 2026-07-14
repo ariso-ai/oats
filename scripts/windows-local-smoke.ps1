@@ -1,3 +1,9 @@
+<#
+Exercises the real Windows sidecar and installed local models while reporting
+machine context and elapsed time. This is a developer performance/contract
+probe, not the installed-app smoke test: it does not download models, drive the
+Tauri UI, or validate installer and updater behavior.
+#>
 param(
   [string]$Sidecar = (Join-Path (Get-Location) "src-tauri\ariso-stt\windows\target\debug\ariso-stt.exe"),
   [Parameter(Mandatory = $true)]
@@ -11,6 +17,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Wraps a sidecar operation in report-friendly timing without deciding whether
+# its result is semantically correct. Each caller performs command-specific
+# validation before the measurement is added to the final JSON report.
 function Invoke-Timed {
   param(
     [Parameter(Mandatory = $true)]
@@ -29,6 +38,9 @@ function Invoke-Timed {
   }
 }
 
+# Captures enough hardware identity to compare CPU-oriented runs without adding
+# vendor-specific benchmark dependencies. Registry fallback keeps the report
+# useful on machines where CIM video enumeration is restricted.
 function Get-HardwareSummary {
   $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Name
   $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
@@ -47,6 +59,9 @@ function Get-HardwareSummary {
   }
 }
 
+# Reads RIFF metadata solely to calculate real-time factor. It is intentionally
+# not the application's audio parser and returns null for formats or layouts the
+# lightweight probe cannot understand.
 function Get-WavDurationSeconds {
   param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -75,6 +90,9 @@ function Get-WavDurationSeconds {
   [math]::Round($dataBytes / $byteRate, 3)
 }
 
+# Creates a longer deterministic fixture by repeating PCM payload bytes while
+# preserving the original WAV format header. This measures scaling behavior; it
+# does not simulate conversational variation or diarization quality.
 function New-RepeatedWav {
   param(
     [Parameter(Mandatory = $true)]
@@ -155,6 +173,8 @@ $results += [pscustomobject]@{
   runtimeBackend = "CPU by default; dedicated GPU not required"
 }
 
+# Transcription validation focuses on the shared JSON contract and timing. Text
+# quality remains a manual/model-evaluation concern outside this smoke script.
 if ($Audio) {
   $ranWork = $true
   if (-not (Test-Path -LiteralPath $Audio)) {
@@ -185,6 +205,9 @@ if ($Audio) {
   }
 }
 
+# Notes validation confirms the llama/Gemma process contract and Markdown shape.
+# Smaller token/context overrides keep developer smoke runs bounded and are not
+# the production notes policy.
 if ($Transcript) {
   $ranWork = $true
   if (-not (Test-Path -LiteralPath $Transcript)) {
