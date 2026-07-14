@@ -483,8 +483,6 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
 
 #[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
-
     // Focus if already exists
     if let Some(win) = app.get_webview_window("settings") {
         win.show().map_err(|e: tauri::Error| e.to_string())?;
@@ -492,11 +490,7 @@ pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String>
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/#/settings".into()))
-        .title("Oats Settings")
-        .inner_size(450.0, 800.0)
-        .resizable(false)
-        .center()
+    crate::window_style::settings_window_builder(&app)
         .build()
         .map_err(|e| e.to_string())?;
 
