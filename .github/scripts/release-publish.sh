@@ -94,11 +94,22 @@ fi
 
 # The version in tauri.conf.json (strip leading 'v' from tag).
 VERSION="${RELEASE_TAG#v}"
+if [[ ! "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+  echo "Release tag produces an unsafe R2 path component: ${VERSION}" >&2
+  exit 1
+fi
 
-# Asset URL is the stable R2 path the updater downloads the payload from. The
-# object at this key is overwritten by the upload below.
-MAC_ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz"
-WINDOWS_ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats-setup.exe"
+# Updater payloads are immutable and versioned. A client that cached an older
+# latest.json therefore keeps downloading the exact bytes covered by that
+# manifest's signature even if a later publish is interrupted. Stable aliases
+# remain human download links and are updated only after latest.json is live.
+PUBLIC_R2_BASE="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev"
+MAC_SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+WINDOWS_SHA256=$(shasum -a 256 "$WINDOWS_INSTALLER" | awk '{print $1}')
+MAC_ASSET_KEY="desktop/releases/${VERSION}/oats-${MAC_SHA256}.app.tar.gz"
+WINDOWS_ASSET_KEY="desktop/releases/${VERSION}/oats-${WINDOWS_SHA256}-setup.exe"
+MAC_ASSET_URL="${PUBLIC_R2_BASE}/${MAC_ASSET_KEY}"
+WINDOWS_ASSET_URL="${PUBLIC_R2_BASE}/${WINDOWS_ASSET_KEY}"
 
 # Read the detached signature contents (single line of base64).
 MAC_SIGNATURE=$(cat "$SIGFILE")
@@ -147,14 +158,28 @@ jq -n \
   }' > latest.json
 
 NOCACHE="no-cache, max-age=0, must-revalidate"
+IMMUTABLE_CACHE="public, max-age=31536000, immutable"
 
-# Upload payloads BEFORE the manifest that references them, so a client reading
-# the new latest.json never points at a missing object.
-aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/desktop/oats.app.tar.gz" \
+# Upload immutable updater payloads BEFORE the manifest that references them,
+# so a client reading the new latest.json never points at a missing object.
+aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/${MAC_ASSET_KEY}" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/gzip \
+  --cache-control "$IMMUTABLE_CACHE"
+
+aws s3 cp "$WINDOWS_INSTALLER" "s3://${R2_BUCKET}/${WINDOWS_ASSET_KEY}" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --content-type application/vnd.microsoft.portable-executable \
+  --cache-control "$IMMUTABLE_CACHE"
+
+aws s3 cp latest.json "s3://${R2_BUCKET}/desktop/latest.json" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --content-type application/json \
   --cache-control "$NOCACHE"
 
+# Convenience aliases are not updater targets. Publish them only after the
+# signed manifest points at immutable payloads, so alias failures cannot break
+# update checks for already-installed clients.
 aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/oats.dmg" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/x-apple-diskimage \
@@ -163,9 +188,4 @@ aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/oats.dmg" \
 aws s3 cp "$WINDOWS_INSTALLER" "s3://${R2_BUCKET}/desktop/oats-setup.exe" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/vnd.microsoft.portable-executable \
-  --cache-control "$NOCACHE"
-
-aws s3 cp latest.json "s3://${R2_BUCKET}/desktop/latest.json" \
-  --endpoint-url "$R2_ENDPOINT" \
-  --content-type application/json \
   --cache-control "$NOCACHE"
