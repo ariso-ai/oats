@@ -129,6 +129,15 @@
 
       <div v-else class="divider" />
 
+      <!-- Prep banner: only Ariso meetings ever carry a prepId (set on the
+           /meetings list row when a meeting prep exists). -->
+      <div v-if="detail.prepId != null" class="prep-banner">
+        <span class="prep-banner-label">✨ Meeting prep is ready</span>
+        <button class="prep-btn" type="button" @click="togglePrep">
+          {{ showPrep ? 'Hide prep' : 'View prep' }}
+        </button>
+      </div>
+
       <!-- Tabs + generation status -->
       <div v-if="availableTabs.length" class="card-tabs">
         <div class="segment">
@@ -136,10 +145,10 @@
             v-for="t in availableTabs"
             :key="t.key"
             class="seg-btn"
-            :class="{ 'seg-btn--active': activeTab === t.key }"
+            :class="{ 'seg-btn--active': !showPrep && activeTab === t.key }"
             type="button"
             :disabled="t.disabled"
-            @click="t.disabled || (activeTab = t.key)"
+            @click="onTabClick(t)"
           >{{ t.label }}</button>
         </div>
         <div v-if="showStatusChip" class="tab-status">
@@ -169,11 +178,20 @@
 
       <!-- Content -->
       <div class="card-content">
-        <div v-if="!availableTabs.length" class="content-empty">
+        <div v-if="!showPrep && !availableTabs.length" class="content-empty">
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
         </div>
 
-        <div v-show="activeTab === 'note'" class="tab-pane">
+        <!-- Prep pane: replaces the tab panes while open. v-if (not v-show) is
+             fine — the pane holds no editor state worth preserving. -->
+        <div v-if="showPrep" class="tab-pane prep-pane">
+          <div v-if="loadingPrep" class="card-state"><span class="spinner" /><span>Loading prep…</span></div>
+          <div v-else-if="prepError" class="card-state card-state--error">{{ prepError }}</div>
+          <div v-else-if="prepContent" class="md" v-html="renderMarkdown(prepContent)" />
+          <div v-else class="content-empty">No prep available.</div>
+        </div>
+
+        <div v-show="!showPrep && activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
           <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
 
@@ -211,7 +229,7 @@
           </template>
         </div>
 
-        <div v-show="activeTab === 'assessment'" class="tab-pane">
+        <div v-show="!showPrep && activeTab === 'assessment'" class="tab-pane">
           <section v-if="detail.score !== undefined" class="sec">
             <h3 class="sec-h">Meeting Assessment</h3>
             <div class="assess-score">
@@ -244,7 +262,7 @@
           </section>
         </div>
 
-        <div v-show="activeTab === 'transcript'" class="tab-pane">
+        <div v-show="!showPrep && activeTab === 'transcript'" class="tab-pane">
           <!-- Audio playback sits right under the tabs, surfaced only while the
                Transcript tab is active; keyed by meeting id so switching selection
                remounts the player instead of leaking the previous blob URL. Both
@@ -295,7 +313,7 @@
           <div v-else class="content-empty">No transcript available.</div>
         </div>
 
-        <div v-show="activeTab === 'mynote'" class="tab-pane tab-pane--editor">
+        <div v-show="!showPrep && activeTab === 'mynote'" class="tab-pane tab-pane--editor">
           <div class="notes-head">
             <input
               v-if="editingNoteTitle"
@@ -562,6 +580,49 @@ function onRegenerate(): void {
   void progress.retryNotes();
 }
 
+// Meeting prep (Ariso only): fetched on demand the first time the banner's
+// "View prep" is clicked, then cached for the lifetime of the loaded meeting.
+// While open, the prep pane replaces the tab panes and no tab reads as active.
+const showPrep = ref(false);
+const prepContent = ref<string | null>(null);
+const prepLoaded = ref(false);
+const loadingPrep = ref(false);
+const prepError = ref<string | null>(null);
+
+function togglePrep(): void {
+  showPrep.value = !showPrep.value;
+  if (showPrep.value) void loadPrep();
+}
+
+function onTabClick(t: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; disabled?: boolean }): void {
+  if (t.disabled) return;
+  showPrep.value = false;
+  activeTab.value = t.key;
+}
+
+// Fetch the prep the first time the pane opens. Guarded by reqId (same pattern
+// as loadTranscript) so a meeting switch mid-fetch drops the stale result.
+async function loadPrep(): Promise<void> {
+  const d = detail.value;
+  const backend = detailBackend;
+  if (!d || d.prepId == null || !backend || prepLoaded.value || loadingPrep.value) return;
+  const my = reqId;
+  loadingPrep.value = true;
+  prepError.value = null;
+  try {
+    const content = await backend.getMeetingPrep(d.prepId);
+    if (my !== reqId) return;
+    prepContent.value = content;
+    prepLoaded.value = true;
+  } catch (e) {
+    if (my !== reqId) return;
+    console.error('Failed to load meeting prep', e);
+    prepError.value = 'Could not load the meeting prep.';
+  } finally {
+    if (my === reqId) loadingPrep.value = false;
+  }
+}
+
 // When the poller reports a newly-ready artifact, read it into `detail` so the
 // now-enabled tab renders its content. Guarded by reqId so a meeting switch
 // mid-read drops the stale result.
@@ -731,6 +792,11 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
   activeClipId.value = null;
+  showPrep.value = false;
+  prepContent.value = null;
+  prepLoaded.value = false;
+  loadingPrep.value = false;
+  prepError.value = null;
   progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
@@ -1256,6 +1322,16 @@ const durationLabel = computed<string | null>(() => {
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
 .meta-ari { margin-left: auto; }
+
+/* Prep banner — slim full-bleed strip between the meta band and the tabs. */
+.prep-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 13px; }
+.prep-banner-label { color: #1c1c1c; font-weight: 500; }
+.prep-btn {
+  height: 28px; padding: 0 12px; flex-shrink: 0;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.prep-btn:hover { background: #fbfbfb; }
 .card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
 .clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .clip-row--active { background: #f7f6f4; }

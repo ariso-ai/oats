@@ -8,6 +8,7 @@ const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const getMeetingAudio = vi.fn();
 const deleteMeetingClip = vi.fn();
+const getMeetingPrep = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
@@ -79,6 +80,7 @@ beforeEach(() => {
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
     getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
     deleteMeetingClip: (...a: [MeetingListItem, string]) => deleteMeetingClip(...a),
+    getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue({ content: '', title: '' });
@@ -92,6 +94,7 @@ beforeEach(() => {
   readRecordingFile.mockResolvedValue(null);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
+  getMeetingPrep.mockResolvedValue(null);
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -1067,5 +1070,63 @@ describe('MeetingDetailView per-clip delete', () => {
     // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
     expect(wrapper.text()).toContain('from clip two');
     expect(wrapper.text()).not.toContain('from clip one');
+  });
+});
+
+describe('MeetingDetailView meeting prep', () => {
+  it('shows no banner when the meeting has no prepId', async () => {
+    const wrapper = await mountWith(detail({ digest: 'D' }));
+    expect(wrapper.find('.prep-banner').exists()).toBe(false);
+  });
+
+  it('View prep fetches once, renders the markdown, and deactivates the tabs', async () => {
+    getMeetingPrep.mockResolvedValue('## Open items');
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    expect(wrapper.find('.prep-banner').exists()).toBe(true);
+    expect(wrapper.find('.prep-btn').text()).toBe('View prep');
+
+    await wrapper.find('.prep-btn').trigger('click');
+    await flushPromises();
+
+    expect(getMeetingPrep).toHaveBeenCalledTimes(1);
+    expect(getMeetingPrep).toHaveBeenCalledWith(4339);
+    expect(wrapper.find('.prep-pane').text()).toContain('Open items');
+    expect(wrapper.find('.seg-btn--active').exists()).toBe(false);
+    expect(wrapper.find('.prep-btn').text()).toBe('Hide prep');
+
+    // Hide, then re-open: the cached prep is reused (no second fetch).
+    await wrapper.find('.prep-btn').trigger('click');
+    expect(wrapper.find('.prep-pane').exists()).toBe(false);
+    await wrapper.find('.prep-btn').trigger('click');
+    await flushPromises();
+    expect(getMeetingPrep).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking a tab closes the prep pane and re-activates that tab', async () => {
+    getMeetingPrep.mockResolvedValue('## P');
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await wrapper.find('.prep-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').exists()).toBe(true);
+
+    await wrapper.find('.seg-btn').trigger('click'); // "AI Notes"
+    expect(wrapper.find('.prep-pane').exists()).toBe(false);
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+  });
+
+  it('shows an empty state when the prep API resolves null', async () => {
+    getMeetingPrep.mockResolvedValue(null);
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await wrapper.find('.prep-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').text()).toContain('No prep available.');
+  });
+
+  it('shows an error state when the prep fetch fails', async () => {
+    getMeetingPrep.mockRejectedValue(new Error('boom'));
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await wrapper.find('.prep-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').text()).toContain('Could not load the meeting prep.');
   });
 });
