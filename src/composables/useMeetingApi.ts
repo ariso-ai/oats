@@ -55,6 +55,9 @@ interface ScheduledMeeting {
   /** Ariso: when truthy, Ari (the notetaker bot) is scheduled to auto-join and
    *  record this meeting server-side. May arrive as bool / 0-1 / "true"-"1". */
   auto_join_scheduled?: boolean | number | string;
+  /** Ariso: present when a meeting prep exists for this meeting. May arrive
+   *  as a number or numeric string. */
+  prep_id?: number | string;
 }
 
 // Search currently returns the same meeting shape as `/meetings`, with optional
@@ -353,6 +356,18 @@ export function useMeetingApi() {
     return { content, title };
   }
 
+  // Fetch a meeting prep's markdown content. Resolves to null on 404 (no prep)
+  // and when the payload holds no usable content, so callers can treat "absent"
+  // distinctly from a real error (same convention as getMeetingTranscript).
+  async function getMeetingPrep(prepId: number): Promise<string | null> {
+    const res = await api.request('GET', `/meeting-preps/${encodeURIComponent(String(prepId))}`);
+    if (res.status === 404) return null;
+    assertOk(res, 200, 'get meeting prep');
+    const data = res.data as { meetingPrep?: { content?: unknown } } | null;
+    const content = data?.meetingPrep?.content;
+    return typeof content === 'string' && content.trim() ? content : null;
+  }
+
   async function updateMeeting(
     meetingId: number,
     updates: { status?: string; title?: string }
@@ -544,6 +559,7 @@ export function useMeetingApi() {
     deleteMeetingRecordingClip,
     getMeetingTranscript,
     getMeetingIndividualNote,
+    getMeetingPrep,
     updateMeeting,
     endMeeting,
     saveTranscript,

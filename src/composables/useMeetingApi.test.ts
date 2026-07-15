@@ -108,3 +108,31 @@ describe('multi-clip', () => {
     ]);
   });
 });
+
+describe('useMeetingApi.getMeetingPrep', () => {
+  it('GETs /meeting-preps/{id} and resolves the markdown content', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { meetingPrep: { id: 4339, content: '## Open items' } },
+    });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toBe('## Open items');
+    expect(apiRequest).toHaveBeenCalledWith('GET', '/meeting-preps/4339');
+  });
+
+  it('resolves null on 404 (no prep)', async () => {
+    apiRequest.mockResolvedValue({ status: 404, data: null });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toBeNull();
+  });
+
+  it('resolves null when content is missing or blank', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { meetingPrep: { id: 4339 } } });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toBeNull();
+    apiRequest.mockResolvedValue({ status: 200, data: { meetingPrep: { id: 4339, content: '   ' } } });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toBeNull();
+  });
+
+  it('throws the server error on other non-200 statuses', async () => {
+    apiRequest.mockResolvedValue({ status: 500, data: { error: 'boom' } });
+    await expect(useMeetingApi().getMeetingPrep(4339)).rejects.toThrow('boom');
+  });
+});
