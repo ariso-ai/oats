@@ -1,4 +1,5 @@
-//! System-audio capture via Core Audio process taps (macOS 14.4+).
+//! Native system-audio capture. macOS uses Core Audio process taps; Windows
+//! uses WASAPI shared-mode loopback on the default render endpoint.
 //!
 //! This replaces the previous ScreenCaptureKit implementation. ScreenCaptureKit
 //! gated audio behind the broad "Screen & System Audio Recording" permission;
@@ -12,12 +13,12 @@
 //! mono, resample to 16 kHz, convert to Int16, and emit as `system-audio-data`
 //! (base64) to match the contract the recorder frontend already consumes.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod imp {
-    /// No system-audio capture off macOS; the recorder treats this as "no
-    /// system source available" and falls back to mic-only.
+    /// Linux has no capture backend yet; capability reporting keeps this path
+    /// out of normal recording flows.
     pub fn start(_app: tauri::AppHandle) -> Result<(), String> {
-        Err("System audio capture is only supported on macOS".into())
+        Err("System audio capture is not supported on this platform".into())
     }
     pub fn stop() -> Result<(), String> {
         Ok(())
@@ -25,6 +26,272 @@ mod imp {
     pub fn request_permission() -> bool {
         true
     }
+    pub fn check_permission() -> bool {
+        true
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod imp {
+    use crate::audio_util::{
+        Resampler, base64_encode, downmix_interleaved_f32,
+    };
+    use std::ptr;
+    use std::slice;
+    use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+    use std::sync::Mutex;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+    use tauri::Emitter;
+    use wasapi::{SampleType, WaveFormat, deinitialize, initialize_mta};
+    use windows::Win32::Foundation::{
+        CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows::Win32::Media::Audio::{
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole,
+        eRender,
+    };
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject};
+    use windows::core::PCSTR;
+
+    /// The capture thread owns every COM/WASAPI object. Stop communicates over
+    /// a channel and joins that thread so no endpoint handle survives a retry.
+    struct CaptureState {
+        stop: Sender<()>,
+        thread: JoinHandle<()>,
+    }
+
+    static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
+
+    struct ComGuard;
+
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            deinitialize();
+        }
+    }
+
+    /// Keep the event alive for the full stream lifetime and close the native
+    /// handle deterministically on every initialization and capture error.
+    struct EventHandle(HANDLE);
+
+    impl Drop for EventHandle {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn run_capture(
+        app: tauri::AppHandle,
+        ready: Sender<Result<(), String>>,
+        stop: Receiver<()>,
+    ) {
+        let result = (|| -> Result<(), String> {
+            let hr = initialize_mta();
+            if hr.is_err() {
+                return Err(format!("CoInitializeEx for WASAPI failed: {hr:?}"));
+            }
+            let _com = ComGuard;
+
+            let enumerator: IMMDeviceEnumerator = unsafe {
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            }
+            .map_err(|e| e.to_string())?;
+            let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+                .map_err(|e| format!("no default Windows output device: {e}"))?;
+            let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
+                .map_err(|e| e.to_string())?;
+
+            // Ask the Windows audio engine for a predictable interleaved Float32
+            // layout. Shared-mode autoconversion handles the endpoint's native
+            // rate/format, keeping the conversion contract hardware-independent.
+            let source_rate = 48_000_u32;
+            let channels = 2_usize;
+            let format = WaveFormat::new(
+                32,
+                32,
+                &SampleType::Float,
+                source_rate as usize,
+                channels,
+                None,
+            );
+            let mut min_period = 0_i64;
+            unsafe { client.GetDevicePeriod(None, Some(&mut min_period)) }
+                .map_err(|e| e.to_string())?;
+            let stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK
+                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+            // Shared-mode conversion gives every endpoint the same Float32
+            // format while LOOPBACK selects rendered output instead of a mic.
+            unsafe {
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    stream_flags,
+                    min_period,
+                    0,
+                    ptr::addr_of!(format.wave_fmt.Format),
+                    None,
+                )
+            }
+            .map_err(|e| format!("initialize WASAPI loopback: {e}"))?;
+            let event = EventHandle(
+                unsafe { CreateEventA(None, false, false, PCSTR::null()) }
+                    .map_err(|e| e.to_string())?,
+            );
+            unsafe { client.SetEventHandle(event.0) }.map_err(|e| e.to_string())?;
+            let capture: IAudioCaptureClient = unsafe { client.GetService() }
+                .map_err(|e| e.to_string())?;
+            let bytes_per_frame = format.get_blockalign() as usize;
+            let mut resampler = Resampler::new(source_rate as f64, 16_000.0);
+
+            unsafe { client.Start() }
+                .map_err(|e| format!("start WASAPI loopback: {e}"))?;
+            if ready.send(Ok(())).is_err() {
+                let _ = unsafe { client.Stop() };
+                return Ok(());
+            }
+
+            let capture_result = (|| -> Result<(), String> {
+                loop {
+                    match stop.try_recv() {
+                        Ok(()) | Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty) => {}
+                    }
+
+                    // Timeouts are expected while the render endpoint is quiet;
+                    // the Vue mixer fills those spans with zeroes.
+                    match unsafe { WaitForSingleObject(event.0, 200) } {
+                        WAIT_OBJECT_0 => {}
+                        WAIT_TIMEOUT => continue,
+                        WAIT_FAILED => return Err("wait for WASAPI loopback packet failed".into()),
+                        status => {
+                            return Err(format!(
+                                "unexpected WASAPI loopback wait status: {}",
+                                status.0
+                            ));
+                        }
+                    }
+
+                    loop {
+                        let frames = unsafe { capture.GetNextPacketSize() }
+                            .map_err(|e| e.to_string())?;
+                        if frames == 0 {
+                            break;
+                        }
+
+                        let mut data = ptr::null_mut();
+                        let mut read_frames = 0_u32;
+                        let mut flags = 0_u32;
+                        unsafe {
+                            capture.GetBuffer(
+                                &mut data,
+                                &mut read_frames,
+                                &mut flags,
+                                None,
+                                None,
+                            )
+                        }
+                        .map_err(|e| format!("read WASAPI loopback packet: {e}"))?;
+
+                        // Windows may return a null data pointer for SILENT
+                        // packets. Build the mono data before releasing the
+                        // packet, but never form a slice from that null pointer.
+                        let mono_result = if read_frames == 0 {
+                            Ok(Vec::new())
+                        } else if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                            Ok(vec![0.0; read_frames as usize])
+                        } else if data.is_null() {
+                            Err("WASAPI returned a null non-silent buffer".into())
+                        } else {
+                            match (read_frames as usize).checked_mul(bytes_per_frame) {
+                                Some(byte_len) => {
+                                    let bytes = unsafe { slice::from_raw_parts(data, byte_len) };
+                                    downmix_interleaved_f32(bytes, channels)
+                                }
+                                None => Err("WASAPI packet size overflow".into()),
+                            }
+                        };
+                        unsafe { capture.ReleaseBuffer(read_frames) }
+                            .map_err(|e| format!("release WASAPI loopback packet: {e}"))?;
+                        let mono = mono_result?;
+
+                        let mut pcm = Vec::with_capacity(mono.len() * 2);
+                        resampler.process(&mono, &mut pcm);
+                        if !pcm.is_empty() {
+                            let _ = app.emit("system-audio-data", base64_encode(&pcm));
+                        }
+                    }
+                }
+                Ok(())
+            })();
+
+            let stop_result = unsafe { client.Stop() }
+                .map_err(|e| format!("stop WASAPI loopback: {e}"));
+            capture_result.and(stop_result)
+        })();
+
+        if let Err(error) = result {
+            let _ = ready.send(Err(error.clone()));
+            eprintln!("windows system-audio capture stopped: {error}");
+        }
+    }
+
+    pub fn start(app: tauri::AppHandle) -> Result<(), String> {
+        let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Err("System audio capture already running".into());
+        }
+
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("oats-wasapi-loopback".into())
+            .spawn(move || run_capture(app, ready_tx, stop_rx))
+            .map_err(|e| format!("start WASAPI capture thread: {e}"))?;
+
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {
+                *guard = Some(CaptureState {
+                    stop: stop_tx,
+                    thread,
+                });
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                Err(error)
+            }
+            Err(error) => {
+                let _ = stop_tx.send(());
+                let _ = thread.join();
+                Err(format!("WASAPI capture initialization timed out: {error}"))
+            }
+        }
+    }
+
+    pub fn stop() -> Result<(), String> {
+        let state = CAPTURE.lock().map_err(|e| e.to_string())?.take();
+        let Some(state) = state else {
+            return Ok(());
+        };
+        let _ = state.stop.send(());
+        state
+            .thread
+            .join()
+            .map_err(|_| "WASAPI capture thread panicked".to_string())
+    }
+
+    // Endpoint loopback does not require a Windows privacy prompt. A missing
+    // or disabled output device is reported by `start`, where it is actionable.
+    pub fn request_permission() -> bool {
+        true
+    }
+
     pub fn check_permission() -> bool {
         true
     }

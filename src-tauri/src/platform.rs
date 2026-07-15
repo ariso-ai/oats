@@ -42,8 +42,8 @@ pub struct LocalBackendCapability {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Models features whose support and settings navigation are related but not
-/// equivalent. Windows can expose Sound settings while system-loopback capture
-/// remains unsupported by this build.
+/// equivalent. A settings destination helps diagnose device configuration; it
+/// is not itself the implementation or a permission result.
 pub struct UrlCapability {
     pub supported: bool,
     pub settings_url: Option<&'static str>,
@@ -102,7 +102,7 @@ fn system_audio() -> UrlCapability {
         }
     } else if cfg!(target_os = "windows") {
         UrlCapability {
-            supported: false,
+            supported: true,
             settings_url: Some("ms-settings:sound"),
         }
     } else {
@@ -176,6 +176,15 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert!(caps.local_backend.supported);
             assert_eq!(caps.local_backend.engine, Some("cpp-sidecar"));
+        }
+    }
+
+    #[test]
+    fn windows_native_recording_capabilities_are_enabled() {
+        let caps = capabilities();
+        if cfg!(target_os = "windows") {
+            assert!(caps.system_audio.supported);
+            assert!(caps.auto_record.supported);
         }
     }
 }

@@ -282,7 +282,7 @@
           </label>
         </div>
         <p v-if="!autoRecordSupported" class="notif-status notif-status--err">
-          Requires macOS 14.4+
+          Auto-record is not available on this platform.
         </p>
 
         <div class="setting-row" style="margin-top: 16px">

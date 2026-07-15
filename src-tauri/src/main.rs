@@ -21,10 +21,9 @@ mod update_manager;
 mod vault;
 mod window_style;
 
-/// Build the macOS application menu. Mirrors Tauri's default menu (so the
-/// standard Edit/Window/View items and their shortcuts still work) but injects
-/// the oats logo into the "About oats" panel — without it, the panel falls back
-/// to a generic icon in dev builds where no bundle icon is present.
+/// Build the native application menu. It preserves the existing macOS menu and
+/// adds Windows entry points for workflows that would otherwise exist only in
+/// the tray. The custom About metadata also keeps the oats icon in dev builds.
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::image::Image;
     use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -70,6 +69,32 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         ],
     )?;
 
+    // Windows users may hide tray icons, so the two primary workflows also
+    // live in the conventional application menu. The handlers call the same
+    // backend-aware gates as the tray rather than creating menu-only behavior.
+    #[cfg(target_os = "windows")]
+    let start_recording = MenuItem::with_id(
+        app,
+        "start_recording",
+        "Start Recording",
+        true,
+        None::<&str>,
+    )?;
+    #[cfg(target_os = "windows")]
+    let library = MenuItem::with_id(app, "library", "Meetings...", true, None::<&str>)?;
+    #[cfg(target_os = "windows")]
+    let file_menu = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[
+            &start_recording,
+            &library,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -104,7 +129,17 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         ],
     )?;
 
-    Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])
+    #[cfg(target_os = "windows")]
+    {
+        Menu::with_items(
+            app,
+            &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])
+    }
 }
 
 fn main() {
@@ -115,8 +150,22 @@ fn main() {
         .install_default()
         .expect("failed to install rustls ring crypto provider");
 
+    let builder = tauri::Builder::default();
+
+    // The Windows executable starts as a tray app, so a second shortcut launch
+    // must surface the existing Settings window instead of leaving users with
+    // another invisible background process. Tauri requires this plugin first.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("settings") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+
     #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
+    let mut builder = builder
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -126,11 +175,16 @@ fn main() {
         .on_menu_event(|app, event| {
             use tauri::Manager;
             // The app menu's "Settings…" (⌘,) opens the same window the tray does.
-            if event.id().as_ref() == "settings" {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+            match event.id().as_ref() {
+                "settings" => {
+                    if let Some(win) = app.get_webview_window("settings") {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
                 }
+                "start_recording" => tray::start_recording(app),
+                "library" => tray::open_library(app),
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -306,6 +360,15 @@ fn main() {
                     activation::refresh(&settings_clone.app_handle());
                 }
             });
+
+            // Windows has no persistent application menu while every window is
+            // hidden, and users commonly hide tray icons. A shortcut launch
+            // therefore opens Settings; closing it returns oats to the tray.
+            #[cfg(target_os = "windows")]
+            {
+                let _ = settings.show();
+                let _ = settings.set_focus();
+            }
 
             // Background update scheduler: wake every 30 min, but only
             // actually check once per 2h (or on snooze expiry). The

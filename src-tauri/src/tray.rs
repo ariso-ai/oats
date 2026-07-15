@@ -120,42 +120,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
-                "start_recording" => {
-                    let app_async = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let backend = crate::commands::active_backend(&app_async);
-
-                        if backend == "local" {
-                            let ready = crate::commands::local_models_ready();
-                            let app_main = app_async.clone();
-                            let _ = app_async.run_on_main_thread(move || {
-                                if !ready {
-                                    crate::commands::surface_model_download(&app_main);
-                                    return;
-                                }
-                                let _ = crate::commands::open_waveform_window(
-                                    &app_main, None, None, false, false,
-                                );
-                            });
-                            return;
-                        }
-
-                        // Ariso (default): existing session gate + meeting-picker.
-                        let valid = crate::commands::is_session_valid(&app_async).await;
-                        let app_main = app_async.clone();
-                        let _ = app_async.run_on_main_thread(move || {
-                            if !valid {
-                                if let Some(win) = app_main.get_webview_window("settings") {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
-                                }
-                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
-                                return;
-                            }
-                            let _ = crate::commands::open_meeting_picker_window(&app_main, None);
-                        });
-                    });
-                }
+                "start_recording" => start_recording(app),
                 "record_featured" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -233,16 +198,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                         });
                     }
                 }
-                "library" => {
-                    // The Meetings window is backend-aware: its list is
-                    // populated from the active backend (Ariso server meetings
-                    // or local recordings), so open the in-app window for both
-                    // rather than sending Ariso users out to the browser.
-                    let app_async = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = crate::commands::create_library_window(app_async).await;
-                    });
-                }
+                "library" => open_library(app),
                 "check_updates" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -265,6 +221,56 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     builder.build(app)?;
 
     Ok(())
+}
+
+/// Start the backend-aware recording flow from any native command surface.
+/// Keeping the session/model gates here makes the tray and desktop menu behave
+/// identically instead of letting Windows acquire a second recording policy.
+pub fn start_recording(app: &AppHandle) {
+    let app_async = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let backend = crate::commands::active_backend(&app_async);
+
+        if backend == "local" {
+            let ready = crate::commands::local_models_ready();
+            let app_main = app_async.clone();
+            let _ = app_async.run_on_main_thread(move || {
+                if !ready {
+                    crate::commands::surface_model_download(&app_main);
+                    return;
+                }
+                let _ = crate::commands::open_waveform_window(
+                    &app_main, None, None, false, false,
+                );
+            });
+            return;
+        }
+
+        // Ariso (default): existing session gate + meeting-picker.
+        let valid = crate::commands::is_session_valid(&app_async).await;
+        let app_main = app_async.clone();
+        let _ = app_async.run_on_main_thread(move || {
+            if !valid {
+                if let Some(win) = app_main.get_webview_window("settings") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+                let _ = app_main.emit("tray://show-sign-in-prompt", ());
+                return;
+            }
+            let _ = crate::commands::open_meeting_picker_window(&app_main, None);
+        });
+    });
+}
+
+/// Open the backend-aware Meetings window from native menus. This stays next
+/// to `start_recording` because both are alternative entry points into the
+/// same frontend workflows, not separate tray-only features.
+pub fn open_library(app: &AppHandle) {
+    let app_async = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::commands::create_library_window(app_async).await;
+    });
 }
 
 pub fn build_idle_menu(
