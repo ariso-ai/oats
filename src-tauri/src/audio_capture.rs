@@ -67,6 +67,20 @@ mod imp {
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
 
+    /// A capture failure is reported from the worker thread, which can finish
+    /// before the recorder calls `stop`. Reap that completed worker here so a
+    /// later recording is not rejected by state that no longer owns resources.
+    fn reap_finished_capture(state: &mut Option<CaptureState>) {
+        if state
+            .as_ref()
+            .is_some_and(|capture| capture.thread.is_finished())
+        {
+            if let Some(finished) = state.take() {
+                let _ = finished.thread.join();
+            }
+        }
+    }
+
     struct ComGuard;
 
     impl Drop for ComGuard {
@@ -243,6 +257,7 @@ mod imp {
 
     pub fn start(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
+        reap_finished_capture(&mut guard);
         if guard.is_some() {
             return Err("System audio capture already running".into());
         }
@@ -268,7 +283,10 @@ mod imp {
             }
             Err(error) => {
                 let _ = stop_tx.send(());
-                let _ = thread.join();
+                // A hung COM call cannot be cancelled safely. Dropping the
+                // JoinHandle detaches the worker so this five-second boundary
+                // remains meaningful; the stop signal makes it exit if the
+                // initialization call eventually returns.
                 Err(format!("WASAPI capture initialization timed out: {error}"))
             }
         }
@@ -294,6 +312,46 @@ mod imp {
 
     pub fn check_permission() -> bool {
         true
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn reaps_finished_capture_but_preserves_active_worker() {
+            let (active_stop, active_stop_rx) = mpsc::channel();
+            let active_thread = std::thread::spawn(move || {
+                let _ = active_stop_rx.recv();
+            });
+            let mut state = Some(CaptureState {
+                stop: active_stop,
+                thread: active_thread,
+            });
+
+            reap_finished_capture(&mut state);
+            assert!(state.is_some());
+            let active = state.take().unwrap();
+            let _ = active.stop.send(());
+            active.thread.join().unwrap();
+
+            let (finished_stop, _finished_stop_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let finished_thread = std::thread::spawn(move || {
+                let _ = done_tx.send(());
+            });
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            while !finished_thread.is_finished() {
+                std::thread::yield_now();
+            }
+            state = Some(CaptureState {
+                stop: finished_stop,
+                thread: finished_thread,
+            });
+
+            reap_finished_capture(&mut state);
+            assert!(state.is_none());
+        }
     }
 }
 
