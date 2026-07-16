@@ -28,7 +28,8 @@ target-specific sidecar naming convention.
 - `audio.rs`: decodes audio, downmixes it to mono, and resamples clips.
 - `models.rs`: validates the lock-defined Windows model layout before inference.
 - `transcribe.rs`: runs Parakeet and diarization, preserving raw speaker keys.
-- `notes.rs`: runs Gemma through the packaged llama.cpp runtime.
+- `notes.rs`: loads Gemma once in a short-lived, authenticated loopback
+  llama.cpp server and bounds hierarchical note reduction.
 
 `../shared/windows-models.json` is the source of truth for upstream artifact
 hashes, immutable CDN prefixes, installed model files, and the packaged

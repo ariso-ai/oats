@@ -7,11 +7,13 @@
 
 use crate::models::discover_gemma;
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::{io::AsRawHandle, process::CommandExt};
@@ -32,29 +34,28 @@ const TITLE_MAX_TOKENS: u32 = 32;
 const CHUNK_MAX_TOKENS: u32 = 256;
 const PROMPT_RESERVE_TOKENS: u32 = 768;
 const CONSERVATIVE_CHARS_PER_TOKEN: usize = 3;
+const MAX_SOURCE_CHUNKS: usize = 24;
+const MAX_REDUCTION_PASSES: usize = 4;
+const MAX_MODEL_CALLS: usize = 32;
+const NOTES_RUNTIME_BUDGET: Duration = Duration::from_secs(25 * 60);
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SERVER_HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Implements the notes subcommand as a narrow file-to-stdout adapter. It does
 /// not update recording metadata itself; the host interprets success or failure
 /// and owns the durable notes lifecycle shared with macOS.
 pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
     let gemma = discover_gemma(models)?;
-    let llama_cli = discover_notes_runtime()?;
-    let prompt_dir = transcript
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let llama_server = discover_notes_runtime()?;
     let transcript_text = fs::read_to_string(transcript)
         .with_context(|| format!("read transcript {}", transcript.display()))?;
-    let notes = clean_notes(&run_llama_notes(
-        &llama_cli,
-        &gemma,
-        &transcript_text,
-        prompt_dir,
-    )?);
+    let mut runtime = LlamaServer::start(&llama_server, &gemma)?;
+    let notes = clean_notes(&run_llama_notes(&mut runtime, &transcript_text)?);
     // Title generation is enrichment, not the durable notes operation. Match
     // macOS by returning an empty title when the second model pass fails so the
     // host still saves useful notes and simply keeps the timestamp title.
-    let title = run_llama_title(&llama_cli, &gemma, &notes, prompt_dir).unwrap_or_default();
+    let title = run_llama_title(&mut runtime, &notes).unwrap_or_default();
     print!("{}", serialize_notes_result(&title, &notes)?);
     Ok(())
 }
@@ -74,75 +75,67 @@ fn serialize_notes_result(title: &str, notes: &str) -> Result<String> {
 /// Isolates llama.cpp process details from the sidecar contract. Prompt-policy
 /// evolution belongs here, while model selection and installation remain fixed
 /// by the versioned bundle discovered below.
-fn run_llama_notes(
-    llama_cli: &Path,
-    gemma: &Path,
-    transcript: &str,
-    prompt_dir: &Path,
-) -> Result<String> {
+fn run_llama_notes(runtime: &mut impl PromptRunner, transcript: &str) -> Result<String> {
     let max_tokens = DEFAULT_MAX_TOKENS;
     let ctx_size = DEFAULT_CONTEXT_SIZE;
     let final_budget = input_char_budget(ctx_size, max_tokens)?;
 
     if transcript.chars().count() <= final_budget {
-        return run_llama_prompt(
-            llama_cli,
-            gemma,
-            &gemma_notes_prompt(transcript),
-            prompt_dir,
-            max_tokens,
-            ctx_size,
-        );
+        return runtime.complete(&gemma_notes_prompt(transcript), max_tokens);
     }
 
     let summary_tokens = max_tokens.min(CHUNK_MAX_TOKENS);
     let summary_budget = input_char_budget(ctx_size, summary_tokens)?;
     let transcript_chunks = chunk_text(transcript, summary_budget);
     let total_chunks = transcript_chunks.len();
+    if total_chunks > MAX_SOURCE_CHUNKS {
+        bail!(
+            "transcript requires {total_chunks} note chunks; local notes support at most {MAX_SOURCE_CHUNKS}"
+        );
+    }
     let mut summaries = Vec::with_capacity(total_chunks);
 
     for (index, chunk) in transcript_chunks.iter().enumerate() {
-        summaries.push(run_llama_prompt(
-            llama_cli,
-            gemma,
+        summaries.push(runtime.complete(
             &chunk_summary_prompt(chunk, index + 1, total_chunks),
-            prompt_dir,
             summary_tokens,
-            ctx_size,
         )?);
     }
 
     // Very long recordings can produce enough partial summaries to overflow the
     // final prompt too. Repeatedly condense bounded groups until one final Gemma
     // request can see all retained facts at once.
-    loop {
+    let mut previous_size = join_summaries(&summaries).chars().count();
+    for pass in 1..=MAX_REDUCTION_PASSES {
         let combined = join_summaries(&summaries);
         if combined.chars().count() <= final_budget {
-            return run_llama_prompt(
-                llama_cli,
-                gemma,
-                &gemma_notes_prompt(&combined),
-                prompt_dir,
-                max_tokens,
-                ctx_size,
-            );
+            return runtime.complete(&gemma_notes_prompt(&combined), max_tokens);
         }
 
         let groups = pack_summaries(&summaries, summary_budget);
         let group_count = groups.len();
         let mut reduced = Vec::with_capacity(group_count);
         for (index, group) in groups.iter().enumerate() {
-            reduced.push(run_llama_prompt(
-                llama_cli,
-                gemma,
+            reduced.push(runtime.complete(
                 &summary_reduction_prompt(group, index + 1, group_count),
-                prompt_dir,
                 summary_tokens,
-                ctx_size,
             )?);
         }
+        let reduced_size = join_summaries(&reduced).chars().count();
+        if reduced_size >= previous_size {
+            bail!(
+                "notes reduction pass {pass} did not shrink its input ({previous_size} to {reduced_size} characters)"
+            );
+        }
+        if reduced_size <= final_budget {
+            let combined = join_summaries(&reduced);
+            return runtime.complete(&gemma_notes_prompt(&combined), max_tokens);
+        }
+        previous_size = reduced_size;
         summaries = reduced;
     }
+
+    bail!("notes reduction exceeded {MAX_REDUCTION_PASSES} passes")
 }
 
 /// Converts the model context into a conservative source-text allowance. The
@@ -262,96 +255,221 @@ Summary group {index} of {total}:\n{group}<end_of_turn>\n<start_of_turn>model\n"
     )
 }
 
-/// Owns one llama.cpp invocation and attaches it to a kill-on-close Windows job.
-/// The Tauri host can therefore enforce its timeout by killing the sidecar;
-/// Windows then tears down this descendant instead of leaving model inference
-/// running invisibly after the recording has already reported a failure.
-fn run_llama_prompt(
-    llama_cli: &Path,
-    gemma: &Path,
-    prompt: &str,
-    prompt_dir: &Path,
-    max_tokens: u32,
-    ctx_size: u32,
-) -> Result<String> {
-    let mut prompt_file = tempfile::Builder::new()
-        .prefix(".oats-notes-prompt-")
-        .suffix(".txt")
-        .tempfile_in(prompt_dir)
-        .with_context(|| format!("create notes prompt in {}", prompt_dir.display()))?;
-    prompt_file
-        .write_all(prompt.as_bytes())
-        .context("write notes prompt")?;
-    prompt_file.flush().context("flush notes prompt")?;
-    let prompt_path = prompt_file.into_temp_path();
-    let mut command = Command::new(llama_cli);
-    command
-        .arg("-m")
-        .arg(gemma)
-        .arg("-f")
-        .arg(&prompt_path)
-        .arg("-n")
-        .arg(max_tokens.to_string())
-        .arg("-c")
-        .arg(ctx_size.to_string())
-        .arg("--temp")
-        .arg("0.3")
-        .arg("--repeat-penalty")
-        .arg("1.15")
-        .arg("--no-display-prompt")
-        .arg("-no-cnv")
-        .arg("--single-turn")
-        .arg("--simple-io")
-        .arg("--log-disable")
-        .arg("--no-warmup")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_background_process(&mut command);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawn llama.cpp notes runtime {}", llama_cli.display()))?;
-    let _job = match KillOnCloseJob::assign(&child) {
-        Ok(job) => job,
-        Err(err) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(err).context("attach llama.cpp notes runtime to Windows job");
+trait PromptRunner {
+    fn complete(&mut self, prompt: &str, max_tokens: u32) -> Result<String>;
+}
+
+#[derive(Serialize)]
+struct CompletionRequest<'a> {
+    prompt: &'a str,
+    n_predict: u32,
+    temperature: f32,
+    repeat_penalty: f32,
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+struct CompletionResponse {
+    content: String,
+}
+
+/// Owns one model-loaded llama.cpp server for the complete notes operation.
+/// It binds only to loopback, requires an ephemeral API key, and remains in the
+/// sidecar's kill-on-close Job Object so the host timeout still tears down the
+/// entire inference process tree.
+struct LlamaServer {
+    child: Child,
+    _job: KillOnCloseJob,
+    agent: ureq::Agent,
+    completion_url: String,
+    authorization: String,
+    deadline: Instant,
+    model_calls: usize,
+}
+
+impl LlamaServer {
+    fn start(server: &Path, gemma: &Path) -> Result<Self> {
+        let deadline = Instant::now()
+            .checked_add(NOTES_RUNTIME_BUDGET)
+            .ok_or_else(|| anyhow!("notes runtime deadline overflow"))?;
+        let port = reserve_loopback_port()?;
+        let api_key = generate_local_api_key()?;
+        let authorization = format!("Bearer {api_key}");
+        let mut command = Command::new(server);
+        command
+            .arg("-m")
+            .arg(gemma)
+            .arg("-c")
+            .arg(DEFAULT_CONTEXT_SIZE.to_string())
+            .arg("--host")
+            .arg(Ipv4Addr::LOCALHOST.to_string())
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--parallel")
+            .arg("1")
+            .arg("--no-webui")
+            .arg("--no-slots")
+            .arg("--api-key")
+            .arg(&api_key)
+            .arg("--log-disable")
+            .arg("--no-warmup")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(parent) = server.parent() {
+            command.current_dir(parent);
         }
-    };
-    let output = child
-        .wait_with_output()
-        .context("wait for llama.cpp notes runtime")?;
-    if !output.status.success() {
-        bail!(
-            "llama.cpp Gemma notes runtime failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        configure_background_process(&mut command);
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawn llama.cpp notes server {}", server.display()))?;
+        let job = match KillOnCloseJob::assign(&child) {
+            Ok(job) => job,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).context("attach llama.cpp notes server to Windows job");
+            }
+        };
+        let agent = ureq::AgentBuilder::new().build();
+        let mut runtime = Self {
+            child,
+            _job: job,
+            agent,
+            completion_url: format!("http://127.0.0.1:{port}/completion"),
+            authorization,
+            deadline,
+            model_calls: 0,
+        };
+        runtime.wait_until_ready(port)?;
+        Ok(runtime)
     }
-    let notes = clean_llama_output(&String::from_utf8_lossy(&output.stdout));
-    if notes.is_empty() {
-        bail!("llama.cpp Gemma notes runtime returned empty notes");
+
+    fn wait_until_ready(&mut self, port: u16) -> Result<()> {
+        let health_url = format!("http://127.0.0.1:{port}/health");
+        let startup_deadline = Instant::now()
+            .checked_add(SERVER_START_TIMEOUT)
+            .ok_or_else(|| anyhow!("llama.cpp startup deadline overflow"))?;
+
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .context("check llama.cpp notes server status")?
+            {
+                bail!("llama.cpp notes server exited during startup with {status}");
+            }
+            if Instant::now() >= startup_deadline || Instant::now() >= self.deadline {
+                bail!(
+                    "llama.cpp notes server did not become ready within {} seconds",
+                    SERVER_START_TIMEOUT.as_secs()
+                );
+            }
+
+            match self
+                .agent
+                .get(&health_url)
+                .set("Authorization", &self.authorization)
+                .timeout(SERVER_HEALTH_TIMEOUT)
+                .call()
+            {
+                Ok(_) => return Ok(()),
+                Err(ureq::Error::Status(503, _)) | Err(ureq::Error::Transport(_)) => {
+                    thread::sleep(SERVER_POLL_INTERVAL);
+                }
+                Err(error) => bail!("llama.cpp notes server health check failed: {error}"),
+            }
+        }
     }
-    Ok(notes)
+
+    fn remaining_time(&self) -> Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                anyhow!(
+                    "local notes exceeded its {}-second runtime budget",
+                    NOTES_RUNTIME_BUDGET.as_secs()
+                )
+            })
+    }
+}
+
+impl PromptRunner for LlamaServer {
+    fn complete(&mut self, prompt: &str, max_tokens: u32) -> Result<String> {
+        if self.model_calls >= MAX_MODEL_CALLS {
+            bail!("local notes exceeded its {MAX_MODEL_CALLS}-request model budget");
+        }
+        if let Some(status) = self
+            .child
+            .try_wait()
+            .context("check llama.cpp notes server status")?
+        {
+            bail!("llama.cpp notes server exited with {status}");
+        }
+        let timeout = self.remaining_time()?;
+        self.model_calls += 1;
+        let response = self
+            .agent
+            .post(&self.completion_url)
+            .set("Authorization", &self.authorization)
+            .timeout(timeout)
+            .send_json(CompletionRequest {
+                prompt,
+                n_predict: max_tokens,
+                temperature: 0.3,
+                repeat_penalty: 1.15,
+                stream: false,
+            })
+            .map_err(|error| anyhow!("llama.cpp notes request failed: {error}"))?;
+        let payload: CompletionResponse = response
+            .into_json()
+            .context("parse llama.cpp notes response")?;
+        let content = strip_code_fences(&payload.content);
+        if content.is_empty() {
+            bail!("llama.cpp Gemma notes runtime returned empty content");
+        }
+        Ok(content)
+    }
+}
+
+impl Drop for LlamaServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn reserve_loopback_port() -> Result<u16> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .context("reserve localhost port for llama.cpp notes server")?;
+    let port = listener
+        .local_addr()
+        .context("read llama.cpp notes server port")?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+fn generate_local_api_key() -> Result<String> {
+    use std::fmt::Write as _;
+
+    let mut bytes = [0_u8; 24];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow!("generate llama.cpp localhost API key: {error}"))?;
+    let mut key = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut key, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(key)
 }
 
 /// Uses the completed notes as compact evidence for a second, bounded model
 /// pass. Keeping title generation separate prevents JSON formatting mistakes
 /// from corrupting the Markdown body that the editor persists.
-fn run_llama_title(
-    llama_cli: &Path,
-    gemma: &Path,
-    notes: &str,
-    prompt_dir: &Path,
-) -> Result<String> {
-    let raw = run_llama_prompt(
-        llama_cli,
-        gemma,
-        &gemma_title_prompt(notes),
-        prompt_dir,
-        TITLE_MAX_TOKENS,
-        DEFAULT_CONTEXT_SIZE,
-    )?;
+fn run_llama_title(runtime: &mut impl PromptRunner, notes: &str) -> Result<String> {
+    let raw = runtime.complete(&gemma_title_prompt(notes), TITLE_MAX_TOKENS)?;
     Ok(sanitize_title(&raw))
 }
 
@@ -526,40 +644,6 @@ fn strip_code_fences(raw: &str) -> String {
         .to_string()
 }
 
-/// Separates llama-cli transport chatter from generated content so runtime
-/// upgrades do not leak prompts, timing output, or shutdown text into saved
-/// notes. Content normalization is delegated to `clean_notes`.
-fn clean_llama_output(raw: &str) -> String {
-    let normalized = raw.replace("\r\n", "\n");
-    let mut seen_prompt = false;
-    let mut kept = Vec::new();
-
-    for line in normalized.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("> ") {
-            seen_prompt = true;
-            kept.clear();
-            continue;
-        }
-        if !seen_prompt {
-            continue;
-        }
-        if trimmed.starts_with("[ Prompt:") || trimmed == "Exiting..." {
-            break;
-        }
-        if !trimmed.is_empty() || !kept.is_empty() {
-            kept.push(line);
-        }
-    }
-
-    let cleaned = clean_notes(&kept.join("\n"));
-    if cleaned.is_empty() {
-        clean_notes(raw)
-    } else {
-        cleaned
-    }
-}
-
 /// Anchors output at the first supported notes section when the model adds a
 /// preamble. If no known heading exists, preserving the cleaned response gives
 /// the host something diagnosable instead of silently discarding generation.
@@ -591,7 +675,7 @@ fn discover_notes_runtime_from(sidecar: &Path) -> Result<PathBuf> {
         .parent()
         .ok_or_else(|| anyhow!("ariso-stt executable has no parent directory"))?
         .join("llama")
-        .join("llama-cli.exe");
+        .join("llama-server.exe");
     if runtime.is_file() {
         Ok(runtime)
     } else {
@@ -605,9 +689,33 @@ fn discover_notes_runtime_from(sidecar: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     #[cfg(windows)]
     const CONSOLE_PROBE_ENV: &str = "ARISO_STT_TEST_CONSOLE_PROBE_CHILD";
+
+    struct StubPromptRunner {
+        responses: VecDeque<String>,
+        calls: usize,
+    }
+
+    impl StubPromptRunner {
+        fn new(responses: impl IntoIterator<Item = String>) -> Self {
+            Self {
+                responses: responses.into_iter().collect(),
+                calls: 0,
+            }
+        }
+    }
+
+    impl PromptRunner for StubPromptRunner {
+        fn complete(&mut self, _prompt: &str, _max_tokens: u32) -> Result<String> {
+            self.calls += 1;
+            self.responses
+                .pop_front()
+                .ok_or_else(|| anyhow!("stub prompt response exhausted"))
+        }
+    }
 
     /// Uses a real console-subsystem test process to verify the exact launch
     /// configuration applied to llama.cpp rather than only checking a constant.
@@ -648,7 +756,7 @@ mod tests {
     fn discovers_packaged_llama_runtime_beside_sidecar() {
         let temp = tempfile::tempdir().unwrap();
         let sidecar = temp.path().join("ariso-stt.exe");
-        let runtime = temp.path().join("llama").join("llama-cli.exe");
+        let runtime = temp.path().join("llama").join("llama-server.exe");
         fs::create_dir_all(runtime.parent().unwrap()).unwrap();
         fs::write(&sidecar, b"sidecar").unwrap();
         fs::write(&runtime, b"runtime").unwrap();
@@ -713,15 +821,63 @@ mod tests {
     }
 
     #[test]
-    fn strips_markdown_code_fences() {
-        let cleaned = strip_code_fences("```markdown\n## Summary\n- Done\n```\n");
-        assert_eq!(cleaned, "## Summary\n- Done");
+    fn long_notes_reuse_one_runner_for_chunk_and_final_prompts() {
+        let transcript = "word ".repeat(1_800);
+        let mut runtime = StubPromptRunner::new([
+            "Speaker 1 approved the launch.".to_string(),
+            "## Summary\n- Launch approved".to_string(),
+        ]);
+
+        let notes = run_llama_notes(&mut runtime, &transcript).unwrap();
+
+        assert_eq!(notes, "## Summary\n- Launch approved");
+        assert_eq!(runtime.calls, 2);
     }
 
     #[test]
-    fn cleans_llama_cli_banner_and_perf_footer() {
-        let raw = "Loading model...\n\n> <prompt>\n## Summary\n- Done\n\n[ Prompt: 20.0 t/s | Generation: 5.0 t/s ]\n\nExiting...\n";
-        assert_eq!(clean_llama_output(raw), "## Summary\n- Done");
+    fn long_notes_reject_a_reduction_that_does_not_shrink() {
+        let transcript = "word ".repeat(1_800);
+        let mut runtime = StubPromptRunner::new(["x".repeat(9_000), "y".repeat(9_000)]);
+
+        let error = run_llama_notes(&mut runtime, &transcript).unwrap_err();
+
+        assert!(error.to_string().contains("did not shrink"));
+        assert_eq!(runtime.calls, 2);
+    }
+
+    #[test]
+    fn long_notes_stop_after_the_reduction_pass_limit() {
+        let transcript = "word ".repeat(1_800);
+        let mut runtime = StubPromptRunner::new([
+            "a".repeat(9_000),
+            "b".repeat(8_900),
+            "c".repeat(8_800),
+            "d".repeat(8_700),
+            "e".repeat(8_600),
+        ]);
+
+        let error = run_llama_notes(&mut runtime, &transcript).unwrap_err();
+
+        assert!(error.to_string().contains("exceeded 4 passes"));
+        assert_eq!(runtime.calls, 5);
+    }
+
+    #[test]
+    fn oversized_transcripts_fail_before_starting_inference() {
+        let summary_budget = input_char_budget(DEFAULT_CONTEXT_SIZE, CHUNK_MAX_TOKENS).unwrap();
+        let transcript = "word ".repeat(summary_budget * (MAX_SOURCE_CHUNKS + 1) / 5 + 10);
+        let mut runtime = StubPromptRunner::new([]);
+
+        let error = run_llama_notes(&mut runtime, &transcript).unwrap_err();
+
+        assert!(error.to_string().contains("local notes support at most 24"));
+        assert_eq!(runtime.calls, 0);
+    }
+
+    #[test]
+    fn strips_markdown_code_fences() {
+        let cleaned = strip_code_fences("```markdown\n## Summary\n- Done\n```\n");
+        assert_eq!(cleaned, "## Summary\n- Done");
     }
 
     #[test]

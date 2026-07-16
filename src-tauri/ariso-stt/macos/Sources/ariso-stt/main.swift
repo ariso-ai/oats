@@ -8,8 +8,13 @@ import Tokenizers
 
 // MARK: - Output contract (must match the Rust `TranscriptResult` deserializer)
 
+struct OutParticipant: Codable {
+    let id: Int
+    let label: String
+}
+
 struct OutSegment: Codable {
-    let speaker: String
+    let speaker: Int
     let text: String
     let start: Double
     let end: Double
@@ -18,6 +23,7 @@ struct OutSegment: Codable {
 struct OutResult: Codable {
     let language: String
     let durationSeconds: Double
+    let participants: [OutParticipant]
     let segments: [OutSegment]
 }
 
@@ -64,20 +70,31 @@ func reconstructText(_ tokens: [TokenTiming]) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-/// Merge ASR token timings with diarization turns while preserving FluidAudio's
-/// raw speaker keys. The Tauri host owns chronological sorting, deduplication,
-/// numeric IDs, and participant labels for both platform sidecars.
+/// Merge ASR token timings with diarization turns into speaker-attributed,
+/// time-ordered segments. Speaker ids are remapped to contiguous 0-based
+/// indices in order of first appearance; labels are "Speaker N".
 func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutResult {
     let timings = asr.tokenTimings ?? []
+
+    var speakerIndex: [String: Int] = [:]
+    var order: [String] = []
+    func indexFor(_ speakerId: String) -> Int {
+        if let i = speakerIndex[speakerId] { return i }
+        let i = order.count
+        speakerIndex[speakerId] = i
+        order.append(speakerId)
+        return i
+    }
 
     var segments: [OutSegment] = []
 
     if diarization.isEmpty || timings.isEmpty {
         // No diarization (or no token timings): a single segment for the whole transcript.
         segments.append(
-            OutSegment(speaker: "0", text: asr.text, start: 0, end: asr.duration))
+            OutSegment(speaker: 0, text: asr.text, start: 0, end: asr.duration))
     } else {
-        for turn in diarization {
+        let ordered = diarization.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
+        for turn in ordered {
             let start = Double(turn.startTimeSeconds)
             let end = Double(turn.endTimeSeconds)
             let inTurn = timings.filter {
@@ -87,7 +104,7 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
             if inTurn.isEmpty { continue }
             segments.append(
                 OutSegment(
-                    speaker: turn.speakerId,
+                    speaker: indexFor(turn.speakerId),
                     text: reconstructText(inTurn),
                     start: start,
                     end: end))
@@ -96,16 +113,22 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
         if segments.isEmpty {
             segments.append(
                 OutSegment(
-                    speaker: diarization[0].speakerId,
+                    speaker: indexFor(ordered[0].speakerId),
                     text: asr.text,
                     start: 0,
                     end: asr.duration))
         }
     }
 
+    let participants: [OutParticipant] =
+        order.isEmpty
+        ? [OutParticipant(id: 0, label: "Speaker 1")]
+        : order.indices.map { OutParticipant(id: $0, label: "Speaker \($0 + 1)") }
+
     return OutResult(
         language: "en",
         durationSeconds: asr.duration,
+        participants: participants,
         segments: segments)
 }
 
@@ -308,11 +331,7 @@ runToCompletion {
 
         // Diarization: needs 16 kHz mono Float samples.
         let samples = try AudioConverter().resampleAudioFile(audioURL)
-        // Use FluidAudio's strict predownloaded-model API so a missing staged
-        // asset fails locally instead of bypassing the host's explicit download.
-        let diarizerModels = try DiarizerModels.load(
-            localSegmentationModel: diarizerDir.appendingPathComponent("pyannote_segmentation.mlmodelc"),
-            localEmbeddingModel: diarizerDir.appendingPathComponent("wespeaker_v2.mlmodelc"))
+        let diarizerModels = try await DiarizerModels.downloadIfNeeded(to: diarizerDir)
         let diarizer = DiarizerManager()
         diarizer.initialize(models: diarizerModels)
         let diarization = try diarizer.performCompleteDiarization(samples, sampleRate: 16000)

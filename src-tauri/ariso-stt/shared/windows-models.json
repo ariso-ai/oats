@@ -88,10 +88,9 @@
       "ggml-cpu-zen4.dll",
       "ggml.dll",
       "libomp140.x86_64.dll",
-      "llama-cli-impl.dll",
-      "llama-cli.exe",
       "llama-common.dll",
       "llama-server-impl.dll",
+      "llama-server.exe",
       "llama.dll",
       "mtmd.dll"
     ]

@@ -17,10 +17,29 @@ pub(crate) struct SidecarTranscriptResult {
 #[derive(Debug, Clone, Deserialize)]
 struct SidecarSegment {
     /// Model-native identity, meaningful only within this transcript.
-    speaker: String,
+    speaker: SidecarSpeaker,
     text: String,
     start: f64,
     end: f64,
+}
+
+/// macOS already emits contiguous numeric IDs, while Windows emits opaque model
+/// keys. Converting both to an internal key lets the host apply one participant
+/// policy without requiring a behavioral Swift change.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum SidecarSpeaker {
+    Key(String),
+    Id(u32),
+}
+
+impl SidecarSpeaker {
+    fn into_key(self) -> String {
+        match self {
+            Self::Key(key) => key,
+            Self::Id(id) => id.to_string(),
+        }
+    }
 }
 
 /// App-facing transcript after shared policy has converted raw model output to
@@ -49,12 +68,13 @@ pub(crate) fn normalize_transcript(mut raw: SidecarTranscriptResult) -> Transcri
         .segments
         .into_iter()
         .map(|segment| {
-            let speaker = if let Some(id) = speaker_ids.get(&segment.speaker) {
+            let speaker_key = segment.speaker.into_key();
+            let speaker = if let Some(id) = speaker_ids.get(&speaker_key) {
                 *id
             } else {
                 let id = next_speaker_id;
                 next_speaker_id += 1;
-                speaker_ids.insert(segment.speaker, id);
+                speaker_ids.insert(speaker_key, id);
                 id
             };
 
@@ -102,19 +122,19 @@ mod tests {
             duration_seconds: 8.0,
             segments: vec![
                 SidecarSegment {
-                    speaker: "model-speaker-b".to_string(),
+                    speaker: SidecarSpeaker::Key("model-speaker-b".to_string()),
                     text: "Second".to_string(),
                     start: 4.0,
                     end: 5.0,
                 },
                 SidecarSegment {
-                    speaker: "model-speaker-a".to_string(),
+                    speaker: SidecarSpeaker::Key("model-speaker-a".to_string()),
                     text: "First".to_string(),
                     start: 0.0,
                     end: 1.0,
                 },
                 SidecarSegment {
-                    speaker: "model-speaker-a".to_string(),
+                    speaker: SidecarSpeaker::Key("model-speaker-a".to_string()),
                     text: "Third".to_string(),
                     start: 6.0,
                     end: 7.0,
@@ -140,5 +160,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, "Speaker 1"), (1, "Speaker 2")]
         );
+    }
+
+    #[test]
+    fn accepts_the_existing_macos_numeric_speaker_contract() {
+        let json = r#"{
+            "language":"en",
+            "durationSeconds":2.0,
+            "participants":[{"id":0,"label":"Speaker 1"}],
+            "segments":[{"speaker":0,"text":"hello","start":0.0,"end":1.0}]
+        }"#;
+
+        let raw: SidecarTranscriptResult = serde_json::from_str(json).unwrap();
+        let result = normalize_transcript(raw);
+
+        assert_eq!(result.participants[0].label, "Speaker 1");
+        assert_eq!(result.segments[0].speaker, 0);
     }
 }

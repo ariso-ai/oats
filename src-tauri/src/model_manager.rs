@@ -1176,7 +1176,7 @@ mod tests {
     fn bundle_file_allowlist_excludes_runtime_entries() {
         let hash = "a".repeat(64);
         let entries =
-            parse_sha256sums(&format!("{hash}  model.gguf\n{hash}  llama-cli.exe\n")).unwrap();
+            parse_sha256sums(&format!("{hash}  model.gguf\n{hash}  llama-server.exe\n")).unwrap();
         let selected = select_manifest_entries(entries, Some(&["model.gguf".into()])).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].path, "model.gguf");
@@ -1286,7 +1286,7 @@ mod tests {
         );
         assert!(
             !tmp.path()
-                .join("llm/gemma-3-1b-it-qat-4bit/llama-cli.exe")
+                .join("llm/gemma-3-1b-it-qat-4bit/llama-server.exe")
                 .exists()
         );
     }
