@@ -370,11 +370,16 @@ impl LlamaServer {
             match self
                 .agent
                 .get(&health_url)
-                .set("Authorization", &self.authorization)
                 .timeout(SERVER_HEALTH_TIMEOUT)
                 .call()
             {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    // Confirm the responding listener belongs to our child before
+                    // sending the bearer token or any transcript content.
+                    #[cfg(windows)]
+                    verify_server_pid(port, self.child.id())?;
+                    return Ok(());
+                }
                 Err(ureq::Error::Status(503, _)) | Err(ureq::Error::Transport(_)) => {
                     thread::sleep(SERVER_POLL_INTERVAL);
                 }
@@ -450,6 +455,80 @@ fn reserve_loopback_port() -> Result<u16> {
         .port();
     drop(listener);
     Ok(port)
+}
+
+/// Queries the OS TCP listener table and returns an error if the process that
+/// owns `port` on 127.0.0.1 is not `expected_pid`. This closes the bind-gap
+/// window: a rogue process that grabbed the port before our child could bind
+/// will be detected here, before the bearer token or transcript are sent.
+#[cfg(windows)]
+fn verify_server_pid(port: u16, expected_pid: u32) -> Result<()> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+
+    // AF_INET = 2 (IPv4); avoid pulling in Win32_Networking_WinSock for one constant.
+    const AF_INET: u32 = 2;
+    // ERROR_INSUFFICIENT_BUFFER = 122; returned by the sizing call.
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    // First call: obtain the required buffer size.
+    let mut buf_size: u32 = 0;
+    // SAFETY: null pointer is valid for the sizing call; the OS only writes buf_size.
+    let rc = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut buf_size,
+            0,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if rc != ERROR_INSUFFICIENT_BUFFER {
+        bail!("GetExtendedTcpTable size query returned unexpected code {rc}");
+    }
+
+    // Extra headroom for listeners that appear between the two calls.
+    buf_size = buf_size.saturating_add(512);
+    let mut buf = vec![0u8; buf_size as usize];
+
+    // Second call: fill the buffer with the actual table.
+    // SAFETY: buf is non-null and sized to at least buf_size bytes; the OS
+    // writes a valid MIB_TCPTABLE_OWNER_PID into it on success.
+    let rc = unsafe {
+        GetExtendedTcpTable(
+            buf.as_mut_ptr().cast(),
+            &mut buf_size,
+            0,
+            AF_INET,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if rc != 0 {
+        bail!("GetExtendedTcpTable failed with code {rc}");
+    }
+
+    // SAFETY: The OS wrote a valid MIB_TCPTABLE_OWNER_PID into buf; the
+    // dwNumEntries sequential MIB_TCPROW_OWNER_PID elements follow the
+    // single-element table[1] header field in the struct definition.
+    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
+    let row_count = table.dwNumEntries as usize;
+    let rows = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), row_count) };
+
+    // dwLocalPort is stored in network byte order (big-endian) as a DWORD;
+    // cast to u16 then swap bytes to get the host-order port number.
+    let owned = rows.iter().any(|row| {
+        u16::from_be(row.dwLocalPort as u16) == port && row.dwOwningPid == expected_pid
+    });
+    if !owned {
+        bail!(
+            "port {port} is not owned by the spawned llama.cpp process (PID \
+             {expected_pid}); possible port squatting between reserve and bind"
+        );
+    }
+    Ok(())
 }
 
 fn generate_local_api_key() -> Result<String> {
