@@ -611,6 +611,30 @@ describe('LibraryView', () => {
     expect(wrapper.find('.status-label').text()).toContain('Upload failed');
   });
 
+  it('keeps Start disabled when native stop fires before the recorder window closes', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'uploading',
+    });
+    await flushPromises();
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+
+    // Native capture has stopped, but the waveform still owns upload/retry.
+    emitEvent('recording://state', false);
+    await flushPromises();
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'closed',
+    });
+    await flushPromises();
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
+  });
+
   // Regression: stopping a recording from the in-library strip leaves the
   // window focused, so no focus event fires to reset the internal `recording`
   // flag. The Start button must NOT stay stuck disabled — disabling is driven

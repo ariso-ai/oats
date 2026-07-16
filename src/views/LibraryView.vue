@@ -210,6 +210,10 @@ const error = ref<string | null>(null);
 const recording = ref(false);
 type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 const recordingPhase = ref<RecorderPhase | null>(null);
+// Once a structured waveform heartbeat arrives, that window becomes the
+// lifecycle authority through upload/retry; native booleans only describe
+// capture and must not unlock a second recorder underneath it.
+const recorderOwnsLifecycle = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
 // Tracks the row the user intentionally selected; auto-load and recorder-driven
@@ -445,6 +449,7 @@ function markRecordingStarting(): void {
 }
 
 function clearRecordingLaunch(): void {
+  recorderOwnsLifecycle.value = false;
   recordingActive.value = false;
   recordingPhase.value = null;
   setRecording(false);
@@ -617,7 +622,12 @@ async function onRecordingStarted(event: { payload: { meetingId: number | null }
 
 async function onRecorderPhase(phase: RecorderPhase | null): Promise<void> {
   recordingPhase.value = phase;
-  if (phase === null) return;
+  if (phase === null) {
+    // A missing heartbeat means the waveform died without its final `closed`
+    // event; release the same lock that a clean shutdown would release.
+    clearRecordingLaunch();
+    return;
+  }
 
   if (phase === 'closed') {
     const hadRecordedMeeting = recordingMeetingId.value !== null;
@@ -630,6 +640,8 @@ async function onRecorderPhase(phase: RecorderPhase | null): Promise<void> {
     }
     return;
   }
+
+  recorderOwnsLifecycle.value = true;
 
   const pendingWasMounted = leftPanelVisible.value;
   if (phase === 'uploading' || phase === 'failed' || phase === 'success') {
@@ -656,8 +668,8 @@ function onNativeRecordingState(event: { payload: unknown }): void {
   // tray and File-menu launches; object payloads are owned by RecorderStrip.
   if (typeof event.payload !== 'boolean') return;
   if (event.payload) {
-    markRecordingStarting();
-  } else {
+    if (!recorderOwnsLifecycle.value) markRecordingStarting();
+  } else if (!recorderOwnsLifecycle.value) {
     clearRecordingLaunch();
   }
 }

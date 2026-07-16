@@ -1,11 +1,13 @@
 //! Windows adapter for local meeting-note generation.
 //!
-//! This module preserves the sidecar's Markdown-on-stdout contract while using
-//! a bundled llama.cpp runtime and GGUF model. Model acquisition, readiness UX,
-//! transcript persistence, and retry scheduling remain in the Tauri host.
+//! This module preserves the sidecar's title-and-Markdown JSON contract while
+//! using a bundled llama.cpp runtime and GGUF model. Model acquisition,
+//! readiness UX, transcript persistence, and retry scheduling remain in the
+//! Tauri host.
 
 use crate::models::discover_gemma;
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,6 +28,7 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const DEFAULT_MAX_TOKENS: u32 = 512;
 const DEFAULT_CONTEXT_SIZE: u32 = 4096;
+const TITLE_MAX_TOKENS: u32 = 32;
 const CHUNK_MAX_TOKENS: u32 = 256;
 const PROMPT_RESERVE_TOKENS: u32 = 768;
 const CONSERVATIVE_CHARS_PER_TOKEN: usize = 3;
@@ -42,9 +45,30 @@ pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
         .unwrap_or_else(|| Path::new("."));
     let transcript_text = fs::read_to_string(transcript)
         .with_context(|| format!("read transcript {}", transcript.display()))?;
-    let notes = run_llama_notes(&llama_cli, &gemma, &transcript_text, prompt_dir)?;
-    print!("{}", clean_notes(&notes));
+    let notes = clean_notes(&run_llama_notes(
+        &llama_cli,
+        &gemma,
+        &transcript_text,
+        prompt_dir,
+    )?);
+    // Title generation is enrichment, not the durable notes operation. Match
+    // macOS by returning an empty title when the second model pass fails so the
+    // host still saves useful notes and simply keeps the timestamp title.
+    let title = run_llama_title(&llama_cli, &gemma, &notes, prompt_dir).unwrap_or_default();
+    print!("{}", serialize_notes_result(&title, &notes)?);
     Ok(())
+}
+
+/// Mirrors the macOS sidecar's stdout payload so the Tauri host can apply a
+/// generated title without knowing which native model adapter produced it.
+#[derive(Serialize)]
+struct NotesResult<'a> {
+    title: &'a str,
+    notes: &'a str,
+}
+
+fn serialize_notes_result(title: &str, notes: &str) -> Result<String> {
+    serde_json::to_string(&NotesResult { title, notes }).context("serialize notes result")
 }
 
 /// Isolates llama.cpp process details from the sidecar contract. Prompt-policy
@@ -311,6 +335,26 @@ fn run_llama_prompt(
     Ok(notes)
 }
 
+/// Uses the completed notes as compact evidence for a second, bounded model
+/// pass. Keeping title generation separate prevents JSON formatting mistakes
+/// from corrupting the Markdown body that the editor persists.
+fn run_llama_title(
+    llama_cli: &Path,
+    gemma: &Path,
+    notes: &str,
+    prompt_dir: &Path,
+) -> Result<String> {
+    let raw = run_llama_prompt(
+        llama_cli,
+        gemma,
+        &gemma_title_prompt(notes),
+        prompt_dir,
+        TITLE_MAX_TOKENS,
+        DEFAULT_CONTEXT_SIZE,
+    )?;
+    Ok(sanitize_title(&raw))
+}
+
 /// Prevents the bundled console runtime from surfacing through the sidecar's
 /// otherwise invisible notes pipeline without sacrificing captured diagnostics.
 #[cfg(windows)]
@@ -400,6 +444,73 @@ Rules:\n\
     format!(
         "<bos><start_of_turn>user\n{instructions}\n\nTranscript:\n{transcript}<end_of_turn>\n<start_of_turn>model\n"
     )
+}
+
+fn gemma_title_prompt(notes: &str) -> String {
+    let instructions = "\
+You write a short title for a meeting, given its notes.\n\n\
+Rules:\n\
+- Output ONLY the title text: no quotes, Markdown, preamble, or trailing punctuation.\n\
+- Keep it short and specific: at most 6 words and 40 characters.\n\
+- Use Title Case. Use only facts present in the notes; never invent names.\n\
+- Do not start with Meeting, Notes, Summary, or a date.";
+
+    format!(
+        "<bos><start_of_turn>user\n{instructions}\n\nNotes:\n{notes}<end_of_turn>\n<start_of_turn>model\n"
+    )
+}
+
+/// Applies the same defensive title boundary as macOS: unwrap common model
+/// formatting, reject generic leading labels, and cap user-visible filenames
+/// without splitting a Unicode scalar or an ordinary word.
+fn sanitize_title(raw: &str) -> String {
+    let mut title = raw
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
+        .unwrap_or_default()
+        .trim_matches(|character| "#*->\"'`".contains(character))
+        .trim()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(|character| ".,;:".contains(character))
+        .trim()
+        .to_string();
+
+    loop {
+        let lowercase = title.to_lowercase();
+        let mut stripped = false;
+        for prefix in ["meeting", "notes", "summary"] {
+            if !lowercase.starts_with(prefix) {
+                continue;
+            }
+            let remainder = &title[prefix.len()..];
+            if remainder.chars().next().is_some_and(char::is_alphanumeric) {
+                continue;
+            }
+            title = remainder
+                .trim_start_matches([':', '-', ' ', '\t'])
+                .trim()
+                .to_string();
+            stripped = true;
+            break;
+        }
+        if !stripped {
+            break;
+        }
+    }
+
+    const MAX_TITLE_CHARS: usize = 40;
+    if title.chars().count() > MAX_TITLE_CHARS {
+        let capped = title.chars().take(MAX_TITLE_CHARS).collect::<String>();
+        title = capped
+            .rfind(' ')
+            .map(|index| capped[..index].trim().to_string())
+            .unwrap_or(capped);
+    }
+    title
 }
 
 /// Removes a common model-formatting escape without attempting to parse or
@@ -504,7 +615,8 @@ mod tests {
     #[test]
     fn background_llama_child_has_no_console_window() {
         if std::env::var_os(CONSOLE_PROBE_ENV).is_some() {
-            let has_console = unsafe { !windows_sys::Win32::System::Console::GetConsoleWindow().is_null() };
+            let has_console =
+                unsafe { !windows_sys::Win32::System::Console::GetConsoleWindow().is_null() };
             println!("ARISO_STT_CONSOLE_WINDOW={has_console}");
             return;
         }
@@ -522,7 +634,10 @@ mod tests {
         let output = command.output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            output.status.success(),
+            "stdout: {stdout}\nstderr: {stderr}"
+        );
         assert!(
             stdout.contains("ARISO_STT_CONSOLE_WINDOW=false"),
             "child unexpectedly acquired a console window; stdout: {stdout}\nstderr: {stderr}"
@@ -546,6 +661,27 @@ mod tests {
         assert!(prompt.starts_with("<bos><start_of_turn>user\n"));
         assert!(prompt.contains("Transcript:\nSpeaker 1: Ship it."));
         assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn notes_result_serializes_the_host_title_contract() {
+        let output = serialize_notes_result("Budget Planning", "## Summary\n- Approved").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(json["title"], "Budget Planning");
+        assert_eq!(json["notes"], "## Summary\n- Approved");
+    }
+
+    #[test]
+    fn generated_title_is_sanitized_like_the_macos_sidecar() {
+        assert_eq!(
+            sanitize_title("```text\n**Meeting Notes: Budget Planning.**\n```"),
+            "Budget Planning"
+        );
+        assert_eq!(
+            sanitize_title("Quarterly Infrastructure Migration Readiness Discussion"),
+            "Quarterly Infrastructure Migration"
+        );
     }
 
     #[test]
