@@ -19,14 +19,20 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate (${{ matrix.os }})
+    name: ${{ matrix.job_name }}
     # Keep frontend and host validation under one cross-platform contract. The
     # matrix proves each native implementation builds; release signing and
     # installer publication deliberately remain outside pull-request CI.
+    # Preserve the original macOS check name because the main-branch ruleset
+    # requires that exact status context.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-latest]
+        include:
+          - os: macos-15
+            job_name: Validate (frontend + cargo build)
+          - os: windows-latest
+            job_name: Validate (windows-latest)
     # macos-15 is a GitHub-hosted Apple Silicon (arm64) runner; macos-13 is Intel.
     runs-on: ${{ matrix.os }}
     permissions:
