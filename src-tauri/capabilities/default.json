@@ -18,7 +18,12 @@
     "opener:default",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "x-apple.systempreferences:*" }]
+      "allow": [
+        { "url": "x-apple.systempreferences:*" },
+        { "url": "ms-settings:privacy-microphone" },
+        { "url": "ms-settings:sound" },
+        { "url": "ms-settings:notifications" }
+      ]
     },
     "notification:default",
     "updater:default"

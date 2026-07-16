@@ -13,6 +13,7 @@ const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
 const saveNote = vi.fn();
 const shareTextNative = vi.fn();
+const loadPlatformCapabilities = vi.fn();
 const recordingStatus = vi.fn();
 const readRecordingFile = vi.fn();
 const retryTranscription = vi.fn();
@@ -29,6 +30,9 @@ vi.mock('../composables/useMeetingNotesPersistence', () => ({
     save: (meeting: MeetingListItem, note: { content: string; title: string }) =>
       saveNote(meeting, note),
   }),
+}));
+vi.mock('../composables/usePlatformCapabilities', () => ({
+  loadPlatformCapabilities: () => loadPlatformCapabilities(),
 }));
 vi.mock('../tauri', () => ({
   shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
@@ -83,6 +87,15 @@ beforeEach(() => {
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue({ content: '', title: '' });
   saveNote.mockResolvedValue(undefined);
+  loadPlatformCapabilities.mockResolvedValue({
+    os: 'macos',
+    localBackend: { supported: true, engine: 'swift-mlx' },
+    systemAudio: { supported: true, settingsUrl: null },
+    autoRecord: { supported: true },
+    nativeShare: { supported: true },
+    notificationSettingsUrl: null,
+    microphoneSettingsUrl: null,
+  });
   recordingStatus.mockResolvedValue({
     status: 'done',
     hasTranscript: false,
@@ -305,7 +318,7 @@ describe('MeetingDetailView inline title editing', () => {
     await flushPromises();
 
     await vi.advanceTimersByTimeAsync(800);
-    expect(saveNote).not.toHaveBeenCalledWith(localItem, { content: '', title: '' });
+    expect(saveNote).not.toHaveBeenCalled();
 
     vi.useRealTimers();
   });
@@ -494,6 +507,25 @@ describe('MeetingDetailView inline title editing', () => {
     await flushPromises();
 
     expect(shareTextNative).toHaveBeenCalled();
+  });
+
+  it('hides local Share when the platform has no native share integration', async () => {
+    loadPlatformCapabilities.mockResolvedValue({
+      os: 'windows',
+      localBackend: { supported: true, engine: 'cpp-sidecar' },
+      systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
+      autoRecord: { supported: false },
+      nativeShare: { supported: false },
+      notificationSettingsUrl: 'ms-settings:notifications',
+      microphoneSettingsUrl: 'ms-settings:privacy-microphone',
+    });
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    expect(wrapper.find('.btn-share').exists()).toBe(false);
+    expect(shareTextNative).not.toHaveBeenCalled();
   });
 
   it('hides the Share button for an Ariso non-participant', async () => {

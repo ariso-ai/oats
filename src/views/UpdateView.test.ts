@@ -44,6 +44,9 @@ vi.mock('../tauri', () => ({
 
 import UpdateView from './UpdateView.vue';
 
+const currentVersion = __APP_VERSION__;
+const newerVersion = `${Number(currentVersion.split('.')[0]) + 1}.0.0`;
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.listeners.clear();
@@ -56,7 +59,7 @@ describe('UpdateView', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('Oats is up to date');
-    expect(wrapper.text()).toContain('Version 0.4.0 is installed.');
+    expect(wrapper.text()).toContain(`Version ${currentVersion} is installed.`);
     expect(wrapper.text()).not.toContain('Install Update');
     expect(wrapper.text()).toContain('Done');
   });
@@ -65,10 +68,10 @@ describe('UpdateView', () => {
     mocks.state = {
       ...mocks.defaultState,
       latest_known: {
-        version: '0.4.1',
+        version: newerVersion,
         mandatory: false,
         notes: [
-          '## [0.4.1](https://github.com/ariso-ai/oats/compare/v0.4.0...v0.4.1)',
+          `## [${newerVersion}](https://github.com/ariso-ai/oats/releases/tag/v${newerVersion})`,
           '',
           '### Features',
           '- Release-note powered highlights',
@@ -82,7 +85,9 @@ describe('UpdateView', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('What’s new for Oats?');
-    expect(wrapper.text()).toContain('Version 0.4.1 is ready. You have 0.4.0.');
+    expect(wrapper.text()).toContain(
+      `Version ${newerVersion} is ready. You have ${currentVersion}.`,
+    );
     expect(wrapper.text()).toContain('Features');
     expect(wrapper.text()).toContain('Release-note powered highlights');
     expect(wrapper.text()).toContain('Smaller native update window');
@@ -95,7 +100,7 @@ describe('UpdateView', () => {
     mocks.state = {
       ...mocks.defaultState,
       latest_known: {
-        version: '0.4.0',
+        version: currentVersion,
         mandatory: false,
         notes: '- Should not show as pending',
       },
@@ -113,7 +118,7 @@ describe('UpdateView', () => {
     mocks.state = {
       ...mocks.defaultState,
       latest_known: {
-        version: '0.4.1',
+        version: newerVersion,
         mandatory: false,
         notes: '### Features\n\n- Release-note powered highlights',
       },

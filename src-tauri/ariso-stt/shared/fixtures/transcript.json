@@ -1,0 +1,12 @@
+{
+  "language": "en",
+  "durationSeconds": 12.0,
+  "segments": [
+    {
+      "speaker": "model-speaker-0",
+      "text": "Hello from oats.",
+      "start": 0.0,
+      "end": 1.5
+    }
+  ]
+}

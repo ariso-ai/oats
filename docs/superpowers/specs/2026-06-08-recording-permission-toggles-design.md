@@ -1,8 +1,12 @@
 # Recording Permission Toggles — Design
 
 **Date:** 2026-06-08
-**Status:** Approved (pending spec review)
+**Status:** Superseded
 **Branch:** `settings-permission-toggles`
+
+> This macOS-first design predates the native `PlatformCapabilities` contract.
+> Current recording-source support and settings links come from the Tauri host;
+> the frontend does not infer them from browser identity.
 
 ## Summary
 
@@ -245,8 +249,8 @@ Tray "record"
 - **`getUserMedia` / ScreenCaptureKit fails at record time** — existing
   `useRecorder` cleanup runs and `WaveformView` rolls the tray back to idle and
   closes the window (unchanged behavior).
-- **Non-macOS** — permission helpers resolve `true` / are no-ops; deep-links are
-  skipped (guarded by the existing `navigator.userAgent.includes('Mac')` check).
+- **Unsupported platforms** — native capabilities keep unavailable sources and
+  settings links disabled.
 
 ## Testing
 

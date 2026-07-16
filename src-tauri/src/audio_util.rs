@@ -1,23 +1,30 @@
-//! Shared Core Audio primitives used by both system-audio (`audio_capture`) and
-//! microphone (`mic_capture`) capture: streaming resampler, mono downmix, PCM
-//! format validation, property reads, and base64 emission.
-#![cfg(target_os = "macos")]
+//! Shared audio primitives used by native capture backends. Resampling and
+//! base64 emission are portable; the Core Audio format/property helpers remain
+//! compiled only on macOS.
 
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
 use objc2_core_audio::{
     kAudioObjectPropertyElementMain, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
 };
+#[cfg(target_os = "macos")]
 use objc2_core_audio_types::{
     kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
     kAudioFormatLinearPCM, kLinearPCMFormatFlagIsNonInterleaved, AudioBufferList,
     AudioStreamBasicDescription,
 };
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
+#[cfg(target_os = "macos")]
 use std::ffi::{c_void, CStr};
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 
+#[cfg(target_os = "macos")]
 pub(crate) type AudioObjectID = u32;
 
+#[cfg(target_os = "macos")]
 pub(crate) fn ns(c: &CStr) -> Retained<NSString> {
     NSString::from_str(c.to_str().expect("Core Audio key is valid UTF-8"))
 }
@@ -67,6 +74,35 @@ impl Resampler {
     }
 }
 
+/// Average interleaved Float32 frames into mono. Windows requests this exact
+/// format from the shared-mode audio engine, so conversion stays independent
+/// of WASAPI handles and can be unit tested without audio hardware.
+pub(crate) fn downmix_interleaved_f32(input: &[u8], channels: usize) -> Result<Vec<f32>, String> {
+    if channels == 0 {
+        return Err("audio stream reported zero channels".into());
+    }
+    let bytes_per_frame = channels
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "audio frame size overflow".to_string())?;
+    if input.len() % bytes_per_frame != 0 {
+        return Err(format!(
+            "audio buffer has {} bytes, not a multiple of the {bytes_per_frame}-byte frame size",
+            input.len()
+        ));
+    }
+
+    let mut mono = Vec::with_capacity(input.len() / bytes_per_frame);
+    for frame in input.chunks_exact(bytes_per_frame) {
+        let mut sum = 0.0_f32;
+        for sample in frame.chunks_exact(4) {
+            sum += f32::from_le_bytes(sample.try_into().expect("four-byte sample"));
+        }
+        mono.push(sum / channels as f32);
+    }
+    Ok(mono)
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn prop_address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress {
         mSelector: selector,
@@ -75,6 +111,7 @@ pub(crate) fn prop_address(selector: u32, scope: u32) -> AudioObjectPropertyAddr
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) unsafe fn get_property<T>(
     object: AudioObjectID,
     selector: u32,
@@ -107,6 +144,7 @@ pub(crate) unsafe fn get_property<T>(
 
 /// Whether a stream format is packed, little-endian, interleaved 32-bit float
 /// LinearPCM with a positive sample rate — the layout `downmix_to_mono` assumes.
+#[cfg(target_os = "macos")]
 pub(crate) fn is_supported_pcm_format(asbd: &AudioStreamBasicDescription) -> bool {
     asbd.mFormatID == kAudioFormatLinearPCM
         && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
@@ -118,6 +156,7 @@ pub(crate) fn is_supported_pcm_format(asbd: &AudioStreamBasicDescription) -> boo
 }
 
 /// Average all channels of an interleaved Float32 `AudioBufferList` into mono.
+#[cfg(target_os = "macos")]
 pub(crate) unsafe fn downmix_to_mono(list: *const AudioBufferList) -> Vec<f32> {
     let list = unsafe { &*list };
     let n = list.mNumberBuffers as usize;
@@ -164,11 +203,13 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use objc2_core_audio_types::{
         kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
         kLinearPCMFormatFlagIsNonInterleaved,
     };
 
+    #[cfg(target_os = "macos")]
     fn float32_pcm() -> AudioStreamBasicDescription {
         AudioStreamBasicDescription {
             mSampleRate: 48_000.0,
@@ -180,15 +221,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn accepts_float32_linear_pcm() { assert!(is_supported_pcm_format(&float32_pcm())); }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_non_32_bit_depth() {
         let mut a = float32_pcm(); a.mBitsPerChannel = 16;
         assert!(!is_supported_pcm_format(&a));
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_non_positive_sample_rate() {
         // step = src_rate / 16_000 would be 0.0, stalling Resampler::process.
         let mut z = float32_pcm(); z.mSampleRate = 0.0; assert!(!is_supported_pcm_format(&z));
@@ -198,6 +242,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_non_linear_pcm_format() {
         let mut asbd = float32_pcm();
         asbd.mFormatID = u32::from_be_bytes(*b"aac "); // compressed, not LinearPCM
@@ -205,6 +250,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_integer_pcm_missing_float_flag() {
         let mut asbd = float32_pcm();
         asbd.mFormatFlags = kAudioFormatFlagIsPacked; // no float flag
@@ -212,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_unpacked_format() {
         let mut asbd = float32_pcm();
         asbd.mFormatFlags = kAudioFormatFlagIsFloat; // padded, not tightly packed
@@ -219,6 +266,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_big_endian_format() {
         let mut asbd = float32_pcm();
         asbd.mFormatFlags |= kAudioFormatFlagIsBigEndian;
@@ -226,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_non_interleaved_format() {
         let mut asbd = float32_pcm();
         asbd.mFormatFlags |= kLinearPCMFormatFlagIsNonInterleaved;
@@ -268,5 +317,23 @@ mod tests {
         rs.process(&[0.0_f32; 441], &mut out);
         let produced = out.len() / 2;
         assert!((150..=170).contains(&produced), "expected ~160 samples, got {produced}");
+    }
+
+    #[test]
+    fn downmixes_interleaved_stereo_float32() {
+        let mut bytes = Vec::new();
+        for sample in [0.25_f32, 0.75, -0.5, 0.25] {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        assert_eq!(
+            downmix_interleaved_f32(&bytes, 2).unwrap(),
+            vec![0.5, -0.125]
+        );
+    }
+
+    #[test]
+    fn rejects_partial_interleaved_frames() {
+        assert!(downmix_interleaved_f32(&[0; 7], 2).is_err());
+        assert!(downmix_interleaved_f32(&[], 0).is_err());
     }
 }

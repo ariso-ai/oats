@@ -8,6 +8,12 @@ use url::Url;
 
 const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 
+// Tauri's window lookup and construction are separate operations. These locks
+// make each singleton's check-and-build boundary atomic when native menu,
+// tray, and webview requests arrive together.
+static SETTINGS_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static LIBRARY_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(APP_USER_AGENT)
@@ -107,10 +113,7 @@ pub(crate) fn local_models_ready() -> bool {
 /// so its on-device-models section auto-starts the missing downloads. Shared by
 /// every recording entry point that gates on Local model readiness.
 pub(crate) fn surface_model_download(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    let _ = open_settings_window(app);
     let _ = app.emit("tray://show-model-prompt", ());
 }
 
@@ -483,16 +486,30 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
 
 #[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
-    // Focus if already exists
+    open_settings_window(&app)
+}
+
+/// Show or create the one Settings window. The creation lock protects the
+/// check/build pair so simultaneous native launchers cannot register duplicate
+/// webviews under the same label.
+pub(crate) fn open_settings_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let _creation = SETTINGS_WINDOW_CREATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.unminimize();
         win.show().map_err(|e: tauri::Error| e.to_string())?;
         win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
         return Ok(());
     }
 
-    crate::window_style::settings_window_builder(&app)
+    let win = crate::window_style::settings_window_builder(app)
         .build()
         .map_err(|e| e.to_string())?;
+    crate::window_style::install_settings_close_behavior(&win);
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -718,10 +735,7 @@ async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
     if is_session_valid(app).await {
         return true;
     }
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    let _ = open_settings_window(app);
     let _ = app.emit("tray://show-sign-in-prompt", ());
     false
 }
@@ -1126,6 +1140,7 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
 /// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
 /// `view_height` is the content view's height in points; `y`/`height` are the
 /// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
+#[cfg(target_os = "macos")]
 fn flip_y(view_height: f64, y: f64, height: f64) -> f64 {
     view_height - (y + height)
 }
@@ -1238,7 +1253,10 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
 /// Open (or focus) the meetings library window. Shared by the
 /// `create_library_window` command and the macOS dock-icon Reopen handler.
 pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri::{Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    let _creation = LIBRARY_WINDOW_CREATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
@@ -1251,11 +1269,20 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
     }
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
-    // the same row, just to the right of them.
-    WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
-        .title("Meetings")
-        .title_bar_style(TitleBarStyle::Overlay)
-        .hidden_title(true)
+    // the same row, just to the right of them. Other platforms keep native
+    // window chrome because this AppKit-specific composition has no equivalent
+    // role in the library UI.
+    #[cfg(target_os = "macos")]
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings")
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings");
+    builder
         .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
@@ -1266,6 +1293,7 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
 }
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct ShareAnchor {
     pub x: f64,
     pub y: f64,
@@ -1334,6 +1362,9 @@ pub fn share_text_native(
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
+/// Keeps the IPC command registered on every desktop target while making the
+/// unsupported boundary explicit. Capability-aware UI should hide this path;
+/// the error remains defense in depth for stale or direct callers.
 pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), String> {
     Err("native share is only supported on macOS".to_string())
 }
@@ -1365,7 +1396,10 @@ mod tests {
         // Relative paths are rejected before any app/store access, so no AppHandle
         // is needed to exercise this branch. Extract the validation into a helper.
         assert!(super::validate_vault_path("relative/dir").is_err());
-        assert!(super::validate_vault_path("/absolute/dir").is_ok());
+        let absolute = tempfile::tempdir().unwrap();
+        assert!(
+            super::validate_vault_path(absolute.path().to_str().unwrap()).is_ok()
+        );
     }
 
     #[test]
@@ -1901,7 +1935,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod share_tests {
     use super::flip_y;
     #[test]

@@ -69,6 +69,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
 
       # Key the build cache on the Xcode toolchain, same rationale as desktop.yaml:
       # DerivedData from one toolchain must not be restored into another.
@@ -85,8 +87,8 @@ jobs:
       - name: Cache ariso-stt DerivedData
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: src-tauri/ariso-stt/.xcode
-          key: codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved') }}
+          path: src-tauri/ariso-stt/macos/.xcode
+          key: codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved') }}
           restore-keys: |
             codeql-swift-derived-${{ steps.toolchain.outputs.fp }}-
 
@@ -97,7 +99,7 @@ jobs:
       # a near-no-op. arm64-only (ARCHS=arm64) — no need to also build x86_64.
       # -skipMacroValidation mirrors desktop.yaml.
       - name: Prime dependency build (untraced)
-        working-directory: src-tauri/ariso-stt
+        working-directory: src-tauri/ariso-stt/macos
         run: |
           xcodebuild build -scheme ariso-stt -configuration Debug \
             -destination 'generic/platform=macOS' \
@@ -119,7 +121,7 @@ jobs:
       # Must match the primed build (Debug, arm64, same derivedDataPath) or it
       # would rebuild dependencies for a different arch/config under the tracer.
       - name: Build ariso-stt (traced)
-        working-directory: src-tauri/ariso-stt
+        working-directory: src-tauri/ariso-stt/macos
         run: |
           touch Sources/ariso-stt/*.swift
           xcodebuild build -scheme ariso-stt -configuration Debug \

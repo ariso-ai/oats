@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { load } from '@tauri-apps/plugin-store';
 import { emit } from '@tauri-apps/api/event';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 
 // The mic monitor lives natively in Rust (src-tauri/src/mic_monitor.rs). This
 // module owns only the settings toggle + support probe, and broadcasts a sync
@@ -24,9 +25,13 @@ export async function setAutoRecordEnabled(enabled: boolean): Promise<void> {
   await emit(AUTO_RECORD_SYNC_EVENT);
 }
 
-/** Whether the OS supports per-process mic detection (macOS 14.4+). */
+/** Combines the shared product capability with the native monitor's runtime
+ * probe. The capability avoids invoking an unavailable backend; the command can
+ * still reject an otherwise supported OS version or environment. */
 export async function isAutoRecordSupported(): Promise<boolean> {
   try {
+    const caps = await loadPlatformCapabilities();
+    if (!caps.autoRecord.supported) return false;
     return await invoke<boolean>('auto_record_supported');
   } catch {
     return false;

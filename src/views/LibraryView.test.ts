@@ -15,6 +15,7 @@ const writeRecordingNote = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
+const listPendingUploads = vi.fn(() => Promise.resolve([]));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -70,7 +71,7 @@ vi.mock('../tauri', () => ({
     writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
   },
   pending: {
-    list: () => Promise.resolve([]),
+    list: () => listPendingUploads(),
   },
 }));
 
@@ -115,12 +116,14 @@ beforeEach(() => {
       startAt: meeting.timestamp,
       participants: [],
       actionItems: [],
+      audioClips: [],
       isLocal: true,
       durationSeconds: meeting.durationSeconds,
       hasTranscript: meeting.files?.hasTranscript ?? false,
     })
   );
   invoke.mockResolvedValue(undefined);
+  listPendingUploads.mockResolvedValue([]);
   readRecordingNote.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
   backendId.mockReturnValue('local');
@@ -548,30 +551,87 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { forceNew: true });
   });
 
-  it('hides the sidebar for an active recording (waveform window) without disabling Start on its own', async () => {
+  it('shows an initializing state when a recorder window exists before capture starts', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    // The sidebar collapses for the recording session…
+    // The sidebar collapses for the recording session.
     expect(wrapper.find('.sidebar').exists()).toBe(false);
-    // …but the Start button is disabled only by the docked recorder strip, not
-    // by the mere presence of the recorder window (which can't be reset here).
     const btn = wrapper.find('.add-btn');
     expect(btn.exists()).toBe(true);
-    expect(btn.attributes('disabled')).toBeUndefined();
+    expect(btn.text()).toContain('Starting recording');
+    expect(btn.attributes('disabled')).toBeDefined();
   });
 
-  it('hides the sidebar immediately after clicking Start, leaving the button usable', async () => {
+  it('hides the sidebar and shows immediate feedback after clicking Start', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
     expect(wrapper.find('.sidebar').exists()).toBe(true);
     await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
-    // Sidebar collapses right away; the button stays enabled until the strip
-    // docks (a redundant click merely refocuses the recorder window).
+    // Sidebar collapses right away and the command cannot be launched twice.
     expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(wrapper.find('.add-btn').text()).toContain('Starting recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('shows initializing feedback for a recording started from the native menu', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    await flushPromises();
+
+    expect(wrapper.find('.add-btn').text()).toContain('Starting recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('refreshes pending uploads as soon as a cloud upload fails', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(listPendingUploads).toHaveBeenCalledTimes(1);
+
+    emitEvent('recording://state', true);
+    await flushPromises();
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'failed',
+    });
+    await flushPromises();
+
+    expect(listPendingUploads).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('.sidebar').exists()).toBe(true);
+    expect(wrapper.find('.status-label').text()).toContain('Upload failed');
+  });
+
+  it('keeps Start disabled when native stop fires before the recorder window closes', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'uploading',
+    });
+    await flushPromises();
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+
+    // Native capture has stopped, but the waveform still owns upload/retry.
+    emitEvent('recording://state', false);
+    await flushPromises();
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'closed',
+    });
+    await flushPromises();
     expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
@@ -826,7 +886,7 @@ describe('LibraryView', () => {
 
   it('selects the picked meeting in the detail panel when a recording starts', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
-    const wrapper = mount(LibraryView);
+    const wrapper = mountWithDetailStub();
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
 
@@ -834,19 +894,19 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
     // The recording transition also collapses the sidebar immediately.
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
   });
 
   it('leaves the detail panel unchanged when a recording starts without a meeting', async () => {
     listMeetings.mockResolvedValue([item({ id: '42', title: 'Picked Sync' })]);
-    const wrapper = mount(LibraryView);
+    const wrapper = mountWithDetailStub();
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
 
     emitEvent('recording://started', { meetingId: null });
     await flushPromises();
     expect(wrapper.find('.up-next').exists()).toBe(false);
-    expect(wrapper.find('.add-btn').exists()).toBe(false);
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
   });
 
   it('reloads the meeting list when the picked meeting is not loaded yet', async () => {

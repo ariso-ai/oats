@@ -95,6 +95,24 @@ vi.mock('../composables/useAutoRecord', () => ({
   setAutoRecordEnabled: vi.fn(),
   isAutoRecordSupported: () => Promise.resolve(true),
 }));
+vi.mock('../composables/usePlatformCapabilities', () => {
+  const capabilities = () => ({
+    os: 'macos',
+    localBackend: { supported: true, engine: 'swift-mlx' },
+    systemAudio: {
+      supported: true,
+      settingsUrl: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    },
+    autoRecord: { supported: true },
+    nativeShare: { supported: true },
+    notificationSettingsUrl: 'x-apple.systempreferences:com.apple.Notifications-Settings.extension',
+    microphoneSettingsUrl: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+  });
+  return {
+    defaultPlatformCapabilities: capabilities,
+    loadPlatformCapabilities: () => Promise.resolve(capabilities()),
+  };
+});
 const setSilenceDetectionEnabled = vi.fn(() => Promise.resolve());
 vi.mock('../composables/useSilenceDetection', () => ({
   isSilenceDetectionEnabled: () => Promise.resolve(true),

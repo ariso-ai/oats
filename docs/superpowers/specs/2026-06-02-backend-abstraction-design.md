@@ -1,10 +1,14 @@
 # Backend Abstraction & Local Transcription — Design Spec
 
 **Date:** 2026-06-02
-**Status:** Approved (design); pending implementation plan
+**Status:** Superseded
 **Scope:** Introduce a switchable "backend" concept with two implementations — the
 existing remote **Ariso** backend and a new fully-offline **Local** backend — plus a
 filesystem storage layer under `~/.ariso/`.
+
+> This document records the original macOS-first design. The implemented
+> cross-platform architecture and current model lifecycle are documented under
+> `src-tauri/ariso-stt/` and `scripts/README.md`.
 
 ---
 
@@ -264,9 +268,9 @@ Steps (atomic from the caller's perspective):
 **`recording.mp3` is retained** (no lost audio; supports future retry). Batch is fast, so the
 UI needs only a single indeterminate "Transcribing…" state — no progress plumbing.
 
-**Testability:** the sidecar path is injectable via an env override
-(e.g. `ARISO_STT_BIN`), so `local_finalize_recording` is testable in CI against a stub
-binary that emits canned JSON — no real model required.
+**Testability:** internal orchestration accepts an explicit sidecar path, so
+`local_finalize_recording` is testable in CI against a stub binary that emits canned
+JSON — no real model required.
 
 ---
 
@@ -367,8 +371,8 @@ still uses `API_BASE_URL` / `WEB_APP_BASE_URL` per build flag.
 
 - **Rust unit tests:** path resolution, folder naming, `meta.json` (de)serialization,
   markdown rendering from segments, manifest verification.
-- **Pipeline test:** `local_finalize_recording` against a stub sidecar (`ARISO_STT_BIN`
-  override) — no real model in CI.
+- **Pipeline test:** `local_finalize_recording` against an explicitly injected stub
+  sidecar — no real model in CI.
 - **TS tests:** `useBackend()` selection + finalize routing; `LibraryView` rendering from
   mocked `list_local_recordings()`.
 - Existing recorder vitest untouched.

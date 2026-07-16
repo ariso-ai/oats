@@ -29,7 +29,7 @@ Be kind, be constructive, and assume good intent. We want oats to be a welcoming
 
 ## Ways to contribute
 
-- 🐛 **Report bugs** — open an [issue](https://github.com/ariso-ai/oats/issues) with steps to reproduce, your macOS version, and which transcription backend you were using.
+- 🐛 **Report bugs** — open an [issue](https://github.com/ariso-ai/oats/issues) with steps to reproduce, your OS version, and which transcription backend you were using.
 - 💡 **Suggest features** — open an issue describing the problem you'd like solved.
 - 🔧 **Send pull requests** — fix a bug, improve docs, or build a feature. See [Submitting changes](#submitting-changes).
 
@@ -46,8 +46,8 @@ config lives in `.claude/` and `.claude-plugin/`.
 - [Rust](https://rustup.rs/) toolchain
 - Node.js + npm
 - From the monorepo root: `npm install`
-- [Xcode](https://apps.apple.com/app/xcode/id497799835) (full install, not just Command Line Tools) — `xcodebuild` is required to compile the sidecar's MLX Metal shaders (`mlx-swift_Cmlx.bundle`); `swift build` alone cannot
-- **Apple Silicon, macOS 14+** (required to build and run the on-device Local backend sidecar)
+- **macOS Local backend:** [Xcode](https://apps.apple.com/app/xcode/id497799835) (full install, not just Command Line Tools) and **Apple Silicon, macOS 14+**. `xcodebuild` is required to compile the sidecar's MLX Metal shaders (`mlx-swift_Cmlx.bundle`); `swift build` alone cannot.
+- **Windows Local backend:** Windows 11, Visual Studio Build Tools with the C++ workload, and the `x86_64-pc-windows-msvc` Rust target. The build helper discovers the newest compatible Visual Studio installation with `vswhere`.
 
 ## Development scripts
 
@@ -87,15 +87,17 @@ Debug mode sets `VITE_DEBUG_AUDIO=true`, which disables echo cancellation and no
 
 ## Local backend (on-device transcription)
 
-The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. It uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording). **Requires Apple Silicon, macOS 14+.**
+The **Local** transcription backend transcribes recordings entirely on-device — no login, no upload. On macOS it uses a bundled Swift sidecar (`ariso-stt`) built on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 ASR + Pyannote speaker diarization, CoreML on the Apple Neural Engine). After transcription it also generates meeting notes on-device with the [`mlx-community/gemma-3-1b-it-qat-4bit`](https://huggingface.co/mlx-community/gemma-3-1b-it-qat-4bit) LLM via [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm), saved as `ari-note.md` next to `transcript.md` (best-effort: a notes failure never fails the recording).
+
+On Windows, the same contract is implemented by the Rust `src-tauri/ariso-stt/windows` target using Parakeet and speaker diarization through sherpa-onnx, plus Gemma GGUF through llama.cpp. The macOS Swift target lives in `src-tauri/ariso-stt/macos`, while language-neutral contract artifacts live in `src-tauri/ariso-stt/shared`. Both targets are inference-only: the Tauri host downloads immutable, hash-pinned model data directly from Cloudflare R2 and writes the same readiness markers on both platforms. Windows executable runtime files are pinned in `shared/windows-models.json` and packaged as Tauri installer resources.
 
 Build the sidecar before `tauri:build` / `tauri:dev` (these are build artifacts, not committed):
 
 ```bash
-cd src-tauri/ariso-stt
+cd src-tauri/ariso-stt/macos
 swift build -c release
-mkdir -p ../binaries
-cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
+mkdir -p ../../binaries
+cp .build/release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
 
 # The notes backend uses MLX (Metal). `swift build` CANNOT compile MLX's Metal
 # shaders — only xcodebuild can — so build the metallib bundle separately and
@@ -103,23 +105,31 @@ cp .build/release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
 # "Failed to load the default metallib".
 xcodebuild build -scheme ariso-stt -configuration Release \
   -destination 'generic/platform=macOS' -derivedDataPath .xcode -skipMacroValidation
-cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
+cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 ```
 
-Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources; the sidecar itself resolves next to the app executable or via the `ARISO_STT_BIN` env override (used in tests). Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../target/debug/`.
+Tauri ships `binaries/ariso-stt-aarch64-apple-darwin` next to the app as `ariso-stt` (`tauri.conf.json > bundle.externalBin`) and `binaries/mlx-swift_Cmlx.bundle` into `Contents/Resources/` (`bundle.resources`). At runtime the sidecar resolves the metallib from `mlx-swift_Cmlx.bundle` via its containing bundle's resources. Because `externalBin` is declared, `cargo build` / `cargo test` require the sidecar binary to be present — build it first on a fresh checkout. For `tauri:dev` (no `.app`), also copy the bundle next to the dev sidecar: `cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../target/debug/`.
 
-The sidecar contract (stdout carries only the result — transcript JSON, progress JSON-lines, or notes Markdown; all logs go to stderr):
+For Windows validation, build the sidecar into Tauri's expected target-specific name:
 
-- `ariso-stt --audio <path> --models <dir> --format json` → one `{language, durationSeconds, participants[], segments[]}` object.
-- `ariso-stt download --models <dir>` → JSON-lines `{"type":"progress","fraction":F}` … then `{"type":"done"}`. Downloads the speech models — ASR (`0–0.66`) and diarizer (`0.66–1.0`) — into `<dir>`. The notes LLM is NOT downloaded here.
-- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Loads the LLM from `<dir>/llm/gemma-3-1b-it-qat-4bit/` (a local directory; no network). The Rust app downloads that model directly from the project CDN (Cloudflare R2) — the published weights are HuggingFace Xet-backed, which the Swift HF client can't fetch.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-sidecar.ps1
+```
+
+The Windows helper also stages the pinned llama.cpp runtime under Tauri's
+resources. It does not download model data.
+
+The sidecar contract (stdout carries only transcript JSON or notes Markdown; all logs go to stderr):
+
+- `ariso-stt --audio <path> --models <dir> --format json` → one `{language, durationSeconds, segments[]}` object whose segment `speaker` values are raw strings. The Tauri host sorts segments and creates numeric speaker IDs and participants for storage.
+- `ariso-stt notes --transcript <path> --models <dir>` → meeting-notes Markdown on stdout. Loads the platform-native Gemma model from `<dir>` with no network access.
 
 Storage layout under `~/.ariso/`:
 
-- `models/` — CoreML speech bundles (`asr/`, `diarizer/`) + `manifest.json` ready-marker; the notes LLM in `llm/gemma-3-1b-it-qat-4bit/` (with a `.complete` marker written only after a full download)
-- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `note.md` (meeting notes), `meta.json`
+- `models/` — platform-native speech and notes bundles plus their readiness markers; `manifest.json` marks speech ready and a versioned `.complete` file marks notes ready
+- `recordings/<utc-timestamp>/` — `recording.mp3`, `transcript.md`, `ari-note.md` (meeting notes), `meta.json`
 
-In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs each model independently: the speech voice model (ASR + diarizer, from the sidecar) downloads automatically, and the language model (for notes, from the project CDN) installs from its own **Install** button. Each shows a green tick when ready. Past local recordings appear in the tray **Library…** window.
+In Settings → **Transcription Backend**, switch to **Local**. The **On-device models** section installs speech (ASR + diarizer) and notes independently from the project R2 CDN. Each shows a green tick after the host has verified every file and written its completion marker. Past local recordings appear in the tray **Library…** window.
 
 ## Testing transcription with a virtual audio device
 
@@ -179,17 +189,18 @@ Use these prefixes so the changelog and version bumps stay accurate.
 
 ## CI: validation and signed releases
 
-Two workflows build the macOS app, both on Apple Silicon (arm64):
+Two workflows validate and package the desktop targets:
 
-- **`Desktop App`** — CI validation. Its single `validate` job runs on PRs to `main` and pushes to `main` on a GitHub-hosted `macos-15` runner: `vite build` + `cargo build --locked`. No signing secrets exposed.
-- **`release`** — the full release pipeline, on a self-hosted Mac runner (`[self-hosted, macOS, ARM64]`, needed for keychain-based signing + notarization), all on push to `main` (see [Cutting a release](#cutting-a-release)).
+- **`Desktop App`** — CI validation. Its `macos-15` and `windows-latest` matrix builds the frontend, platform sidecar, and Tauri host without exposing signing secrets.
+- **`release`** — the full release pipeline on push to `main`: macOS packaging runs on Apple Silicon, Windows packaging runs on `windows-latest`, and publication waits for both signed outputs (see [Cutting a release](#cutting-a-release)).
 
 | Job              | Runs when                        | What it does                                                                                                                |
 | ---------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `release-please` | every push to `main`             | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`.                                  |
 | `sync-lock`      | a Release PR was created/updated | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch.                        |
 | `release`        | a GitHub Release was just cut    | Signs + notarizes with `--features prod-api` and uploads the bundle. Gated by the `release` GitHub Environment (required reviewer + scoped secrets). |
-| `publish`        | after `release`                  | Publishes the signed DMG, updater tarball, and `latest.json` to Cloudflare R2 (`/desktop/...`) and appends an R2 download link to the GitHub Release. Also gated by the `release` Environment. |
+| `package-windows` | a GitHub Release was just cut   | Builds Authenticode-signed NSIS/MSI packages and Tauri updater signatures, then verifies both signature layers. Gated by the `release` environment. |
+| `publish`        | after both platform packages     | Publishes the DMG, macOS updater tarball, Windows NSIS updater, and multi-platform `latest.json` to Cloudflare R2. Gated by the `release` environment. |
 
 Because the build runs as downstream jobs in the same `release` run (gated on release-please having cut a release), no cross-workflow trigger is needed — so the default `GITHUB_TOKEN` suffices throughout and no PAT is required.
 
@@ -222,20 +233,28 @@ npx @tauri-apps/cli signer generate
    | `APPLE_TEAM_ID`                      | 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership  |
    | `TAURI_SIGNING_PRIVATE_KEY`          | Ed25519 private key content (or a path to the key file) generated by `tauri signer generate`              |
    | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for that private key (leave empty if the key has no password)                                     |
+   | `WINDOWS_CERTIFICATE`                | Base64 text produced by `certutil -encode` for the Authenticode `.pfx` certificate                         |
+   | `WINDOWS_CERTIFICATE_PASSWORD`       | Export password for the Windows Authenticode `.pfx`                                                        |
    | `R2_ACCESS_KEY_ID`                   | R2 API token Access Key ID (Cloudflare → R2 → Manage R2 API Tokens, scoped Object Read & Write)           |
    | `R2_SECRET_ACCESS_KEY`               | R2 API token Secret Access Key                                                                             |
-   | `R2_ENDPOINT`                        | `https://<account-id>.r2.cloudflarestorage.com`                                                           |
-   | `R2_BUCKET`                          | Bucket backing `pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev`                                               |
 
-   The release job publishes artifacts to the stable keys `desktop/latest.json`, `desktop/oats.app.tar.gz`, and `desktop/oats.dmg` (overwritten each release, served with `no-cache`). The updater endpoint in `tauri.conf.json` points at `desktop/latest.json`.
+4. **Add these variables to the same environment:**
+
+   | Variable                | Value                                                           |
+   | ----------------------- | --------------------------------------------------------------- |
+   | `WINDOWS_TIMESTAMP_URL` | RFC 3161 timestamp service supplied by the certificate provider |
+   | `R2_ENDPOINT`           | `https://<account-id>.r2.cloudflarestorage.com`                  |
+   | `R2_BUCKET`             | Bucket backing the public `r2.dev` desktop download domain      |
+
+   The release job overwrites the stable keys `desktop/latest.json`, `desktop/oats.app.tar.gz`, `desktop/oats.dmg`, and `desktop/oats-setup.exe` with `no-cache`. The updater endpoint in `tauri.conf.json` points at the multi-platform `desktop/latest.json` manifest.
 
 ## Cutting a release
 
 Releases are automated by [release-please](https://github.com/googleapis/release-please) (the `release` workflow). On every push to `main` it parses conventional commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major) and maintains a **Release PR** that bumps the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, updates `CHANGELOG.md`, and (via the `sync-lock` job) keeps `package-lock.json` and `Cargo.lock` in sync.
 
 1. **Merge feature/fix PRs to `main`** with conventional-commit messages. release-please keeps the Release PR up to date.
-2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so the `release` workflow runs again: release-please creates the `vX.Y.Z` tag and GitHub Release, and the same run continues into the `release` and `publish` jobs.
-3. **Approve the `release` environment gate** when the workflow pauses (per the required-reviewer rule). It then builds + signs + notarizes, publishes the artifacts to R2, and adds the R2 download link to the GitHub Release.
+2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so the `release` workflow runs again: release-please creates the `vX.Y.Z` tag and GitHub Release, and the same run continues into the macOS, Windows, and `publish` jobs.
+3. **Approve each `release` environment deployment** when the workflow pauses (per the required-reviewer rule). GitHub evaluates protected environments per job, so macOS packaging, Windows packaging, and publication each request approval. The first two may run in parallel; approve publication after both signed bundles are ready.
 
 > **Note:** The signing/publish jobs run from the `release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`).
 

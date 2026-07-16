@@ -19,9 +19,22 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate (frontend + cargo build)
+    name: ${{ matrix.job_name }}
+    # Keep frontend and host validation under one cross-platform contract. The
+    # matrix proves each native implementation builds; release signing and
+    # installer publication deliberately remain outside pull-request CI.
+    # Preserve the original macOS check name because the main-branch ruleset
+    # requires that exact status context.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            job_name: Validate (frontend + cargo build)
+          - os: windows-latest
+            job_name: Validate (windows-latest)
     # macos-15 is a GitHub-hosted Apple Silicon (arm64) runner; macos-13 is Intel.
-    runs-on: macos-15
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
@@ -36,8 +49,13 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        if: runner.os == 'macOS'
         with:
           targets: aarch64-apple-darwin
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        if: runner.os == 'Windows'
 
       - name: Cache Rust dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -45,9 +63,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: rust-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            rust-aarch64-apple-darwin-
+            rust-${{ runner.os }}-
 
       - name: Install dependencies
         run: npm ci --prefer-offline
@@ -60,6 +78,7 @@ jobs:
       # so a sidecar built by one runner's Xcode is never restored into another's
       # — e.g. this GitHub-hosted macos-15 build vs release.yaml's self-hosted Mac.
       - name: Fingerprint Xcode toolchain
+        if: runner.os == 'macOS'
         id: toolchain
         run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
 
@@ -72,13 +91,14 @@ jobs:
       # Exact-match key only (no restore-keys): a partial restore would yield
       # artifacts that don't match the current source or toolchain.
       - name: Cache ariso-stt sidecar artifacts
+        if: runner.os == 'macOS'
         id: sidecar-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved', 'src-tauri/ariso-stt/macos/Sources/**') }}
 
       # On a cache miss, build once with xcodebuild. It emits both the
       # executable and the MLX metallib bundle (mlx-swift_Cmlx.bundle, referenced
@@ -87,16 +107,73 @@ jobs:
       # Metal shaders anyway, and xcodebuild's executable already expects the
       # metallib bundle beside it — so build once and copy both products out.
       - name: Build ariso-stt sidecar
-        if: steps.sidecar-cache.outputs.cache-hit != 'true'
-        working-directory: src-tauri/ariso-stt
+        if: runner.os == 'macOS' && steps.sidecar-cache.outputs.cache-hit != 'true'
+        working-directory: src-tauri/ariso-stt/macos
         run: |
-          mkdir -p ../binaries
+          mkdir -p ../../binaries
           xcodebuild build -scheme ariso-stt -configuration Release \
             -destination 'generic/platform=macOS' \
             -derivedDataPath .xcode -skipMacroValidation
-          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
-          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
+          cp .xcode/Build/Products/Release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
+
+      - name: Fingerprint Windows Rust toolchain
+        if: runner.os == 'Windows'
+        id: windows-toolchain
+        shell: pwsh
+        run: |
+          $version = (rustc --version).Replace(' ', '-')
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      # The host build only consumes the staged executable and llama runtime.
+      # Cache those exact externalBin/resources outputs, keyed by every script,
+      # source, and lock input that can change their bytes.
+      - name: Cache Windows ariso-stt sidecar artifacts
+        if: runner.os == 'Windows'
+        id: windows-sidecar-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
+            src-tauri/binaries/llama
+          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
+
+      # Exercise the sidecar's shared CLI/JSON contract before its release
+      # binary is copied into Tauri's externalBin location.
+      - name: Test Windows ariso-stt sidecar
+        if: runner.os == 'Windows' && steps.windows-sidecar-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          . ./scripts/import-windows-build-env.ps1
+          Import-WindowsBuildEnvironment
+          cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml --locked
+
+      # The following host build expects the target-suffixed external binary to
+      # exist even though CI is not producing an installer.
+      - name: Build Windows ariso-stt sidecar
+        if: runner.os == 'Windows' && steps.windows-sidecar-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/build-windows-sidecar.ps1
+
+      # Host tests mutate process-scoped test overrides, so keep them serial on
+      # Windows while exercising the same target that Tauri packages.
+      - name: Test Rust host on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/import-windows-build-env.ps1
+          Import-WindowsBuildEnvironment
+          cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 
       - name: Build Rust
+        if: runner.os == 'macOS'
         working-directory: src-tauri
         run: cargo build --locked
+
+      - name: Build Rust
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/import-windows-build-env.ps1
+          Import-WindowsBuildEnvironment
+          cargo build --manifest-path src-tauri/Cargo.toml --locked
