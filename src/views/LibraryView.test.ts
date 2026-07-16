@@ -15,6 +15,7 @@ const writeRecordingNote = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
+const listPendingUploads = vi.fn(() => Promise.resolve([]));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -70,7 +71,7 @@ vi.mock('../tauri', () => ({
     writeRecordingNote: (id: string, markdown: string) => writeRecordingNote(id, markdown),
   },
   pending: {
-    list: () => Promise.resolve([]),
+    list: () => listPendingUploads(),
   },
 }));
 
@@ -122,6 +123,7 @@ beforeEach(() => {
     })
   );
   invoke.mockResolvedValue(undefined);
+  listPendingUploads.mockResolvedValue([]);
   readRecordingNote.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
   backendId.mockReturnValue('local');
@@ -549,31 +551,59 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { forceNew: true });
   });
 
-  it('hides the sidebar for an active recording (waveform window) without disabling Start on its own', async () => {
+  it('shows an initializing state when a recorder window exists before capture starts', async () => {
     listMeetings.mockResolvedValue([]);
     getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = mount(LibraryView);
     await flushPromises();
-    // The sidebar collapses for the recording session…
+    // The sidebar collapses for the recording session.
     expect(wrapper.find('.sidebar').exists()).toBe(false);
-    // …but the Start button is disabled only by the docked recorder strip, not
-    // by the mere presence of the recorder window (which can't be reset here).
     const btn = wrapper.find('.add-btn');
     expect(btn.exists()).toBe(true);
-    expect(btn.attributes('disabled')).toBeUndefined();
+    expect(btn.text()).toContain('Starting recording');
+    expect(btn.attributes('disabled')).toBeDefined();
   });
 
-  it('hides the sidebar immediately after clicking Start, leaving the button usable', async () => {
+  it('hides the sidebar and shows immediate feedback after clicking Start', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
     await flushPromises();
     expect(wrapper.find('.sidebar').exists()).toBe(true);
     await wrapper.find('.add-btn').trigger('click');
     await flushPromises();
-    // Sidebar collapses right away; the button stays enabled until the strip
-    // docks (a redundant click merely refocuses the recorder window).
+    // Sidebar collapses right away and the command cannot be launched twice.
     expect(wrapper.find('.sidebar').exists()).toBe(false);
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
+    expect(wrapper.find('.add-btn').text()).toContain('Starting recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('shows initializing feedback for a recording started from the native menu', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    await flushPromises();
+
+    expect(wrapper.find('.add-btn').text()).toContain('Starting recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('refreshes pending uploads as soon as a cloud upload fails', async () => {
+    backendId.mockReturnValue('ariso');
+    usesMeetingPicker.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(listPendingUploads).toHaveBeenCalledTimes(1);
+
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: 77, phase: 'failed',
+    });
+    await flushPromises();
+
+    expect(listPendingUploads).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('.status-label').text()).toContain('Upload failed');
   });
 
   // Regression: stopping a recording from the in-library strip leaves the

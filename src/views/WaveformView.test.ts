@@ -13,6 +13,7 @@ const closeWin = vi.fn(() => Promise.resolve());
 const setIgnoreCursorEvents = vi.fn(() => Promise.resolve());
 const showWin = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
+const backendKind = vi.hoisted(() => ({ value: 'local' as 'local' | 'ariso' }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 const eventHandlers: Record<string, (e: unknown) => void> = {};
@@ -61,7 +62,7 @@ vi.mock('../composables/useWaveform', () => ({
 }));
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () =>
-    Promise.resolve({ id: 'local', finalizeRecording: (...a: unknown[]) => finalizeRecording(...a) }),
+    Promise.resolve({ id: backendKind.value, finalizeRecording: (...a: unknown[]) => finalizeRecording(...a) }),
 }));
 vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
@@ -101,6 +102,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const k in eventHandlers) delete eventHandlers[k];
   routeQuery = {};
+  backendKind.value = 'local';
   recorderIsRecording.value = true;
   recorderIsPaused.value = false;
   recorderDuration.value = 5;
@@ -408,7 +410,7 @@ describe('WaveformView vertical pill', () => {
     wrapper.unmount();
   });
 
-  it('does not broadcast a recording phase before capture has started', async () => {
+  it('broadcasts starting, but not recording, before capture has started', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     // getUserMedia still pending: the recorder reports not-recording.
@@ -417,8 +419,31 @@ describe('WaveformView vertical pill', () => {
     await vi.runOnlyPendingTimersAsync();
     emitEvent.mockClear();
     await vi.advanceTimersByTimeAsync(2_100); // heartbeats fire
-    const states = emitEvent.mock.calls.filter(([name]) => name === 'recorder://state');
-    expect(states).toHaveLength(0);
+    const phases = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, payload]) => (payload as { phase: string }).phase);
+    expect(phases).toContain('starting');
+    expect(phases).not.toContain('recording');
+    vi.useRealTimers();
+  });
+
+  it('broadcasts the meeting created by an unattached cloud upload', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    backendKind.value = 'ariso';
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'ariso', meetingId: 77 });
+
+    const wrapper = mount(WaveformView);
+    await vi.runOnlyPendingTimersAsync();
+    await wrapper.find('.stop-btn').trigger('click');
+    await vi.runOnlyPendingTimersAsync();
+
+    const success = emitEvent.mock.calls
+      .filter(([name, payload]) =>
+        name === 'recorder://state' && (payload as { phase: string }).phase === 'success')
+      .at(-1)?.[1] as { meetingId: number | null } | undefined;
+    expect(success?.meetingId).toBe(77);
     vi.useRealTimers();
   });
 

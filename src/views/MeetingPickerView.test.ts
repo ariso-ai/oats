@@ -52,6 +52,23 @@ describe('MeetingPickerView — record a new meeting', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 77 });
   });
 
+  it('shows immediate feedback while the recorder window is opening', async () => {
+    let resolveStart!: () => void;
+    invoke.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveStart = resolve; }),
+    );
+    const wrapper = mount(MeetingPickerView);
+    await flushPromises();
+
+    void byText(wrapper, 'Start recording')!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Starting recording');
+    expect(wrapper.find('.btn-primary').attributes('disabled')).toBeDefined();
+    resolveStart();
+    await flushPromises();
+  });
+
   it('keeps the title optional — an empty title still starts recording', async () => {
     const wrapper = mount(MeetingPickerView);
     await flushPromises();

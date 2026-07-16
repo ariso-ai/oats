@@ -86,6 +86,19 @@ describe('RecorderStrip', () => {
     expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
   });
 
+  it('shows an initializing state before capture becomes active', async () => {
+    const wrapper = mount(RecorderStrip);
+    await flushPromises();
+
+    sendState(recording({ phase: 'starting', bars: [], durationSeconds: 0 }));
+    await flushPromises();
+
+    expect(wrapper.find('.spinner').exists()).toBe(true);
+    expect(wrapper.text()).toContain('Starting recording');
+    expect(wrapper.emitted('recording-active')?.at(-1)).toEqual([false]);
+    expect(wrapper.emitted('recording-phase')?.at(-1)).toEqual(['starting']);
+  });
+
   it('hides after a closed phase', async () => {
     const wrapper = mount(RecorderStrip);
     await flushPromises();

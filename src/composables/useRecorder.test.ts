@@ -16,6 +16,7 @@ const platformCapabilities = vi.hoisted((): {
     systemAudio: { supported: false, settingsUrl: null },
   },
 }));
+const invoke = vi.hoisted(() => vi.fn(async () => undefined));
 
 // lamejs does real MP3 work we don't need here; stub the encoder.
 // encodeBuffer records its argument and returns a non-empty buffer so that
@@ -34,7 +35,7 @@ vi.mock('@breezystack/lamejs', () => ({
   },
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
 // Capture event listeners by name so tests can push synthetic events.
 const listeners: Record<string, (e: { payload: string }) => void> = {};
@@ -262,6 +263,33 @@ describe('useRecorder mic native capture', () => {
 
     expect(getUserMedia).toHaveBeenCalledOnce();
     expect(startMicrophoneCapture).not.toHaveBeenCalled();
+    await rec.stopRecording();
+  });
+
+  it('initializes Windows microphone and system audio concurrently', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: true, settingsUrl: 'ms-settings:sound' },
+    };
+    let resolveMic!: (stream: MediaStream) => void;
+    const getUserMedia = vi.fn(
+      () => new Promise<MediaStream>((resolve) => { resolveMic = resolve; }),
+    );
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    const rec = useRecorder();
+
+    const starting = rec.startRecording('mic_and_system');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('start_system_audio_capture');
+
+    resolveMic({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    await starting;
     await rec.stopRecording();
   });
 });
