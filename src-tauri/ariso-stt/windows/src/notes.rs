@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 #[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::{io::AsRawHandle, process::CommandExt};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
@@ -21,6 +21,8 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const DEFAULT_MAX_TOKENS: u32 = 512;
 const DEFAULT_CONTEXT_SIZE: u32 = 4096;
@@ -281,6 +283,7 @@ fn run_llama_prompt(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    configure_background_process(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn llama.cpp notes runtime {}", llama_cli.display()))?;
@@ -307,6 +310,16 @@ fn run_llama_prompt(
     }
     Ok(notes)
 }
+
+/// Prevents the bundled console runtime from surfacing through the sidecar's
+/// otherwise invisible notes pipeline without sacrificing captured diagnostics.
+#[cfg(windows)]
+fn configure_background_process(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_background_process(_command: &mut Command) {}
 
 #[cfg(windows)]
 struct KillOnCloseJob(HANDLE);
@@ -481,6 +494,40 @@ fn discover_notes_runtime_from(sidecar: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    const CONSOLE_PROBE_ENV: &str = "ARISO_STT_TEST_CONSOLE_PROBE_CHILD";
+
+    /// Uses a real console-subsystem test process to verify the exact launch
+    /// configuration applied to llama.cpp rather than only checking a constant.
+    #[cfg(windows)]
+    #[test]
+    fn background_llama_child_has_no_console_window() {
+        if std::env::var_os(CONSOLE_PROBE_ENV).is_some() {
+            let has_console = unsafe { !windows_sys::Win32::System::Console::GetConsoleWindow().is_null() };
+            println!("ARISO_STT_CONSOLE_WINDOW={has_console}");
+            return;
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("notes::tests::background_llama_child_has_no_console_window")
+            .arg("--nocapture")
+            .env(CONSOLE_PROBE_ENV, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_background_process(&mut command);
+
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains("ARISO_STT_CONSOLE_WINDOW=false"),
+            "child unexpectedly acquired a console window; stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 
     #[test]
     fn discovers_packaged_llama_runtime_beside_sidecar() {

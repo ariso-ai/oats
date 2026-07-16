@@ -8,6 +8,9 @@ use tokio::process::Command;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
 use crate::transcript_normalization::{
     normalize_transcript, SidecarTranscriptResult, TranscriptResult,
 };
@@ -16,6 +19,16 @@ use crate::transcript_normalization::{
 /// Notes generation is best-effort and runs detached from `finalize_core`,
 /// so this only bounds the background task's lifetime.
 const NOTES_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Keeps console-subsystem inference binaries behind the GUI application
+/// boundary while preserving their piped output for errors and diagnostics.
+#[cfg(windows)]
+fn configure_background_process(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW.0);
+}
+
+#[cfg(not(windows))]
+fn configure_background_process(_command: &mut Command) {}
 
 /// Per-recording mutex table. Serializes concurrent `append_recording_core`
 /// calls to the same target so two simultaneous finalizations cannot both
@@ -58,7 +71,8 @@ pub fn sidecar_path() -> Result<PathBuf, String> {
 /// Run the sidecar in transcribe mode and parse its JSON stdout.
 pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptResult, String> {
     let bin = sidecar_path()?;
-    let output = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .arg("--audio")
         .arg(audio)
         .arg("--models")
@@ -66,7 +80,9 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
         .arg("--format")
         .arg("json")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_background_process(&mut command);
+    let output = command
         .output()
         .await
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
@@ -123,6 +139,7 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<NotesOutput, 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    configure_background_process(&mut cmd);
 
     let output = tokio::time::timeout(NOTES_TIMEOUT, cmd.output())
         .await
@@ -717,6 +734,44 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(windows)]
+    const CONSOLE_PROBE_ENV: &str = "OATS_TEST_CONSOLE_PROBE_CHILD";
+
+    /// Exercises the actual Windows process boundary so a later command
+    /// refactor cannot silently bring the console flash back.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn background_sidecar_child_has_no_console_window() {
+        if std::env::var_os(CONSOLE_PROBE_ENV).is_some() {
+            let has_console = unsafe {
+                !windows::Win32::System::Console::GetConsoleWindow()
+                    .0
+                    .is_null()
+            };
+            println!("OATS_CONSOLE_WINDOW={has_console}");
+            return;
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("transcribe::tests::background_sidecar_child_has_no_console_window")
+            .arg("--nocapture")
+            .env(CONSOLE_PROBE_ENV, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_background_process(&mut command);
+
+        let output = command.output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains("OATS_CONSOLE_WINDOW=false"),
+            "child unexpectedly acquired a console window; stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 
     // SAFETY (all set_var/remove_var below): tests run with `--test-threads=1`,
     // so there is no concurrent env mutation while these calls execute.

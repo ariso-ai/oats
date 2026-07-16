@@ -69,6 +69,7 @@ wasapi = "=0.23.0"
 windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
+    "Win32_System_Console",
     "Win32_System_Com",
     "Win32_System_Threading",
 ] }
