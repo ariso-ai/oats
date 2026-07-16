@@ -27,3 +27,17 @@ where
         .center()
         .skip_taskbar(true)
 }
+
+/// Keep Settings resident so every launcher can reuse the same webview and its
+/// in-progress form state. The close affordance hides it; application shutdown
+/// still destroys it normally.
+pub(crate) fn install_settings_close_behavior(window: &tauri::WebviewWindow) {
+    let window_for_close = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window_for_close.hide();
+            crate::activation::refresh(window_for_close.app_handle());
+        }
+    });
+}

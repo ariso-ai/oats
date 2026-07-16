@@ -140,25 +140,16 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                             .map(|f| f.id);
                         let Some(meeting_id) = meeting_id else { return };
 
-                        let valid = crate::commands::is_session_valid(&app_async).await;
-                        let app_main = app_async.clone();
-                        let _ = app_async.run_on_main_thread(move || {
-                            if !valid {
-                                if let Some(win) = app_main.get_webview_window("settings") {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
-                                }
-                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
-                                return;
-                            }
-                            let _ = crate::commands::open_waveform_window(
-                                &app_main,
-                                Some(meeting_id),
-                                None,
-                                false,
-                                false,
-                            );
-                        });
+                        if let Err(error) = crate::commands::start_recording_window(
+                            app_async,
+                            Some(meeting_id),
+                            None,
+                            None,
+                        )
+                        .await
+                        {
+                            eprintln!("Failed to start featured meeting recording: {error}");
+                        }
                     });
                 }
                 "pause_recording" => {
@@ -181,22 +172,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     // The waveform window closes itself after upload completes.
                 }
                 "settings" => {
-                    if let Some(win) = app.get_webview_window("settings") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    } else if let Ok(win) = crate::window_style::settings_window_builder(app)
-                        .build()
-                    {
-                        let win_clone = win.clone();
-                        win.on_window_event(move |event| {
-                            if let tauri::WindowEvent::CloseRequested { api, .. } =
-                                event
-                            {
-                                api.prevent_close();
-                                let _ = win_clone.hide();
-                            }
-                        });
-                    }
+                    let _ = crate::commands::open_settings_window(app);
                 }
                 "library" => open_library(app),
                 "check_updates" => {
@@ -230,36 +206,14 @@ pub fn start_recording(app: &AppHandle) {
     let app_async = app.clone();
     tauri::async_runtime::spawn(async move {
         let backend = crate::commands::active_backend(&app_async);
-
-        if backend == "local" {
-            let ready = crate::commands::local_models_ready();
-            let app_main = app_async.clone();
-            let _ = app_async.run_on_main_thread(move || {
-                if !ready {
-                    crate::commands::surface_model_download(&app_main);
-                    return;
-                }
-                let _ = crate::commands::open_waveform_window(
-                    &app_main, None, None, false, false,
-                );
-            });
-            return;
+        let result = if backend == "local" {
+            crate::commands::start_recording_window(app_async, None, None, None).await
+        } else {
+            crate::commands::open_meeting_picker(app_async, None).await
+        };
+        if let Err(error) = result {
+            eprintln!("Failed to start recording flow: {error}");
         }
-
-        // Ariso (default): existing session gate + meeting-picker.
-        let valid = crate::commands::is_session_valid(&app_async).await;
-        let app_main = app_async.clone();
-        let _ = app_async.run_on_main_thread(move || {
-            if !valid {
-                if let Some(win) = app_main.get_webview_window("settings") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
-                let _ = app_main.emit("tray://show-sign-in-prompt", ());
-                return;
-            }
-            let _ = crate::commands::open_meeting_picker_window(&app_main, None);
-        });
     });
 }
 

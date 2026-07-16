@@ -123,6 +123,10 @@ beforeEach(() => {
     os: 'macos',
     systemAudio: { supported: false, settingsUrl: null },
   };
+  Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {},
+  });
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
     value: {
@@ -136,6 +140,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });

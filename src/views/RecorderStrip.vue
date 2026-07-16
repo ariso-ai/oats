@@ -8,6 +8,10 @@
         {{ state.phase === 'success' ? 'Recording saved' : 'Upload failed' }}
       </span>
     </template>
+    <template v-else-if="state.phase === 'starting'">
+      <span class="spinner" />
+      <span class="status-label">Starting recording…</span>
+    </template>
     <template v-else-if="state.phase === 'uploading'">
       <span class="spinner" />
       <span class="status-label">Saving…</span>
@@ -61,7 +65,7 @@ interface RecorderState {
   meetingId: number | null;
   /** Deterministic id of an in-progress local recording (null for Ariso). */
   localRecordingId?: string | null;
-  phase: 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
+  phase: 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 }
 
 /** The meeting currently shown in the detail panel (null when none). */
@@ -75,6 +79,7 @@ const props = defineProps<{ meetingId: string | null }>();
 const emitToParent = defineEmits<{
   'recording-change': [string | null];
   'recording-active': [boolean];
+  'recording-phase': [RecorderState['phase'] | null];
 }>();
 
 // The recorder heartbeats state about every second; a longer silence means it
@@ -106,6 +111,7 @@ const visible = computed(() => {
 watch(state, (s) => {
   emitToParent('recording-change', s ? recordedMeetingId(s) : null);
   emitToParent('recording-active', s?.phase === 'recording');
+  emitToParent('recording-phase', s?.phase ?? null);
 });
 
 const formattedDuration = computed(() => {
@@ -120,9 +126,14 @@ function control(event: string): void {
 }
 
 onMounted(async () => {
-  unlistenState = await listen<RecorderState>('recorder://state', (e) => {
+  unlistenState = await listen<RecorderState | boolean>('recorder://state', (e) => {
+    // Treat the waveform's structured heartbeat as this component's only
+    // contract. Library consumes native lifecycle booleans on the separate
+    // `recording://state` channel, so malformed/crossed payloads stay harmless.
+    if (typeof e.payload !== 'object' || e.payload === null || !('phase' in e.payload)) return;
     if (staleTimer) clearTimeout(staleTimer);
     if (e.payload.phase === 'closed') {
+      emitToParent('recording-phase', 'closed');
       state.value = null;
       return;
     }

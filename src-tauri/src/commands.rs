@@ -8,6 +8,12 @@ use url::Url;
 
 const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 
+// Tauri's window lookup and construction are separate operations. These locks
+// make each singleton's check-and-build boundary atomic when native menu,
+// tray, and webview requests arrive together.
+static SETTINGS_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static LIBRARY_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(APP_USER_AGENT)
@@ -107,10 +113,7 @@ pub(crate) fn local_models_ready() -> bool {
 /// so its on-device-models section auto-starts the missing downloads. Shared by
 /// every recording entry point that gates on Local model readiness.
 pub(crate) fn surface_model_download(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    let _ = open_settings_window(app);
     let _ = app.emit("tray://show-model-prompt", ());
 }
 
@@ -483,16 +486,30 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
 
 #[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
-    // Focus if already exists
+    open_settings_window(&app)
+}
+
+/// Show or create the one Settings window. The creation lock protects the
+/// check/build pair so simultaneous native launchers cannot register duplicate
+/// webviews under the same label.
+pub(crate) fn open_settings_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let _creation = SETTINGS_WINDOW_CREATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.unminimize();
         win.show().map_err(|e: tauri::Error| e.to_string())?;
         win.set_focus().map_err(|e: tauri::Error| e.to_string())?;
         return Ok(());
     }
 
-    crate::window_style::settings_window_builder(&app)
+    let win = crate::window_style::settings_window_builder(app)
         .build()
         .map_err(|e| e.to_string())?;
+    crate::window_style::install_settings_close_behavior(&win);
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -718,10 +735,7 @@ async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
     if is_session_valid(app).await {
         return true;
     }
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    let _ = open_settings_window(app);
     let _ = app.emit("tray://show-sign-in-prompt", ());
     false
 }
@@ -1240,6 +1254,9 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
 /// `create_library_window` command and the macOS dock-icon Reopen handler.
 pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    let _creation = LIBRARY_WINDOW_CREATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // The library window has no hide-on-close handler, so it is destroyed on
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.

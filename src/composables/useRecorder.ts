@@ -8,9 +8,12 @@ import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
 
-const hasTauri =
-  typeof window !== 'undefined' &&
-  ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
+function isTauriRuntime(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    ('__TAURI__' in window || '__TAURI_INTERNALS__' in window)
+  );
+}
 
 // Peak (absolute Int16) below which a frame counts as "no sound activity".
 // ~0.01 of full scale (32768) — above the noise floor, below real speech.
@@ -152,7 +155,7 @@ export function useRecorder() {
     // comes from the current binary. Intersecting them here is the final guard
     // before native capture rather than trusting Settings to have been opened.
     const caps = await loadPlatformCapabilities();
-    systemAudioSupported.value = hasTauri && caps.systemAudio.supported;
+    systemAudioSupported.value = isTauriRuntime() && caps.systemAudio.supported;
     const useSystemAudio = mode === 'mic_and_system' || mode === 'system';
     if (useSystemAudio && !systemAudioSupported.value) {
       throw new Error('System audio recording is not supported by this oats installation');
@@ -167,7 +170,8 @@ export function useRecorder() {
       audioContext = new AudioContext({ sampleRate: 44100 });
       analyserNode = audioContext.createAnalyser();
 
-      if (useMic) {
+      const startMic = async (): Promise<void> => {
+        if (!useMic) return;
         if (micUsesNativeCapture) {
           // Register first so no frames from the native macOS HAL source are lost.
           micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
@@ -200,14 +204,13 @@ export function useRecorder() {
           micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(analyserNode);
         }
-      }
+      };
 
-      if (useSystemAudio) {
-        // Start Tauri system audio capture and listen for PCM data events
-        await invoke('start_system_audio_capture');
-        systemAudioActive = true;
-
-        const unlisten = await listen<string>('system-audio-data', (event) => {
+      const startSystemAudio = async (): Promise<void> => {
+        if (!useSystemAudio) return;
+        // Subscribe before WASAPI starts so its first PCM frames cannot arrive
+        // in the gap between the native command and listener registration.
+        systemAudioUnlisten = await listen<string>('system-audio-data', (event) => {
           if (!isRecording.value || isPaused.value) return;
 
           // Decode base64 → raw bytes → Int16 PCM
@@ -227,7 +230,28 @@ export function useRecorder() {
           merged.set(samples, systemAudioBuffer.length);
           systemAudioBuffer = merged;
         });
-        systemAudioUnlisten = unlisten;
+
+        try {
+          await invoke('start_system_audio_capture');
+          systemAudioActive = true;
+        } catch (err) {
+          systemAudioUnlisten?.();
+          systemAudioUnlisten = null;
+          throw err;
+        }
+      };
+
+      if (caps.os === 'windows' && useMic && useSystemAudio) {
+        // Windows permission/device setup and WASAPI loopback initialization do
+        // not depend on each other. Wait for both to settle so a partial start
+        // can always be cleaned up before surfacing either failure.
+        const starts = await Promise.allSettled([startMic(), startSystemAudio()]);
+        for (const result of starts) {
+          if (result.status === 'rejected') throw result.reason;
+        }
+      } else {
+        await startMic();
+        await startSystemAudio();
       }
 
       // Stereo (ch0 mic, ch1 system) only when mixing both; otherwise mono.

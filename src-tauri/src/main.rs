@@ -158,9 +158,13 @@ fn main() {
     #[cfg(target_os = "windows")]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
         use tauri::Manager;
-        if let Some(window) = app.get_webview_window("settings") {
-            let _ = window.show();
-            let _ = window.set_focus();
+        // A second shortcut launch returns the user to their existing primary
+        // work surface. Before Meetings has been opened, Settings remains the
+        // startup surface for this tray-first application.
+        if app.get_webview_window("library").is_some() {
+            let _ = commands::open_library_window(app);
+        } else {
+            let _ = commands::open_settings_window(app);
         }
     }));
 
@@ -173,14 +177,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
         .on_menu_event(|app, event| {
-            use tauri::Manager;
             // The app menu's "Settings…" (⌘,) opens the same window the tray does.
             match event.id().as_ref() {
                 "settings" => {
-                    if let Some(win) = app.get_webview_window("settings") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
+                    let _ = commands::open_settings_window(app);
                 }
                 "start_recording" => tray::start_recording(app),
                 "library" => tray::open_library(app),
@@ -349,17 +349,7 @@ fn main() {
             let settings = crate::window_style::settings_window_builder(app)
                 .visible(false)
                 .build()?;
-
-            let settings_clone = settings.clone();
-            settings.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = settings_clone.hide();
-                    // Settings hides rather than closes, so the global
-                    // Destroyed hook never fires — demote here once it's gone.
-                    activation::refresh(&settings_clone.app_handle());
-                }
-            });
+            crate::window_style::install_settings_close_behavior(&settings);
 
             // Windows has no persistent application menu while every window is
             // hidden, and users commonly hide tray icons. A shortcut launch

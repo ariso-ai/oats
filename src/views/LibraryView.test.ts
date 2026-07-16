@@ -597,12 +597,17 @@ describe('LibraryView', () => {
     await flushPromises();
     expect(listPendingUploads).toHaveBeenCalledTimes(1);
 
+    emitEvent('recording://state', true);
+    await flushPromises();
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+
     emitEvent('recorder://state', {
-      bars: [], durationSeconds: 3, isPaused: false, meetingId: 77, phase: 'failed',
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'failed',
     });
     await flushPromises();
 
     expect(listPendingUploads).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('.sidebar').exists()).toBe(true);
     expect(wrapper.find('.status-label').text()).toContain('Upload failed');
   });
 

@@ -104,7 +104,12 @@ import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
-import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
+import {
+  getActiveBackend,
+  type Backend,
+  type FinalizeResult,
+  type RecordingMeta,
+} from '../composables/useBackend';
 import { pending, local } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
@@ -184,12 +189,12 @@ const formattedDuration = computed(() => {
 // Mirror the recording to the library window's embedded recorder strip. The
 // bars ride on frameLevels (sampled in the audio callback, so the cadence
 // survives this window being hidden, unlike rAF-driven waveform.levels).
-type RecorderPhase = 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
+type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 
 function currentPhase(): RecorderPhase {
   if (uploadResult.value) return uploadResult.value;
   if (isUploading.value) return 'uploading';
-  return 'recording';
+  return recorder.isRecording.value ? 'recording' : 'starting';
 }
 
 // Once `closed` is sent, stay silent: a heartbeat firing between the closed
@@ -346,6 +351,9 @@ async function rollbackAndClose() {
 }
 
 async function startRecording() {
+  // Surface initialization before any settings, permission, or device work so
+  // every launcher has an immediate and honest state to render.
+  broadcastState('starting');
   let mode: ReturnType<typeof deriveRecordingMode>;
   try {
     mode = deriveRecordingMode(await loadRecordingEnabled());
@@ -578,7 +586,7 @@ async function handleMeetingEndStop() {
 // Retry button — blob and meta stay in refs so retry needs no re-record.
 // Tracks the underlying finalize promise (not the UI-timeout race) so that a
 // timed-out attempt whose work is still running won't be re-launched by Retry.
-let inFlightFinalize: Promise<unknown> | null = null;
+let inFlightFinalize: Promise<FinalizeResult> | null = null;
 async function runFinalize() {
   if (!stoppedBlob.value || !stoppedMeta.value || !backend.value) return;
   if (inFlightFinalize) return;
@@ -603,7 +611,17 @@ async function runFinalize() {
     timeoutId = setTimeout(() => reject(new Error('Operation timed out')), 120_000);
   });
   try {
-    await Promise.race([work, timeout]);
+    const result = await Promise.race([work, timeout]);
+    // An unattached Ariso upload creates its meeting during finalize. Carry
+    // that server-assigned id into the success event so Library can pin and
+    // reload the real meeting instead of waiting for a later focus refresh.
+    if (
+      result.backend === 'ariso' &&
+      typeof result.meetingId === 'number' &&
+      Number.isSafeInteger(result.meetingId)
+    ) {
+      effectiveMeetingId.value = result.meetingId;
+    }
     uploadResult.value = 'success';
     stoppedBlob.value = null;
     stoppedMeta.value = null;

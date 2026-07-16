@@ -22,16 +22,22 @@ const LEGACY_KEY = 'recordingMode';
  * remain enabled; the loader never substitutes a different source.
  */
 export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
-  const store = await load(SETTINGS_PATH, { autoSave: true });
-  const capabilities = await loadPlatformCapabilities();
-  const mic = await store.get<boolean>(MIC_KEY);
-  const sys = await store.get<boolean>(SYS_KEY);
+  // Store startup and native capability discovery are independent IPC calls;
+  // overlap them so recorder launch is not gated on two serial round trips.
+  const [store, capabilities] = await Promise.all([
+    load(SETTINGS_PATH, { autoSave: true }),
+    loadPlatformCapabilities(),
+  ]);
+  const [mic, sys, legacy] = await Promise.all([
+    store.get<boolean>(MIC_KEY),
+    store.get<boolean>(SYS_KEY),
+    store.get<string>(LEGACY_KEY),
+  ]);
   let persisted: RecordingEnabled;
 
   if (typeof mic === 'boolean' && typeof sys === 'boolean') {
     persisted = { mic, systemAudio: sys };
   } else {
-    const legacy = await store.get<string>(LEGACY_KEY);
     persisted = legacy
       ? deriveEnabledFromLegacy(legacy)
       : { mic: true, systemAudio: capabilities.systemAudio.supported };
@@ -45,10 +51,12 @@ export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
 
   // Initialize missing keys and clear a source this binary cannot capture.
   // Microphone state is never changed as a substitute for system audio.
-  if (typeof mic !== 'boolean') await store.set(MIC_KEY, persisted.mic);
+  const writes: Promise<void>[] = [];
+  if (typeof mic !== 'boolean') writes.push(store.set(MIC_KEY, persisted.mic));
   if (typeof sys !== 'boolean' || sys !== persisted.systemAudio) {
-    await store.set(SYS_KEY, persisted.systemAudio);
+    writes.push(store.set(SYS_KEY, persisted.systemAudio));
   }
+  await Promise.all(writes);
   return persisted;
 }
 
