@@ -1,5 +1,6 @@
 # ariso-stt
 
+
 `ariso-stt` is the local transcription and notes sidecar project for oats. It
 contains one shared runtime contract and a native implementation for each
 desktop platform:
