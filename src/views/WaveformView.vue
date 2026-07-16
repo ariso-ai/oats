@@ -120,6 +120,8 @@ import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/s
 import {
   shouldPromptMeetingEnd,
   findMeetingEndAt,
+  findNextMeetingStart,
+  MEETING_END_GRACE_MS,
   MEETING_END_PROMPT_TIMEOUT_MS,
 } from '../composables/meetingEndWatch';
 import { localRecordingIdFromStart } from '../composables/localRecordingId';
@@ -330,6 +332,11 @@ let meetingEndTimer: ReturnType<typeof setInterval> | null = null;
 // card subtitle.
 const meetingEndAt = ref<number | null>(null);
 const meetingEndSubtitle = ref<string | undefined>(undefined);
+// Scheduled start of the NEXT calendar meeting (epoch ms), or null when there
+// is none. The next meeting's start is the transition point: it triggers the
+// prompt immediately, so back-to-back (or slightly overlapping) meetings don't
+// bleed through the end+grace wait.
+const meetingNextStartAt = ref<number | null>(null);
 let meetingEndPromptShownAt: number | null = null;
 let meetingEndPromptsShown = 0;
 let meetingEndLastPromptAt: number | null = null;
@@ -522,13 +529,15 @@ async function resolveSilenceSubtitle(): Promise<string | undefined> {
   }
 }
 
-// Resolve the attached meeting's scheduled end (Ariso only). end_at lives on the
-// scheduled-meetings list, NOT /desktop/meetings/{id}, so fetch the ±2h window
-// and match by id. Any failure leaves meetingEndAt null → the watch stays off.
+// Resolve the attached meeting's scheduled end and the next meeting's start
+// (Ariso only). end_at lives on the scheduled-meetings list, NOT
+// /desktop/meetings/{id}, so fetch the ±2h window and match by id. Any failure
+// leaves both null → the watch stays off.
 async function resolveMeetingEnd() {
   if (!meetingEndReminderEnabled || backend.value?.id !== 'ariso' || effectiveMeetingId.value === null) {
     meetingEndAt.value = null;
     meetingEndSubtitle.value = undefined;
+    meetingNextStartAt.value = null;
     return;
   }
   try {
@@ -539,9 +548,11 @@ async function resolveMeetingEnd() {
     const info = findMeetingEndAt(meetings, effectiveMeetingId.value);
     meetingEndAt.value = info.endAt;
     meetingEndSubtitle.value = info.title ?? undefined;
+    meetingNextStartAt.value = findNextMeetingStart(meetings, effectiveMeetingId.value).startAt;
   } catch (e) {
     console.error('Failed to resolve meeting end; meeting-end watch disabled', e);
     meetingEndAt.value = null;
+    meetingNextStartAt.value = null;
   }
 }
 
@@ -768,8 +779,9 @@ onMounted(async () => {
   // watcher covers the async auto path). No-op when the reminder is disabled.
   void resolveMeetingEnd();
 
-  // Meeting-stop reminder: prompts when the attached meeting's scheduled end has
-  // passed; ignoring it keeps recording.
+  // Meeting-stop reminder: prompts when the attached meeting's scheduled end
+  // has passed, or immediately when the next calendar meeting starts (the
+  // transition point for back-to-back calls); ignoring it keeps recording.
   if (meetingEndReminderEnabled) {
     meetingEndTimer = setInterval(() => {
       if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
@@ -782,15 +794,23 @@ onMounted(async () => {
             recorder.isPaused.value,
             meetingEndPromptsShown,
             meetingEndLastPromptAt,
+            meetingNextStartAt.value,
           )
         ) {
           meetingEndPromptShownAt = now;
           meetingEndLastPromptAt = now;
           meetingEndPromptsShown += 1;
-          void invoke(
-            'show_meeting_end_prompt',
-            meetingEndSubtitle.value ? { subtitle: meetingEndSubtitle.value } : {},
-          );
+          // Title says why the card appeared; subtitle names the meeting being
+          // ended. "Next meeting started" exactly when the end+grace rule alone
+          // wouldn't have fired yet — i.e. the next meeting is the trigger.
+          const nextStarted =
+            meetingNextStartAt.value !== null &&
+            now >= meetingNextStartAt.value &&
+            (meetingEndAt.value === null || now < meetingEndAt.value + MEETING_END_GRACE_MS);
+          void invoke('show_meeting_end_prompt', {
+            ...(meetingEndSubtitle.value ? { subtitle: meetingEndSubtitle.value } : {}),
+            ...(nextStarted ? { title: 'Next meeting started' } : {}),
+          });
         }
         return;
       }

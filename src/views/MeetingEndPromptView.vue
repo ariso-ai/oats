@@ -7,11 +7,11 @@ import { parseMeetingEndPromptParams } from './meetingPromptParams';
 import oatsLogo from '../assets/oats-light.svg';
 
 // Read params straight from the URL (no router dependency, so the view mounts
-// bare in tests). Opened by Rust with `?seconds=<countdown>&subtitle=`.
+// bare in tests). Opened by Rust with `?seconds=<countdown>&subtitle=&title=`.
 const search = window.location.hash.includes('?')
   ? window.location.hash.slice(window.location.hash.indexOf('?'))
   : '';
-const { seconds, subtitle } = parseMeetingEndPromptParams(search);
+const { seconds, subtitle, title } = parseMeetingEndPromptParams(search);
 
 const menuOpen = ref(false);
 const splitEl = ref<HTMLElement | null>(null);
@@ -58,7 +58,7 @@ async function resolve(stop: boolean) {
       <div class="row">
         <img :src="oatsLogo" alt="oats" class="logo" />
         <div class="copy">
-          <div class="title">Meeting ended</div>
+          <div class="title">{{ title }}</div>
           <div v-if="subtitle" data-test="subtitle" class="subtitle">{{ subtitle }}</div>
         </div>
 
