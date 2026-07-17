@@ -56,6 +56,20 @@ jobs:
       HEAD_REF: ${{ github.event.pull_request.head.ref }}
       BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
+      # Show an at-a-glance status on the PR while the run is in flight.
+      # Added before checkout so it's visible even if a later step fails;
+      # the final always() step below removes it. Best-effort — a labeling
+      # hiccup must not abort the actual autofix.
+      - name: Mark PR autofix:working
+        run: |
+          gh label create "autofix:working" \
+            --repo "$REPO" \
+            --color FBCA04 \
+            --description "Autofix workflow is applying review fixes" \
+            2>/dev/null || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "autofix:working" \
+            || echo "::warning::could not add autofix:working label"
+
       - name: Checkout PR head
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -233,3 +247,12 @@ jobs:
       - name: Cleanup
         if: always()
         run: rm -f /tmp/commit-message.txt /tmp/thread-replies.json /tmp/claude-output.json
+
+      # Clear the in-flight status label whatever the outcome (success,
+      # no-op, failure, or cancellation). Best-effort so cleanup never
+      # fails the run.
+      - name: Remove autofix:working label
+        if: always()
+        run: |
+          gh pr edit "$PR" --repo "$REPO" --remove-label "autofix:working" \
+            2>/dev/null || true
