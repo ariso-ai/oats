@@ -16,9 +16,8 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: apply-review-fixes-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 env:
   CODERABBIT_BOT_LOGIN: "coderabbitai[bot]"
   HUMAN_REVIEWERS: "shawnzhu"
