@@ -263,6 +263,24 @@ fn abort_pending_sign_in() -> bool {
     }
 }
 
+/// Atomically retire attempt `id` — clear the slot only if it still holds
+/// `id` — and report whether it did. Used right before a result is emitted so
+/// a cancel that arrives after the listener task's final await (too late for
+/// `JoinHandle::abort` to stop, since abort only takes effect at an await
+/// point) still prevents the stale result from being published, and so a
+/// naturally completed attempt doesn't linger in the slot for a later
+/// `cancel_google_sign_in` to emit a bogus cancellation over.
+fn retire_sign_in_attempt(id: u64) -> bool {
+    let mut slot = PENDING_SIGN_IN.lock().unwrap();
+    match slot.as_ref() {
+        Some(p) if p.id == id => {
+            *slot = None;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Constant-time-ish nonce check: comparing SHA-256 digests instead of the
 /// raw strings keeps a local process from recovering the nonce byte-by-byte
 /// through comparison timing.
@@ -393,8 +411,12 @@ async fn accept_loopback_callback(
 /// Drive the post-browser half of sign-in: wait for the loopback callback,
 /// exchange the magic-link token for a session, and report via `oauth-result`.
 /// Emits on `window` (the webview that started this attempt) rather than
-/// broadcasting the session token to every window.
+/// broadcasting the session token to every window. Retires `attempt_id`
+/// immediately before emitting so a cancel that arrives too late to abort
+/// this task (abort only takes effect at an await point, and there are none
+/// left after the callback resolves) still suppresses the stale result.
 async fn run_browser_sign_in(
+    attempt_id: u64,
     window: tauri::WebviewWindow,
     listener: tokio::net::TcpListener,
     nonce: String,
@@ -415,7 +437,9 @@ async fn run_browser_sign_in(
                 error: Some("Sign-in timed out — please try again".into()),
             },
         };
-    let _ = window.emit("oauth-result", result);
+    if retire_sign_in_attempt(attempt_id) {
+        let _ = window.emit("oauth-result", result);
+    }
 }
 
 /// Initiates Google OAuth sign-in in the user's default browser (native
@@ -505,7 +529,8 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // Step 3: Wait for the browser to hit the loopback callback. If this
     // attempt was superseded or canceled while the browser was opening,
     // `attach_sign_in_handle` aborts the task instead of letting it run.
-    let handle = tauri::async_runtime::spawn(run_browser_sign_in(window, listener, nonce));
+    let handle =
+        tauri::async_runtime::spawn(run_browser_sign_in(attempt_id, window, listener, nonce));
     attach_sign_in_handle(attempt_id, handle);
 
     // Return immediately — the frontend listens for the "oauth-result" event
@@ -1652,6 +1677,25 @@ mod tests {
 
         // A cancel with nothing pending is a no-op, not an error.
         assert!(!abort_pending_sign_in());
+    }
+
+    #[test]
+    fn retire_sign_in_attempt_only_clears_the_matching_slot() {
+        let id = begin_sign_in_attempt();
+
+        // A superseded attempt's retire is a no-op — its slot is already gone
+        // (or belongs to a newer attempt), so it must not clear the winner's
+        // state or report success.
+        let superseded_id = begin_sign_in_attempt();
+        assert!(!retire_sign_in_attempt(id));
+        assert!(sign_in_attempt_active(superseded_id));
+
+        // Retiring the current attempt clears it and reports true exactly
+        // once; a second retire (e.g. a late cancel racing the emit) is a
+        // no-op instead of clearing a newer attempt that took the slot.
+        assert!(retire_sign_in_attempt(superseded_id));
+        assert!(!sign_in_attempt_active(superseded_id));
+        assert!(!retire_sign_in_attempt(superseded_id));
     }
 
     #[tokio::test]
