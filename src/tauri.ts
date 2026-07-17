@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -28,14 +28,22 @@ export const SIGN_IN_CANCELED_ERROR = 'Sign-in canceled';
 
 export const auth = {
   async googleSignIn(): Promise<{ success?: boolean; sessionToken?: string; error?: string }> {
-    // Listen for the OAuth result event before triggering the flow
     let resolveResult: (result: SignInResult) => void;
     const resultPromise = new Promise<SignInResult>((resolve) => {
       resolveResult = resolve;
     });
-    const unlistenPromise = listen<SignInResult>('oauth-result', (event) => {
-      resolveResult(event.payload);
-    });
+
+    // Await listener setup before triggering the flow. The backend scopes
+    // its "oauth-result" emit to this webview (it carries the session
+    // token), so listen on the current webview window too. If setup fails,
+    // let it throw here rather than starting a sign-in that can never
+    // resolve resultPromise.
+    const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
+      'oauth-result',
+      (event) => {
+        resolveResult(event.payload);
+      }
+    );
 
     try {
       // Trigger the OAuth flow — opens the sign-in page in the default browser
@@ -49,7 +57,7 @@ export const auth = {
       // Wait for the browser flow to hit the loopback callback and complete
       return await resultPromise;
     } finally {
-      void unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+      unlisten();
     }
   },
 
