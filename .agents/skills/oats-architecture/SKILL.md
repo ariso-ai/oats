@@ -35,7 +35,7 @@ All windows load one Vue bundle and render a hash route (`src/main.ts`):
 - `settings` (`/settings`) — the settings window (pre-created hidden at startup).
 - `library` (`/library`) — titled **"Meetings"**; the main user-facing window
   (created on demand, destroyed on close).
-- plus `waveform`, `update`, `meeting-picker`, `onboarding`, `oauth`.
+- plus `waveform`, `update`, `meeting-picker`, `onboarding`.
 
 The tray (`tray.rs`, `tray_meeting.rs`) and recorder pill (`recorder_pill.rs`) are the
 menu-bar surface.

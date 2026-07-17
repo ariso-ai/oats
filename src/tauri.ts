@@ -22,26 +22,39 @@ interface ApiResponse {
   data: unknown;
 }
 
+// Error emitted by the backend when a pending sign-in is canceled (user gave
+// up waiting on the browser). Views treat it as a silent cancel, not a failure.
+export const SIGN_IN_CANCELED_ERROR = 'Sign-in canceled';
+
 export const auth = {
   async googleSignIn(): Promise<{ success?: boolean; sessionToken?: string; error?: string }> {
     // Listen for the OAuth result event before triggering the flow
+    let resolveResult: (result: SignInResult) => void;
     const resultPromise = new Promise<SignInResult>((resolve) => {
-      listen<SignInResult>('oauth-result', (event) => {
-        resolve(event.payload);
-      });
+      resolveResult = resolve;
+    });
+    const unlistenPromise = listen<SignInResult>('oauth-result', (event) => {
+      resolveResult(event.payload);
     });
 
-    // Trigger the OAuth flow — opens a native webview window
-    const immediate = await invoke<SignInResult>('google_sign_in');
+    try {
+      // Trigger the OAuth flow — opens the sign-in page in the default browser
+      const immediate = await invoke<SignInResult>('google_sign_in');
 
-    // If the command itself returned an error (e.g. prepare-state failed), return it
-    if (immediate.error) {
-      return { error: immediate.error };
+      // If the command itself returned an error (e.g. prepare-state failed), return it
+      if (immediate.error) {
+        return { error: immediate.error };
+      }
+
+      // Wait for the browser flow to hit the loopback callback and complete
+      return await resultPromise;
+    } finally {
+      void unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
     }
+  },
 
-    // Wait for the OAuth window flow to complete
-    const result = await resultPromise;
-    return result;
+  async cancelSignIn(): Promise<void> {
+    await invoke('cancel_google_sign_in');
   },
 
   async checkSession(): Promise<{ sessionToken: string } | null> {

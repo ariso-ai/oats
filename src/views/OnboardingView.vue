@@ -17,14 +17,25 @@
           <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
         </svg>
         <span v-if="!isSigningIn">Sign in with Google</span>
-        <span v-else>Signing in…</span>
+        <span v-else>Continue in your browser…</span>
       </button>
+
+      <p v-if="isSigningIn" class="subheading">
+        Finish signing in with the browser window we just opened, then come back here.
+      </p>
 
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
 
       <button
+        v-if="isSigningIn"
+        class="skip-btn cancel-btn"
+        @click="handleCancelSignIn"
+      >
+        Cancel sign-in
+      </button>
+      <button
+        v-else
         class="skip-btn"
-        :disabled="isSigningIn"
         @click="handleSkip"
       >
         Skip for now
@@ -37,7 +48,7 @@
 import { ref, computed } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { emit } from '@tauri-apps/api/event';
-import { AUTH_SIGNED_IN_EVENT, auth, openSettingsWindow, setOnboarded } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, openSettingsWindow, setOnboarded } from '../tauri';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 import { ONBOARDING_STEPS, nextStepIndex } from './onboarding';
 
@@ -83,8 +94,8 @@ async function handleGoogleSignIn() {
   try {
     const result = await auth.googleSignIn();
     if (result.error) {
-      // Treat a user-closed auth window as a silent cancel (matches Settings).
-      if (result.error !== 'Auth window closed') {
+      // Treat a user-triggered cancel as silent (matches Settings).
+      if (result.error !== SIGN_IN_CANCELED_ERROR) {
         errorMessage.value = result.error;
       }
       return;
@@ -108,6 +119,16 @@ async function handleSkip() {
     return;
   }
   await advance();
+}
+
+// Abort a pending browser sign-in. The backend resolves the waiting
+// googleSignIn() call with the silent-cancel error, which resets the UI.
+async function handleCancelSignIn() {
+  try {
+    await auth.cancelSignIn();
+  } catch {
+    /* nothing pending — ignore */
+  }
 }
 </script>
 
