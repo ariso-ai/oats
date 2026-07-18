@@ -7,8 +7,11 @@
         <span class="pi-wave" aria-hidden="true" />
         <span class="pi-title">{{ titleFor(it) }}</span>
         <span class="pi-dur">{{ durationFor(it) }}</span>
-        <span class="pi-play" title="Plays the recording buffered on this Mac, not an uploaded copy">
-          <RecordingAudioPlayer :load="() => loadAudio(it)" />
+        <span class="pi-play">
+          <RecordingAudioPlayer
+            :load="() => loadAudio(it)"
+            title="Plays the recording buffered on this Mac, not an uploaded copy"
+          />
         </span>
       </div>
       <!-- Leaving the actions row cancels a pending discard confirmation so the
