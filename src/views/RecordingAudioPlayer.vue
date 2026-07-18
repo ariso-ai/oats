@@ -13,7 +13,6 @@
     :class="{ 'play-btn--error': errored }"
     :disabled="noAudio || loading"
     :title="title"
-    :aria-label="title"
     @click="onPlay"
   >
     <span v-if="noAudio">▶ No audio</span>

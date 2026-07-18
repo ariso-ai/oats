@@ -56,8 +56,9 @@ describe('PendingUploads', () => {
     const wrapper = mount(PendingUploads);
     await flushPromises();
     expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(2);
-    // Each control says it plays the local buffered copy, not the cloud version.
-    expect(wrapper.find('.pi-play').attributes('title')).toContain('on this Mac');
+    // Each control says it plays the local buffered copy, not the cloud
+    // version — on the focusable button itself so keyboard/AT users get it.
+    expect(wrapper.find('.pi-play .play-btn').attributes('title')).toContain('on this Mac');
   });
 
   it('play loads only that recording\'s buffered audio', async () => {
