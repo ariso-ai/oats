@@ -7,6 +7,9 @@
         <span class="pi-wave" aria-hidden="true" />
         <span class="pi-title">{{ titleFor(it) }}</span>
         <span class="pi-dur">{{ durationFor(it) }}</span>
+        <span class="pi-play" title="Plays the recording buffered on this Mac, not an uploaded copy">
+          <RecordingAudioPlayer :load="() => loadAudio(it)" />
+        </span>
       </div>
       <!-- Leaving the actions row cancels a pending discard confirmation so the
            destructive second click can't linger armed after the user moves away. -->
@@ -28,6 +31,7 @@
 import { ref, onMounted } from 'vue';
 import { auth, pending, type PendingUploadMeta } from '../tauri';
 import { combineAndUpload, discardAll } from '../composables/usePendingUploads';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
 const emit = defineEmits<{ uploaded: [] }>();
 
@@ -66,6 +70,12 @@ function durationFor(it: PendingUploadMeta): string {
   const mins = Math.floor(it.durationSeconds / 60).toString().padStart(2, '0');
   const secs = (it.durationSeconds % 60).toString().padStart(2, '0');
   return `${mins}:${secs}`;
+}
+
+// Reuses the combine command with a single key to read one buffer's mp3 bytes,
+// so playback exercises the exact bytes an upload retry would send.
+function loadAudio(it: PendingUploadMeta): Promise<ArrayBuffer> {
+  return pending.combine([it.createdAt]);
 }
 
 // Retry is only useful when desktop has an Ari session to attach to the upload
@@ -182,6 +192,24 @@ onMounted(refresh);
   font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+.pi-play {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+/* Once playing, cap the native controls so they share the row with the title
+   instead of the <audio> element's intrinsic ~300px width overflowing it. */
+.pi-play :deep(.audio-el) {
+  width: 150px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+/* The expanded player has its own timeline; drop the redundant wave glyph and
+   duration so the title isn't squeezed to nothing in the narrow sidebar row. */
+.pending-item:has(.audio-el) .pi-wave,
+.pending-item:has(.audio-el) .pi-dur {
+  display: none;
 }
 .pending-error {
   margin: 0 10px;

@@ -3,13 +3,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 
 const list = vi.fn();
+const combine = vi.fn();
 const checkSession = vi.fn();
 const combineAndUpload = vi.fn();
 const discardAll = vi.fn();
 
 vi.mock('../tauri', () => ({
   auth: { checkSession: (...a: unknown[]) => checkSession(...a) },
-  pending: { list: (...a: unknown[]) => list(...a) },
+  pending: {
+    list: (...a: unknown[]) => list(...a),
+    combine: (...a: unknown[]) => combine(...a),
+  },
 }));
 vi.mock('../composables/usePendingUploads', () => ({
   combineAndUpload: (...a: unknown[]) => combineAndUpload(...a),
@@ -17,6 +21,7 @@ vi.mock('../composables/usePendingUploads', () => ({
 }));
 
 import PendingUploads from './PendingUploads.vue';
+import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
 const items = [
   { createdAt: '2026-06-12T09:00:00Z', startAt: '2026-06-12T09:00:00Z', endAt: '2026-06-12T09:05:00Z', durationSeconds: 300 },
@@ -44,6 +49,29 @@ describe('PendingUploads', () => {
     expect(wrapper.findAll('.pending-item')).toHaveLength(2);
     expect(wrapper.findAll('.pi-wave')).toHaveLength(2);
     expect(wrapper.find('.upload').text()).toContain('Upload (2)');
+  });
+
+  it('renders a play control for each buffered recording', async () => {
+    list.mockResolvedValue(items);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+    expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(2);
+    // Each control says it plays the local buffered copy, not the cloud version.
+    expect(wrapper.find('.pi-play').attributes('title')).toContain('on this Mac');
+  });
+
+  it('play loads only that recording\'s buffered audio', async () => {
+    list.mockResolvedValue(items);
+    const buf = new ArrayBuffer(4);
+    combine.mockResolvedValue(buf);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    const players = wrapper.findAllComponents(RecordingAudioPlayer);
+    const loaded = await players[1].props('load')();
+
+    expect(combine).toHaveBeenCalledWith(['2026-06-12T11:00:00Z']);
+    expect(loaded).toBe(buf);
   });
 
   it('Upload combines+uploads, refreshes, and emits uploaded on success', async () => {
