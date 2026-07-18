@@ -40,9 +40,11 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 vi.mock('../tauri', () => ({
   AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
+  SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
   auth: {
     checkSession: () => checkSession(),
     googleSignIn: vi.fn(),
+    cancelSignIn: vi.fn(),
     signOut: vi.fn(),
   },
   api: {
