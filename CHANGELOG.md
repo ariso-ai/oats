@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.17.0](https://github.com/ariso-ai/oats/compare/v0.16.0...v0.17.0) (2026-07-19)
+
+
+### Features
+
+* add play button for buffered recordings in Pending Uploads ([1799613](https://github.com/ariso-ai/oats/commit/17996137c1217338d2b3f540ddd43d64747a91f3)), closes [#229](https://github.com/ariso-ai/oats/issues/229)
+* harden Windows local parity and releases ([e9de46b](https://github.com/ariso-ai/oats/commit/e9de46b400c266b4f460bb569c0bd87fe7846e01))
+* play button for buffered recordings in Pending Uploads ([229b490](https://github.com/ariso-ai/oats/commit/229b490d256bd3e4b2737e5e8cca75684e5f8ff2))
+* run the OAuth handshake in the default browser via a loopback c… ([f816224](https://github.com/ariso-ai/oats/commit/f816224aeeb8d12829d99f340edd9f74f07c5326))
+* run the OAuth handshake in the default browser via a loopback callback ([ea3cd55](https://github.com/ariso-ai/oats/commit/ea3cd5587c9476a16dceccfecedfd530d7781f3a))
+* treat the next meeting's start as the stop-prompt transition point ([4ab1d41](https://github.com/ariso-ai/oats/commit/4ab1d41a15d7132935a1b072ec0a4ab85d0bb9fd)), closes [#230](https://github.com/ariso-ai/oats/issues/230)
+* **windows:** add native audio parity ([2835acd](https://github.com/ariso-ai/oats/commit/2835acdb65cf2ee378784d09df39e15c495e757a))
+
+
+### Bug Fixes
+
+* adds required permission ([a6a4667](https://github.com/ariso-ai/oats/commit/a6a466705b74b0143638b8fb11aa0e761bc7ea03))
+* **ci:** scope MLX resource to macOS ([17798ca](https://github.com/ariso-ai/oats/commit/17798cac10f33d6df41dad72a71c683a807717eb))
+* harden Windows local production paths ([1e564d0](https://github.com/ariso-ai/oats/commit/1e564d09465674cae5de501d3de8a2cc5792e637))
+* match settings titlebar background ([071d900](https://github.com/ariso-ai/oats/commit/071d900acc756683ae62555a5b939eed969d70c7))
+* prompt to stop recording when the next calendar meeting starts ([6ba6fa6](https://github.com/ariso-ai/oats/commit/6ba6fa6ee5accbd38d1a36efcbd3ad9d54b8cd05))
+* **recording:** preserve recorder lifecycle and titles ([5554367](https://github.com/ariso-ai/oats/commit/55543679521989f4bf4c144d03f00ae39f9a1242))
+* **recording:** unify Windows launch and refresh flows ([fd307f5](https://github.com/ariso-ai/oats/commit/fd307f5bbc5f5021a7394cb15022723acd01b81d))
+* repair autofix regressions in play-button a11y change ([3aa332c](https://github.com/ariso-ai/oats/commit/3aa332cae513877d9c1fcb880205c6f2ce527ef9))
+* **updater:** publish immutable payloads ([f56b48f](https://github.com/ariso-ai/oats/commit/f56b48f357607d69558e9ea90c98ac9edc74bbb6))
+* **windows:** harden audio capture lifecycle ([2ad04c5](https://github.com/ariso-ai/oats/commit/2ad04c52b4edca113d2d9d8a1872e19bf19b7cf0))
+* **windows:** hide local inference consoles ([73395ce](https://github.com/ariso-ai/oats/commit/73395cec3dd08c601dd77d0edf3cac2e07a79677))
+
 ## [0.16.0](https://github.com/ariso-ai/oats/compare/v0.15.0...v0.16.0) (2026-07-08)
 
 
