@@ -4,6 +4,7 @@
     ref="audioEl"
     class="audio-el"
     :src="blobUrl"
+    :title="title"
     controls
   ></audio>
   <button
@@ -11,6 +12,7 @@
     class="play-btn"
     :class="{ 'play-btn--error': errored }"
     :disabled="noAudio || loading"
+    :title="title"
     @click="onPlay"
   >
     <span v-if="noAudio">▶ No audio</span>
@@ -27,7 +29,10 @@ import { ref, onBeforeUnmount, nextTick } from 'vue';
 // or null when no audio exists (e.g. the server 404s). Local recordings pass
 // read_recording_audio; Ariso meetings pass the authenticated
 // /meeting-notes/{id}/audio fetch.
-const props = defineProps<{ load: () => Promise<ArrayBuffer | null> }>();
+const props = defineProps<{
+  load: () => Promise<ArrayBuffer | null>;
+  title?: string;
+}>();
 
 const blobUrl = ref<string | null>(null);
 const loading = ref(false);
