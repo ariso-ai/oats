@@ -3,6 +3,17 @@
 **Date:** 2026-06-14
 **Status:** Approved
 
+> **Amendment (2026-07-20) — preserve `meetingId` on resume.** The original
+> design concatenated *all* pending items into one new meeting and dropped every
+> `meetingId` (see the struck decisions below). That orphaned the pre-created
+> server meeting whenever a buffered item carried an id. Resume now **groups
+> pending items by `meetingId`**: items sharing an id combine and re-attach to
+> that meeting via `POST /desktop/meetings/:id/audio/presign`; items with no id
+> combine into one fresh meeting. Each group uploads independently — a group that
+> fails is left buffered for a later retry while the others upload and discard.
+> This changes the "one merged meeting / all-or-nothing" decisions in §Goals,
+> §Decisions, §Design step 4, and the error table; those are annotated inline.
+
 ## Problem
 
 When recording with the Ariso (cloud) backend and the network is down, stopping
@@ -26,8 +37,10 @@ appears done ("Recording saved") and there is no option to resume uploading.
    resumed after an app restart.
 2. Surface pending/failed uploads in the Library with a resume control that
    survives restart.
-3. When more than one upload is pending, **combine** them into a single
-   concatenated MP3 and upload once, producing one merged meeting.
+3. When more than one upload is pending, **combine** them per meeting (grouped
+   by `meetingId`) and upload each group — re-attaching to its existing meeting
+   when it has an id, else producing one fresh merged meeting.
+   *(2026-07-20 amendment; was "combine all into one merged meeting".)*
 
 ## Non-goals
 
@@ -42,9 +55,11 @@ appears done ("Recording saved") and there is no option to resume uploading.
 - **Durability:** survive app restart (persist a metadata sidecar; scan on demand).
 - **Backend in scope:** Ariso (cloud) only.
 - **Placement:** a pinned "Pending uploads" group at the top of the Library sidebar.
-- **Multiple pending → one merged meeting:** concatenate all pending audio
-  chronologically into a single MP3; the separate recordings do not survive as
-  individual meetings.
+- **Multiple pending → one merged meeting per meetingId** *(2026-07-20 amendment;
+  was "concatenate all pending audio into a single MP3 / one meeting").*
+  Group pending items by `meetingId`; each group concatenates chronologically
+  into one MP3 and uploads to its own meeting (existing id → re-attached; no id →
+  one fresh meeting). Recordings within a group do not survive individually.
 - **Trigger:** a single primary **`Upload (N)`** button (auto-combine, all-or-
   nothing). No per-item upload/retry.
 - **Discard:** a secondary **`Discard all`** button. No per-item discard in the
@@ -148,17 +163,28 @@ disk.
 Lives in a small composable (e.g. `usePendingUploads.ts`) so the Library view
 and tests share one implementation:
 
+*(2026-07-20 amendment: steps now run per `meetingId` group instead of over the
+whole list at once — see `groupByMeetingId` in `usePendingUploads.ts`.)*
+
 1. `items = await pending.list()` (already chronological).
-2. `keys = items.map(i => i.createdAt)`.
-3. `merged = { startAt: items[0].startAt ?? items[0].createdAt,
-   endAt: items.at(-1).endAt,
-   durationSeconds: sum(items.durationSeconds) }`. `meetingId` is omitted →
-   the upload creates one new meeting.
-4. `buf = await pending.combine(keys)` → `new Blob([buf], { type: 'audio/mpeg' })`.
-5. `await useMeetingApi().uploadAudio(blob, merged)` — reuses the existing
-   presign → PUT → confirm path unchanged.
-6. On success: `await Promise.all(keys.map(k => pending.discardAudio(k)))`,
-   then refresh the list. On failure: leave everything in place, surface an error.
+2. `groups = groupByMeetingId(items)` — partition by `meetingId ?? null`,
+   preserving order (items with no id form one group).
+3. For each `group`:
+   1. `keys = group.map(i => i.createdAt)`.
+   2. `merged = { startAt: group[0].startAt ?? group[0].createdAt,
+      endAt: group.at(-1).endAt,
+      durationSeconds: sum(group.durationSeconds),
+      ...(group[0].meetingId != null ? { meetingId: group[0].meetingId } : {}) }`.
+      A present `meetingId` re-attaches to that meeting; an absent one creates a
+      fresh meeting.
+   3. `buf = await pending.combine(keys)` → `new Blob([buf], { type: 'audio/mpeg' })`.
+   4. `await useMeetingApi().uploadAudio(blob, merged)` — reuses the existing
+      presign → PUT → confirm path unchanged.
+   5. On success: discard that group's keys. On failure: leave that group's
+      buffers in place.
+4. Groups upload independently; if any group failed, re-throw the first failure
+   so the caller surfaces an error. Refresh the list — succeeded groups drop off,
+   failed ones remain for a later retry.
 
 `Discard all`: snapshot `keys` from `list()`, then discard each.
 
@@ -197,11 +223,11 @@ state.
 | Upload fails (offline) | Pill shows ✗ + Retry/Dismiss; buffer + sidecar persist; item appears in Library's Pending uploads |
 | Combine: a key missing | Error surfaced as upload failure; nothing discarded |
 | Combine: total > `MAX_AUDIO_BYTES` | Error surfaced as upload failure; nothing discarded |
-| Resume upload fails | Items left in place; section shows error; user can try again |
-| Resume upload succeeds | Combined keys discarded; one new meeting created; list refreshed |
+| A meetingId group's upload fails | That group's buffers left in place; other groups still upload; section shows error; user can retry |
+| Resume upload succeeds (a group) | That group's keys discarded; its meeting created (no id) or re-attached (had id); list refreshed |
 | `Discard all` | All listed buffers + sidecars deleted (explicit discard) |
 | Orphan `.mp3` with no `.json` | Skipped by `list_pending_uploads`; left for manual recovery |
-| Pending item had a `meetingId` (rare) | Combined upload still creates a new meeting; the pre-created server meeting is left empty |
+| Pending item had a `meetingId` | *(2026-07-20 amendment)* Its group re-attaches to that meeting via `/desktop/meetings/:id/audio/presign` instead of orphaning it |
 
 ## Testing
 
@@ -216,8 +242,11 @@ state.
   upload, discards on success, leaves both on failure, and does not fail
   finalize when buffering itself fails.
 - **`usePendingUploads` / `PendingUploads.vue`:** section hidden when empty;
-  shows count and rows; `Upload (N)` combines (chronological keys), uploads with
-  merged meta (earliest start / latest end / summed duration), discards the
-  combined keys on success and leaves them on failure; `Discard all` clears.
+  shows count and rows; `Upload (N)` groups by `meetingId` and, per group,
+  combines (chronological keys) and uploads with merged meta (earliest start /
+  latest end / summed duration / the group's `meetingId` when present), discards
+  a group's keys on success and leaves them on failure; a failed group doesn't
+  block the others; `Discard all` clears. *(2026-07-20 amendment: `mergedMeta`
+  now carries `meetingId`; `groupByMeetingId` partitions items.)*
 - **Honest-status regression:** a finalize failure broadcasts `failed`, never
   `success` / "Recording saved".
