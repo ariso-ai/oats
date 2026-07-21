@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.1](https://github.com/ariso-ai/oats/compare/v0.17.0...v0.17.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* clear the 'Upload failed' pill after a pending upload succeeds ([42aca65](https://github.com/ariso-ai/oats/commit/42aca65367a070fbd248983118101f1d619f2bee))
+* do not show failed pill after successful upload ([3288608](https://github.com/ariso-ai/oats/commit/328860866d21a58d162cb14546028756434da7d7))
+* preserve meeting id when resuming pending uploads ([2a97c2e](https://github.com/ariso-ai/oats/commit/2a97c2e9504d3d5cec30a8a67f843802e813927f))
+* preserve meeting id when resuming pending uploads ([1949ba3](https://github.com/ariso-ai/oats/commit/1949ba3219268e572991a781ba6b075a118f8d1d))
+* unblock macOS releases from Windows signing ([1fa3453](https://github.com/ariso-ai/oats/commit/1fa3453ee4bd063e149ce0e6fd2fbba571d54f7b))
+* unblock macOS releases from Windows signing ([2e234a7](https://github.com/ariso-ai/oats/commit/2e234a794747fedd99333b3ebc911065a7fb58ca))
+
 ## [0.17.0](https://github.com/ariso-ai/oats/compare/v0.16.0...v0.17.0) (2026-07-19)
 
 
