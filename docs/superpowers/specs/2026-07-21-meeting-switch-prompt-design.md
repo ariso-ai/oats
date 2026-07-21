@@ -63,19 +63,29 @@ card resolves via events back to the recorder window). The meeting-end files are
 
 | Old | New |
 |---|---|
-| `MeetingEndPromptView.vue` | `MeetingSwitchPromptView.vue` |
-| `/meeting-end-prompt` route | `/meeting-switch-prompt` |
-| `parseMeetingEndPromptParams` | `parseMeetingSwitchPromptParams` |
+| `MeetingEndPromptView.vue` | *deleted* — `MeetingPromptView.vue` serves both modes |
+| `/meeting-end-prompt` route | *deleted* — switch mode loads `/meeting-prompt?mode=switch` |
+| `parseMeetingEndPromptParams` | `parsePromptParams` gains `mode: 'start' \| 'switch'` |
 | `meetingEndWatch.ts` | `meetingSwitchWatch.ts` |
 | Rust `show/dismiss/resolve/resize_meeting_end_prompt` | `show/dismiss/resolve/resize_meeting_switch_prompt` |
 | window label `meeting-end-prompt` | `meeting-switch-prompt` |
 | events `meeting-end-prompt://stop\|keep` | `meeting-switch-prompt://switch\|keep` |
 
+**One card view.** `MeetingPromptView.vue` and `MeetingEndPromptView.vue` were
+~90% identical (~250 duplicated CSS lines), and in switch mode the card shows
+the *same* "Meeting started" heading and "Take notes" button — a second view
+file would be near-verbatim duplication. So the existing card gains a `mode`
+URL param and switch mode branches on exactly four things: the resolve command
++ payload key, the resize command, the secondary button label, and the
+subtitle/seconds defaults. The window **label** stays distinct
+(`meeting-switch-prompt`) so capabilities and close/resize targeting are
+unambiguous.
+
 **Card copy:** title **"Meeting started"**, subtitle = the next meeting's title
 (hidden when absent), primary split button **"Take notes"** (= switch), chevron
-menu reveals **"Keep recording"**; corner ✕ = keep. 30-second cosmetic
-countdown, same visual as today. Timeout or dismiss = keep recording; the card
-does **not** re-prompt for the same next meeting.
+menu reveals **"Keep recording"** (start mode keeps "Dismiss"); corner ✕ = keep.
+30-second cosmetic countdown, same visual as today. Timeout or dismiss = keep
+recording; the card does **not** re-prompt for the same next meeting.
 
 ### Detection (in `WaveformView.vue` + `meetingSwitchWatch.ts`)
 
