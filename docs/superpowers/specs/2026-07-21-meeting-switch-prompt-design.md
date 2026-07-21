@@ -115,14 +115,17 @@ On `meeting-switch-prompt://switch`:
    so the Library's **Pending uploads** retry covers recovery (same guarantee
    as a timed-out finalize today).
    - Empty-blob / short-auto guard: if the blob is empty, or the recording is
-     auto and shorter than `MIN_AUTO_DURATION_S`, discard (via
-     `pending.discardAudio`) instead of uploading a stub — mirrors
-     `handleStop`/`discardRecording`.
+     auto and shorter than `MIN_AUTO_DURATION_S`, drop the segment instead of
+     uploading a stub — mirrors `handleStop`/`discardRecording`. (No on-disk
+     cleanup is needed: the pending buffer is only written inside
+     `finalizeRecording`, which we skip.)
 3. Re-point the session: `effectiveMeetingId.value = nextMeetingId`, clear
    `localAppendId`-related meta influence (switch is Ariso-only, so local
    append/forceNew doesn't apply), reset the silence clock and switch-watch
    state, then `await recorder.startRecording()` and restart `waveform`.
-   Elapsed time restarts from 0.
+   Elapsed time restarts from 0. The switched-to recording counts as **manual**
+   (the user explicitly accepted), so the `MIN_AUTO_DURATION_S` stub gate no
+   longer applies to its eventual stop even if the original recording was auto.
 4. Sync the backend + other windows: invoke a new lightweight Rust command
    `update_recording_meeting(meeting_id)` that updates
    `RecordingState.meeting_id` (source unchanged) and re-emits
