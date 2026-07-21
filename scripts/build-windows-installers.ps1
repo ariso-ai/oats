@@ -1,8 +1,8 @@
 <#
-Builds Windows installer bundles through the same Tauri path used by release
-CI. This script owns local artifact cleanup and shape validation; it
-does not publish releases or provide signing credentials. Release CI can pass a
-Tauri config overlay that selects its imported Authenticode certificate.
+Builds Windows installer bundles for local/internal QA through Tauri. This
+script owns local artifact cleanup and shape validation; it does not publish
+releases or provide signing credentials. Callers may pass a Tauri config overlay
+for an explicitly reviewed signing test.
 #>
 param(
   [string]$Bundles = "nsis,msi",
