@@ -61,7 +61,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows-sidecar.ps1
 
 Run `prepare-windows-llama-runtime.ps1` directly only when a host build needs
 the resource without rebuilding the sidecar. The runtime is never downloaded
-into the user's model directory; it ships inside the signed application
+into the user's model directory; it ships inside the local QA application
 installer.
 
 The sidecar is inference-only and supports the same runtime commands as the macOS sidecar:
@@ -90,15 +90,16 @@ contain the optional debug-only `mcp` plugin entry.
 `build-windows-installers.ps1` builds both Windows installer formats through Tauri:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "C:\path\to\tauri.key"
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1
 ```
 
-Release CI additionally imports the Authenticode certificate and passes a
-generated signing overlay through `-TauriConfig`. The script keeps that input
-optional so local QA builds can remain unsigned while the public release job
-fails unless both Authenticode and Tauri updater signatures validate.
+Set `TAURI_SIGNING_PRIVATE_KEY` only when testing Tauri updater signatures; it
+does not Authenticode-sign the installer.
+
+The Windows release job and public Windows publication are removed until a
+production signing provider is provisioned and reviewed. The script keeps
+`-TauriConfig` optional so local QA builds can remain unsigned without creating
+public artifacts.
 When `TAURI_SIGNING_PRIVATE_KEY` is absent, the helper uses a temporary config
 overlay to disable updater artifacts for that local build only; the checked-in
 production setting remains enabled.
@@ -111,8 +112,8 @@ The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 Replace these assets directly when updating the installer artwork, preserving
 their dimensions and 24-bit BMP format.
 
-Desktop and release CI call the same sidecar helper. Release CI calls the
-installer helper to produce the signed distribution artifacts.
+Desktop CI calls the same sidecar helper. Release CI does not call this installer
+helper; local/internal QA can invoke it directly.
 
 ## Windows Local benchmark
 
