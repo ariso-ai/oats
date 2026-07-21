@@ -26,6 +26,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 // handlers, `emitEvent` drives them the way the Rust side would.
 type EventHandler = (e: { payload: unknown }) => void;
 const eventHandlers = new Map<string, EventHandler[]>();
+const emitAppEvent = vi.fn(() => Promise.resolve());
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (name: string, cb: EventHandler) => {
     const arr = eventHandlers.get(name) ?? [];
@@ -37,6 +38,7 @@ vi.mock('@tauri-apps/api/event', () => ({
       if (i >= 0) list.splice(i, 1);
     });
   },
+  emit: (...a: unknown[]) => emitAppEvent(...a),
 }));
 
 function emitEvent(name: string, payload: unknown): void {
@@ -1236,6 +1238,30 @@ describe('LibraryView', () => {
     });
     await flushPromises();
     expect(wrapper.find('.pending-stub').exists()).toBe(true);
+  });
+
+  it('notifies the recorder window when a sidebar pending upload succeeds', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: {
+            name: 'PendingUploads',
+            emits: ['uploaded'],
+            template: '<div class="pending-stub" />',
+          },
+        },
+      },
+    });
+    await flushPromises();
+    emitAppEvent.mockClear();
+
+    wrapper.findComponent({ name: 'PendingUploads' }).vm.$emit('uploaded');
+    await flushPromises();
+
+    // Broadcasts the stand-down so a still-open failed pill (mirrored into the
+    // recorder strip) clears instead of lingering after a successful retry.
+    expect(emitAppEvent).toHaveBeenCalledWith('pending-upload://succeeded');
   });
 
   it('confirms before recording an ariso auto-join meeting, and records only on confirm', async () => {

@@ -313,6 +313,7 @@ async function applyPillVisibility(hidden: boolean) {
 }
 
 let unlistenPillVisible: UnlistenFn | null = null;
+let unlistenPendingUploaded: UnlistenFn | null = null;
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
@@ -663,6 +664,20 @@ async function dismissFailed() {
   await closeWindow();
 }
 
+// The sidebar "Pending uploads" retry uploaded (and discarded) this recording's
+// on-disk buffer out from under us. Our failed pill — and the library strip it
+// heartbeats — is now stale, and our held blob would double-upload on Retry.
+// Drop the in-memory copy without re-discarding the (already-gone) buffer, then
+// close so both pills clear. Ignored unless we're actually showing the failed
+// pill: a live recording or an in-flight resume must not be torn down.
+async function handlePendingUploadSucceeded() {
+  if (uploadResult.value !== 'failed') return;
+  inFlightFinalize = null;
+  stoppedBlob.value = null;
+  stoppedMeta.value = null;
+  await closeWindow();
+}
+
 // Keep the failed recording's audio and resume capturing into a fresh buffer.
 // The next stop concatenates the held blob with the new segment (see handleStop).
 async function resumeFailed() {
@@ -710,6 +725,8 @@ onMounted(async () => {
   unlistenPillVisible = await listen<boolean>('recorder://pill-visible', (e) => {
     void applyPillVisibility(!e.payload);
   });
+
+  unlistenPendingUploaded = await listen('pending-upload://succeeded', handlePendingUploadSucceeded);
 
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);
@@ -834,6 +851,7 @@ onUnmounted(() => {
   if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
   unlistenPillVisible?.();
+  unlistenPendingUploaded?.();
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();

@@ -180,7 +180,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, timestampTitle, BACKEND_CHANGED_EVENT, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
@@ -505,6 +505,13 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
 }
 
 async function onPendingUploaded(): Promise<void> {
+  // A still-open waveform window may be sitting on a stale "Upload failed" pill
+  // for the recording we just uploaded from the sidebar. Tell it to stand down
+  // so its failed pill (mirrored into the recorder strip) clears and no Retry
+  // can double-upload the buffer we already discarded.
+  await emit('pending-upload://succeeded').catch((e) =>
+    console.error('Failed to notify recorder of pending upload success', e),
+  );
   await loadMeetings();
 }
 

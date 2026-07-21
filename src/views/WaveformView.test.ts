@@ -753,4 +753,37 @@ describe('WaveformView vertical pill', () => {
     const last = emitEvent.mock.calls.filter(([n]) => n === 'recorder://state').at(-1);
     expect((last?.[1] as { phase: string }).phase).toBe('closed');
   });
+
+  it('closes the failed pill when the sidebar pending-upload retry succeeds', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+
+    // The Pending-uploads retry uploaded and discarded this same buffer: the
+    // stale failed pill must go away (window closes → broadcasts 'closed'), and
+    // the window must not re-discard or re-upload the already-gone buffer.
+    emitEvent.mockClear();
+    eventHandlers['pending-upload://succeeded']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(closeWin).toHaveBeenCalled();
+    const last = emitEvent.mock.calls.filter(([n]) => n === 'recorder://state').at(-1);
+    expect((last?.[1] as { phase: string }).phase).toBe('closed');
+    expect(discardPendingAudio).not.toHaveBeenCalled();
+  });
+
+  it('ignores a pending-upload success while still actively recording', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+
+    eventHandlers['pending-upload://succeeded']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(closeWin).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
 });
