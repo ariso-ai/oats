@@ -6,6 +6,7 @@ mod audio_util;
 mod audio_capture;
 mod mic_capture;
 mod commands;
+mod local_notes;
 mod meeting_notifications;
 mod mic_monitor;
 mod platform;
@@ -288,6 +289,11 @@ fn main() {
             // recording. Write paths also call ensure_vault lazily.
             if let Err(e) = crate::vault::ensure_vault() {
                 eprintln!("ensure vault: {e}");
+            }
+            if let Ok(root) = crate::vault::meta_root() {
+                if let Err(e) = crate::local_notes::recover_interrupted_jobs(&root) {
+                    eprintln!("recover interrupted notes jobs: {e}");
+                }
             }
 
             // Managed state must exist before the tray is created: tray menu

@@ -1138,12 +1138,17 @@ pub fn local_recording_status(
     let has_note =
         dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
     let has_transcript = dir.join("transcript.md").is_file();
-    let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+    let notes_status = crate::storage::derive_notes_status(
+        has_note,
+        meta.notes_error.as_deref(),
+        meta.notes_job_id.as_deref(),
+    );
     Ok(crate::storage::RecordingStatusView {
         status: meta.status,
         has_transcript,
         has_note,
         notes_status,
+        notes_written: meta.notes_written,
     })
 }
 
@@ -1980,6 +1985,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_cursor: None,
+            notes_source_hash: None,
+            notes_job_id: None,
             title_is_default: false,
         }
     }
@@ -2262,6 +2270,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_cursor: None,
+            notes_source_hash: None,
+            notes_job_id: None,
             title_is_default: false,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
@@ -2280,11 +2291,25 @@ mod tests {
         let view = local_recording_status(id.to_string()).unwrap();
         assert_eq!(view.notes_status, crate::storage::NotesStatus::Failed);
 
-        // Write the note file -> notes ready (note presence wins over the error).
+        // A failed latest update remains visible even though the old note stays.
         std::fs::write(dir.join("ari-note.md"), b"n").unwrap();
         let view = local_recording_status(id.to_string()).unwrap();
         assert!(view.has_note);
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Failed);
+
+        // Clearing the error makes the existing note ready.
+        meta.notes_error = None;
+        meta.notes_written = Some("2026-06-02T14:31:00Z".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let view = local_recording_status(id.to_string()).unwrap();
         assert_eq!(view.notes_status, crate::storage::NotesStatus::Ready);
+        assert_eq!(view.notes_written.as_deref(), Some("2026-06-02T14:31:00Z"));
+
+        // Starting another job exposes Updating without hiding the note.
+        meta.notes_job_id = Some("job-1".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.notes_status, crate::storage::NotesStatus::Updating);
 
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }

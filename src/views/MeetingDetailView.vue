@@ -144,27 +144,17 @@
         </div>
         <div v-if="showStatusChip" class="tab-status">
           <span v-if="statusGenerating" class="spinner spinner--sm" />
-          <span class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
+          <span class="tab-status-label" :class="{ 'tab-status-label--err': statusIsError }">
             {{ statusLabel }}
           </span>
           <button
-            v-if="!statusGenerating"
+            v-if="statusIsError"
             class="tab-retry"
             type="button"
             :disabled="progress.retrying.value"
             @click="onRetry"
           >Retry</button>
         </div>
-        <button
-          v-if="showRegenerate"
-          class="tab-regen"
-          type="button"
-          title="Regenerate AI Notes from the transcript"
-          @click="onRegenerate"
-        >
-          <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
-          Regenerate notes
-        </button>
       </div>
 
       <!-- Content -->
@@ -175,7 +165,12 @@
 
         <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
-          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
+          <template v-if="detail.isLocal && detail.note">
+            <div v-if="lastNoteUpdated" class="note-updated">
+              Last updated {{ formatDateTime(lastNoteUpdated) }}
+            </div>
+            <div class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
+          </template>
 
           <!-- Ariso rich content -->
           <template v-if="!detail.isLocal">
@@ -533,44 +528,54 @@ const progress = useLocalRecordingProgress(() => (detail.value?.isLocal ? detail
 const showStatusChip = computed(
   () =>
     !!detail.value?.isLocal &&
-    ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed'].includes(progress.stage.value)
+    [
+      'transcribing',
+      'notes-pending',
+      'notes-updating',
+      'ready',
+      'transcript-failed',
+      'notes-failed',
+      'notes-update-failed',
+    ].includes(progress.stage.value)
 );
 const statusGenerating = computed(
-  () => progress.stage.value === 'transcribing' || progress.stage.value === 'notes-pending'
+  () =>
+    progress.stage.value === 'transcribing' ||
+    progress.stage.value === 'notes-pending' ||
+    progress.stage.value === 'notes-updating'
 );
+const statusIsError = computed(() =>
+  ['transcript-failed', 'notes-failed', 'notes-update-failed'].includes(progress.stage.value)
+);
+const lastNoteUpdated = computed(() => progress.status.value?.notesWritten);
 const statusLabel = computed(() => {
   switch (progress.stage.value) {
     case 'transcribing':
       return 'Generating Transcript';
     case 'notes-pending':
       return 'Generating AI Notes';
+    case 'notes-updating':
+      return 'Updating AI Notes';
     case 'transcript-failed':
       return 'Transcript failed';
     case 'notes-failed':
       return 'AI Notes failed';
+    case 'notes-update-failed':
+      return 'AI Notes update failed';
+    case 'ready':
+      return 'AI Notes ready';
     default:
       return '';
   }
 });
 function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
-  else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
-}
-
-// Local AI Notes can be regenerated from the transcript on demand. Shown only on
-// the AI Notes tab once a note already exists and nothing is in flight (the
-// status chip owns the row's right slot while generating/failed). Clicking
-// reuses the notes-retry path, which re-runs generation from transcript.md.
-const showRegenerate = computed(
-  () =>
-    !!detail.value?.isLocal &&
-    activeTab.value === 'note' &&
-    !!detail.value?.note &&
-    !!detail.value?.hasTranscript &&
-    !showStatusChip.value
-);
-function onRegenerate(): void {
-  void progress.retryNotes();
+  else if (
+    progress.stage.value === 'notes-failed' ||
+    progress.stage.value === 'notes-update-failed'
+  ) {
+    void progress.retryNotes();
+  }
 }
 
 // When the poller reports a newly-ready artifact, read it into `detail` so the
@@ -604,6 +609,14 @@ watch(
   () => progress.hasNote.value,
   (now, prev) => {
     if (now && !prev && detail.value?.isLocal) void reloadLocalArtifact('note');
+  }
+);
+watch(
+  () => progress.status.value?.notesWritten,
+  (now, previous) => {
+    if (now && now !== previous && detail.value?.isLocal) {
+      void reloadLocalArtifact('note');
+    }
   }
 );
 
@@ -1349,14 +1362,6 @@ const durationLabel = computed<string | null>(() => {
 .tab-retry:hover:not(:disabled) { background: #fbfbfb; }
 .tab-retry:disabled { opacity: 0.6; cursor: default; }
 .spinner--sm { width: 14px; height: 14px; }
-.tab-regen {
-  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
-  height: 28px; padding: 0 12px;
-  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
-  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
-}
-.tab-regen:hover { background: #fbfbfb; }
-.tab-regen .ic { width: 15px; height: 15px; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
@@ -1364,6 +1369,7 @@ const durationLabel = computed<string | null>(() => {
 .card-content::-webkit-scrollbar-thumb { background: #d6d6d6; border-radius: 3px; }
 .tab-pane { min-height: 100%; }
 .tab-pane--editor { display: flex; flex-direction: column; }
+.note-updated { margin-bottom: 12px; color: #7a7a7a; font-size: 12px; }
 .notes-head { margin-bottom: 14px; }
 .notes-title { margin: 0; font-size: 20px; font-weight: 700; color: #1c1c1c; line-height: 1.2; }
 /* Same click-to-rename affordance as the meeting title (see .head-title--editable). */

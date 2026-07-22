@@ -228,7 +228,7 @@ export interface RecordingSummary {
   hasTranscript: boolean;
 }
 
-export type NotesStatus = 'pending' | 'ready' | 'failed';
+export type NotesStatus = 'pending' | 'updating' | 'ready' | 'failed';
 
 /** Mirrors the Rust `RecordingStatusView`. Drives the detail panel's local
  *  generation poller (tab enable/disable + the inline status chip). */
@@ -237,6 +237,8 @@ export interface RecordingStatusView {
   hasTranscript: boolean;
   hasNote: boolean;
   notesStatus: NotesStatus;
+  /** RFC3339 timestamp of the latest successful note write. */
+  notesWritten?: string;
 }
 
 export interface LocalFinalizeResult {

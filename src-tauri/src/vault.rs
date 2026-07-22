@@ -580,7 +580,8 @@ mod tests {
                 crate::storage::Participant { id: 1, label: "Speaker 2".into() },
             ],
             model_version: None, error: None, notes_error: None, last_clip_end_at: None,
-            audio_file: None, notes_written: None, title_is_default: false,
+            audio_file: None, notes_written: None, notes_cursor: None,
+            notes_source_hash: None, notes_job_id: None, title_is_default: false,
         }
     }
 

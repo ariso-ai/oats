@@ -20,6 +20,19 @@ The first implementation should stay deliberately simple:
 
 This plan is scoped to local/offline notes. It does not introduce true streaming STT checkpoints during an active recording; it improves the note-generation path after local transcript segments are persisted by fresh finalization, append, or retry.
 
+## Cross-Platform and Change-Scope Constraints
+
+This feature must ship through one product-logic implementation on both macOS and Windows:
+
+- Shared Tauri Rust is the only implementation of reducer policy, prompts, batching, cursor/hash/job state, validation, retry semantics, and durable writes.
+- Vue/TypeScript owns presentation and polling only. It does not implement note reduction or platform branches.
+- The macOS Swift and Windows Rust sidecars each expose the same bounded `llm-complete` transport contract because model loading is necessarily platform-specific.
+- No reducer prompt, Markdown schema, transcript cursor, retry policy, or persistence rule may be copied into either sidecar.
+- Existing transcription and one-shot first-note behavior are compatibility surfaces. Sidecar changes are additive command dispatch and generic model completion only; do not refactor ASR, diarization, transcript normalization, model acquisition, or the existing `notes` command.
+- Platform differences belong behind the completion adapter. The shared Rust caller must not branch on macOS versus Windows.
+
+The result is not zero platform code: model adapters remain native. It is one copy of all meeting-note behavior, with two intentionally thin inference adapters.
+
 ## Current State
 
 The local pipeline already has a clean separation point after STT:
@@ -74,7 +87,7 @@ The `ariso-stt` sidecars own only:
 - Running a prompt with bounded generation parameters.
 - Returning raw generated text or a narrow JSON wrapper.
 
-This avoids writing the reducer twice. macOS remains the product target today, but if Windows support is revived, Windows should implement the same thin completion adapter while reusing the Rust reducer module unchanged.
+This avoids writing the reducer twice. macOS and Windows both implement the same thin completion adapter and reuse the Rust reducer module unchanged.
 
 ### Markdown Scaffold
 
@@ -151,7 +164,8 @@ ariso-stt llm-complete \
   --prompt <path> \
   --models <path> \
   [--max-tokens 2048] \
-  [--temperature 0.3]
+  [--temperature 0.3] \
+  [--repetition-penalty 1.15]
 ```
 
 Output should be raw generated text, or this narrow shape if JSON is easier to parse consistently:
@@ -298,8 +312,9 @@ Acceptance criteria:
 Files:
 
 - `src-tauri/ariso-stt/macos/Sources/ariso-stt/main.swift`
+- `src-tauri/ariso-stt/windows/src/main.rs`
+- `src-tauri/ariso-stt/windows/src/notes.rs`
 - `src-tauri/ariso-stt/shared/README.md`
-- If Windows parity is actively required: `src-tauri/ariso-stt/windows/src/notes.rs`
 
 Steps:
 
@@ -308,18 +323,21 @@ Steps:
 3. Keep generation parameters bounded and explicit: max tokens, temperature, repetition penalty, and runtime timeout from Rust.
 4. Return raw text or `{ "text": "..." }`; do not return `{title, notes}` for reducer calls.
 5. Do not build reducer prompts, inspect transcript deltas, update cursors, or normalize meeting-note headings inside the sidecar.
-6. Update the shared sidecar README to document:
+6. Implement the same argument bounds and `{ "text": "..." }` output on Windows, using its existing packaged local-model runtime without adding reducer semantics.
+7. Update the shared sidecar README to document:
    - Existing `notes` command.
    - New completion command.
    - Output contract.
-   - Security invariant: no shell invocation and no network access.
-7. For future Windows support, implement only the same thin completion command. Move any useful bounded reduction policy from `windows/src/notes.rs` into shared Rust instead of keeping a separate Windows reducer.
+   - Security invariant: direct argv invocation, no shell, and no external network access. A Windows llama.cpp loopback transport remains local to the sidecar process boundary.
+8. Leave transcription flags, ASR/diarization code, existing `notes` prompts, and model installation behavior unchanged.
 
 Acceptance criteria:
 
 - Existing `notes` behavior remains compatible for first-note generation.
 - The new completion command can run a Rust-authored prompt and return parseable text/JSON.
 - The sidecar contains no reducer-specific branching or transcript-cursor logic.
+- macOS and Windows accept the same completion arguments and return the same JSON shape.
+- Existing platform transcription tests remain green without fixture changes caused by this feature.
 - Completion failure exits non-zero or returns invalid output in a way Rust can classify as a failed update without deleting prior notes.
 
 ### 5. Wire Fresh, Append, and Retry Flows
@@ -415,7 +433,16 @@ DYLD_LIBRARY_PATH="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDe
   cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 ```
 
-If `main.swift` changes, also rebuild the macOS sidecar and copy the binary/resources:
+Also run the Windows sidecar tests and compile the macOS sidecar after changing either adapter:
+
+```bash
+cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml
+
+cd src-tauri/ariso-stt/macos
+swift build -c release
+```
+
+For a distributable macOS sidecar, rebuild and copy the binary/resources:
 
 ```bash
 cd src-tauri/ariso-stt/macos
@@ -445,7 +472,7 @@ The current status derivation treats `has_note` as ready. Mitigate by adding `Up
 
 ### Medium: Sidecar command drift across platforms
 
-macOS and Windows sidecars already differ. Mitigate by keeping sidecars thin: a completion adapter only, documented once, with all reducer policy in shared Rust. If Windows is not a supported target for this release, explicitly gate or skip the Windows adapter rather than partially duplicating logic.
+macOS and Windows sidecars already differ. Mitigate by keeping sidecars thin: one completion contract documented once, contract tests on both adapters, and all reducer policy in shared Rust.
 
 ### Medium: Cursor semantics become wrong after manual note deletion or metadata edits
 

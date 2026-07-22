@@ -9,7 +9,7 @@ plan_file: thoughts/shared/plans/PLAN-live-notes-reducer.md
 
 ## Summary
 
-Created and revised a concrete implementation plan for replacing local/offline full-note regeneration with a simple reducer-style note update path over transcript deltas. The revised plan keeps reusable note logic in shared Rust and minimizes `ariso-stt` changes to a thin local-LLM completion surface.
+Created and revised a concrete implementation plan for replacing local/offline full-note regeneration with a simple reducer-style note update path over transcript deltas. The revised plan requires one shared Rust implementation across macOS and Windows and limits each `ariso-stt` sidecar to the same thin local-LLM completion surface.
 
 ## Plan Created
 
@@ -24,7 +24,8 @@ Created and revised a concrete implementation plan for replacing local/offline f
 - Use reducer generation for appends: previous note + transcript delta + optional bounded recent transcript window.
 - Do not delete or blank the last good note on retry, update failure, blank model output, or stale job discard.
 - Do not add a sidecar-level `reduce-notes` implementation. Put full/reducer policy, prompts, validation, cursoring, and stale guards in shared Rust.
-- Add only a minimal sidecar completion command or prompt-file mode, if needed, that loads the local LLM and returns generated text.
+- Add the same minimal completion command to both platform sidecars; native code loads the local LLM and returns generated text, but owns no meeting-note behavior.
+- Treat existing STT, diarization, transcript normalization, model acquisition, and first-note behavior as compatibility surfaces. Changes in `ariso-stt` are additive command dispatch and generic completion only.
 
 ## Important Code Findings
 
@@ -55,6 +56,7 @@ Created and revised a concrete implementation plan for replacing local/offline f
 - Detached notes jobs may race append jobs; use `notes_job_id` and source hashes before writes.
 - Old notes may hide failed updates unless the status derivation changes first.
 - macOS and Windows sidecar contracts may drift unless the completion contract stays tiny and documented.
+- A Windows loopback model transport is acceptable, but neither adapter may make external network requests during local inference.
 - If a prior note is missing while a cursor remains, fall back to full generation and reset cursor on success.
 
 ## Recommended First Implementation Step
@@ -65,6 +67,10 @@ Start with metadata/status and frontend stage changes. Then extract Rust note or
 
 ```bash
 npm test
+
+cargo test --manifest-path src-tauri/ariso-stt/windows/Cargo.toml
+
+cd src-tauri/ariso-stt/macos && swift build -c release
 
 DYLD_LIBRARY_PATH="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx" \
   cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
