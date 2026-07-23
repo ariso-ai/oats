@@ -20,7 +20,7 @@
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2.5.3",
-    "@tauri-apps/plugin-store": "^2.3.1",
+    "@tauri-apps/plugin-store": "^2.4.4",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "@tiptap/extension-placeholder": "^3.28.0",
     "@tiptap/extension-task-item": "^3.28.0",
@@ -29,19 +29,19 @@
     "@tiptap/markdown": "^3.28.0",
     "@tiptap/starter-kit": "^3.28.0",
     "@tiptap/vue-3": "^3.28.0",
-    "vue": "^3.5.39",
+    "vue": "^3.5.40",
     "vue-router": "^5.2.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.2",
+    "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.4.11",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.1.8",
-    "tauri-plugin-mcp": "^0.1.0",
-    "tauri-plugin-mcp-server": "^0.1.0",
-    "vite": "^8.1.4",
+    "tauri-plugin-mcp": "^0.3.1",
+    "tauri-plugin-mcp-server": "^0.3.1",
+    "vite": "^8.1.5",
     "vitest": "^4.1.10"
   },
   "optionalDependencies": {
