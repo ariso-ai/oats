@@ -11,7 +11,11 @@ import oatsLogo from '../assets/oats-light.svg';
 const search = window.location.hash.includes('?')
   ? window.location.hash.slice(window.location.hash.indexOf('?'))
   : '';
-const { seconds, title, subtitle } = parsePromptParams(search);
+const { seconds, title, subtitle, mode } = parsePromptParams(search);
+// Switch mode = the next calendar meeting started while we were already
+// recording: same card, but the choice is "switch to it" vs "keep recording",
+// and it is resolved by the recorder window's own prompt window/commands.
+const isSwitch = mode === 'switch';
 
 // Whether the "more options" menu below the Take notes button is open. Rust
 // grows the (fixed-size, overflow-hidden) window so the menu has room to show.
@@ -26,7 +30,9 @@ async function toggleMenu() {
     menuWidth.value = `${splitEl.value.offsetWidth}px`;
   }
   try {
-    await invoke('resize_meeting_prompt', { expanded: menuOpen.value });
+    await invoke(isSwitch ? 'resize_meeting_switch_prompt' : 'resize_meeting_prompt', {
+      expanded: menuOpen.value,
+    });
   } catch {
     // No window in unit tests.
   }
@@ -35,8 +41,11 @@ async function toggleMenu() {
 // Report the choice to Rust (which records / honors it), then close the banner
 // right away for snappy feedback. Rust also tears the window down on decision or
 // timeout, so this close is a harmless no-op if it gets there first.
-async function resolve(record: boolean) {
-  await invoke('resolve_meeting_prompt', { record });
+async function resolve(yes: boolean) {
+  await invoke(
+    isSwitch ? 'resolve_meeting_switch_prompt' : 'resolve_meeting_prompt',
+    isSwitch ? { switch: yes } : { record: yes },
+  );
   try {
     await getCurrentWebviewWindow().close();
   } catch {
@@ -65,7 +74,7 @@ async function resolve(record: boolean) {
         <img :src="oatsLogo" alt="oats" class="logo" />
         <div class="copy">
           <div class="title">{{ title }}</div>
-          <div class="subtitle">{{ subtitle }}</div>
+          <div v-if="subtitle" data-test="subtitle" class="subtitle">{{ subtitle }}</div>
         </div>
 
         <!-- Split button: Take notes + a chevron that reveals more options. -->
@@ -96,7 +105,7 @@ async function resolve(record: boolean) {
       :style="{ width: menuWidth }"
       @click="resolve(false)"
     >
-      Dismiss
+      {{ isSwitch ? 'Keep recording' : 'Dismiss' }}
     </button>
   </div>
 </template>
