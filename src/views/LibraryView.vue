@@ -173,7 +173,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
@@ -214,6 +214,7 @@ const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
+  openPrepTab?: () => void;
 };
 const detailView = ref<MeetingDetailViewExposed | null>(null);
 const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
@@ -622,6 +623,62 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
   if (m) await selectMeeting(m, { userSelected: false });
 }
 
+// A meeting-prep notification was clicked. The prep id is queued natively (the
+// click usually *creates* this window, so an event payload would arrive before
+// anything is listening) — claim it here, on mount and on the nudge event.
+async function openPendingMeetingPrep(): Promise<void> {
+  let prepId: number | null = null;
+  try {
+    prepId = await invoke<number | null>('take_pending_meeting_prep');
+  } catch (e) {
+    console.error('Failed to claim the pending meeting prep', e);
+    return;
+  }
+  if (prepId == null) return;
+  await openMeetingPrep(prepId);
+}
+
+// Surface the prep's meeting in the detail pane with its Prep tab active.
+async function openMeetingPrep(prepId: number): Promise<void> {
+  const byPrep = (): MeetingListItem | null =>
+    displayMeetings.value.find((x) => x.prepId === prepId) ?? null;
+  // The loaded list can predate the prep (rows carry prep_id), so reload before
+  // giving up on a match.
+  let m = byPrep();
+  if (!m) {
+    await loadMeetings();
+    m = byPrep();
+  }
+  if (!m) {
+    // Still nothing — the meeting may sit outside the loaded window. The prep
+    // itself knows which meeting it belongs to.
+    m = await meetingForPrep(prepId);
+  }
+  if (!m) {
+    console.warn('Meeting prep', prepId, 'has no meeting row to open');
+    return;
+  }
+  await selectMeeting(m, { userSelected: true });
+  // The detail view mounts/loads asynchronously; it holds the request until the
+  // meeting has loaded.
+  await nextTick();
+  detailView.value?.openPrepTab?.();
+}
+
+// Fallback resolver: ask the backend which meeting a prep belongs to, then find
+// that row. Returns null when the prep or its row can't be resolved.
+async function meetingForPrep(prepId: number): Promise<MeetingListItem | null> {
+  try {
+    const backend = activeBackend.value ?? (await getActiveBackend());
+    const prep = await backend.getMeetingPrep(prepId);
+    if (!prep?.meetingId) return null;
+    return displayMeetings.value.find((x) => x.id === prep.meetingId) ?? null;
+  } catch (e) {
+    console.error('Failed to resolve the meeting for prep', prepId, e);
+    return null;
+  }
+}
+
 // Keep the detail panel on the recorded meeting: surface its row when the
 // strip reports a recording (the synthetic row for local, the scheduled row
 // for Ariso), and reload when it ends so the finalized local recording
@@ -667,6 +724,7 @@ let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
+let unlistenPrepOpen: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -683,7 +741,11 @@ async function recoverActiveRecording(): Promise<void> {
 }
 
 onMounted(() => {
-  void loadMeetings(true).then(() => recoverActiveRecording());
+  void loadMeetings(true)
+    .then(() => recoverActiveRecording())
+    // A prep notification click that opened this window queued its prep before
+    // any listener existed; claim it once the list is up.
+    .then(() => openPendingMeetingPrep());
   void refreshRecordingState();
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;
@@ -716,6 +778,12 @@ onMounted(() => {
   }).then((un) => {
     unlistenBackendChanged = un;
   });
+  // Prep notification clicked while this window was already open.
+  void listen('meeting-prep://open', () => {
+    void openPendingMeetingPrep();
+  }).then((un) => {
+    unlistenPrepOpen = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -731,6 +799,7 @@ onUnmounted(() => {
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();
+  unlistenPrepOpen?.();
 });
 </script>
 

@@ -60,6 +60,14 @@ interface ScheduledMeeting {
   prep_id?: number | string;
 }
 
+/** A meeting prep, reduced to the two fields the desktop consumes: the markdown
+ *  to render, and the meeting it belongs to (used to resolve a prep-ready
+ *  notification back to a row in the library). */
+export interface MeetingPrep {
+  content: string | null;
+  meetingId: string | null;
+}
+
 // Search currently returns the same meeting shape as `/meetings`, with optional
 // match context left open for a backend that can provide Granola-style snippets.
 interface MeetingSearchResult extends ScheduledMeeting {
@@ -356,16 +364,30 @@ export function useMeetingApi() {
     return { content, title };
   }
 
-  // Fetch a meeting prep's markdown content. Resolves to null on 404 (no prep)
-  // and when the payload holds no usable content, so callers can treat "absent"
-  // distinctly from a real error (same convention as getMeetingTranscript).
-  async function getMeetingPrep(prepId: number): Promise<string | null> {
+  // Fetch a meeting prep: its markdown content plus the meeting it belongs to
+  // (the notification path only knows the prep id, so it resolves the meeting
+  // from here). Resolves to null on 404, so callers can treat "absent"
+  // distinctly from a real error (same convention as getMeetingTranscript);
+  // `content` is null on its own when the payload holds no usable markdown.
+  async function getMeetingPrep(prepId: number): Promise<MeetingPrep | null> {
     const res = await api.request('GET', `/meeting-preps/${encodeURIComponent(String(prepId))}`);
     if (res.status === 404) return null;
     assertOk(res, 200, 'get meeting prep');
-    const data = res.data as { meetingPrep?: { content?: unknown } } | null;
-    const content = data?.meetingPrep?.content;
-    return typeof content === 'string' && content.trim() ? content : null;
+    const prep = (res.data as { meetingPrep?: Record<string, unknown> } | null)?.meetingPrep;
+    if (!prep) return null;
+    const content = prep.content;
+    // meeting_id comes back as a string ("45565") but tolerate a number, the
+    // way prep_id is tolerated on the meeting row.
+    const meetingId = prep.meeting_id;
+    return {
+      content: typeof content === 'string' && content.trim() ? content : null,
+      meetingId:
+        typeof meetingId === 'string' && meetingId !== ''
+          ? meetingId
+          : typeof meetingId === 'number' && Number.isFinite(meetingId)
+            ? String(meetingId)
+            : null,
+    };
   }
 
   async function updateMeeting(

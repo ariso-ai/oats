@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
+import { mount, flushPromises, type VueWrapper, type DOMWrapper } from '@vue/test-utils';
 import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 
 const getMeetingDetail = vi.fn();
@@ -1074,38 +1074,47 @@ describe('MeetingDetailView per-clip delete', () => {
 });
 
 describe('MeetingDetailView meeting prep', () => {
-  it('shows no banner when the meeting has no prepId', async () => {
+  const tabLabels = (wrapper: VueWrapper): string[] =>
+    wrapper.findAll('.seg-btn').map((b) => b.text());
+  const prepTab = (wrapper: VueWrapper): DOMWrapper<Element> =>
+    wrapper.findAll('.seg-btn').filter((b) => b.text() === 'Prep')[0];
+
+  it('shows no Prep tab when the meeting has no prepId', async () => {
     const wrapper = await mountWith(detail({ digest: 'D' }));
-    expect(wrapper.find('.prep-banner').exists()).toBe(false);
+    expect(tabLabels(wrapper)).not.toContain('Prep');
   });
 
-  it('View prep fetches once, renders the markdown, and deactivates the tabs', async () => {
-    getMeetingPrep.mockResolvedValue('## Open items');
-    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
-    expect(wrapper.find('.prep-banner').exists()).toBe(true);
-    expect(wrapper.find('.prep-btn').text()).toBe('View prep');
+  it('places the Prep tab after My Notes', async () => {
+    const wrapper = await mountWith(
+      detail({ prepId: 4339, digest: 'D', hasIndividualNote: true, hasTranscript: true })
+    );
+    expect(tabLabels(wrapper)).toEqual(['AI Notes', 'Transcript', 'My Notes', 'Prep']);
+  });
 
-    await wrapper.find('.prep-btn').trigger('click');
+  it('the Prep tab fetches once and renders the markdown', async () => {
+    getMeetingPrep.mockResolvedValue({ content: '## Open items', meetingId: '45565' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+
+    await prepTab(wrapper).trigger('click');
     await flushPromises();
 
     expect(getMeetingPrep).toHaveBeenCalledTimes(1);
     expect(getMeetingPrep).toHaveBeenCalledWith(4339);
     expect(wrapper.find('.prep-pane').text()).toContain('Open items');
-    expect(wrapper.find('.seg-btn--active').exists()).toBe(false);
-    expect(wrapper.find('.prep-btn').text()).toBe('Hide prep');
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
 
-    // Hide, then re-open: the cached prep is reused (no second fetch).
-    await wrapper.find('.prep-btn').trigger('click');
+    // Away and back: the cached prep is reused (no second fetch).
+    await wrapper.find('.seg-btn').trigger('click'); // "AI Notes"
     expect(wrapper.find('.prep-pane').exists()).toBe(false);
-    await wrapper.find('.prep-btn').trigger('click');
+    await prepTab(wrapper).trigger('click');
     await flushPromises();
     expect(getMeetingPrep).toHaveBeenCalledTimes(1);
   });
 
-  it('clicking a tab closes the prep pane and re-activates that tab', async () => {
-    getMeetingPrep.mockResolvedValue('## P');
+  it('clicking another tab leaves the prep pane and activates that tab', async () => {
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '1' });
     const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
-    await wrapper.find('.prep-btn').trigger('click');
+    await prepTab(wrapper).trigger('click');
     await flushPromises();
     expect(wrapper.find('.prep-pane').exists()).toBe(true);
 
@@ -1114,10 +1123,30 @@ describe('MeetingDetailView meeting prep', () => {
     expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
   });
 
+  it('openPrepTab activates the Prep tab (the notification click target)', async () => {
+    getMeetingPrep.mockResolvedValue({ content: '## From the notification', meetingId: '1' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+
+    (wrapper.vm as unknown as { openPrepTab: () => void }).openPrepTab();
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+    expect(wrapper.find('.prep-pane').text()).toContain('From the notification');
+  });
+
   it('shows an empty state when the prep API resolves null', async () => {
     getMeetingPrep.mockResolvedValue(null);
     const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
-    await wrapper.find('.prep-btn').trigger('click');
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').text()).toContain('No prep available.');
+  });
+
+  it('shows an empty state when the prep has no content', async () => {
+    getMeetingPrep.mockResolvedValue({ content: null, meetingId: '1' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await prepTab(wrapper).trigger('click');
     await flushPromises();
     expect(wrapper.find('.prep-pane').text()).toContain('No prep available.');
   });
@@ -1125,7 +1154,7 @@ describe('MeetingDetailView meeting prep', () => {
   it('shows an error state when the prep fetch fails', async () => {
     getMeetingPrep.mockRejectedValue(new Error('boom'));
     const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
-    await wrapper.find('.prep-btn').trigger('click');
+    await prepTab(wrapper).trigger('click');
     await flushPromises();
     expect(wrapper.find('.prep-pane').text()).toContain('Could not load the meeting prep.');
   });

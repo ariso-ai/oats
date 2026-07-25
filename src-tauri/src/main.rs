@@ -173,6 +173,7 @@ fn main() {
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            meeting_notifications::take_pending_meeting_prep,
             meeting_notifications::show_silence_prompt,
             meeting_notifications::dismiss_silence_prompt,
             meeting_notifications::resolve_silence_prompt,

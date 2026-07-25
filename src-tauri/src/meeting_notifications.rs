@@ -23,13 +23,26 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
-    api_base_url, clear_session_token, get_session_token, http_client, web_app_base_url,
-    PUSHER_CLUSTER, PUSHER_KEY,
+    api_base_url, clear_session_token, get_session_token, http_client, PUSHER_CLUSTER, PUSHER_KEY,
 };
 
 const SETTINGS_PATH: &str = "settings.json";
 const ENABLED_KEY: &str = "meetingNotificationsEnabled";
 const MEETING_PREP_SOURCE: &str = "meeting_prep";
+
+/// The Pusher event the API fires when an inbox message finishes generating.
+/// It is a generic inbox signal — `source` says what kind of message it is, so
+/// we act only on `meeting_prep` and ignore every other source.
+const INBOX_MESSAGE_READY_EVENT: &str = "inbox-message-ready";
+
+/// Notification identifiers carry this scheme + the prep id, so the click
+/// delegate can route back into the app instead of opening the web app.
+const PREP_LINK_SCHEME: &str = "oats-prep://";
+
+/// Emitted to the library window when a prep notification is clicked. The id
+/// itself travels through `take_pending_meeting_prep` (not the payload) so a
+/// window that is still booting can pick it up on mount.
+const PREP_OPEN_EVENT: &str = "meeting-prep://open";
 
 /// Hard cap on a single websocket handshake. Without this a hung TCP/TLS
 /// connect can stall the orchestrator past the point where run_loop's
@@ -239,8 +252,8 @@ async fn handle_message(
             catch_up(app, seen, *first).await?;
             *first = false;
         }
-        "meeting-prep-complete" => {
-            if let Some(prep_id) = inner_json(&v).get("meetingPrepId").and_then(Value::as_i64) {
+        INBOX_MESSAGE_READY_EVENT => {
+            if let Some(prep_id) = meeting_prep_id_from_event(&inner_json(&v)) {
                 handle_prep(app, prep_id, seen).await?;
             }
         }
@@ -257,6 +270,18 @@ fn inner_json(v: &Value) -> Value {
         Some(other) => other.clone(),
         None => Value::Null,
     }
+}
+
+/// Pure selector (testable): the meeting-prep id carried by an
+/// `inbox-message-ready` payload — `{ source, sourceId }`. Returns None for any
+/// other source, so unrelated inbox messages never raise a prep notification.
+/// `sourceId` may arrive as a number or a numeric string.
+fn meeting_prep_id_from_event(data: &Value) -> Option<i64> {
+    let source = data.get("source").and_then(Value::as_str)?;
+    if source != MEETING_PREP_SOURCE {
+        return None;
+    }
+    parse_id(data.get("sourceId"))
 }
 
 /// GET /auth/me → (org_id, user_id) for the channel name. Both fields may come
@@ -425,7 +450,7 @@ async fn handle_prep(
         }
     };
     let (title, body) = build_notification(message.as_deref());
-    show(app, &title, &body, &prep_url(prep_id));
+    show(app, &title, &body, prep_id);
     Ok(())
 }
 
@@ -454,7 +479,7 @@ async fn catch_up(
             seen.insert(id);
         } else if item.unread && seen.insert(id) {
             let (title, body) = build_notification(item.message.as_deref());
-            show(app, &title, &body, &prep_url(id));
+            show(app, &title, &body, id);
         }
     }
     Ok(())
@@ -469,9 +494,48 @@ fn build_notification(message: Option<&str>) -> (String, String) {
     (title, body)
 }
 
-/// The web deep link a meeting-prep notification opens when clicked.
-fn prep_url(prep_id: i64) -> String {
-    format!("{}/my/meeting-prep-v2/{prep_id}", web_app_base_url())
+/// The identifier a meeting-prep notification carries, so the click delegate
+/// can recover the prep id. Not a registered URL scheme — nothing outside this
+/// module ever resolves it; it only has to round-trip through UNC.
+fn prep_link(prep_id: i64) -> String {
+    format!("{PREP_LINK_SCHEME}{prep_id}")
+}
+
+/// Pure selector (testable): the prep id inside a notification identifier, or
+/// None if the identifier isn't one of ours.
+fn prep_id_from_link(identifier: &str) -> Option<i64> {
+    identifier.strip_prefix(PREP_LINK_SCHEME)?.parse().ok()
+}
+
+/// The prep a notification click asked to open, waiting to be claimed by the
+/// library window. Handed over through a slot (rather than the event payload)
+/// because the click usually *creates* the library window — the frontend
+/// listener isn't mounted yet, so an emitted payload would be dropped.
+fn pending_prep_slot() -> &'static Mutex<Option<i64>> {
+    static SLOT: OnceLock<Mutex<Option<i64>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Claim the prep queued by a notification click (clearing it, so it opens
+/// exactly once). Called by the library window on mount and on `PREP_OPEN_EVENT`.
+#[tauri::command]
+pub fn take_pending_meeting_prep() -> Option<i64> {
+    pending_prep_slot().lock().unwrap().take()
+}
+
+/// Handle a meeting-prep notification click: queue the prep, then open (or
+/// focus) the library window and nudge it. The window opens the meeting the
+/// prep belongs to with its Prep tab active. Must run on the main thread —
+/// `open_library_window` builds a webview.
+fn open_prep_from_notification(app: &AppHandle, prep_id: i64) {
+    use tauri::Emitter;
+    *pending_prep_slot().lock().unwrap() = Some(prep_id);
+    if let Err(e) = crate::commands::open_library_window(app) {
+        eprintln!("meeting-notifications: failed to open library window: {e}");
+    }
+    // No-op when the window was just created (nothing is listening yet); that
+    // case is covered by the mount-time claim.
+    let _ = app.emit(PREP_OPEN_EVENT, ());
 }
 
 // ---------------------------------------------------------------------------
@@ -797,32 +861,34 @@ fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>) {
 pub fn init_native(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
-        macos_un::init();
+        macos_un::init(app);
     }
 }
 
 /// Show the notification. On a macOS bundle we use UNUserNotificationCenter
 /// directly (the plugin exposes no click handling on desktop) so the delegate
-/// can open the deep link on click; the URL rides along as the request id. In
-/// dev and on other platforms we fall back to the plugin (no click).
-fn show(app: &AppHandle, title: &str, body: &str, url: &str) {
+/// can open the prep in-app on click; the prep link rides along as the request
+/// id. In dev and on other platforms we fall back to the plugin (no click).
+fn show(app: &AppHandle, title: &str, body: &str, prep_id: i64) {
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
-        macos_un::show(app, title, body, url);
+        macos_un::show(app, title, body, &prep_link(prep_id));
         return;
     }
-    let _ = url; // click-to-open is only wired up for the macOS bundle
+    let _ = prep_id; // click-to-open is only wired up for the macOS bundle
     if let Err(e) = app.notification().builder().title(title).body(body).show() {
         eprintln!("meeting-notifications: failed to show notification: {e}");
     }
 }
 
 /// UNUserNotificationCenter integration: a delegate receives the click on the
-/// main thread (non-blocking) and opens the deep link carried as the request
-/// identifier. UNC requires a properly signed (Developer ID) app; in unsigned
-/// builds `addNotificationRequest` errors and we fall back to the plugin.
+/// main thread (non-blocking) and opens the prep the request identifier points
+/// at. UNC requires a properly signed (Developer ID) app; in unsigned builds
+/// `addNotificationRequest` errors and we fall back to the plugin.
 #[cfg(target_os = "macos")]
 mod macos_un {
+    use std::sync::OnceLock;
+
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
@@ -860,7 +926,9 @@ mod macos_un {
                 completion.call((opts,));
             }
 
-            // Open the deep link carried as the request identifier.
+            // Open the prep the request identifier points at, in-app. This
+            // callback already runs on the main thread, which is what window
+            // creation in `open_prep_from_notification` requires.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -868,9 +936,11 @@ mod macos_un {
                 response: &UNNotificationResponse,
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
-                let url = response.notification().request().identifier().to_string();
-                if url.starts_with("http") {
-                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                let identifier = response.notification().request().identifier().to_string();
+                if let (Some(prep_id), Some(app)) =
+                    (super::prep_id_from_link(&identifier), app_handle())
+                {
+                    super::open_prep_from_notification(app, prep_id);
                 }
                 completion.call(());
             }
@@ -891,9 +961,18 @@ mod macos_un {
         }
     }
 
+    /// The handle the click callback routes through. Stored once at init: the
+    /// ObjC delegate is a plain class with no Rust state of its own.
+    static APP: OnceLock<AppHandle> = OnceLock::new();
+
+    fn app_handle() -> Option<&'static AppHandle> {
+        APP.get()
+    }
+
     /// Install the delegate (retained for the process lifetime — it's a weak
     /// property) and request authorization. Must run on the main thread.
-    pub fn init() {
+    pub fn init(app: &AppHandle) {
+        let _ = APP.set(app.clone());
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let delegate = Delegate::new();
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1230,6 +1309,61 @@ pub async fn resize_meeting_end_prompt(app: AppHandle, expanded: bool) -> Result
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inbox_event_yields_the_meeting_prep_id() {
+        let data = json!({ "source": "meeting_prep", "sourceId": 5145 });
+        assert_eq!(meeting_prep_id_from_event(&data), Some(5145));
+    }
+
+    #[test]
+    fn inbox_event_accepts_a_numeric_string_source_id() {
+        let data = json!({ "source": "meeting_prep", "sourceId": "5145" });
+        assert_eq!(meeting_prep_id_from_event(&data), Some(5145));
+    }
+
+    #[test]
+    fn inbox_event_ignores_other_sources() {
+        let data = json!({ "source": "slack_summary", "sourceId": 7 });
+        assert_eq!(meeting_prep_id_from_event(&data), None);
+    }
+
+    #[test]
+    fn inbox_event_without_a_usable_source_id_is_ignored() {
+        assert_eq!(
+            meeting_prep_id_from_event(&json!({ "source": "meeting_prep" })),
+            None
+        );
+        assert_eq!(
+            meeting_prep_id_from_event(&json!({ "source": "meeting_prep", "sourceId": null })),
+            None
+        );
+        assert_eq!(meeting_prep_id_from_event(&json!({ "sourceId": 5145 })), None);
+    }
+
+    #[test]
+    fn inbox_event_survives_pushers_json_encoded_data() {
+        // Pusher delivers `data` as a JSON-encoded string; `inner_json` decodes
+        // it before the selector sees it.
+        let frame = json!({
+            "event": "inbox-message-ready",
+            "data": r#"{"source":"meeting_prep","sourceId":5145}"#
+        });
+        assert_eq!(meeting_prep_id_from_event(&inner_json(&frame)), Some(5145));
+    }
+
+    #[test]
+    fn prep_link_round_trips_the_prep_id() {
+        assert_eq!(prep_link(5145), "oats-prep://5145");
+        assert_eq!(prep_id_from_link(&prep_link(5145)), Some(5145));
+    }
+
+    #[test]
+    fn prep_id_from_link_rejects_foreign_identifiers() {
+        assert_eq!(prep_id_from_link("https://web.ari.ariso.ai/x"), None);
+        assert_eq!(prep_id_from_link("oats-prep://not-a-number"), None);
+        assert_eq!(prep_id_from_link(""), None);
+    }
 
     #[test]
     fn meeting_prompt_url_carries_the_timeout_seconds() {

@@ -5,6 +5,7 @@ import {
   type MeetingSearchResult,
   type TranscriptChunk,
   type MeetingAudioClip,
+  type MeetingPrep,
 } from './useMeetingApi';
 import { arisoTruthy } from './autoJoin';
 
@@ -148,9 +149,10 @@ export interface Backend {
   getMeetingTranscript(item: MeetingListItem): Promise<string | TranscriptChunk[] | null>;
   /** Lazily load the requester's individual note (null when none). */
   getIndividualNote(item: MeetingListItem): Promise<{ content: string; title: string | null } | null>;
-  /** Fetch a meeting prep's markdown content; null when absent. Only Ariso
-   *  meetings ever carry a prepId, so the local backend always resolves null. */
-  getMeetingPrep(prepId: number): Promise<string | null>;
+  /** Fetch a meeting prep (markdown content + the meeting it belongs to); null
+   *  when absent. Only Ariso meetings ever carry a prepId, so the local backend
+   *  always resolves null. */
+  getMeetingPrep(prepId: number): Promise<MeetingPrep | null>;
   /** Rename a meeting. Ariso PATCHes the meeting-notes endpoint; local
    *  rewrites the title in the recording's meta.json. */
   renameMeeting(id: string, title: string): Promise<void>;
@@ -378,7 +380,7 @@ export class ArisoBackend implements Backend {
     return getMeetingIndividualNote(item.id);
   }
 
-  async getMeetingPrep(prepId: number): Promise<string | null> {
+  async getMeetingPrep(prepId: number): Promise<MeetingPrep | null> {
     const { getMeetingPrep } = useMeetingApi();
     return getMeetingPrep(prepId);
   }
@@ -491,7 +493,7 @@ export class LocalBackend implements Backend {
     return null;
   }
 
-  async getMeetingPrep(): Promise<string | null> {
+  async getMeetingPrep(): Promise<MeetingPrep | null> {
     return null; // local recordings never have meeting preps
   }
 

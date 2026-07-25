@@ -580,8 +580,11 @@ describe('meeting prep plumbing', () => {
   });
 
   it('ArisoBackend.getMeetingPrep delegates to the API', async () => {
-    getMeetingPrepApi.mockResolvedValue('## md');
-    await expect(new ArisoBackend().getMeetingPrep(4339)).resolves.toBe('## md');
+    getMeetingPrepApi.mockResolvedValue({ content: '## md', meetingId: '45565' });
+    await expect(new ArisoBackend().getMeetingPrep(4339)).resolves.toEqual({
+      content: '## md',
+      meetingId: '45565',
+    });
     expect(getMeetingPrepApi).toHaveBeenCalledWith(4339);
   });
 

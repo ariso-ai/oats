@@ -15,6 +15,8 @@ const writeRecordingNote = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
+const getMeetingPrep = vi.fn();
+const openPrepTab = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -53,6 +55,7 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
         listMeetings: () => listMeetings(),
         searchMeetings: (query: string) => searchMeetings(query),
         getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
+        getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
       }),
   };
 });
@@ -95,7 +98,13 @@ function item(over: Record<string, unknown>) {
 const detailStub = {
   name: 'MeetingDetailView',
   emits: ['close', 'title-updated'],
-  template: '<div class="detail-stub"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
+  props: ['item'],
+  methods: {
+    openPrepTab: () => openPrepTab(),
+    saveNotesNow: () => Promise.resolve(),
+  },
+  template:
+    '<div class="detail-stub" :data-meeting="item?.id"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
 };
 function mountWithDetailStub() {
   return mount(LibraryView, { global: { stubs: { MeetingDetailView: detailStub } } });
@@ -121,6 +130,7 @@ beforeEach(() => {
     })
   );
   invoke.mockResolvedValue(undefined);
+  getMeetingPrep.mockResolvedValue(null);
   readRecordingNote.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
   backendId.mockReturnValue('local');
@@ -1261,5 +1271,85 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', { defaultMeetingId: 42 });
+  });
+});
+
+// Clicking a "Meeting prep ready" notification opens this window (or focuses
+// it) and queues the prep id natively; the Library claims it and opens the
+// prep's meeting with its Prep tab active.
+describe('LibraryView meeting-prep notification', () => {
+  function invokeWith(pendingPrepId: number | null) {
+    invoke.mockImplementation((cmd: unknown) =>
+      Promise.resolve(cmd === 'take_pending_meeting_prep' ? pendingPrepId : undefined)
+    );
+  }
+
+  it('claims the queued prep on mount and opens that meeting on its Prep tab', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([
+      item({ id: '1', title: 'Other', files: undefined }),
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the prep\'s meeting_id when no loaded row carries the prep id', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([
+      item({ id: '45565', title: 'Standup', files: undefined }),
+    ]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '45565' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(getMeetingPrep).toHaveBeenCalledWith(5145);
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('claims the prep on the event when the window was already open', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(null);
+    listMeetings.mockResolvedValue([
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(openPrepTab).not.toHaveBeenCalled();
+
+    invokeWith(5145);
+    emitEvent('meeting-prep://open', {});
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when nothing is queued', async () => {
+    invokeWith(null);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    mountWithDetailStub();
+    await flushPromises();
+    expect(openPrepTab).not.toHaveBeenCalled();
+  });
+
+  it('leaves the pane alone when the prep resolves to no known meeting', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '1', title: 'Other', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '99999' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(openPrepTab).not.toHaveBeenCalled();
+    // The auto-selected first row stays put — no meeting is yanked out from
+    // under the user for a prep we can't place.
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('1');
   });
 });

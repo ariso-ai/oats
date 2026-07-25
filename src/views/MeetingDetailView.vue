@@ -129,15 +129,6 @@
 
       <div v-else class="divider" />
 
-      <!-- Prep banner: only Ariso meetings ever carry a prepId (set on the
-           /meetings list row when a meeting prep exists). -->
-      <div v-if="detail.prepId != null" class="prep-banner">
-        <span class="prep-banner-label">✨ Meeting prep is ready</span>
-        <button class="prep-btn" type="button" @click="togglePrep">
-          {{ showPrep ? 'Hide prep' : 'View prep' }}
-        </button>
-      </div>
-
       <!-- Tabs + generation status -->
       <div v-if="availableTabs.length" class="card-tabs">
         <div class="segment">
@@ -145,7 +136,7 @@
             v-for="t in availableTabs"
             :key="t.key"
             class="seg-btn"
-            :class="{ 'seg-btn--active': !showPrep && activeTab === t.key }"
+            :class="{ 'seg-btn--active': activeTab === t.key }"
             type="button"
             :disabled="t.disabled"
             @click="onTabClick(t)"
@@ -178,20 +169,20 @@
 
       <!-- Content -->
       <div class="card-content">
-        <div v-if="!showPrep && !availableTabs.length" class="content-empty">
+        <div v-if="!availableTabs.length" class="content-empty">
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
         </div>
 
-        <!-- Prep pane: replaces the tab panes while open. v-if (not v-show) is
-             fine — the pane holds no editor state worth preserving. -->
-        <div v-if="showPrep" class="tab-pane prep-pane">
+        <!-- Prep pane. v-if (not v-show) is fine — the pane holds no editor
+             state worth preserving. -->
+        <div v-if="activeTab === 'prep'" class="tab-pane prep-pane">
           <div v-if="loadingPrep" class="card-state"><span class="spinner" /><span>Loading prep…</span></div>
           <div v-else-if="prepError" class="card-state card-state--error">{{ prepError }}</div>
           <div v-else-if="prepContent" class="md" v-html="renderMarkdown(prepContent)" />
           <div v-else class="content-empty">No prep available.</div>
         </div>
 
-        <div v-show="!showPrep && activeTab === 'note'" class="tab-pane">
+        <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
           <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
 
@@ -229,7 +220,7 @@
           </template>
         </div>
 
-        <div v-show="!showPrep && activeTab === 'assessment'" class="tab-pane">
+        <div v-show="activeTab === 'assessment'" class="tab-pane">
           <section v-if="detail.score !== undefined" class="sec">
             <h3 class="sec-h">Meeting Assessment</h3>
             <div class="assess-score">
@@ -262,7 +253,7 @@
           </section>
         </div>
 
-        <div v-show="!showPrep && activeTab === 'transcript'" class="tab-pane">
+        <div v-show="activeTab === 'transcript'" class="tab-pane">
           <!-- Audio playback sits right under the tabs, surfaced only while the
                Transcript tab is active; keyed by meeting id so switching selection
                remounts the player instead of leaking the previous blob URL. Both
@@ -313,7 +304,7 @@
           <div v-else class="content-empty">No transcript available.</div>
         </div>
 
-        <div v-show="!showPrep && activeTab === 'mynote'" class="tab-pane tab-pane--editor">
+        <div v-show="activeTab === 'mynote'" class="tab-pane tab-pane--editor">
           <div class="notes-head">
             <input
               v-if="editingNoteTitle"
@@ -393,7 +384,8 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
-const activeTab = ref<'note' | 'transcript' | 'mynote' | 'assessment'>('note');
+type TabKey = 'note' | 'transcript' | 'mynote' | 'prep' | 'assessment';
+const activeTab = ref<TabKey>('note');
 
 // Inline title editing. Both backends rename through Backend.renameMeeting
 // (ariso PATCHes the server; local rewrites meta.json). Local titles are
@@ -580,23 +572,32 @@ function onRegenerate(): void {
   void progress.retryNotes();
 }
 
-// Meeting prep (Ariso only): fetched on demand the first time the banner's
-// "View prep" is clicked, then cached for the lifetime of the loaded meeting.
-// While open, the prep pane replaces the tab panes and no tab reads as active.
-const showPrep = ref(false);
+// Meeting prep (Ariso only): the Prep tab renders it, fetched on demand the
+// first time that tab opens and then cached for the lifetime of the loaded
+// meeting.
 const prepContent = ref<string | null>(null);
 const prepLoaded = ref(false);
 const loadingPrep = ref(false);
 const prepError = ref<string | null>(null);
 
-function togglePrep(): void {
-  showPrep.value = !showPrep.value;
-  if (showPrep.value) void loadPrep();
+// Set when a prep-ready notification asks for this meeting's prep before the
+// detail has finished loading; `load` applies it once the tabs exist.
+let pendingPrepOpen = false;
+
+/** Activate the Prep tab (the notification click target). Called by the Library
+ *  after it selects the prep's meeting — possibly while the detail is still
+ *  loading, hence the pending flag. */
+function openPrepTab(): void {
+  if (detail.value?.prepId != null) {
+    activeTab.value = 'prep';
+    pendingPrepOpen = false;
+    return;
+  }
+  pendingPrepOpen = true;
 }
 
-function onTabClick(t: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; disabled?: boolean }): void {
+function onTabClick(t: { key: TabKey; disabled?: boolean }): void {
   if (t.disabled) return;
-  showPrep.value = false;
   activeTab.value = t.key;
 }
 
@@ -610,9 +611,9 @@ async function loadPrep(): Promise<void> {
   loadingPrep.value = true;
   prepError.value = null;
   try {
-    const content = await backend.getMeetingPrep(d.prepId);
+    const prep = await backend.getMeetingPrep(d.prepId);
     if (my !== reqId) return;
-    prepContent.value = content;
+    prepContent.value = prep?.content ?? null;
     prepLoaded.value = true;
   } catch (e) {
     if (my !== reqId) return;
@@ -792,7 +793,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
   activeClipId.value = null;
-  showPrep.value = false;
+  pendingPrepOpen = false;
   prepContent.value = null;
   prepLoaded.value = false;
   loadingPrep.value = false;
@@ -823,7 +824,11 @@ async function load(item: MeetingListItem | null): Promise<void> {
     detail.value = d;
     detailBackend = backend;
     activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
-    activeTab.value = firstTabFor(d, item); // default to the first available tab
+    // A prep-ready notification that landed while this was loading wins over
+    // the content-driven default.
+    activeTab.value =
+      pendingPrepOpen && d.prepId != null ? 'prep' : firstTabFor(d, item);
+    pendingPrepOpen = false;
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
     }
@@ -962,10 +967,11 @@ function assessmentPresent(d: MeetingDetail): boolean {
 }
 // The initial tab follows available content, but editable personal notes count
 // as available even before the first note has been saved.
-function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' | 'assessment' {
+function firstTabFor(d: MeetingDetail, item: MeetingListItem): TabKey {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
   if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
+  if (d.prepId != null) return 'prep';
   if (assessmentPresent(d)) return 'assessment';
   return 'note';
 }
@@ -973,13 +979,13 @@ function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcr
 // Tabs appear when their content exists. For local recordings the AI Notes and
 // Transcript tabs are always present (disabled until their content is ready) so
 // the row stays stable while generation runs; the inline status chip reports
-// progress. Ariso meetings keep the content-gated behavior.
-const availableTabs = computed<
-  { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[]
->(() => {
+// progress. Ariso meetings keep the content-gated behavior. The Prep tab sits
+// after My Notes and only exists for Ariso meetings that carry a prepId (set on
+// the /meetings list row when a meeting prep exists).
+const availableTabs = computed<{ key: TabKey; label: string; disabled?: boolean }[]>(() => {
   const d = detail.value;
   if (!d) return [];
-  const out: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[] = [];
+  const out: { key: TabKey; label: string; disabled?: boolean }[] = [];
   if (d.isLocal) {
     out.push({ key: 'note', label: 'AI Notes', disabled: !d.note });
     out.push({ key: 'transcript', label: 'Transcript', disabled: !d.hasTranscript });
@@ -993,6 +999,7 @@ const availableTabs = computed<
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
   }
+  if (d.prepId != null) out.push({ key: 'prep', label: 'Prep' });
   if (assessmentPresent(d)) out.push({ key: 'assessment', label: 'AI Assessment' });
   return out;
 });
@@ -1090,7 +1097,7 @@ async function saveNotesNow(): Promise<void> {
   }
 }
 
-defineExpose({ saveNotesNow });
+defineExpose({ saveNotesNow, openPrepTab });
 
 // Flushes the loaded note before the detail pane clears local draft state.
 // This protects quick tab/meeting/window changes where the 700ms debounce has
@@ -1103,6 +1110,7 @@ async function flushPendingNoteBeforeReset(): Promise<void> {
 watch(activeTab, (t) => {
   if (t === 'transcript') void loadTranscript();
   else if (t === 'mynote') void loadIndividualNote();
+  else if (t === 'prep') void loadPrep();
 });
 
 // Debounced autosave shared by the note body and its title so an edit to either
@@ -1323,15 +1331,6 @@ const durationLabel = computed<string | null>(() => {
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
 .meta-ari { margin-left: auto; }
 
-/* Prep banner — slim full-bleed strip between the meta band and the tabs. */
-.prep-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 13px; }
-.prep-banner-label { color: #1c1c1c; font-weight: 500; }
-.prep-btn {
-  height: 28px; padding: 0 12px; flex-shrink: 0;
-  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
-  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
-}
-.prep-btn:hover { background: #fbfbfb; }
 .card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
 .clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .clip-row--active { background: #f7f6f4; }

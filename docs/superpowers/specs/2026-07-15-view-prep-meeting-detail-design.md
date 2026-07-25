@@ -1,18 +1,17 @@
 # View prep in the meeting detail view — design
 
-Date: 2026-07-15
+Date: 2026-07-15 (revised 2026-07-24)
 Status: approved
 
 ## Summary
 
 When a meeting has an associated meeting prep, the desktop's meeting detail view
-shows a slim "Meeting prep is ready" banner with a **View prep** button. Clicking
-it fetches the prep from the Ariso API and renders its markdown content in the
-detail card's content area, replacing the active tab pane until dismissed.
+shows a **Prep** tab next to **My Notes**. Selecting it fetches the prep from the
+Ariso API and renders its markdown in the detail card's content area.
 
-Today the only desktop surface for meeting prep is the native OS notification
-(`meeting_notifications.rs`), which deep-links to the **web app**
-(`/my/meeting-prep-v2/{prepId}`). This feature makes the prep readable in-app.
+The "Meeting prep ready" OS notification now opens that tab *in-app* instead of
+deep-linking to the web app: clicking it opens (or focuses) the Library window,
+selects the prep's meeting, and activates its Prep tab.
 
 ## API contract (verified against production responses)
 
@@ -24,9 +23,9 @@ Today the only desktop surface for meeting prep is the native OS notification
   ```json
   {
     "meetingPrep": {
-      "id": 4339,
-      "meeting_id": "37480",
-      "content": "## Open items…  (markdown)",
+      "id": 5145,
+      "meeting_id": "45565",
+      "content": "## Standup prep…  (markdown)",
       "attendees": [...],
       "previous_meetings": [...],
       "meeting_url": "…",
@@ -35,22 +34,39 @@ Today the only desktop surface for meeting prep is the native OS notification
   }
   ```
 
-Only `content` is consumed. `attendees`, `previous_meetings`, `meeting_url`,
-and the rest are deliberately ignored (YAGNI).
+Only `content` and `meeting_id` are consumed — `content` to render, `meeting_id`
+to resolve a notification back to its meeting. `attendees`,
+`previous_meetings`, `meeting_url`, and the rest are deliberately ignored (YAGNI).
+
+## Realtime trigger
+
+The prep-ready signal is the generic inbox event, not a prep-specific one:
+
+```
+channel: private-{orgId}-{orgUserMappingId}
+event:   inbox-message-ready
+data:    { source: "meeting_prep", sourceId: <meetingPrepId> }
+```
+
+`meeting_notifications.rs` acts only on `source === "meeting_prep"` and ignores
+every other inbox source. `sourceId` is tolerated as a number or numeric string.
+The catch-up backstop (`/user-inbox-messages`, run on every re-subscribe) is
+unchanged — it already filters on the same `meeting_prep` source.
 
 ## Data flow
 
 Ariso backend only. Local recordings never have preps, so nothing on the local
-path changes and the banner can never render for a local meeting.
+path changes and the Prep tab can never render for a local meeting.
 
 1. **`useMeetingApi.ts`**
    - `ScheduledMeeting` gains `prep_id?: number | string` (tolerant of the
      API returning either, mirroring `auto_join_scheduled`'s leniency).
-   - New `getMeetingPrep(prepId: number): Promise<string | null>` —
-     GET `/meeting-preps/{prepId}`; resolves the `meetingPrep.content` string,
-     `null` on 404 or when `content` is missing/empty (matching the
+   - `getMeetingPrep(prepId: number): Promise<MeetingPrep | null>` —
+     GET `/meeting-preps/{prepId}`; resolves `{ content, meetingId }`, `null` on
+     404 or when the payload carries no `meetingPrep` (matching the
      `getMeetingTranscript` "absent ≠ error" convention); throws on other
-     non-200s via `assertOk`.
+     non-200s via `assertOk`. `content` is null on its own when the markdown is
+     missing/blank; `meetingId` is null when `meeting_id` is missing/unusable.
 2. **`useBackend.ts`**
    - `MeetingListItem` gains `prepId?: number`; `meetingSummaryToListItem`
      sets it from `prep_id` when it parses to a finite number (list and
@@ -58,67 +74,100 @@ path changes and the banner can never render for a local meeting.
    - `MeetingDetail` gains `prepId?: number`; `ArisoBackend.getMeetingDetail`
      carries it from the list item, exactly how `autoJoinScheduled` travels
      today — `/meeting-notes/:id` does not include it.
-3. **`MeetingDetailView.vue`** owns fetch-on-demand, caching, and display
-   state (below).
+3. **`MeetingDetailView.vue`** owns fetch-on-demand, caching, and tab state.
+4. **`LibraryView.vue`** owns the notification-click landing (below).
 
 ## UI
 
-### Banner
+### Prep tab
 
-- Rendered between the meta band and the tab bar, only when
-  `detail.prepId != null`.
-- Content: "✨ Meeting prep is ready" left, a **View prep** button right.
-- While the prep pane is open the button reads **Hide prep**.
-- No prep id → no banner, zero layout change for every other meeting.
+- Appended after **My Notes** (before **AI Assessment**) whenever
+  `detail.prepId != null`. No prep id → no tab, zero layout change for every
+  other meeting.
 
 ```
 ┌──────────────────────────────────────────────┐
 │ Max + Shawn Weekly            [Share] [✕]    │
 │ ⏱ 40m · 👤 2 Attendees · #one-on-one         │
-│ ✨ Meeting prep is ready      [View prep]    │
 │──────────────────────────────────────────────│
-│ [AI Notes][Transcript][My note]              │
+│ [AI Notes][Transcript][My Notes][Prep]       │
 │──────────────────────────────────────────────│
-│ Quick Digest…                                │
+│ ## Standup prep …                            │
 └──────────────────────────────────────────────┘
 ```
 
-### Prep pane
-
-- Clicking **View prep** switches the content area to a prep pane; no tab
-  segment renders active while it is open.
 - The pane lazily fetches `getMeetingPrep(detail.prepId)` on first open and
   caches the result for the lifetime of the loaded meeting. States:
   - loading: spinner + "Loading prep…" (same `card-state` pattern as
     transcript loading);
   - loaded: `content` rendered through the existing `renderMarkdown` into a
     `.md` block;
-  - `null` (404 / empty): "No prep available." empty state;
+  - no content (404 / empty): "No prep available." empty state;
   - error: inline error text in the pane.
-- Exiting: clicking **Hide prep** returns to the previously active tab;
-  clicking any tab segment also closes the pane and activates that tab.
-- Meeting switch resets prep state (open flag, cache, in-flight guard) using
-  the view's existing `reqId` pattern so a stale response can't land on the
-  wrong meeting.
+- Meeting switch resets prep state (cache, in-flight guard) using the view's
+  existing `reqId` pattern so a stale response can't land on the wrong meeting.
+- The tab is only the *default* tab when nothing else has content
+  (`firstTabFor`), so opening a meeting normally still lands on AI Notes.
+- `openPrepTab()` is exposed for the notification path. When the detail is still
+  loading it sets a pending flag that `load()` applies once the tabs exist.
 
 Links inside the prep markdown (e.g. "Previous meeting note") behave exactly
 like links in AI Notes today — no new URL-opening surface is introduced.
 
-## Testing (Vitest)
+### Notification click → in-app
 
-- `useMeetingApi.test.ts` — `getMeetingPrep`: happy path resolves `content`;
-  404 → `null`; missing/empty `content` → `null`; other non-200 throws.
+The macOS `UNUserNotificationCenter` request identifier carries `oats-prep://{id}`
+(an internal token, not a registered URL scheme). On click the delegate — already
+on the main thread, which window creation requires:
+
+1. stores the prep id in a native pending slot,
+2. opens (or focuses) the Library window,
+3. emits `meeting-prep://open`.
+
+The id travels through the slot rather than the event payload because the click
+usually *creates* the Library window, so an emitted payload would arrive before
+any listener exists. `LibraryView` claims it with the
+`take_pending_meeting_prep` command both on mount and on `meeting-prep://open`
+(the already-open case); the claim clears the slot, so a prep opens exactly once.
+
+Resolving the prep to a row:
+
+1. match a loaded row on `prepId`;
+2. if none, `loadMeetings()` and retry — the list can predate the prep;
+3. if still none, fall back to `getMeetingPrep(prepId).meetingId` and match by
+   row id (covers a meeting outside the loaded window);
+4. if still none, log and leave the pane untouched.
+
+Then select the row and call the detail view's `openPrepTab()`.
+
+In dev / unsigned builds UNC is unavailable and the notification falls back to
+the Tauri plugin, which exposes no click handling — the in-app landing only
+works in a Developer-ID-signed bundle. Unchanged from the previous behavior.
+
+## Testing
+
+- Rust (`meeting_notifications.rs`) — `inbox-message-ready` selector: numeric
+  and numeric-string `sourceId`; non-`meeting_prep` sources ignored; missing
+  `sourceId` ignored; Pusher's JSON-encoded `data` decodes; `oats-prep://` link
+  round-trips and rejects foreign identifiers.
+- `useMeetingApi.test.ts` — `getMeetingPrep`: content + meetingId happy path;
+  numeric `meeting_id`; 404 → `null`; no `meetingPrep` → `null`; missing/empty
+  `content` → null content; missing `meeting_id` → null meetingId; other
+  non-200 throws.
 - `useBackend.test.ts` — `prep_id` mapping: numeric and numeric-string map to
   `prepId`; absent/garbage stays `undefined`; `getMeetingDetail` carries
-  `item.prepId` through.
-- `MeetingDetailView.test.ts` — banner absent without `prepId`; present with
-  it; View prep click fetches and renders markdown; Hide prep / tab click
-  restores the tab; fetch error shows the error state. (Heavy view test file:
-  run in isolation per repo convention.)
+  `item.prepId` through; `getMeetingPrep` delegates.
+- `MeetingDetailView.test.ts` — no Prep tab without `prepId`; tab order places
+  Prep after My Notes; the tab fetches once and renders markdown; switching tabs
+  leaves the pane; `openPrepTab` activates it; null / empty / error states.
+- `LibraryView.test.ts` — claims a queued prep on mount and opens the meeting's
+  Prep tab; the `meeting_id` fallback; the `meeting-prep://open` event path;
+  no-op when nothing is queued or the prep maps to no known row.
+
+(Heavy view test files: run in isolation per repo convention.)
 
 ## Out of scope
 
 - Rendering prep attendees / previous meetings / meeting URL.
 - Prep on the UpNextCard or library rows.
-- Any change to the notification deep link (still opens the web app).
 - Offline/local backend behavior.
