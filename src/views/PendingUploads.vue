@@ -2,17 +2,30 @@
   <div v-if="items.length > 0" class="pending">
     <div class="group-label">Pending uploads</div>
     <div class="pending-card">
+      <!-- Two lines per item: the sidebar is ~250px wide, so Play + Locate on
+           the title's line would squeeze the title itself down to nothing. -->
       <div v-for="it in items" :key="it.createdAt" class="pending-item">
-        <span class="pi-dot" aria-hidden="true" />
-        <span class="pi-wave" aria-hidden="true" />
-        <span class="pi-title">{{ titleFor(it) }}</span>
-        <span class="pi-dur">{{ durationFor(it) }}</span>
-        <span class="pi-play">
-          <RecordingAudioPlayer
-            :load="() => loadAudio(it)"
-            title="Plays the recording buffered on this Mac, not an uploaded copy"
-          />
-        </span>
+        <div class="pi-head">
+          <span class="pi-dot" aria-hidden="true" />
+          <span class="pi-wave" aria-hidden="true" />
+          <span class="pi-title">{{ titleFor(it) }}</span>
+          <span class="pi-dur">{{ durationFor(it) }}</span>
+        </div>
+        <div class="pi-controls">
+          <span class="pi-play">
+            <RecordingAudioPlayer
+              :load="() => loadAudio(it)"
+              title="Plays the recording buffered on this Mac, not an uploaded copy"
+            />
+          </span>
+          <button
+            class="pi-locate"
+            title="Show this buffered recording in Finder (~/.ariso/pending-uploads)"
+            @click="onLocate(it)"
+          >
+            Locate
+          </button>
+        </div>
       </div>
       <!-- Leaving the actions row cancels a pending discard confirmation so the
            destructive second click can't linger armed after the user moves away. -->
@@ -79,6 +92,18 @@ function durationFor(it: PendingUploadMeta): string {
 // so playback exercises the exact bytes an upload retry would send.
 function loadAudio(it: PendingUploadMeta): Promise<ArrayBuffer> {
   return pending.combine([it.createdAt]);
+}
+
+// Opens the buffer folder in the OS file manager so the mp3 can be recovered
+// by hand — the backend selects this recording's file when it still exists.
+async function onLocate(it: PendingUploadMeta): Promise<void> {
+  error.value = null;
+  try {
+    await pending.reveal(it.createdAt);
+  } catch (e) {
+    console.error('Failed to reveal pending upload', e);
+    error.value = 'Could not open the pending uploads folder.';
+  }
 }
 
 // Retry is only useful when desktop has an Ari session to attach to the upload
@@ -150,11 +175,22 @@ onMounted(refresh);
 }
 .pending-item {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+.pi-head {
+  display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 52px;
-  padding: 0 10px;
-  box-sizing: border-box;
+  min-width: 0;
+}
+.pi-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
 .pending-item + .pending-item {
   border-top: 1px solid #e5e2dd;
@@ -196,23 +232,40 @@ onMounted(refresh);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+/* Collapsed, the Play button sits directly beside Locate; expanded, the
+   <audio> element claims the rest of the line and pushes Locate to the edge. */
 .pi-play {
   display: flex;
   align-items: center;
+  flex: 0 1 auto;
   min-width: 0;
 }
-/* Once playing, cap the native controls so they share the row with the title
+.pi-play:has(.audio-el) {
+  flex: 1 1 auto;
+}
+/* Once playing, let the native controls fill the controls line beside Locate
    instead of the <audio> element's intrinsic ~300px width overflowing it. */
 .pi-play :deep(.audio-el) {
-  width: 150px;
+  width: 100%;
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
 }
-/* The expanded player has its own timeline; drop the redundant wave glyph and
-   duration so the title isn't squeezed to nothing in the narrow sidebar row. */
-.pending-item:has(.audio-el) .pi-wave,
-.pending-item:has(.audio-el) .pi-dur {
-  display: none;
+/* Matches the player's Play button so the pair reads as one control group. */
+.pi-locate {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #1d1d1f;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pi-locate:hover {
+  background: #f7f6f4;
+  border-color: #bdbbb6;
 }
 .pending-error {
   margin: 0 10px;

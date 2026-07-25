@@ -4,6 +4,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 
 const list = vi.fn();
 const combine = vi.fn();
+const reveal = vi.fn();
 const checkSession = vi.fn();
 const combineAndUpload = vi.fn();
 const discardAll = vi.fn();
@@ -13,6 +14,7 @@ vi.mock('../tauri', () => ({
   pending: {
     list: (...a: unknown[]) => list(...a),
     combine: (...a: unknown[]) => combine(...a),
+    reveal: (...a: unknown[]) => reveal(...a),
   },
 }));
 vi.mock('../composables/usePendingUploads', () => ({
@@ -73,6 +75,33 @@ describe('PendingUploads', () => {
 
     expect(combine).toHaveBeenCalledWith(['2026-06-12T11:00:00Z']);
     expect(loaded).toBe(buf);
+  });
+
+  it('Locate opens the buffer folder for that recording', async () => {
+    list.mockResolvedValue(items);
+    reveal.mockResolvedValue(undefined);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    const buttons = wrapper.findAll('.pi-locate');
+    expect(buttons).toHaveLength(2);
+    await buttons[1].trigger('click');
+    await flushPromises();
+
+    expect(reveal).toHaveBeenCalledWith('2026-06-12T11:00:00Z');
+    expect(wrapper.find('.pending-error').exists()).toBe(false);
+  });
+
+  it('shows an error when the buffer folder cannot be opened', async () => {
+    list.mockResolvedValue(items);
+    reveal.mockRejectedValue(new Error('no such directory'));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.find('.pi-locate').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.pending-error').text()).toBe('Could not open the pending uploads folder.');
   });
 
   it('Upload combines+uploads, refreshes, and emits uploaded on success', async () => {

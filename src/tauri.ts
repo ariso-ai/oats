@@ -365,6 +365,10 @@ export const pending = {
   combine(createdAtKeys: string[]): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('combine_pending_audio', { createdAtKeys });
   },
+  /** Open `~/.ariso/pending-uploads` in Finder/Explorer, selecting this buffer. */
+  reveal(createdAt: string): Promise<void> {
+    return invoke('reveal_pending_upload', { createdAt });
+  },
 };
 
 export async function getBackendSetting(): Promise<'ariso' | 'local'> {

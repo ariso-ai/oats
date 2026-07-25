@@ -1184,6 +1184,29 @@ pub fn combine_pending_audio(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Reveal a buffered pending upload in the OS file manager (Finder on macOS,
+/// Explorer on Windows). If the mp3 is gone, still open `pending-uploads/`
+/// itself so the button always lands the user in the right folder.
+#[tauri::command]
+pub fn reveal_pending_upload(app: tauri::AppHandle, created_at: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let root = crate::storage::ariso_root()?;
+    let audio = crate::storage::pending_audio_path(&root, &created_at)?;
+    if audio.is_file() {
+        return app
+            .opener()
+            .reveal_item_in_dir(&audio)
+            .map_err(|e| e.to_string());
+    }
+
+    let dir = crate::storage::pending_uploads_dir(&root);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create pending-uploads dir: {e}"))?;
+    app.opener()
+        .open_path(dir.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve a recording's directory under `<vault>/.oats/recordings/<id>`,
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
