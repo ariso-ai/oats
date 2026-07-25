@@ -219,6 +219,7 @@ fn main() {
             commands::discard_pending_audio,
             commands::list_pending_uploads,
             commands::combine_pending_audio,
+            commands::reveal_pending_upload,
             commands::fetch_meeting_audio,
             commands::share_text_native,
             transcribe::local_recording_id_for_start,

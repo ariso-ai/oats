@@ -213,7 +213,7 @@ fn validate_pending_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
+pub fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
     let id = sanitize_iso_to_pending_id(created_at);
     validate_pending_id(&id)?;
     Ok(pending_uploads_dir(root).join(format!("{id}.mp3")))
