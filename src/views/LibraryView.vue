@@ -102,7 +102,7 @@
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
           </button>
         </template>
-        <p v-if="displayedSections.length === 0" class="hint">No meetings today.</p>
+        <p v-if="displayedSections.length === 0" class="hint">{{ emptyListHint }}</p>
       </div>
 
       <!-- Floating bottom navigation -->
@@ -303,12 +303,18 @@ const displayMeetings = computed<MeetingListItem[]>(() => {
   ];
 });
 
+// The Meetings view is a history list — it stops at today, so it can come up
+// empty even when the backend returned only future (scheduled) meetings.
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
     return groupTodaysMeetings(displayMeetings.value, now.value);
   }
   return groupMeetingsByDate(displayMeetings.value, now.value);
 });
+
+const emptyListHint = computed(() =>
+  activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
+);
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
 // relative-time chip; it's the first item of the Today view's UPCOMING section.

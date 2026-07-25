@@ -83,28 +83,43 @@ describe('nextDaySection', () => {
 });
 
 describe('groupMeetingsByDate', () => {
-  it('buckets meetings by date with upcoming days nearest-first, then past days newest-first', () => {
+  it('buckets meetings by date, today first then past days newest-first', () => {
     const meetings = [
       m('older', '2026-06-08T09:00:00'),
       m('past1', '2026-06-09T09:00:00'),
       m('today1', '2026-06-10T09:00:00'),
       m('today2', '2026-06-10T11:00:00'),
       m('soon', '2026-06-10T18:00:00'),
+    ];
+    const sections = groupMeetingsByDate(meetings, NOW);
+    expect(sections.map((s) => s.label)).toEqual(['TODAY', 'YESTERDAY', 'MON, JUN 8']);
+    // Within a date, earliest-first (ascending) — including later-today meetings.
+    expect(sections[0].items.map((x) => x.id)).toEqual(['today1', 'today2', 'soon']);
+  });
+
+  it('drops meetings dated beyond today', () => {
+    const meetings = [
+      m('past1', '2026-06-09T09:00:00'),
+      m('today1', '2026-06-10T09:00:00'),
       m('tomorrow', '2026-06-11T09:00:00'),
       m('future', '2026-06-12T10:00:00'),
     ];
     const sections = groupMeetingsByDate(meetings, NOW);
-    // No UPCOMING section: future meetings live under their own date header.
-    expect(sections.map((s) => s.label)).toEqual([
-      'TODAY',
-      'TOMORROW',
-      'FRI, JUN 12',
-      'YESTERDAY',
-      'MON, JUN 8',
-    ]);
-    // Within a date, earliest-first (ascending).
-    expect(sections[0].items.map((x) => x.id)).toEqual(['today1', 'today2', 'soon']);
-    expect(sections[2].items.map((x) => x.id)).toEqual(['future']);
+    expect(sections.map((s) => s.label)).toEqual(['TODAY', 'YESTERDAY']);
+    expect(sections.flatMap((s) => s.items.map((x) => x.id))).toEqual(['today1', 'past1']);
+  });
+
+  it('hides a past meeting that was rescheduled into the future', () => {
+    // The rescheduled meeting carries its new (future) start, so it must not
+    // land between TODAY and YESTERDAY (issue #263).
+    const meetings = [
+      m('yesterday', '2026-06-09T09:00:00'),
+      m('rescheduled', '2026-06-17T10:00:00'),
+      m('today', '2026-06-10T09:00:00'),
+    ];
+    const sections = groupMeetingsByDate(meetings, NOW);
+    expect(sections.map((s) => s.label)).toEqual(['TODAY', 'YESTERDAY']);
+    expect(sections.flatMap((s) => s.items.map((x) => x.id))).not.toContain('rescheduled');
   });
 
   it('returns an empty array for no meetings', () => {
