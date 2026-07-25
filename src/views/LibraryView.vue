@@ -493,10 +493,9 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
-    if (autoSelectFirst && !selectedItem.value && meetings.value.length > 0) {
-      await selectMeeting(displayedSections.value[0]?.items[0] ?? meetings.value[0], {
-        userSelected: false,
-      });
+    const firstVisible = displayedSections.value[0]?.items[0];
+    if (autoSelectFirst && !selectedItem.value && firstVisible) {
+      await selectMeeting(firstVisible, { userSelected: false });
     } else if (selectedItem.value) {
       selectedItem.value =
         meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
