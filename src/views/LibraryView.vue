@@ -102,7 +102,7 @@
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
           </button>
         </template>
-        <p v-if="displayedSections.length === 0" class="hint">No meetings today.</p>
+        <p v-if="displayedSections.length === 0" class="hint">{{ emptyListHint }}</p>
       </div>
 
       <!-- Floating bottom navigation -->
@@ -303,12 +303,18 @@ const displayMeetings = computed<MeetingListItem[]>(() => {
   ];
 });
 
+// The Meetings view is a history list — it stops at today, so it can come up
+// empty even when the backend returned only future (scheduled) meetings.
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
     return groupTodaysMeetings(displayMeetings.value, now.value);
   }
   return groupMeetingsByDate(displayMeetings.value, now.value);
 });
+
+const emptyListHint = computed(() =>
+  activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
+);
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
 // relative-time chip; it's the first item of the Today view's UPCOMING section.
@@ -487,10 +493,9 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
-    if (autoSelectFirst && !selectedItem.value && meetings.value.length > 0) {
-      await selectMeeting(displayedSections.value[0]?.items[0] ?? meetings.value[0], {
-        userSelected: false,
-      });
+    const firstVisible = displayedSections.value[0]?.items[0];
+    if (autoSelectFirst && !selectedItem.value && firstVisible) {
+      await selectMeeting(firstVisible, { userSelected: false });
     } else if (selectedItem.value) {
       selectedItem.value =
         meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;

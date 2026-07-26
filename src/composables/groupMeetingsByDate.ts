@@ -104,27 +104,28 @@ export function nextDaySection(meetings: MeetingListItem[], now: Date): MeetingS
   return { key: nextKey, label: dayLabelWithDate(nextKey, now), items };
 }
 
-/** Bucket every meeting under per-calendar-date headers in a meeting-list order:
- *  today and future dates read nearest-first, while past dates read newest-first. */
+/** Bucket meetings up to and including today under per-calendar-date headers,
+ *  newest day first. Days beyond today are dropped: this is the history list, and
+ *  a meeting rescheduled into the future would otherwise wedge itself between
+ *  TODAY and YESTERDAY. Upcoming meetings live in the Today view / UpNextCard. */
 export function groupMeetingsByDate(meetings: MeetingListItem[], now: Date): MeetingSection[] {
+  const today = localDateKey(now);
   const buckets = new Map<string, MeetingListItem[]>();
   for (const meeting of meetings) {
     const d = new Date(meeting.timestamp);
+    // Zero-padded YYYY-MM-DD keys compare lexically, so this drops future days.
     const key = Number.isNaN(d.getTime()) ? 'unknown' : localDateKey(d);
+    if (key !== 'unknown' && key > today) continue;
     const bucket = buckets.get(key);
     if (bucket) bucket.push(meeting);
     else buckets.set(key, [meeting]);
   }
 
   const sections: MeetingSection[] = [];
-  const today = localDateKey(now);
-  // Lexical sort == chronological because keys are zero-padded YYYY-MM-DD. The
-  // split keeps upcoming days from being pushed below farther-future meetings.
-  const datedKeys = [...buckets.keys()].filter((k) => k !== 'unknown');
-  const futureAndTodayKeys = datedKeys.filter((key) => key >= today).sort();
-  const pastKeys = datedKeys.filter((key) => key < today).sort().reverse();
+  // Lexical sort == chronological because the keys are zero-padded.
+  const pastKeys = [...buckets.keys()].filter((k) => k !== 'unknown').sort().reverse();
 
-  for (const key of [...futureAndTodayKeys, ...pastKeys]) {
+  for (const key of pastKeys) {
     const items = [...buckets.get(key)!].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );

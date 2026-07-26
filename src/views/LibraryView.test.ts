@@ -751,6 +751,32 @@ describe('LibraryView', () => {
     expect(wrapper.get('button[title="Meetings"]').classes()).not.toContain('nav-tab--active');
   });
 
+  it('Meetings tab hides meetings scheduled beyond today', async () => {
+    const inAWeek = new Date();
+    inAWeek.setDate(inAWeek.getDate() + 7);
+    listMeetings.mockResolvedValue([
+      item({ id: 'today', title: 'Today Standup', timestamp: todayAt(9) }),
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' }),
+      item({ id: 'moved', title: 'Rescheduled Sync', timestamp: inAWeek.toISOString() }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(2);
+    expect(wrapper.text()).not.toContain('Rescheduled Sync');
+  });
+
+  it('Meetings tab shows a past-specific hint when only future meetings exist', async () => {
+    const inAWeek = new Date();
+    inAWeek.setDate(inAWeek.getDate() + 7);
+    listMeetings.mockResolvedValue([
+      item({ id: 'moved', title: 'Rescheduled Sync', timestamp: inAWeek.toISOString() }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
+    expect(wrapper.text()).toContain('No past meetings.');
+  });
+
   it('Today tab shows the empty hint when there are no meetings today', async () => {
     listMeetings.mockResolvedValue([item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' })]);
     const wrapper = mount(LibraryView);
