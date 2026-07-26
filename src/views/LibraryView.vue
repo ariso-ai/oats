@@ -96,7 +96,7 @@
           >
             <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
-              <span class="mi-title">{{ m.title }}</span>
+              <span class="mi-title" :class="{ 'mi-title--canceled': m.canceled }">{{ m.title }}</span>
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
@@ -1080,6 +1080,12 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Canceled meetings stay in the list (for context) but read as struck out,
+   matching how the web app renders a canceled meeting's title. */
+.mi-title--canceled {
+  text-decoration: line-through;
+  color: #8a8a8a;
 }
 .mi-rel { flex-shrink: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; color: #6f6f6f; }
 .mi-rel--now { color: #2e8b4f; }

@@ -124,7 +124,10 @@
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
         </span>
-        <AriWillJoinTag v-if="detail?.autoJoinScheduled" class="meta-ari" />
+        <!-- A canceled meeting is marked as such, and never advertises Ari's
+             auto-join: the bot won't join a meeting that isn't happening. -->
+        <MeetingCanceledTag v-if="detail?.canceled" class="meta-canceled" />
+        <AriWillJoinTag v-else-if="detail?.autoJoinScheduled" class="meta-ari" />
       </div>
 
       <div v-else class="divider" />
@@ -357,6 +360,7 @@ import {
   type MeetingCoaching,
 } from '../composables/useBackend';
 import AriWillJoinTag from './AriWillJoinTag.vue';
+import MeetingCanceledTag from './MeetingCanceledTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
@@ -1101,7 +1105,14 @@ const hasCoaching = computed(() => {
 // The meta band (duration · attendees · category) renders only when at least
 // one of its fields is present; otherwise a plain divider separates header and tabs.
 const hasMeta = computed(
-  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType || detail.value?.autoJoinScheduled)
+  () =>
+    !!(
+      durationLabel.value ||
+      detail.value?.participants.length ||
+      detail.value?.meetingType ||
+      detail.value?.autoJoinScheduled ||
+      detail.value?.canceled
+    )
 );
 
 const otesEmpty = computed(() => {
@@ -1271,7 +1282,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
-.meta-ari { margin-left: auto; }
+.meta-ari, .meta-canceled { margin-left: auto; }
 .card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
 .clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .clip-row--active { background: #f7f6f4; }

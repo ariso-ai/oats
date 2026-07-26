@@ -74,6 +74,9 @@ async function mountWith(d: MeetingDetail) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps queued `mockResolvedValueOnce` implementations, so an
+  // unconsumed one would answer the next test's first detail load.
+  getMeetingDetail.mockReset();
   renameMeeting.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
   getMeetingAudio.mockResolvedValue(null);
@@ -1099,5 +1102,30 @@ describe('MeetingDetailView per-clip delete', () => {
     // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
     expect(wrapper.text()).toContain('from clip two');
     expect(wrapper.text()).not.toContain('from clip one');
+  });
+});
+
+describe('MeetingDetailView canceled meetings', () => {
+  it('marks a canceled meeting with a chip', async () => {
+    const wrapper = await mountWith(detail({ canceled: true }));
+    expect(wrapper.find('.canceled-tag').exists()).toBe(true);
+    expect(wrapper.find('.canceled-tag').text()).toContain('Canceled');
+  });
+
+  it('hides the "Ari will join" tag on a canceled meeting', async () => {
+    const wrapper = await mountWith(detail({ canceled: true, autoJoinScheduled: true }));
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
+    expect(wrapper.find('.canceled-tag').exists()).toBe(true);
+  });
+
+  it('still shows the "Ari will join" tag on a live meeting', async () => {
+    const wrapper = await mountWith(detail({ autoJoinScheduled: true }));
+    expect(wrapper.find('.ari-tag').exists()).toBe(true);
+    expect(wrapper.find('.canceled-tag').exists()).toBe(false);
+  });
+
+  it('shows no canceled chip for a normal meeting', async () => {
+    const wrapper = await mountWith(detail());
+    expect(wrapper.find('.canceled-tag').exists()).toBe(false);
   });
 });
