@@ -544,6 +544,20 @@ describe('LibraryView', () => {
     expect(row.find('.mi-sub').text()).toContain('min');
   });
 
+  it('strikes through the title of a canceled meeting only', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'a', title: 'Dropped Sync', canceled: true }),
+      item({ id: 'b', title: 'Live Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    const titles = wrapper.findAll('.mi-title');
+    const canceled = titles.find((t) => t.text() === 'Dropped Sync')!;
+    const live = titles.find((t) => t.text() === 'Live Sync')!;
+    expect(canceled.classes()).toContain('mi-title--canceled');
+    expect(live.classes()).not.toContain('mi-title--canceled');
+  });
+
   it('opens the floating recorder window forcing a new recording when the detail pane is empty', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);

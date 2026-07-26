@@ -453,6 +453,7 @@ pub(crate) fn parse_meetings(v: &Value) -> Vec<ScheduledMeeting> {
         .unwrap_or_default();
     items
         .iter()
+        .filter(|it| !is_cancelled_status(it))
         .filter_map(|it| {
             Some(ScheduledMeeting {
                 id: parse_id(it.get("id"))?,
@@ -461,6 +462,20 @@ pub(crate) fn parse_meetings(v: &Value) -> Vec<ScheduledMeeting> {
             })
         })
         .collect()
+}
+
+/// Whether a `/meetings` entry is a canceled meeting. The backend turns a
+/// deleted or canceled calendar event into `status: "cancelled"`; such a
+/// meeting is not happening, so the menu bar must not count down to it or
+/// announce it as current. Accepts the American spelling and stray case for
+/// the same reason the frontend's `isCanceledMeetingStatus` does.
+pub(crate) fn is_cancelled_status(v: &Value) -> bool {
+    v.get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|s| {
+            let s = s.trim().to_ascii_lowercase();
+            s == "cancelled" || s == "canceled"
+        })
 }
 
 /// Read the optional `end_at` from a `GET /meeting-notes/:id` payload.
@@ -791,6 +806,33 @@ mod tests {
         );
         assert_eq!(ms[1].id, 8);
         assert_eq!(ms[1].title, None);
+    }
+
+    #[test]
+    fn parse_meetings_drops_cancelled_meetings() {
+        // A canceled meeting must never reach the tray: no "… in 10min"
+        // countdown and no "… now" once its start time passes.
+        let v = serde_json::json!({ "meetings": [
+            { "id": 7, "title": "Standup", "start_at": "2026-06-11T14:00:00.000Z" },
+            { "id": 8, "title": "Dropped", "start_at": "2026-06-11T15:00:00Z", "status": "cancelled" },
+            { "id": 9, "title": "American", "start_at": "2026-06-11T16:00:00Z", "status": "Canceled" },
+            { "id": 10, "title": "Live", "start_at": "2026-06-11T17:00:00Z", "status": "created" }
+        ]});
+        let ms = parse_meetings(&v);
+        assert_eq!(
+            ms.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![7, 10],
+            "cancelled meetings (either spelling) must be filtered out"
+        );
+    }
+
+    #[test]
+    fn cancelled_status_matching_is_narrow() {
+        assert!(is_cancelled_status(&serde_json::json!({ "status": "cancelled" })));
+        assert!(is_cancelled_status(&serde_json::json!({ "status": " CANCELED " })));
+        assert!(!is_cancelled_status(&serde_json::json!({ "status": "recording" })));
+        assert!(!is_cancelled_status(&serde_json::json!({ "status": null })));
+        assert!(!is_cancelled_status(&serde_json::json!({})));
     }
 
     #[test]

@@ -338,6 +338,48 @@ describe('ArisoBackend', () => {
     expect(d.shareMeetingNotesToPublic).toBe('host_only');
     expect(d.participants[0].id).toBe(11);
   });
+
+  it('marks the detail canceled from the meeting-notes status', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Dropped',
+      start_at: '2026-06-01T10:00:00Z',
+      status: 'cancelled',
+    });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Dropped',
+      timestamp: '2026-06-01T10:00:00Z',
+    });
+    expect(d.canceled).toBe(true);
+  });
+
+  it('keeps the list row canceled flag when the notes payload omits status', async () => {
+    getMeetingNotes.mockResolvedValue({ id: 7, title: 'Dropped', start_at: '2026-06-01T10:00:00Z' });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Dropped',
+      timestamp: '2026-06-01T10:00:00Z',
+      canceled: true,
+    });
+    expect(d.canceled).toBe(true);
+  });
+
+  it('is not canceled for a live meeting', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Live',
+      start_at: '2026-06-01T10:00:00Z',
+      status: 'done',
+    });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Live',
+      timestamp: '2026-06-01T10:00:00Z',
+      canceled: true,
+    });
+    expect(d.canceled).toBe(false);
+  });
 });
 
 describe('ArisoBackend clips', () => {
@@ -506,9 +548,18 @@ describe('ArisoBackend.listMeetings', () => {
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
     );
     expect(items).toEqual([
-      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z', autoJoinScheduled: false },
-      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z', autoJoinScheduled: false },
+      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z', autoJoinScheduled: false, canceled: false },
+      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z', autoJoinScheduled: false, canceled: false },
     ]);
+  });
+
+  it('flags meetings whose calendar event was canceled', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 7, title: 'Dropped', start_at: '2026-06-08T09:00:00Z', status: 'cancelled' },
+      { id: 8, title: 'Live', start_at: '2026-06-09T09:00:00Z', status: 'done' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(items.map((i) => i.canceled)).toEqual([true, false]);
   });
 });
 
@@ -537,6 +588,7 @@ describe('ArisoBackend.searchMeetings', () => {
         snippet: 'Discussed pipeline notes',
         matchedText: 'pipeline',
         autoJoinScheduled: false,
+        canceled: false,
       },
     ]);
   });
