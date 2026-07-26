@@ -7,14 +7,49 @@ use tauri::{
 
 // The menu-bar icon is a macOS template image: AppKit uses the PNG alpha mask
 // and tints it for the current menu-bar material, matching system status items.
+#[cfg(not(target_os = "windows"))]
 const TRAY_ICON_TEMPLATE: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
+// Windows does not reliably template-tint tray icons, so use concrete color
+// assets and swap them on theme changes.
+#[cfg(target_os = "windows")]
+/// Concrete icon selected when the Windows shell reports a light theme; the
+/// asset, rather than shell tinting, owns the required contrast.
+const TRAY_ICON_WINDOWS_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
+#[cfg(target_os = "windows")]
+/// Companion asset for a dark Windows shell theme. Keeping it bundled avoids
+/// runtime image manipulation and preserves predictable alpha rendering.
+const TRAY_ICON_WINDOWS_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
 
-/// Re-apply the template tray icon after startup and theme notifications. The
-/// icon bytes stay constant; macOS owns the actual light/dark tint.
-pub fn apply_theme(app: &AppHandle, _theme: tauri::Theme) {
+/// Resolves the platform-appropriate icon bytes behind one tray construction
+/// path. macOS keeps template semantics, while Windows receives already-colored
+/// pixels because its notification area does not honor AppKit-style masks.
+fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
+    #[cfg(target_os = "windows")]
+    {
+        let bytes = match theme {
+            tauri::Theme::Dark => TRAY_ICON_WINDOWS_DARK,
+            _ => TRAY_ICON_WINDOWS_LIGHT,
+        };
+        return Image::from_bytes(bytes);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = theme;
+        Image::from_bytes(TRAY_ICON_TEMPLATE)
+    }
+}
+
+/// Re-applies the platform icon after startup and theme notifications. macOS
+/// reuses one template mask and delegates tinting to AppKit; Windows swaps the
+/// concrete asset selected above. Menu state is intentionally untouched.
+pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
     let Some(tray) = app.tray_by_id("main") else { return };
-    if let Ok(icon) = Image::from_bytes(TRAY_ICON_TEMPLATE) {
+    if let Ok(icon) = tray_icon(theme) {
+        #[cfg(target_os = "macos")]
         let _ = tray.set_icon_with_as_template(Some(icon), true);
+        #[cfg(not(target_os = "macos"))]
+        let _ = tray.set_icon(Some(icon));
     }
 }
 
@@ -80,50 +115,12 @@ pub fn refresh_tray_title(app: &AppHandle) {
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_idle_menu(app, None)?;
 
-    TrayIconBuilder::with_id("main")
-        // Mark it as a template so AppKit tints it alongside the other menu-bar
-        // status icons instead of preserving the brand colors.
-        .icon(Image::from_bytes(TRAY_ICON_TEMPLATE)?)
-        .icon_as_template(true)
+    let builder = TrayIconBuilder::with_id("main")
+        .icon(tray_icon(tauri::Theme::Light)?)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
-                "start_recording" => {
-                    let app_async = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let backend = crate::commands::active_backend(&app_async);
-
-                        if backend == "local" {
-                            let ready = crate::commands::local_models_ready();
-                            let app_main = app_async.clone();
-                            let _ = app_async.run_on_main_thread(move || {
-                                if !ready {
-                                    crate::commands::surface_model_download(&app_main);
-                                    return;
-                                }
-                                let _ = crate::commands::open_waveform_window(
-                                    &app_main, None, None, false, false,
-                                );
-                            });
-                            return;
-                        }
-
-                        // Ariso (default): existing session gate + meeting-picker.
-                        let valid = crate::commands::is_session_valid(&app_async).await;
-                        let app_main = app_async.clone();
-                        let _ = app_async.run_on_main_thread(move || {
-                            if !valid {
-                                if let Some(win) = app_main.get_webview_window("settings") {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
-                                }
-                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
-                                return;
-                            }
-                            let _ = crate::commands::open_meeting_picker_window(&app_main, None);
-                        });
-                    });
-                }
+                "start_recording" => start_recording(app),
                 "record_featured" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -143,25 +140,16 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                             .map(|f| f.id);
                         let Some(meeting_id) = meeting_id else { return };
 
-                        let valid = crate::commands::is_session_valid(&app_async).await;
-                        let app_main = app_async.clone();
-                        let _ = app_async.run_on_main_thread(move || {
-                            if !valid {
-                                if let Some(win) = app_main.get_webview_window("settings") {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
-                                }
-                                let _ = app_main.emit("tray://show-sign-in-prompt", ());
-                                return;
-                            }
-                            let _ = crate::commands::open_waveform_window(
-                                &app_main,
-                                Some(meeting_id),
-                                None,
-                                false,
-                                false,
-                            );
-                        });
+                        if let Err(error) = crate::commands::start_recording_window(
+                            app_async,
+                            Some(meeting_id),
+                            None,
+                            None,
+                        )
+                        .await
+                        {
+                            eprintln!("Failed to start featured meeting recording: {error}");
+                        }
                     });
                 }
                 "pause_recording" => {
@@ -184,33 +172,9 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                     // The waveform window closes itself after upload completes.
                 }
                 "settings" => {
-                    if let Some(win) = app.get_webview_window("settings") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    } else if let Ok(win) = crate::window_style::settings_window_builder(app)
-                        .build()
-                    {
-                        let win_clone = win.clone();
-                        win.on_window_event(move |event| {
-                            if let tauri::WindowEvent::CloseRequested { api, .. } =
-                                event
-                            {
-                                api.prevent_close();
-                                let _ = win_clone.hide();
-                            }
-                        });
-                    }
+                    let _ = crate::commands::open_settings_window(app);
                 }
-                "library" => {
-                    // The Meetings window is backend-aware: its list is
-                    // populated from the active backend (Ariso server meetings
-                    // or local recordings), so open the in-app window for both
-                    // rather than sending Ariso users out to the browser.
-                    let app_async = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = crate::commands::create_library_window(app_async).await;
-                    });
-                }
+                "library" => open_library(app),
                 "check_updates" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -222,10 +186,45 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
                 _ => {}
             }
-        })
-        .build(app)?;
+        });
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        // Mark it as a template so AppKit tints it alongside the other menu-bar
+        // status icons instead of preserving the brand colors.
+        .icon_as_template(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.icon_as_template(false);
+    builder.build(app)?;
 
     Ok(())
+}
+
+/// Start the backend-aware recording flow from any native command surface.
+/// Keeping the session/model gates here makes the tray and desktop menu behave
+/// identically instead of letting Windows acquire a second recording policy.
+pub fn start_recording(app: &AppHandle) {
+    let app_async = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let backend = crate::commands::active_backend(&app_async);
+        let result = if backend == "local" {
+            crate::commands::start_recording_window(app_async, None, None, None).await
+        } else {
+            crate::commands::open_meeting_picker(app_async, None).await
+        };
+        if let Err(error) = result {
+            eprintln!("Failed to start recording flow: {error}");
+        }
+    });
+}
+
+/// Open the backend-aware Meetings window from native menus. This stays next
+/// to `start_recording` because both are alternative entry points into the
+/// same frontend workflows, not separate tray-only features.
+pub fn open_library(app: &AppHandle) {
+    let app_async = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::commands::create_library_window(app_async).await;
+    });
 }
 
 pub fn build_idle_menu(

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/main/tauri.schema.json",
   "productName": "oats",
-  "version": "0.16.0",
+  "version": "0.17.1",
   "identifier": "ai.ariso.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -22,9 +22,6 @@
     "externalBin": [
       "binaries/ariso-stt"
     ],
-    "resources": {
-      "binaries/mlx-swift_Cmlx.bundle": "mlx-swift_Cmlx.bundle"
-    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

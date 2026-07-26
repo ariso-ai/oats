@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
 # Build the Tauri updater manifest (latest.json) and publish the release
-# artifacts (updater tarball, DMG, manifest) to Cloudflare R2.
+# artifacts (macOS updater tarball, DMG, manifest) to Cloudflare R2.
 #
 # Invoked by the publish job in .github/workflows/release.yaml after the
-# release job has uploaded the bundler outputs (restored under
-# src-tauri/target/release/bundle/).
+# release job has uploaded the bundler outputs under bundle/.
 #
 # Required environment:
 #   RELEASE_TAG    release tag (e.g. v0.3.1); leading 'v' is stripped for VERSION
@@ -31,7 +30,7 @@ require_env() {
   done
   if [[ "$missing" -ne 0 ]]; then
     echo "Set these as secrets in the 'release' GitHub environment" \
-      "(see README -> Signing & Notarization)." >&2
+      "(see CONTRIBUTING -> One-time setup in the repo)." >&2
     exit 1
   fi
 }
@@ -55,12 +54,12 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
-BUNDLE_DIR="src-tauri/target/release/bundle"
+MAC_BUNDLE_DIR="src-tauri/target/release/bundle"
 
 # Locate the updater artifacts the bundler produced. Tauri v2 writes these to
 # bundle/macos/. Cached builds can leave stale tarballs alongside the fresh
 # one, so require exactly one match and fail loudly otherwise.
-mapfile -t TARBALLS < <(find "${BUNDLE_DIR}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | sort)
+mapfile -t TARBALLS < <(find "${MAC_BUNDLE_DIR}/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | sort)
 if [[ "${#TARBALLS[@]}" -ne 1 ]]; then
   echo "Expected exactly 1 updater tarball, found ${#TARBALLS[@]}:" >&2
   printf ' - %s\n' "${TARBALLS[@]}" >&2
@@ -69,7 +68,7 @@ fi
 TARBALL="${TARBALLS[0]}"
 SIGFILE="${TARBALL}.sig"
 
-mapfile -t DMGS < <(find "${BUNDLE_DIR}/dmg" -maxdepth 1 -type f -name '*.dmg' | sort)
+mapfile -t DMGS < <(find "${MAC_BUNDLE_DIR}/dmg" -maxdepth 1 -type f -name '*.dmg' | sort)
 if [[ "${#DMGS[@]}" -ne 1 ]]; then
   echo "Expected exactly 1 DMG, found ${#DMGS[@]}." >&2
   exit 1
@@ -78,13 +77,22 @@ DMG="${DMGS[0]}"
 
 # The version in tauri.conf.json (strip leading 'v' from tag).
 VERSION="${RELEASE_TAG#v}"
+if [[ ! "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+  echo "Release tag produces an unsafe R2 path component: ${VERSION}" >&2
+  exit 1
+fi
 
-# Asset URL is the stable R2 path the updater downloads the payload from. The
-# object at this key is overwritten by the upload below.
-ASSET_URL="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.app.tar.gz"
+# Updater payloads are immutable and versioned. A client that cached an older
+# latest.json therefore keeps downloading the exact bytes covered by that
+# manifest's signature even if a later publish is interrupted. Stable aliases
+# remain human download links and are updated only after latest.json is live.
+PUBLIC_R2_BASE="https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev"
+MAC_SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+MAC_ASSET_KEY="desktop/releases/${VERSION}/oats-${MAC_SHA256}.app.tar.gz"
+MAC_ASSET_URL="${PUBLIC_R2_BASE}/${MAC_ASSET_KEY}"
 
 # Read the detached signature contents (single line of base64).
-SIG=$(cat "$SIGFILE")
+MAC_SIGNATURE=$(cat "$SIGFILE")
 
 # Mandatory flag: derived from the release title containing "[mandatory]".
 if [[ "${RELEASE_NAME:-}" == *"[mandatory]"* ]]; then
@@ -107,8 +115,8 @@ jq -n \
   --arg notes "$NOTES" \
   --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson mandatory "$MANDATORY" \
-  --arg signature "$SIG" \
-  --arg url "$ASSET_URL" \
+  --arg mac_signature "$MAC_SIGNATURE" \
+  --arg mac_url "$MAC_ASSET_URL" \
   '{
     version: $version,
     notes: $notes,
@@ -116,27 +124,31 @@ jq -n \
     mandatory: $mandatory,
     platforms: {
       "darwin-aarch64": {
-        signature: $signature,
-        url: $url
+        signature: $mac_signature,
+        url: $mac_url
       }
     }
   }' > latest.json
 
 NOCACHE="no-cache, max-age=0, must-revalidate"
+IMMUTABLE_CACHE="public, max-age=31536000, immutable"
 
-# Upload payloads BEFORE the manifest that references them, so a client reading
-# the new latest.json never points at a missing object.
-aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/desktop/oats.app.tar.gz" \
+# Upload immutable updater payloads BEFORE the manifest that references them,
+# so a client reading the new latest.json never points at a missing object.
+aws s3 cp "$TARBALL" "s3://${R2_BUCKET}/${MAC_ASSET_KEY}" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/gzip \
-  --cache-control "$NOCACHE"
-
-aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/oats.dmg" \
-  --endpoint-url "$R2_ENDPOINT" \
-  --content-type application/x-apple-diskimage \
-  --cache-control "$NOCACHE"
+  --cache-control "$IMMUTABLE_CACHE"
 
 aws s3 cp latest.json "s3://${R2_BUCKET}/desktop/latest.json" \
   --endpoint-url "$R2_ENDPOINT" \
   --content-type application/json \
+  --cache-control "$NOCACHE"
+
+# Convenience aliases are not updater targets. Publish them only after the
+# signed manifest points at immutable payloads, so alias failures cannot break
+# update checks for already-installed clients.
+aws s3 cp "$DMG" "s3://${R2_BUCKET}/desktop/oats.dmg" \
+  --endpoint-url "$R2_ENDPOINT" \
+  --content-type application/x-apple-diskimage \
   --cache-control "$NOCACHE"

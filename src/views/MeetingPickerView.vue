@@ -2,6 +2,11 @@
   <div class="picker">
     <h2 class="title">{{ state === 'empty' ? 'New meeting' : 'Select a meeting' }}</h2>
 
+    <div v-if="isChoosing" class="start-status" role="status" aria-live="polite">
+      <span class="spinner" />
+      <span>Starting recording…</span>
+    </div>
+
     <div v-if="state === 'loading'" class="state-row">
       <span class="spinner" />
       <span>Loading meetings…</span>
@@ -308,6 +313,16 @@ onMounted(async () => {
   gap: 10px;
   color: #6f6f6f;
   font-size: 14px;
+}
+
+.start-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  margin: -8px 0 10px;
+  color: #6f6f6f;
+  font-size: 13px;
 }
 
 .spinner {

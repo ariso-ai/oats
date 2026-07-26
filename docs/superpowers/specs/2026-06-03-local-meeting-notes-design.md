@@ -1,7 +1,12 @@
 # Local Meeting Notes Generation — Design
 
 **Date:** 2026-06-03
-**Status:** Approved (pending spec review)
+**Status:** Superseded
+
+> This is the historical macOS notes design. The current cross-platform
+> contract, model layout, filenames, and Windows distribution metadata are
+> documented under `src-tauri/ariso-stt/` and `scripts/README.md`. Do not use
+> this document as an implementation guide.
 
 ## Summary
 
@@ -51,7 +56,7 @@ returns data on stdout and Rust persists it.
 
 ## Components
 
-### Swift sidecar (`src-tauri/ariso-stt`)
+### Swift sidecar (`src-tauri/ariso-stt/macos`)
 
 **Dependency:** add `https://github.com/ml-explore/mlx-swift-lm` to `Package.swift`
 (products `MLXLLM`, `MLXLMCommon`, `MLXHuggingFace`), which transitively pulls in
@@ -135,7 +140,7 @@ by `llm_is_ready`). STT readiness gates recording; LLM readiness gates notes.
 
 ## Testing
 
-Rust stub-script tests (the existing `ARISO_STT_BIN` stub pattern, no real model):
+Rust stub-script tests (explicit sidecar-path injection, no real model):
 - `run_notes` success → stdout captured, `note.md` written with expected content.
 - `run_notes` failure (stub exits 1) → `finalize_core` keeps status `Done`, sets
   `notes_error`, and `transcript.md` still present.

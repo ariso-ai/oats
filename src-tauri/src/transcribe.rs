@@ -8,10 +8,27 @@ use tokio::process::Command;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+use crate::transcript_normalization::{
+    normalize_transcript, SidecarTranscriptResult, TranscriptResult,
+};
+
 /// Upper bound on how long the notes sidecar may run before we kill it.
 /// Notes generation is best-effort and runs detached from `finalize_core`,
 /// so this only bounds the background task's lifetime.
-const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
+const NOTES_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Keeps console-subsystem inference binaries behind the GUI application
+/// boundary while preserving their piped output for errors and diagnostics.
+#[cfg(windows)]
+fn configure_background_process(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW.0);
+}
+
+#[cfg(not(windows))]
+fn configure_background_process(_command: &mut Command) {}
 
 /// Per-recording mutex table. Serializes concurrent `append_recording_core`
 /// calls to the same target so two simultaneous finalizations cannot both
@@ -26,16 +43,6 @@ fn get_append_lock(target_id: &str) -> Arc<TokioMutex<()>> {
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
 }
-
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptResult {
-    pub language: String,
-    pub participants: Vec<crate::storage::Participant>,
-    pub segments: Vec<crate::storage::Segment>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalizeResult {
@@ -45,21 +52,27 @@ pub struct FinalizeResult {
     pub status: crate::storage::RecordingStatus,
 }
 
-/// Resolve the `ariso-stt` sidecar. `ARISO_STT_BIN` overrides (tests/dev);
-/// otherwise it sits next to the app executable (Tauri externalBin layout).
+/// Resolve the platform's `ariso-stt` sidecar from Tauri's externalBin layout.
+/// The test-only override never changes production process selection.
 pub fn sidecar_path() -> Result<PathBuf, String> {
+    #[cfg(test)]
     if let Some(p) = std::env::var_os("ARISO_STT_BIN") {
         return Ok(PathBuf::from(p));
     }
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let dir = exe.parent().ok_or("no parent dir for current_exe")?;
-    Ok(dir.join("ariso-stt"))
+    Ok(dir.join(if cfg!(target_os = "windows") {
+        "ariso-stt.exe"
+    } else {
+        "ariso-stt"
+    }))
 }
 
 /// Run the sidecar in transcribe mode and parse its JSON stdout.
 pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptResult, String> {
     let bin = sidecar_path()?;
-    let output = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .arg("--audio")
         .arg(audio)
         .arg("--models")
@@ -67,7 +80,9 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
         .arg("--format")
         .arg("json")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_background_process(&mut command);
+    let output = command
         .output()
         .await
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
@@ -76,14 +91,15 @@ pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptRes
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ariso-stt failed: {}", stderr.trim()));
     }
-    serde_json::from_slice::<TranscriptResult>(&output.stdout).map_err(|e| {
+    let raw = serde_json::from_slice::<SidecarTranscriptResult>(&output.stdout).map_err(|e| {
         // Include a bounded, char-safe preview of stdout for diagnosis.
         let preview: String = String::from_utf8_lossy(&output.stdout)
             .chars()
             .take(200)
             .collect();
         format!("parse transcript json: {e} (stdout: {preview})")
-    })
+    })?;
+    Ok(normalize_transcript(raw))
 }
 
 /// Parsed output of `ariso-stt notes`: the Markdown notes plus an optional
@@ -123,6 +139,7 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<NotesOutput, 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    configure_background_process(&mut cmd);
 
     let output = tokio::time::timeout(NOTES_TIMEOUT, cmd.output())
         .await
@@ -361,7 +378,7 @@ async fn fresh_recording_core(
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
-            meta.model_version = Some(storage::MODEL_VERSION.to_string());
+            meta.model_version = Some(crate::model_manager::stt_model_version());
             storage::write_segments(&dir, &storage::SegmentsFile {
                 language: Some(result.language.clone()),
                 participants: result.participants.clone(),
@@ -712,24 +729,159 @@ pub async fn local_finalize_recording(
         .map(|(res, _notes)| res)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(windows)]
+    const CONSOLE_PROBE_ENV: &str = "OATS_TEST_CONSOLE_PROBE_CHILD";
+
+    /// Exercises the actual Windows process boundary so a later command
+    /// refactor cannot silently bring the console flash back.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn background_sidecar_child_has_no_console_window() {
+        if std::env::var_os(CONSOLE_PROBE_ENV).is_some() {
+            let has_console = unsafe {
+                !windows::Win32::System::Console::GetConsoleWindow()
+                    .0
+                    .is_null()
+            };
+            println!("OATS_CONSOLE_WINDOW={has_console}");
+            return;
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("transcribe::tests::background_sidecar_child_has_no_console_window")
+            .arg("--nocapture")
+            .env(CONSOLE_PROBE_ENV, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_background_process(&mut command);
+
+        let output = command.output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains("OATS_CONSOLE_WINDOW=false"),
+            "child unexpectedly acquired a console window; stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 
     // SAFETY (all set_var/remove_var below): tests run with `--test-threads=1`,
     // so there is no concurrent env mutation while these calls execute.
 
-    /// Write an executable stub script and point ARISO_STT_BIN at it.
-    fn write_stub(dir: &Path, body: &str) -> PathBuf {
-        let path = dir.join("stub-stt.sh");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/bin/sh\n{body}").unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        path
+    #[derive(Clone)]
+    struct StubOutcome {
+        stdout: String,
+        stderr: String,
+        success: bool,
+    }
+
+    impl StubOutcome {
+        fn success(stdout: impl Into<String>) -> Self {
+            Self { stdout: stdout.into(), stderr: String::new(), success: true }
+        }
+
+        fn failure(stderr: impl Into<String>) -> Self {
+            Self { stdout: String::new(), stderr: stderr.into(), success: false }
+        }
+    }
+
+    struct StubBehavior {
+        transcribe: StubOutcome,
+        notes: StubOutcome,
+        notes_transcript_replacement: Option<String>,
+    }
+
+    impl StubBehavior {
+        fn transcribe_success(stdout: impl Into<String>) -> Self {
+            Self {
+                transcribe: StubOutcome::success(stdout),
+                notes: StubOutcome::success("# Notes"),
+                notes_transcript_replacement: None,
+            }
+        }
+
+        fn transcribe_failure(stderr: impl Into<String>) -> Self {
+            Self {
+                transcribe: StubOutcome::failure(stderr),
+                notes: StubOutcome::success("# Notes"),
+                notes_transcript_replacement: None,
+            }
+        }
+
+        fn notes_only(notes: StubOutcome) -> Self {
+            Self {
+                transcribe: StubOutcome::failure("unexpected transcription invocation"),
+                notes,
+                notes_transcript_replacement: None,
+            }
+        }
+
+        fn with_notes(mut self, notes: StubOutcome) -> Self {
+            self.notes = notes;
+            self
+        }
+
+        fn replacing_transcript(mut self, replacement: impl Into<String>) -> Self {
+            self.notes_transcript_replacement = Some(replacement.into());
+            self
+        }
+    }
+
+    /// Materializes a data-driven sidecar double for either host shell. Payloads
+    /// live in files so JSON, Markdown, and shell metacharacters are never parsed
+    /// as script source.
+    fn write_stub(dir: &Path, behavior: StubBehavior) -> PathBuf {
+        std::fs::write(dir.join("transcribe-stdout.txt"), &behavior.transcribe.stdout).unwrap();
+        std::fs::write(dir.join("transcribe-stderr.txt"), &behavior.transcribe.stderr).unwrap();
+        std::fs::write(dir.join("notes-stdout.txt"), &behavior.notes.stdout).unwrap();
+        std::fs::write(dir.join("notes-stderr.txt"), &behavior.notes.stderr).unwrap();
+        if let Some(replacement) = behavior.notes_transcript_replacement {
+            std::fs::write(dir.join("notes-transcript.txt"), replacement).unwrap();
+        }
+
+        let transcribe_exit = i32::from(!behavior.transcribe.success);
+        let notes_exit = i32::from(!behavior.notes.success);
+
+        #[cfg(windows)]
+        {
+            let path = dir.join("stub-stt.cmd");
+            let replacement = if dir.join("notes-transcript.txt").is_file() {
+                "if exist \"%~dp0notes-transcript.txt\" type \"%~dp0notes-transcript.txt\" > \"%~3\"\r\n"
+            } else {
+                ""
+            };
+            let script = format!(
+                "@echo off\r\nif \"%~1\"==\"notes\" (\r\n{replacement}type \"%~dp0notes-stdout.txt\"\r\ntype \"%~dp0notes-stderr.txt\" 1>&2\r\nexit /b {notes_exit}\r\n)\r\ntype \"%~dp0transcribe-stdout.txt\"\r\ntype \"%~dp0transcribe-stderr.txt\" 1>&2\r\nexit /b {transcribe_exit}\r\n"
+            );
+            std::fs::write(&path, script).unwrap();
+            path
+        }
+
+        #[cfg(unix)]
+        {
+            let path = dir.join("stub-stt.sh");
+            let replacement = if dir.join("notes-transcript.txt").is_file() {
+                "cat \"$dir/notes-transcript.txt\" > \"$3\"\n"
+            } else {
+                ""
+            };
+            let script = format!(
+                "#!/bin/sh\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nif [ \"$1\" = notes ]; then\n{replacement}cat \"$dir/notes-stdout.txt\"\ncat \"$dir/notes-stderr.txt\" >&2\nexit {notes_exit}\nfi\ncat \"$dir/transcribe-stdout.txt\"\ncat \"$dir/transcribe-stderr.txt\" >&2\nexit {transcribe_exit}\n"
+            );
+            std::fs::write(&path, script).unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            path
+        }
     }
 
     #[tokio::test]
@@ -737,7 +889,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = write_stub(
             tmp.path(),
-            "echo '{\"title\":\"Budget Planning\",\"notes\":\"## Summary body\"}'",
+            StubBehavior::notes_only(StubOutcome::success(
+                r###"{"title":"Budget Planning","notes":"## Summary body"}"###,
+            )),
         );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         let transcript = tmp.path().join("transcript.md");
@@ -751,7 +905,10 @@ mod tests {
     #[tokio::test]
     async fn run_notes_falls_back_to_raw_markdown() {
         let tmp = tempfile::tempdir().unwrap();
-        let stub = write_stub(tmp.path(), "echo '# Notes'");
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::notes_only(StubOutcome::success("# Notes")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         let transcript = tmp.path().join("transcript.md");
         std::fs::write(&transcript, b"hi").unwrap();
@@ -764,7 +921,12 @@ mod tests {
     #[tokio::test]
     async fn run_notes_blank_title_is_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let stub = write_stub(tmp.path(), "echo '{\"title\":\"   \",\"notes\":\"## Summary\"}'");
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::notes_only(StubOutcome::success(
+                r###"{"title":"   ","notes":"## Summary"}"###,
+            )),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         let transcript = tmp.path().join("transcript.md");
         std::fs::write(&transcript, b"hi").unwrap();
@@ -777,8 +939,8 @@ mod tests {
     #[tokio::test]
     async fn parses_stub_transcript_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let stub = write_stub(tmp.path(), &format!("cat <<'EOF'\n{json}\nEOF"));
+        let json = r#"{"language":"en","durationSeconds":12.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         let audio = tmp.path().join("a.mp3");
@@ -794,7 +956,7 @@ mod tests {
     #[tokio::test]
     async fn surfaces_stub_failure() {
         let tmp = tempfile::tempdir().unwrap();
-        let stub = write_stub(tmp.path(), "echo 'boom' >&2\nexit 1");
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         let audio = tmp.path().join("a.mp3");
         std::fs::write(&audio, b"x").unwrap();
@@ -808,12 +970,8 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_transcript_and_marks_done() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        // Branch on the `notes` subcommand so the stub's transcript JSON isn't
-        // dumped into ari-note.md; this test exercises only the transcribe path.
-        let body =
-            format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
-        let stub = write_stub(tmp.path(), &body);
+        let json = r#"{"language":"en","durationSeconds":12.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         // Vault resolves via ARISO_ROOT; point it at the same tempdir as `root`
         // so audio writes stay inside this test's sandbox.
@@ -846,9 +1004,8 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_segments_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let body = format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
-        let stub = write_stub(tmp.path(), &body);
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
@@ -869,7 +1026,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_marks_failed_but_keeps_audio_on_stt_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let stub = write_stub(tmp.path(), "echo 'boom' >&2\nexit 1");
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
@@ -898,12 +1055,12 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_vault_note_when_notes_succeed() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        // Stub: `notes` subcommand prints markdown; otherwise print transcript JSON.
-        let body = format!(
-            "if [ \"$1\" = notes ]; then echo '# Notes'; echo '- did a thing'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
+        let json = r#"{"language":"en","durationSeconds":12.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::success("# Notes\n- did a thing")),
         );
-        let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
@@ -929,11 +1086,12 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_vault_note_not_ari_note_md() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let body = format!(
-            "if [ \"$1\" = notes ]; then echo '# Vault note'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
+        let json = r#"{"language":"en","durationSeconds":12.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::success("# Vault note")),
         );
-        let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
@@ -958,12 +1116,12 @@ mod tests {
     #[tokio::test]
     async fn finalize_stays_done_when_notes_fail() {
         let tmp = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        // Stub: `notes` subcommand fails; transcribe still succeeds.
-        let body = format!(
-            "if [ \"$1\" = notes ]; then echo 'notes boom' >&2; exit 1; fi\ncat <<'EOF'\n{json}\nEOF"
+        let json = r#"{"language":"en","durationSeconds":12.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::failure("notes boom")),
         );
-        let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
@@ -1011,12 +1169,8 @@ mod tests {
         };
         storage::write_meta(&dir, &meta).unwrap();
 
-        // Stub: notes subcommand prints markdown; otherwise transcript JSON.
-        let json = r#"{"language":"en","durationSeconds":5.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let body = format!(
-            "if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF"
-        );
-        let stub = write_stub(tmp.path(), &body);
+        let json = r#"{"language":"en","durationSeconds":5.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
@@ -1072,9 +1226,10 @@ mod tests {
         };
         storage::write_meta(&dir, &meta).unwrap();
 
-        // Stub: notes subcommand succeeds.
-        let body = "if [ \"$1\" = notes ]; then echo '# Notes'; echo '- point'; exit 0; fi\nexit 1";
-        let stub = write_stub(tmp.path(), body);
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::notes_only(StubOutcome::success("# Notes\n- point")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         let handle = retry_notes_core(root, id).await.unwrap();
@@ -1115,8 +1270,10 @@ mod tests {
         // Notes regeneration fails: with the stale note cleared up front, the
         // recording is observably note-less afterwards (rather than still showing
         // the old note), which is what lets the poller track regeneration.
-        let body = "if [ \"$1\" = notes ]; then echo 'boom' >&2; exit 1; fi\nexit 1";
-        let stub = write_stub(tmp.path(), body);
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::notes_only(StubOutcome::failure("boom")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         let handle = retry_notes_core(root, id).await.unwrap();
@@ -1141,9 +1298,12 @@ mod tests {
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let root = tmp.path().to_path_buf();
 
-        let json = r#"{"language":"en","durationSeconds":1.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let body = format!("if [ \"$1\" = notes ]; then echo '# first'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
-        let stub = write_stub(&root, &body);
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            &root,
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::success("# first")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         let (res, h) = finalize_core(
@@ -1155,8 +1315,11 @@ mod tests {
 
         // Sidecar now emits new notes: re-stub and re-set ARISO_STT_BIN so
         // regeneration sees different output the second time.
-        let body2 = format!("if [ \"$1\" = notes ]; then echo '# second'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
-        let stub2 = write_stub(&root, &body2);
+        let stub2 = write_stub(
+            &root,
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::success("# second")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub2); }
 
         let h2 = retry_notes_core(&root, &res.id).await.unwrap();
@@ -1178,9 +1341,12 @@ mod tests {
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let root = tmp.path().to_path_buf();
 
-        let json = r#"{"language":"en","durationSeconds":1.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        let body = format!("if [ \"$1\" = notes ]; then echo '# first'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
-        let stub = write_stub(&root, &body);
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            &root,
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::success("# first")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         let (res, h) = finalize_core(
@@ -1191,7 +1357,10 @@ mod tests {
         assert_eq!(crate::vault::read_note(&res.id).unwrap().as_deref(), Some("# first"));
 
         // Regeneration now fails outright.
-        let fail_stub = write_stub(&root, "if [ \"$1\" = notes ]; then echo 'boom' >&2; exit 1; fi\nexit 1");
+        let fail_stub = write_stub(
+            &root,
+            StubBehavior::notes_only(StubOutcome::failure("boom")),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
 
         let h2 = retry_notes_core(&root, &res.id).await.unwrap();
@@ -1207,13 +1376,10 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    // Helper: a stub that prints notes for `notes`, else a single-segment JSON
-    // whose text is the first CLI arg's file contents is overkill — instead emit a
-    // fixed clip transcript. Each call yields one segment "clip".
+    // Each append test receives the same deterministic clip and notes payload.
     fn clip_stub(dir: &Path) -> PathBuf {
-        let json = r#"{"language":"en","participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"clip text","start":0.0,"end":3.0}]}"#;
-        let body = format!("if [ \"$1\" = notes ]; then echo '# Notes'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF");
-        write_stub(dir, &body)
+        let json = r#"{"language":"en","durationSeconds":3.0,"segments":[{"speaker":"model-speaker-0","text":"clip text","start":0.0,"end":3.0}]}"#;
+        write_stub(dir, StubBehavior::transcribe_success(json))
     }
 
     #[tokio::test]
@@ -1519,7 +1685,7 @@ mod tests {
         h1.await.unwrap();
 
         // Second: failing stub → append must fall back to a separate Failed recording.
-        let fail_stub = write_stub(tmp.path(), "echo 'boom' >&2\nexit 1");
+        let fail_stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
         unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
         let err = finalize_core(
             tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
@@ -1685,11 +1851,13 @@ mod tests {
         };
         storage::write_meta(&dir, &meta).unwrap();
 
-        // Notes stub REWRITES the transcript it was handed (simulating an append that
-        // landed while notes were generating), then prints notes. process_notes must
-        // then see the change and discard its output.
-        let body = "if [ \"$1\" = notes ]; then echo 'changed' > \"$3\"; echo '# Notes'; exit 0; fi\nexit 1";
-        let stub = write_stub(root, body);
+        // Simulate an append landing while notes are generating so process_notes
+        // must recognize that its output is stale and discard it.
+        let stub = write_stub(
+            root,
+            StubBehavior::notes_only(StubOutcome::success("# Notes"))
+                .replacing_transcript("changed"),
+        );
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
 
         // process_notes takes (dir, models, meta). $3 is the --transcript path arg.
@@ -1848,12 +2016,13 @@ mod tests {
     #[tokio::test]
     async fn notes_regenerate_default_title_and_rename_vault_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let asr = r#"{"language":"en","durationSeconds":12.0,"participants":[{"id":0,"label":"Speaker 1"}],"segments":[{"speaker":0,"text":"hi","start":0.0,"end":1.0}]}"#;
-        // notes subcommand emits the {title,notes} JSON; transcribe path emits ASR JSON.
-        let body = format!(
-            "if [ \"$1\" = notes ]; then echo '{{\"title\":\"Budget Planning\",\"notes\":\"## Summary body\"}}'; exit 0; fi\ncat <<'EOF'\n{asr}\nEOF"
+        let asr = r#"{"language":"en","durationSeconds":12.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(asr).with_notes(StubOutcome::success(
+                r###"{"title":"Budget Planning","notes":"## Summary body"}"###,
+            )),
         );
-        let stub = write_stub(tmp.path(), &body);
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 

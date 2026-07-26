@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
-import { deriveEnabledFromLegacy, type RecordingEnabled } from '../views/recordingSettings';
+import {
+  deriveEnabledFromLegacy,
+  type RecordingEnabled,
+} from '../views/recordingSettings';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 import {
   requestMicrophonePermission,
   checkMicrophonePermission,
@@ -12,32 +16,48 @@ const MIC_KEY = 'recordMicEnabled';
 const SYS_KEY = 'recordSystemAudioEnabled';
 const LEGACY_KEY = 'recordingMode';
 
-function isMac(): boolean {
-  return typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
-}
-
 /**
  * Load both recording-source flags, migrating from the legacy `recordingMode`
- * key on first run (absent → defaults to both on). The migrated values are
- * written back so the legacy key is never read again.
+ * key on first run. Native capabilities determine whether system audio may
+ * remain enabled; the loader never substitutes a different source.
  */
 export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
-  const store = await load(SETTINGS_PATH, { autoSave: true });
-  const mic = await store.get<boolean>(MIC_KEY);
-  const sys = await store.get<boolean>(SYS_KEY);
+  // Store startup and native capability discovery are independent IPC calls;
+  // overlap them so recorder launch is not gated on two serial round trips.
+  const [store, capabilities] = await Promise.all([
+    load(SETTINGS_PATH, { autoSave: true }),
+    loadPlatformCapabilities(),
+  ]);
+  const [mic, sys, legacy] = await Promise.all([
+    store.get<boolean>(MIC_KEY),
+    store.get<boolean>(SYS_KEY),
+    store.get<string>(LEGACY_KEY),
+  ]);
+  let persisted: RecordingEnabled;
+
   if (typeof mic === 'boolean' && typeof sys === 'boolean') {
-    return { mic, systemAudio: sys };
+    persisted = { mic, systemAudio: sys };
+  } else {
+    persisted = legacy
+      ? deriveEnabledFromLegacy(legacy)
+      : { mic: true, systemAudio: capabilities.systemAudio.supported };
   }
-  // At least one new key is missing — migrate the missing one(s) from the
-  // legacy `recordingMode` while preserving any new key already written.
-  const derived = deriveEnabledFromLegacy(await store.get<string>(LEGACY_KEY));
-  const result: RecordingEnabled = {
-    mic: typeof mic === 'boolean' ? mic : derived.mic,
-    systemAudio: typeof sys === 'boolean' ? sys : derived.systemAudio,
+  persisted = {
+    mic: typeof mic === 'boolean' ? mic : persisted.mic,
+    systemAudio:
+      capabilities.systemAudio.supported &&
+      (typeof sys === 'boolean' ? sys : persisted.systemAudio),
   };
-  if (typeof mic !== 'boolean') await store.set(MIC_KEY, result.mic);
-  if (typeof sys !== 'boolean') await store.set(SYS_KEY, result.systemAudio);
-  return result;
+
+  // Initialize missing keys and clear a source this binary cannot capture.
+  // Microphone state is never changed as a substitute for system audio.
+  const writes: Promise<void>[] = [];
+  if (typeof mic !== 'boolean') writes.push(store.set(MIC_KEY, persisted.mic));
+  if (typeof sys !== 'boolean' || sys !== persisted.systemAudio) {
+    writes.push(store.set(SYS_KEY, persisted.systemAudio));
+  }
+  await Promise.all(writes);
+  return persisted;
 }
 
 export async function setMicEnabled(enabled: boolean): Promise<void> {
@@ -50,10 +70,16 @@ export async function setSystemAudioEnabled(enabled: boolean): Promise<void> {
   await store.set(SYS_KEY, enabled);
 }
 
-/** Prompt for / verify microphone permission via the native command. */
+/** Prompt for microphone permission through the platform's capture owner. */
 export async function ensureMicPermission(): Promise<boolean> {
   try {
-    return await requestMicrophonePermission();
+    const capabilities = await loadPlatformCapabilities();
+    if (capabilities.os === 'macos') {
+      return await requestMicrophonePermission();
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((track) => track.stop());
+    return true;
   } catch {
     return false;
   }
@@ -62,7 +88,13 @@ export async function ensureMicPermission(): Promise<boolean> {
 /** Current microphone permission status (best-effort). */
 export async function checkMicPermission(): Promise<boolean> {
   try {
-    return await checkMicrophonePermission();
+    const capabilities = await loadPlatformCapabilities();
+    if (capabilities.os === 'macos') {
+      return await checkMicrophonePermission();
+    }
+    if (!navigator.permissions) return false;
+    const status = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+    return status.state === 'granted';
   } catch {
     return false;
   }
@@ -92,18 +124,21 @@ export async function checkSystemAudioPermission(): Promise<boolean> {
   }
 }
 
-/** Open System Settings → Privacy → Microphone. macOS only; no-op elsewhere. */
+/** Open the OS microphone permission pane when the platform exposes one. The
+ * native capability layer owns the exact allowlisted URL; this helper remains a
+ * UI action and does not infer whether permission is currently denied. */
 export async function openMicSettings(): Promise<void> {
-  if (!isMac()) return;
-  await openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
+  const url = (await loadPlatformCapabilities()).microphoneSettingsUrl;
+  if (url) await openUrl(url);
 }
 
 /**
- * Open System Settings → Privacy → Screen & System Audio Recording. The
- * "System Audio Recording Only" entries live in a section of this same pane.
- * macOS only; no-op elsewhere.
+ * Open the OS system-audio settings pane when the platform exposes one. On
+ * macOS this is Privacy & Security; on Windows this is the Sound settings page.
+ * A URL can exist even when capture is unsupported, so callers must still use
+ * `systemAudio.supported` for feature gating.
  */
 export async function openSystemAudioSettings(): Promise<void> {
-  if (!isMac()) return;
-  await openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+  const url = (await loadPlatformCapabilities()).systemAudio.settingsUrl;
+  if (url) await openUrl(url);
 }

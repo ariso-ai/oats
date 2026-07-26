@@ -61,7 +61,7 @@ jobs:
           ref: ${{ fromJson(needs.release-please.outputs.prs)[0].headBranchName }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: '24'
 
@@ -92,8 +92,8 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: [self-hosted, macOS, ARM64]
-    # `release` environment holds the Apple signing/notarization secrets and
-    # the required-reviewer protection rule (see README → Signing & Notarization).
+    # The `release` environment holds the Apple signing/notarization secrets.
+    # Configure its required-reviewer rule before shipping (see CONTRIBUTING).
     environment: release
     permissions:
       contents: read
@@ -104,7 +104,7 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           cache: 'npm'
           node-version: '24'
@@ -153,18 +153,18 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved', 'src-tauri/ariso-stt/macos/Sources/**') }}
 
       - name: Build ariso-stt sidecar
         if: steps.sidecar-cache.outputs.cache-hit != 'true'
-        working-directory: src-tauri/ariso-stt
+        working-directory: src-tauri/ariso-stt/macos
         run: |
-          mkdir -p ../binaries
+          mkdir -p ../../binaries
           xcodebuild build -scheme ariso-stt -configuration Release \
             -destination 'generic/platform=macOS' \
             -derivedDataPath .xcode -skipMacroValidation
-          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
-          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
+          cp .xcode/Build/Products/Release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 
       - name: Build, sign, and notarize
         env:
@@ -235,10 +235,12 @@ jobs:
 
   publish:
     name: Generate manifest and publish artifacts to R2
+    # Windows publication is intentionally detached while that platform remains
+    # internal QA; never substitute an unsigned installer here.
     needs: [release-please, release]
     runs-on: macos-15
     # The R2 credentials live in the `release` environment alongside the Apple
-    # signing secrets (see README → Signing & Notarization).
+    # signing secrets (see CONTRIBUTING → One-time setup in the repo).
     environment: release
     permissions:
       contents: write
@@ -298,7 +300,7 @@ jobs:
         run: .github/scripts/publish-homebrew-cask.sh
 
       - name: Add R2 download link to GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           append_body: true

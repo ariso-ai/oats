@@ -104,7 +104,12 @@ import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { useWaveform } from '../composables/useWaveform';
-import { getActiveBackend, type Backend, type RecordingMeta } from '../composables/useBackend';
+import {
+  getActiveBackend,
+  type Backend,
+  type FinalizeResult,
+  type RecordingMeta,
+} from '../composables/useBackend';
 import { pending, local } from '../tauri';
 import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
@@ -115,6 +120,8 @@ import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/s
 import {
   shouldPromptMeetingEnd,
   findMeetingEndAt,
+  findNextMeetingStart,
+  MEETING_END_GRACE_MS,
   MEETING_END_PROMPT_TIMEOUT_MS,
 } from '../composables/meetingEndWatch';
 import { localRecordingIdFromStart } from '../composables/localRecordingId';
@@ -184,12 +191,12 @@ const formattedDuration = computed(() => {
 // Mirror the recording to the library window's embedded recorder strip. The
 // bars ride on frameLevels (sampled in the audio callback, so the cadence
 // survives this window being hidden, unlike rAF-driven waveform.levels).
-type RecorderPhase = 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
+type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 
 function currentPhase(): RecorderPhase {
   if (uploadResult.value) return uploadResult.value;
   if (isUploading.value) return 'uploading';
-  return 'recording';
+  return recorder.isRecording.value ? 'recording' : 'starting';
 }
 
 // Once `closed` is sent, stay silent: a heartbeat firing between the closed
@@ -306,6 +313,7 @@ async function applyPillVisibility(hidden: boolean) {
 }
 
 let unlistenPillVisible: UnlistenFn | null = null;
+let unlistenPendingUploaded: UnlistenFn | null = null;
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
@@ -325,6 +333,11 @@ let meetingEndTimer: ReturnType<typeof setInterval> | null = null;
 // card subtitle.
 const meetingEndAt = ref<number | null>(null);
 const meetingEndSubtitle = ref<string | undefined>(undefined);
+// Scheduled start of the NEXT calendar meeting (epoch ms), or null when there
+// is none. The next meeting's start is the transition point: it triggers the
+// prompt immediately, so back-to-back (or slightly overlapping) meetings don't
+// bleed through the end+grace wait.
+const meetingNextStartAt = ref<number | null>(null);
 let meetingEndPromptShownAt: number | null = null;
 let meetingEndPromptsShown = 0;
 let meetingEndLastPromptAt: number | null = null;
@@ -346,6 +359,9 @@ async function rollbackAndClose() {
 }
 
 async function startRecording() {
+  // Surface initialization before any settings, permission, or device work so
+  // every launcher has an immediate and honest state to render.
+  broadcastState('starting');
   let mode: ReturnType<typeof deriveRecordingMode>;
   try {
     mode = deriveRecordingMode(await loadRecordingEnabled());
@@ -514,13 +530,15 @@ async function resolveSilenceSubtitle(): Promise<string | undefined> {
   }
 }
 
-// Resolve the attached meeting's scheduled end (Ariso only). end_at lives on the
-// scheduled-meetings list, NOT /desktop/meetings/{id}, so fetch the ±2h window
-// and match by id. Any failure leaves meetingEndAt null → the watch stays off.
+// Resolve the attached meeting's scheduled end and the next meeting's start
+// (Ariso only). end_at lives on the scheduled-meetings list, NOT
+// /desktop/meetings/{id}, so fetch the ±2h window and match by id. Any failure
+// leaves both null → the watch stays off.
 async function resolveMeetingEnd() {
   if (!meetingEndReminderEnabled || backend.value?.id !== 'ariso' || effectiveMeetingId.value === null) {
     meetingEndAt.value = null;
     meetingEndSubtitle.value = undefined;
+    meetingNextStartAt.value = null;
     return;
   }
   try {
@@ -531,9 +549,11 @@ async function resolveMeetingEnd() {
     const info = findMeetingEndAt(meetings, effectiveMeetingId.value);
     meetingEndAt.value = info.endAt;
     meetingEndSubtitle.value = info.title ?? undefined;
+    meetingNextStartAt.value = findNextMeetingStart(meetings, effectiveMeetingId.value).startAt;
   } catch (e) {
     console.error('Failed to resolve meeting end; meeting-end watch disabled', e);
     meetingEndAt.value = null;
+    meetingNextStartAt.value = null;
   }
 }
 
@@ -578,7 +598,7 @@ async function handleMeetingEndStop() {
 // Retry button — blob and meta stay in refs so retry needs no re-record.
 // Tracks the underlying finalize promise (not the UI-timeout race) so that a
 // timed-out attempt whose work is still running won't be re-launched by Retry.
-let inFlightFinalize: Promise<unknown> | null = null;
+let inFlightFinalize: Promise<FinalizeResult> | null = null;
 async function runFinalize() {
   if (!stoppedBlob.value || !stoppedMeta.value || !backend.value) return;
   if (inFlightFinalize) return;
@@ -603,7 +623,17 @@ async function runFinalize() {
     timeoutId = setTimeout(() => reject(new Error('Operation timed out')), 120_000);
   });
   try {
-    await Promise.race([work, timeout]);
+    const result = await Promise.race([work, timeout]);
+    // An unattached Ariso upload creates its meeting during finalize. Carry
+    // that server-assigned id into the success event so Library can pin and
+    // reload the real meeting instead of waiting for a later focus refresh.
+    if (
+      result.backend === 'ariso' &&
+      typeof result.meetingId === 'number' &&
+      Number.isSafeInteger(result.meetingId)
+    ) {
+      effectiveMeetingId.value = result.meetingId;
+    }
     uploadResult.value = 'success';
     stoppedBlob.value = null;
     stoppedMeta.value = null;
@@ -631,6 +661,20 @@ async function dismissFailed() {
       console.error('Failed to discard buffered audio', e);
     }
   }
+  await closeWindow();
+}
+
+// The sidebar "Pending uploads" retry uploaded (and discarded) this recording's
+// on-disk buffer out from under us. Our failed pill — and the library strip it
+// heartbeats — is now stale, and our held blob would double-upload on Retry.
+// Drop the in-memory copy without re-discarding the (already-gone) buffer, then
+// close so both pills clear. Ignored unless we're actually showing the failed
+// pill: a live recording or an in-flight resume must not be torn down.
+async function handlePendingUploadSucceeded() {
+  if (uploadResult.value !== 'failed') return;
+  inFlightFinalize = null;
+  stoppedBlob.value = null;
+  stoppedMeta.value = null;
   await closeWindow();
 }
 
@@ -681,6 +725,8 @@ onMounted(async () => {
   unlistenPillVisible = await listen<boolean>('recorder://pill-visible', (e) => {
     void applyPillVisibility(!e.payload);
   });
+
+  unlistenPendingUploaded = await listen('pending-upload://succeeded', handlePendingUploadSucceeded);
 
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);
@@ -750,8 +796,9 @@ onMounted(async () => {
   // watcher covers the async auto path). No-op when the reminder is disabled.
   void resolveMeetingEnd();
 
-  // Meeting-stop reminder: prompts when the attached meeting's scheduled end has
-  // passed; ignoring it keeps recording.
+  // Meeting-stop reminder: prompts when the attached meeting's scheduled end
+  // has passed, or immediately when the next calendar meeting starts (the
+  // transition point for back-to-back calls); ignoring it keeps recording.
   if (meetingEndReminderEnabled) {
     meetingEndTimer = setInterval(() => {
       if (isUploading.value || uploadResult.value || !recorder.isRecording.value) return;
@@ -764,15 +811,23 @@ onMounted(async () => {
             recorder.isPaused.value,
             meetingEndPromptsShown,
             meetingEndLastPromptAt,
+            meetingNextStartAt.value,
           )
         ) {
           meetingEndPromptShownAt = now;
           meetingEndLastPromptAt = now;
           meetingEndPromptsShown += 1;
-          void invoke(
-            'show_meeting_end_prompt',
-            meetingEndSubtitle.value ? { subtitle: meetingEndSubtitle.value } : {},
-          );
+          // Title says why the card appeared; subtitle names the meeting being
+          // ended. "Next meeting started" exactly when the end+grace rule alone
+          // wouldn't have fired yet — i.e. the next meeting is the trigger.
+          const nextStarted =
+            meetingNextStartAt.value !== null &&
+            now >= meetingNextStartAt.value &&
+            (meetingEndAt.value === null || now < meetingEndAt.value + MEETING_END_GRACE_MS);
+          void invoke('show_meeting_end_prompt', {
+            ...(meetingEndSubtitle.value ? { subtitle: meetingEndSubtitle.value } : {}),
+            ...(nextStarted ? { title: 'Next meeting started' } : {}),
+          });
         }
         return;
       }
@@ -796,6 +851,7 @@ onUnmounted(() => {
   if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
   unlistenPillVisible?.();
+  unlistenPendingUploaded?.();
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();

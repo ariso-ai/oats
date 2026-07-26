@@ -27,7 +27,8 @@ Frontend → backend goes through typed wrappers in `src/tauri.ts`
 ## Capabilities & permissions
 
 `src-tauri/capabilities/default.json` is the allowlist — it names the **windows**
-(`main`, `waveform`, `settings`, `oauth`, `update`, `library`, `onboarding`) and the
+(`main`, `waveform`, `settings`, `update`, `library`, `onboarding`, `meeting-prompt`,
+`silence-prompt`, `meeting-end-prompt`) and the
 **permissions** they get (`core:window:*`, `store:default`, `opener:default`,
 `notification:default`, `updater:default`, plus a scoped `opener:allow-open-url` for
 `x-apple.systempreferences:*`). A new window or plugin capability must be added here or

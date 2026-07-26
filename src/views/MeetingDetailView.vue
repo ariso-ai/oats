@@ -124,7 +124,10 @@
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
         </span>
-        <AriWillJoinTag v-if="detail?.autoJoinScheduled" class="meta-ari" />
+        <!-- A canceled meeting is marked as such, and never advertises Ari's
+             auto-join: the bot won't join a meeting that isn't happening. -->
+        <MeetingCanceledTag v-if="detail?.canceled" class="meta-canceled" />
+        <AriWillJoinTag v-else-if="detail?.autoJoinScheduled" class="meta-ari" />
       </div>
 
       <div v-else class="divider" />
@@ -353,7 +356,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { renderMarkdown, stripFrontmatter } from '../utils/markdown';
 import type { TranscriptChunk, MeetingAudioClip } from '../composables/useMeetingApi';
 import { useMeetingNotesPersistence } from '../composables/useMeetingNotesPersistence';
@@ -366,6 +369,7 @@ import {
   type MeetingCoaching,
 } from '../composables/useBackend';
 import AriWillJoinTag from './AriWillJoinTag.vue';
+import MeetingCanceledTag from './MeetingCanceledTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
@@ -373,6 +377,7 @@ import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative, local } from '../tauri';
 import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
+import { loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 
 const props = defineProps<{ item: MeetingListItem | null }>();
 const emit = defineEmits<{
@@ -406,6 +411,7 @@ const titleError = computed<string | null>(() => {
 const showShare = ref(false);
 const shareBtn = ref<HTMLButtonElement | null>(null);
 const shareAnchor = ref<{ bottom: number; right: number } | null>(null);
+const nativeShareSupported = ref(false);
 
 // Attendees dropdown. The card clips overflow, so the menu is fixed-
 // positioned and anchored to the trigger's rect (captured on open),
@@ -445,18 +451,19 @@ const isHost = computed(() =>
 const isAttendee = computed(() =>
   (detail.value?.participants ?? []).some((p) => p.role !== 'host' && p.self)
 );
-// Local recordings always get the native share; Ariso meetings only for
-// participants (host/attendee), matching the web.
+// Cloud sharing is authorization-based; local sharing is an OS integration and
+// is only offered when the current native target implements that integration.
 const canShare = computed(() => {
   const d = detail.value;
   if (!d) return false;
-  return d.isLocal || isHost.value || isAttendee.value;
+  return d.isLocal ? nativeShareSupported.value : isHost.value || isAttendee.value;
 });
 
 async function onShareClick(): Promise<void> {
   const d = detail.value;
   if (!d) return;
   if (d.isLocal) {
+    if (!nativeShareSupported.value) return;
     await shareLocal(d);
     return;
   }
@@ -464,6 +471,14 @@ async function onShareClick(): Promise<void> {
   shareAnchor.value = rect ? { bottom: rect.bottom, right: rect.right } : null;
   showShare.value = !showShare.value;
 }
+
+onMounted(async () => {
+  try {
+    nativeShareSupported.value = (await loadPlatformCapabilities()).nativeShare.supported;
+  } catch (error) {
+    console.error('Failed to load platform capabilities', error);
+  }
+});
 
 async function shareLocal(d: MeetingDetail): Promise<void> {
   if (!props.item) return;
@@ -1060,8 +1075,13 @@ async function loadIndividualNote(): Promise<void> {
     saveState.value = 'error';
   } finally {
     if (my === noteReqId) {
-      loadingIndividualNote.value = false;
-      suppressAutoSave = false;
+      // Let watchers consume persistence-driven ref updates while autosave is
+      // still suppressed, so loaded content cannot be mistaken for an edit.
+      await nextTick();
+      if (my === noteReqId) {
+        loadingIndividualNote.value = false;
+        suppressAutoSave = false;
+      }
     }
   }
 }
@@ -1159,7 +1179,14 @@ const hasCoaching = computed(() => {
 // The meta band (duration · attendees · category) renders only when at least
 // one of its fields is present; otherwise a plain divider separates header and tabs.
 const hasMeta = computed(
-  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType || detail.value?.autoJoinScheduled)
+  () =>
+    !!(
+      durationLabel.value ||
+      detail.value?.participants.length ||
+      detail.value?.meetingType ||
+      detail.value?.autoJoinScheduled ||
+      detail.value?.canceled
+    )
 );
 
 const otesEmpty = computed(() => {
@@ -1329,8 +1356,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
-.meta-ari { margin-left: auto; }
-
+.meta-ari, .meta-canceled { margin-left: auto; }
 .card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
 .clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .clip-row--active { background: #f7f6f4; }

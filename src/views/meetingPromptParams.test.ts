@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parsePromptParams, parseSilencePromptParams, parseMeetingEndPromptParams } from './meetingPromptParams';
+import { parsePromptParams, parseSilencePromptParams } from './meetingPromptParams';
 
 describe('parsePromptParams', () => {
   it('uses defaults when the query is empty', () => {
@@ -7,6 +7,7 @@ describe('parsePromptParams', () => {
       seconds: 10,
       title: 'Meeting started',
       subtitle: 'oats can take notes for you.',
+      mode: 'start',
     });
   });
 
@@ -29,6 +30,39 @@ describe('parsePromptParams', () => {
   });
 });
 
+describe('parsePromptParams mode', () => {
+  it('defaults to start mode with the start-mode subtitle and 10s countdown', () => {
+    expect(parsePromptParams('')).toEqual({
+      seconds: 10,
+      title: 'Meeting started',
+      subtitle: 'oats can take notes for you.',
+      mode: 'start',
+    });
+  });
+
+  it('switch mode defaults to a 30s countdown and a blank subtitle', () => {
+    expect(parsePromptParams('?mode=switch')).toEqual({
+      seconds: 30,
+      title: 'Meeting started',
+      subtitle: '',
+      mode: 'switch',
+    });
+  });
+
+  it('switch mode carries the next meeting title as the subtitle', () => {
+    expect(parsePromptParams('?mode=switch&seconds=45&subtitle=Weekly%20sync')).toEqual({
+      seconds: 45,
+      title: 'Meeting started',
+      subtitle: 'Weekly sync',
+      mode: 'switch',
+    });
+  });
+
+  it('treats an unknown mode as start', () => {
+    expect(parsePromptParams('?mode=bogus').mode).toBe('start');
+  });
+});
+
 describe('parseSilencePromptParams', () => {
   it('defaults to 60s and an empty subtitle when the query is empty', () => {
     expect(parseSilencePromptParams('')).toEqual({ seconds: 60, subtitle: '' });
@@ -45,23 +79,5 @@ describe('parseSilencePromptParams', () => {
   it('reads the subtitle but leaves it empty when absent (so the view hides it)', () => {
     expect(parseSilencePromptParams('?subtitle=Weekly%20sync').subtitle).toBe('Weekly sync');
     expect(parseSilencePromptParams('?seconds=60').subtitle).toBe('');
-  });
-});
-
-describe('parseMeetingEndPromptParams', () => {
-  it('reads seconds and subtitle from the query', () => {
-    expect(parseMeetingEndPromptParams('?seconds=30&subtitle=Weekly%20sync')).toEqual({
-      seconds: 30,
-      subtitle: 'Weekly sync',
-    });
-  });
-
-  it('defaults seconds to 30 and subtitle to empty when absent', () => {
-    expect(parseMeetingEndPromptParams('')).toEqual({ seconds: 30, subtitle: '' });
-  });
-
-  it('falls back to 30 when seconds is non-positive or NaN', () => {
-    expect(parseMeetingEndPromptParams('?seconds=0').seconds).toBe(30);
-    expect(parseMeetingEndPromptParams('?seconds=abc').seconds).toBe(30);
   });
 });

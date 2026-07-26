@@ -3,11 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Identifier of the on-device STT model, recorded in each recording's
-/// `meta.json` and the models `manifest.json`. Single source of truth so the
-/// per-recording `modelVersion` and the ready-marker can never drift apart.
-pub const MODEL_VERSION: &str = "parakeet-tdt-0.6b-v3";
-
 /// A new local recording that starts within this many seconds of the previous
 /// one finishing is appended to it rather than started as a separate recording.
 pub const APPEND_WINDOW_SECONDS: i64 = 5 * 60;
@@ -218,7 +213,7 @@ fn validate_pending_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
+pub fn pending_audio_path(root: &Path, created_at: &str) -> Result<PathBuf, String> {
     let id = sanitize_iso_to_pending_id(created_at);
     validate_pending_id(&id)?;
     Ok(pending_uploads_dir(root).join(format!("{id}.mp3")))

@@ -8,6 +8,7 @@ import {
   type MeetingPrep,
 } from './useMeetingApi';
 import { arisoTruthy } from './autoJoin';
+import { isCanceledMeetingStatus } from './meetingStatus';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -61,6 +62,9 @@ export interface MeetingListItem {
   autoJoinScheduled?: boolean;
   /** Ariso: id of this meeting's prep, when one exists (from the list row). */
   prepId?: number;
+  /** Ariso: the meeting was canceled (its calendar event was deleted/canceled).
+   *  Rows stay in the list but are struck through. */
+  canceled?: boolean;
 }
 
 export interface MeetingActionItem {
@@ -112,6 +116,9 @@ export interface MeetingDetail {
   /** Ariso: id of this meeting's prep, when one exists (carried from the list
    *  row — /meeting-notes/:id does not include it). */
   prepId?: number;
+  /** Ariso: the meeting was canceled — the detail panel marks it with a chip
+   *  and suppresses the "Ari will join" tag. */
+  canceled?: boolean;
   /** Whether a transcript exists — drives the Live Transcript tab. Content is
    *  loaded lazily via `getMeetingTranscript`. */
   hasTranscript?: boolean;
@@ -222,6 +229,7 @@ function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): Me
     timestamp: m.start_at,
     endTimestamp: m.end_at,
     autoJoinScheduled: arisoTruthy(m.auto_join_scheduled),
+    canceled: isCanceledMeetingStatus(m.status),
   };
   if ('snippet' in m && m.snippet) item.snippet = m.snippet;
   if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
@@ -364,6 +372,9 @@ export class ArisoBackend implements Backend {
       isLocal: false,
       autoJoinScheduled: item.autoJoinScheduled ?? false,
       prepId: item.prepId,
+      // The notes payload carries the authoritative status; fall back to the
+      // list row when it's absent so a canceled row stays marked once opened.
+      canceled: data.status != null ? isCanceledMeetingStatus(data.status) : !!item.canceled,
       audioClips: data.audio_clips ?? [],
     };
   }

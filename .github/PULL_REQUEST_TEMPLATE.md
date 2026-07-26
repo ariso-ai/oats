@@ -21,7 +21,7 @@ See CONTRIBUTING.md for the full guide.
 
 ## How was this tested?
 
-<!-- Did you run the frontend tests (`npm test`)? Test manually with which backend (Ariso / Local)? On what macOS version? -->
+<!-- Did you run the frontend tests (`npm test`)? Test manually with which backend (Ariso / Local)? On which OS/platform? -->
 
 ## Screenshots / recordings
 

@@ -1,7 +1,7 @@
-//! Auto-trigger microphone monitor. Watches per-process audio input via
-//! CoreAudio (macOS 14.4+), excludes our own PID, and runs a debounced state
-//! machine. On a sustained external mic-on it opens the recorder window; on a
-//! sustained mic-off it emits `auto-record://stop`.
+//! Auto-trigger microphone monitor. Watches per-process input through Core
+//! Audio on macOS or capture-endpoint sessions on Windows, excludes our own
+//! PID, and feeds one shared debounced state machine. A sustained external
+//! mic-on opens the recorder; a sustained mic-off emits `auto-record://stop`.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,14 +185,18 @@ mod tests {
     }
 }
 
-/// PIDs (excluding our own) currently running audio input, via CoreAudio.
-/// Returns an empty set off macOS or when the API is unavailable.
+/// PIDs (excluding our own) currently running audio input, via the native audio
+/// session API. Returns an empty set when the endpoint cannot be queried.
 fn external_input_pids() -> HashSet<i32> {
     #[cfg(target_os = "macos")]
     {
         coreaudio::external_input_pids(std::process::id() as i32)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_audio::external_input_pids(std::process::id() as i32)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         HashSet::new()
     }
@@ -204,7 +208,13 @@ pub fn is_supported() -> bool {
     {
         coreaudio::is_supported()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Windows 11 always exposes endpoint audio sessions. Device absence is
+        // transient and handled by the polling query, not a product capability.
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
@@ -369,6 +379,61 @@ pub fn request_mic_monitor_rearm(app: AppHandle) {
     app.state::<MicMonitorManager>()
         .rearm
         .store(true, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "windows")]
+mod windows_audio {
+    use std::collections::HashSet;
+    use wasapi::{
+        DeviceEnumerator, Direction, SessionState, deinitialize, initialize_mta,
+    };
+
+    /// Enumerate active sessions on the default capture endpoint. Conference
+    /// apps that hold the microphone own an active capture session; render-only
+    /// playback sessions live on a different endpoint and do not trigger this.
+    pub fn external_input_pids(our_pid: i32) -> HashSet<i32> {
+        let hr = initialize_mta();
+        if hr.is_err() {
+            return HashSet::new();
+        }
+
+        let result = query_external_input_pids(our_pid).unwrap_or_default();
+        deinitialize();
+        result
+    }
+
+    fn query_external_input_pids(our_pid: i32) -> Result<HashSet<i32>, String> {
+        let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
+        let device = enumerator
+            .get_default_device(&Direction::Capture)
+            .map_err(|e| e.to_string())?;
+        let manager = device
+            .get_iaudiosessionmanager()
+            .map_err(|e| e.to_string())?;
+        let sessions = manager
+            .get_audiosessionenumerator()
+            .map_err(|e| e.to_string())?;
+        let mut pids = HashSet::new();
+
+        for index in 0..sessions.get_count().map_err(|e| e.to_string())? {
+            let Ok(session) = sessions.get_session(index) else {
+                continue;
+            };
+            if session.get_state().ok() != Some(SessionState::Active) {
+                continue;
+            }
+            let Ok(pid) = session.get_process_id() else {
+                continue;
+            };
+            let Ok(pid) = i32::try_from(pid) else {
+                continue;
+            };
+            if pid > 0 && pid != our_pid {
+                pids.insert(pid);
+            }
+        }
+        Ok(pids)
+    }
 }
 
 #[cfg(target_os = "macos")]

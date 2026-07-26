@@ -2,14 +2,18 @@ import { ref, type Ref } from 'vue';
 import lamejs from '@breezystack/lamejs';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
 
-const hasTauri =
-  typeof window !== 'undefined' &&
-  ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
+function isTauriRuntime(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    ('__TAURI__' in window || '__TAURI_INTERNALS__' in window)
+  );
+}
 
 // Peak (absolute Int16) below which a frame counts as "no sound activity".
 // ~0.01 of full scale (32768) — above the noise floor, below real speech.
@@ -21,7 +25,10 @@ export function useRecorder() {
   const error: Ref<string | null> = ref(null);
   const durationSeconds: Ref<number> = ref(0);
   const startedAt: Ref<string | null> = ref(null);
-  const systemAudioSupported: Ref<boolean> = ref(hasTauri);
+  // Starts disabled until the native snapshot arrives so browser previews and
+  // failed IPC cannot accidentally enter the privileged system-audio path.
+  // Permission state is checked later by the native capture command.
+  const systemAudioSupported: Ref<boolean> = ref(false);
   // Wall-clock of the last frame that carried real sound, for the silence
   // backstop. Seeded on start and reset on resume so paused gaps don't count.
   const lastSoundAt: Ref<number> = ref(Date.now());
@@ -31,6 +38,8 @@ export function useRecorder() {
   const frameLevels: Ref<number[]> = ref([]);
 
   let audioContext: AudioContext | null = null;
+  let micStream: MediaStream | null = null;
+  let micSource: MediaStreamAudioSourceNode | null = null;
   let processor: ScriptProcessorNode | null = null;
   let analyserNode: AnalyserNode | null = null;
   // Silent sink keeps the Web Audio graph pulling (so the ScriptProcessor fires)
@@ -56,6 +65,7 @@ export function useRecorder() {
   // Mic audio state (native capture, 44.1kHz mono Int16 PCM)
   let micAudioActive = false;
   let micAudioUnlisten: UnlistenFn | null = null;
+  let micUsesNativeCapture = false;
   // Ring buffer for incoming mic audio (already 44.1kHz — no resample needed)
   let micAudioBuffer: Int16Array = new Int16Array(0);
 
@@ -141,45 +151,66 @@ export function useRecorder() {
     systemAudioBuffer = new Int16Array(0);
     micAudioBuffer = new Int16Array(0);
 
-    const useSystemAudio = (mode === 'mic_and_system' || mode === 'system') && hasTauri;
+    // Recording modes come from persisted user choices, but capability support
+    // comes from the current binary. Intersecting them here is the final guard
+    // before native capture rather than trusting Settings to have been opened.
+    const caps = await loadPlatformCapabilities();
+    systemAudioSupported.value = isTauriRuntime() && caps.systemAudio.supported;
+    const useSystemAudio = mode === 'mic_and_system' || mode === 'system';
+    if (useSystemAudio && !systemAudioSupported.value) {
+      throw new Error('System audio recording is not supported by this oats installation');
+    }
     const useMic = mode !== 'system';
-    // Outside Tauri, system-audio-only collapses to no usable input; fail fast
-    // rather than building a silent graph and recording zeroes.
     if (!useMic && !useSystemAudio) {
       throw new Error('No recording source is available');
     }
+    micUsesNativeCapture = useMic && caps.os === 'macos';
 
     try {
       audioContext = new AudioContext({ sampleRate: 44100 });
       analyserNode = audioContext.createAnalyser();
 
-      if (useMic) {
-        // Register the listener before starting capture so no early frames are dropped.
-        micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
-          if (isPaused.value) return;
-          // Decode base64 → raw bytes → Int16 PCM (LE, mono, 44.1kHz)
-          const binary = atob(event.payload);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-          const samples = new Int16Array(bytes.buffer);
-          // Append to ring buffer
-          const merged = new Int16Array(micAudioBuffer.length + samples.length);
-          merged.set(micAudioBuffer);
-          merged.set(samples, micAudioBuffer.length);
-          micAudioBuffer = merged;
-        });
-        // Start native mic capture (no getUserMedia — avoids macOS ducking
-        // system audio for ~2s and routing through Voice-Processing I/O).
-        await startMicrophoneCapture();
-        micAudioActive = true;
-      }
+      const startMic = async (): Promise<void> => {
+        if (!useMic) return;
+        if (micUsesNativeCapture) {
+          // Register first so no frames from the native macOS HAL source are lost.
+          micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
+            if (isPaused.value) return;
+            const binary = atob(event.payload);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const samples = new Int16Array(bytes.buffer);
+            const merged = new Int16Array(micAudioBuffer.length + samples.length);
+            merged.set(micAudioBuffer);
+            merged.set(samples, micAudioBuffer.length);
+            micAudioBuffer = merged;
+          });
+          // The HAL path avoids macOS Voice-Processing I/O and its device-level
+          // gain changes while a conference app is using the same microphone.
+          await startMicrophoneCapture();
+          micAudioActive = true;
+        } else {
+          // Windows keeps microphone capture in the webview; its native mic
+          // command is intentionally macOS-only.
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: 44100,
+            },
+          });
+          micSource = audioContext.createMediaStreamSource(micStream);
+          micSource.connect(analyserNode);
+        }
+      };
 
-      if (useSystemAudio) {
-        // Start Tauri system audio capture and listen for PCM data events
-        await invoke('start_system_audio_capture');
-        systemAudioActive = true;
-
-        const unlisten = await listen<string>('system-audio-data', (event) => {
+      const startSystemAudio = async (): Promise<void> => {
+        if (!useSystemAudio) return;
+        // Subscribe before WASAPI starts so its first PCM frames cannot arrive
+        // in the gap between the native command and listener registration.
+        systemAudioUnlisten = await listen<string>('system-audio-data', (event) => {
           if (!isRecording.value || isPaused.value) return;
 
           // Decode base64 → raw bytes → Int16 PCM
@@ -199,7 +230,28 @@ export function useRecorder() {
           merged.set(samples, systemAudioBuffer.length);
           systemAudioBuffer = merged;
         });
-        systemAudioUnlisten = unlisten;
+
+        try {
+          await invoke('start_system_audio_capture');
+          systemAudioActive = true;
+        } catch (err) {
+          systemAudioUnlisten?.();
+          systemAudioUnlisten = null;
+          throw err;
+        }
+      };
+
+      if (caps.os === 'windows' && useMic && useSystemAudio) {
+        // Windows permission/device setup and WASAPI loopback initialization do
+        // not depend on each other. Wait for both to settle so a partial start
+        // can always be cleaned up before surfacing either failure.
+        const starts = await Promise.allSettled([startMic(), startSystemAudio()]);
+        for (const result of starts) {
+          if (result.status === 'rejected') throw result.reason;
+        }
+      } else {
+        await startMic();
+        await startSystemAudio();
       }
 
       // Stereo (ch0 mic, ch1 system) only when mixing both; otherwise mono.
@@ -231,10 +283,18 @@ export function useRecorder() {
         // the live mic signal even though the output gain is 0.
         const micInt16 = new Int16Array(frame);
         if (useMic) {
-          const micRaw = drainMic(frame);
-          if (micRaw) micInt16.set(micRaw);
-          const out = e.outputBuffer.getChannelData(0);
-          for (let i = 0; i < frame; i++) out[i] = micInt16[i] / 0x8000;
+          if (micUsesNativeCapture) {
+            const micRaw = drainMic(frame);
+            if (micRaw) micInt16.set(micRaw);
+            const out = e.outputBuffer.getChannelData(0);
+            for (let i = 0; i < frame; i++) out[i] = micInt16[i] / 0x8000;
+          } else {
+            const samples = e.inputBuffer.getChannelData(0);
+            for (let i = 0; i < samples.length; i++) {
+              const sample = Math.max(-1, Math.min(1, samples[i]));
+              micInt16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+            }
+          }
         }
 
         let mp3buf: Int8Array;
@@ -296,8 +356,13 @@ export function useRecorder() {
       // to the output buffer in onaudioprocess instead.
       systemGain = audioContext.createGain();
       systemGain.gain.value = 0;
-      processor.connect(analyserNode!);
-      analyserNode!.connect(systemGain);
+      if (useMic && !micUsesNativeCapture) {
+        micSource!.connect(processor);
+        processor.connect(systemGain);
+      } else {
+        processor.connect(analyserNode!);
+        analyserNode!.connect(systemGain);
+      }
       systemGain.connect(audioContext.destination);
 
       isRecording.value = true;
@@ -388,6 +453,22 @@ export function useRecorder() {
       micAudioUnlisten = null;
     }
     micAudioBuffer = new Int16Array(0);
+    micUsesNativeCapture = false;
+
+    if (micSource && processor) {
+      try {
+        micSource.disconnect(processor);
+      } catch {
+        // Already disconnected
+      }
+    }
+    if (micSource && analyserNode) {
+      try {
+        micSource.disconnect(analyserNode);
+      } catch {
+        // Already disconnected
+      }
+    }
 
     if (processor) {
       try {
@@ -412,7 +493,13 @@ export function useRecorder() {
       }
     }
     processor = null;
+    micSource = null;
     analyserNode = null;
+
+    if (micStream) {
+      micStream.getTracks().forEach((track) => track.stop());
+      micStream = null;
+    }
 
     if (audioContext) {
       try {

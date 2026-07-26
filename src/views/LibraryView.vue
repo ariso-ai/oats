@@ -42,16 +42,20 @@
       <button
         v-else
         class="add-btn"
+        :class="{ 'add-btn--starting': recordingStarting }"
         type="button"
         :disabled="startDisabled"
-        aria-label="Start recording"
-        title="Start recording"
+        :aria-label="recordingStarting ? 'Starting recording' : 'Start recording'"
+        :title="recordingStarting ? 'Starting recording' : 'Start recording'"
         @click="startRecording"
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <span v-if="recordingStarting" class="start-spinner" aria-hidden="true" />
+        <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
         </svg>
-        <span class="add-btn-label">Start recording</span>
+        <span class="add-btn-label">
+          {{ recordingStarting ? 'Starting recording…' : 'Start recording' }}
+        </span>
       </button>
     </div>
 
@@ -92,13 +96,13 @@
           >
             <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
             <span class="mi-head">
-              <span class="mi-title">{{ m.title }}</span>
+              <span class="mi-title" :class="{ 'mi-title--canceled': m.canceled }">{{ m.title }}</span>
               <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
             </span>
             <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
           </button>
         </template>
-        <p v-if="displayedSections.length === 0" class="hint">No meetings today.</p>
+        <p v-if="displayedSections.length === 0" class="hint">{{ emptyListHint }}</p>
       </div>
 
       <!-- Floating bottom navigation -->
@@ -144,6 +148,7 @@
         :meeting-id="selectedItem?.id ?? null"
         @recording-change="recordingMeetingId = $event"
         @recording-active="recordingActive = $event"
+        @recording-phase="onRecorderPhase"
       />
     </section>
 
@@ -175,7 +180,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, timestampTitle, BACKEND_CHANGED_EVENT, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
@@ -203,6 +208,12 @@ const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const recording = ref(false);
+type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
+const recordingPhase = ref<RecorderPhase | null>(null);
+// Once a structured waveform heartbeat arrives, that window becomes the
+// lifecycle authority through upload/retry; native booleans only describe
+// capture and must not unlock a second recorder underneath it.
+const recorderOwnsLifecycle = ref(false);
 const leftPanelVisible = ref(true);
 const selectedItem = ref<MeetingListItem | null>(null);
 // Tracks the row the user intentionally selected; auto-load and recorder-driven
@@ -224,6 +235,12 @@ const recordingMeetingId = ref<string | null>(null);
 // True only while audio is actively being captured — gates the red dot so it
 // stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
 const recordingActive = ref(false);
+const recordingStarting = computed(
+  () =>
+    recording.value &&
+    !recordingActive.value &&
+    (recordingPhase.value === null || recordingPhase.value === 'starting'),
+);
 
 // The recorder strip is docked in the detail pane when an active recording's
 // meeting is the one on-screen (a recording with no home row shows anywhere).
@@ -237,13 +254,10 @@ const recorderStripVisible = computed(
 // detail or navigated to another meeting). The titlebar then shows a
 // "Recording" indicator instead of the Start button.
 const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
-// Disable "Start recording" only while the recorder strip is docked here (its
-// meeting is on-screen). This tracks the live strip — which clears the instant
-// recording ends — rather than the `recording` flag, which only resets on a
-// window refocus and would otherwise leave the button stuck disabled after a
-// stop. A redundant second start is harmless anyway: the backend just refocuses
-// the existing recorder window.
-const startDisabled = computed(() => recorderStripVisible.value);
+// A single waveform window owns capture, upload, and failed-upload recovery.
+// Keep every launcher disabled for that window's full lifetime so a second
+// click cannot race native creation or replace a recoverable failed session.
+const startDisabled = computed(() => recording.value || recorderStripVisible.value);
 // Ad-hoc meetings we recorded this session that the backend list doesn't surface
 // yet (e.g. "Record a new meeting" — created via /meeting-notes/audio, so it
 // isn't a calendar-scheduled meeting and never appears in listMeetings()). We
@@ -290,12 +304,18 @@ const displayMeetings = computed<MeetingListItem[]>(() => {
   ];
 });
 
+// The Meetings view is a history list — it stops at today, so it can come up
+// empty even when the backend returned only future (scheduled) meetings.
 const displayedSections = computed<MeetingSection[]>(() => {
   if (activeView.value === 'today') {
     return groupTodaysMeetings(displayMeetings.value, now.value);
   }
   return groupMeetingsByDate(displayMeetings.value, now.value);
 });
+
+const emptyListHint = computed(() =>
+  activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
+);
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
 // relative-time chip; it's the first item of the Today view's UPCOMING section.
@@ -430,6 +450,18 @@ function setRecording(next: boolean): void {
   recording.value = next;
 }
 
+function markRecordingStarting(): void {
+  recordingPhase.value = 'starting';
+  setRecording(true);
+}
+
+function clearRecordingLaunch(): void {
+  recorderOwnsLifecycle.value = false;
+  recordingActive.value = false;
+  recordingPhase.value = null;
+  setRecording(false);
+}
+
 // Bump per call so an older in-flight `listMeetings()` can't clobber a newer
 // reload (e.g. the recording://started fallback firing while the initial
 // onMounted load is still pending).
@@ -462,10 +494,9 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync tray after meeting list refresh', err);
     });
-    if (autoSelectFirst && !selectedItem.value && meetings.value.length > 0) {
-      await selectMeeting(displayedSections.value[0]?.items[0] ?? meetings.value[0], {
-        userSelected: false,
-      });
+    const firstVisible = displayedSections.value[0]?.items[0];
+    if (autoSelectFirst && !selectedItem.value && firstVisible) {
+      await selectMeeting(firstVisible, { userSelected: false });
     } else if (selectedItem.value) {
       selectedItem.value =
         meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
@@ -480,6 +511,13 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
 }
 
 async function onPendingUploaded(): Promise<void> {
+  // A still-open waveform window may be sitting on a stale "Upload failed" pill
+  // for the recording we just uploaded from the sidebar. Tell it to stand down
+  // so its failed pill (mirrored into the recorder strip) clears and no Retry
+  // can double-upload the buffer we already discarded.
+  await emit('pending-upload://succeeded').catch((e) =>
+    console.error('Failed to notify recorder of pending upload success', e),
+  );
   await loadMeetings();
 }
 
@@ -487,7 +525,15 @@ async function onPendingUploaded(): Promise<void> {
 async function refreshRecordingState(): Promise<void> {
   try {
     const wins = await getAllWebviewWindows();
-    setRecording(wins.some((w) => w.label === 'waveform'));
+    const hasRecorder = wins.some((w) => w.label === 'waveform');
+    if (hasRecorder) {
+      if (!recordingActive.value && recordingPhase.value === null) {
+        recordingPhase.value = 'starting';
+      }
+      setRecording(true);
+    } else {
+      clearRecordingLaunch();
+    }
   } catch (e) {
     console.error('Failed to read window state', e);
   }
@@ -516,8 +562,8 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
     // recorder so the eventual upload attaches to the selected meeting.
     const meetingId = backend.id === 'ariso' ? numericMeetingId(item) : undefined;
     if (meetingId != null) {
+      markRecordingStarting();
       await invoke('start_recording_window', { meetingId });
-      setRecording(true);
       return;
     }
     if (backend.usesMeetingPicker) {
@@ -526,9 +572,10 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
       await invoke('open_meeting_picker', {});
       return;
     }
+    markRecordingStarting();
     await invoke('start_recording_window', {});
-    setRecording(true);
   } catch (e) {
+    clearRecordingLaunch();
     console.error('Failed to start recording', e);
   }
 }
@@ -564,15 +611,16 @@ async function startRecording(): Promise<void> {
 
     if (plan.kind === 'local-new') {
       // Empty detail: force a brand-new recording, skipping the 5-minute auto-append.
+      markRecordingStarting();
       await invoke('start_recording_window', { forceNew: true });
-      setRecording(true);
       return;
     }
 
     // plan.kind === 'local-continue': a meeting is shown — keep the 5-minute auto-append.
+    markRecordingStarting();
     await invoke('start_recording_window', {});
-    setRecording(true);
   } catch (e) {
+    clearRecordingLaunch();
     console.error('Failed to start recording', e);
   }
 }
@@ -581,8 +629,62 @@ async function startRecording(): Promise<void> {
 // meeting id it was started against. Collapse the sidebar right away and pull
 // the picked meeting into the detail panel so the user sees what's recording.
 async function onRecordingStarted(event: { payload: { meetingId: number | null } }): Promise<void> {
-  setRecording(true);
+  markRecordingStarting();
   await selectRecordingMeeting(event.payload?.meetingId);
+}
+
+async function onRecorderPhase(phase: RecorderPhase | null): Promise<void> {
+  recordingPhase.value = phase;
+  if (phase === null) {
+    // A missing heartbeat means the waveform died without its final `closed`
+    // event; release the same lock that a clean shutdown would release.
+    clearRecordingLaunch();
+    return;
+  }
+
+  if (phase === 'closed') {
+    const hadRecordedMeeting = recordingMeetingId.value !== null;
+    clearRecordingLaunch();
+    // RecorderStrip clears recordingMeetingId immediately after this callback;
+    // its existing watcher owns the attached-meeting reload. Unattached Cloud
+    // recordings have no id transition, so refresh them here instead.
+    if (!hadRecordedMeeting) {
+      await Promise.all([loadMeetings(), pendingUploads.value?.refresh()]);
+    }
+    return;
+  }
+
+  recorderOwnsLifecycle.value = true;
+
+  const pendingWasMounted = leftPanelVisible.value;
+  if (phase === 'uploading' || phase === 'failed' || phase === 'success') {
+    // Capture is over, so bring the list back while the waveform window owns
+    // save/retry state. Keep `recording` true to prevent a second recording;
+    // remounting PendingUploads also performs a fresh initial read.
+    leftPanelVisible.value = true;
+    if (!pendingWasMounted) await nextTick();
+  }
+
+  if (phase === 'failed') {
+    if (pendingWasMounted) await pendingUploads.value?.refresh();
+  } else if (phase === 'success') {
+    await Promise.all([
+      loadMeetings(),
+      pendingWasMounted ? pendingUploads.value?.refresh() : Promise.resolve(),
+    ]);
+  }
+}
+
+function onNativeRecordingState(event: { payload: unknown }): void {
+  // Native creation emits a boolean before the waveform webview has mounted
+  // and can send rich heartbeats. That early signal powers instant feedback for
+  // tray and File-menu launches; object payloads are owned by RecorderStrip.
+  if (typeof event.payload !== 'boolean') return;
+  if (event.payload) {
+    if (!recorderOwnsLifecycle.value) markRecordingStarting();
+  } else if (!recorderOwnsLifecycle.value) {
+    clearRecordingLaunch();
+  }
 }
 
 // Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
@@ -721,6 +823,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
+let unlistenRecordingState: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
@@ -749,6 +852,9 @@ onMounted(() => {
   void refreshRecordingState();
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;
+  });
+  void listen('recording://state', onNativeRecordingState).then((un) => {
+    unlistenRecordingState = un;
   });
   // The floating recorder pill asks (on click) to surface the meeting it's
   // recording — re-dock the strip even if the user had navigated away.
@@ -796,6 +902,7 @@ onUnmounted(() => {
   window.removeEventListener('focus', onWindowFocus);
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
+  unlistenRecordingState?.();
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();
@@ -893,6 +1000,19 @@ onUnmounted(() => {
   cursor: default;
 }
 .add-btn:disabled:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: none; }
+.add-btn--starting {
+  min-width: 166px;
+}
+.start-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border: 2px solid #d6d6d6;
+  border-top-color: #1c1c1c;
+  border-radius: 50%;
+  animation: start-spin 0.8s linear infinite;
+}
+@keyframes start-spin { to { transform: rotate(360deg); } }
 /* Recording indicator: same pill, tinted red, pausing-glyph + "Recording". */
 .add-btn--recording {
   color: #c5352f;
@@ -1034,6 +1154,12 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Canceled meetings stay in the list (for context) but read as struck out,
+   matching how the web app renders a canceled meeting's title. */
+.mi-title--canceled {
+  text-decoration: line-through;
+  color: #8a8a8a;
 }
 .mi-rel { flex-shrink: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; color: #6f6f6f; }
 .mi-rel--now { color: #2e8b4f; }

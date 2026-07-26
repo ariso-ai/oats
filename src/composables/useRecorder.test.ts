@@ -5,6 +5,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // real mic data reached the encoder.  Hoisted so the mock factory can close
 // over it before any import resolves.
 const encodeCalls = vi.hoisted((): Int16Array[] => []);
+const platformCapabilities = vi.hoisted((): {
+  value: {
+    os: 'macos' | 'windows';
+    systemAudio: { supported: boolean; settingsUrl: string | null };
+  };
+} => ({
+  value: {
+    os: 'macos',
+    systemAudio: { supported: false, settingsUrl: null },
+  },
+}));
+const invoke = vi.hoisted(() => vi.fn(async () => undefined));
 
 // lamejs does real MP3 work we don't need here; stub the encoder.
 // encodeBuffer records its argument and returns a non-empty buffer so that
@@ -23,7 +35,7 @@ vi.mock('@breezystack/lamejs', () => ({
   },
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
 // Capture event listeners by name so tests can push synthetic events.
 const listeners: Record<string, (e: { payload: string }) => void> = {};
@@ -39,6 +51,9 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('../tauri', () => ({
   startMicrophoneCapture: vi.fn(async () => {}),
   stopMicrophoneCapture: vi.fn(async () => {}),
+}));
+vi.mock('./usePlatformCapabilities', () => ({
+  loadPlatformCapabilities: () => Promise.resolve(platformCapabilities.value),
 }));
 
 import { useRecorder } from './useRecorder';
@@ -104,16 +119,45 @@ beforeEach(() => {
   for (const k in listeners) delete listeners[k];
   encodeCalls.length = 0;
   vi.clearAllMocks();
+  platformCapabilities.value = {
+    os: 'macos',
+    systemAudio: { supported: false, settingsUrl: null },
+  };
+  Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(navigator, 'mediaDevices', {
+    configurable: true,
+    value: {
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [{ stop: vi.fn() }],
+      })),
+    },
+  });
   (globalThis as unknown as { AudioContext: unknown }).AudioContext =
     FakeAudioContext;
 });
 
 afterEach(() => {
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe('useRecorder duration', () => {
+  it('rejects system-only capture when it is unsupported', async () => {
+    const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
+    const rec = useRecorder();
+
+    await expect(rec.startRecording('system')).rejects.toThrow(
+      'System audio recording is not supported',
+    );
+
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(rec.isRecording.value).toBe(false);
+  });
+
   it('tracks wall-clock elapsed time even when interval ticks are throttled', async () => {
     // Fake only the interval; drive Date.now() ourselves to simulate the OS
     // throttling the recorder window's timer in the background.
@@ -210,5 +254,47 @@ describe('useRecorder mic native capture', () => {
     // Blob is also non-empty (encoder returned a byte).
     const blob = await rec.stopRecording();
     expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it('uses webview microphone capture on Windows', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
+    };
+    const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
+    const rec = useRecorder();
+
+    await rec.startRecording('mic');
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(startMicrophoneCapture).not.toHaveBeenCalled();
+    await rec.stopRecording();
+  });
+
+  it('initializes Windows microphone and system audio concurrently', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: true, settingsUrl: 'ms-settings:sound' },
+    };
+    let resolveMic!: (stream: MediaStream) => void;
+    const getUserMedia = vi.fn(
+      () => new Promise<MediaStream>((resolve) => { resolveMic = resolve; }),
+    );
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    const rec = useRecorder();
+
+    const starting = rec.startRecording('mic_and_system');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('start_system_audio_capture');
+
+    resolveMic({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    await starting;
+    await rec.stopRecording();
   });
 });

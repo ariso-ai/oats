@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -22,26 +22,47 @@ interface ApiResponse {
   data: unknown;
 }
 
+// Error emitted by the backend when a pending sign-in is canceled (user gave
+// up waiting on the browser). Views treat it as a silent cancel, not a failure.
+export const SIGN_IN_CANCELED_ERROR = 'Sign-in canceled';
+
 export const auth = {
   async googleSignIn(): Promise<{ success?: boolean; sessionToken?: string; error?: string }> {
-    // Listen for the OAuth result event before triggering the flow
+    let resolveResult: (result: SignInResult) => void;
     const resultPromise = new Promise<SignInResult>((resolve) => {
-      listen<SignInResult>('oauth-result', (event) => {
-        resolve(event.payload);
-      });
+      resolveResult = resolve;
     });
 
-    // Trigger the OAuth flow — opens a native webview window
-    const immediate = await invoke<SignInResult>('google_sign_in');
+    // Await listener setup before triggering the flow. The backend scopes
+    // its "oauth-result" emit to this webview (it carries the session
+    // token), so listen on the current webview window too. If setup fails,
+    // let it throw here rather than starting a sign-in that can never
+    // resolve resultPromise.
+    const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
+      'oauth-result',
+      (event) => {
+        resolveResult(event.payload);
+      }
+    );
 
-    // If the command itself returned an error (e.g. prepare-state failed), return it
-    if (immediate.error) {
-      return { error: immediate.error };
+    try {
+      // Trigger the OAuth flow — opens the sign-in page in the default browser
+      const immediate = await invoke<SignInResult>('google_sign_in');
+
+      // If the command itself returned an error (e.g. prepare-state failed), return it
+      if (immediate.error) {
+        return { error: immediate.error };
+      }
+
+      // Wait for the browser flow to hit the loopback callback and complete
+      return await resultPromise;
+    } finally {
+      unlisten();
     }
+  },
 
-    // Wait for the OAuth window flow to complete
-    const result = await resultPromise;
-    return result;
+  async cancelSignIn(): Promise<void> {
+    await invoke('cancel_google_sign_in');
   },
 
   async checkSession(): Promise<{ sessionToken: string } | null> {
@@ -101,6 +122,32 @@ export interface DesktopConfig {
 
 export async function getDesktopConfig(): Promise<DesktopConfig> {
   return invoke<DesktopConfig>('get_desktop_config');
+}
+
+/** Product-level OS vocabulary shared with Rust. It intentionally omits target
+ * architecture because feature decisions should not parse target triples. */
+export type PlatformOs = 'macos' | 'windows' | 'linux';
+
+/** Diagnostic identity of the native Local implementation. Frontend workflows
+ * branch on `supported`; they do not dispatch directly on this engine label. */
+export type LocalBackendEngine = 'swift-mlx' | 'cpp-sidecar' | null;
+
+/** Compile-time feature support reported by the native host. This does not
+ * represent OS permission state or whether local model files are installed. */
+export interface PlatformCapabilities {
+  os: PlatformOs;
+  localBackend: { supported: boolean; engine: LocalBackendEngine };
+  systemAudio: { supported: boolean; settingsUrl: string | null };
+  autoRecord: { supported: boolean };
+  nativeShare: { supported: boolean };
+  notificationSettingsUrl: string | null;
+  microphoneSettingsUrl: string | null;
+}
+
+/** Thin IPC boundary for callers that need the native source of truth. Caching
+ * and browser/test fallback policy live in `usePlatformCapabilities`. */
+export function getPlatformCapabilities(): Promise<PlatformCapabilities> {
+  return invoke<PlatformCapabilities>('platform_capabilities');
 }
 
 export interface ShareAnchor {
@@ -317,6 +364,10 @@ export const pending = {
   /** Concatenate the given buffers (chronological keys) into one mp3's bytes. */
   combine(createdAtKeys: string[]): Promise<ArrayBuffer> {
     return invoke<ArrayBuffer>('combine_pending_audio', { createdAtKeys });
+  },
+  /** Open `~/.ariso/pending-uploads` in Finder/Explorer, selecting this buffer. */
+  reveal(createdAt: string): Promise<void> {
+    return invoke('reveal_pending_upload', { createdAt });
   },
 };
 
