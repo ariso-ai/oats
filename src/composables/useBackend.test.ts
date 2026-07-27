@@ -18,6 +18,7 @@ const fetchMeetingAudio = vi.fn();
 const readRecordingAudio = vi.fn();
 const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
+const getMeetingPrepApi = vi.fn();
 
 vi.mock('../tauri', () => ({
   local: {
@@ -48,6 +49,7 @@ vi.mock('./useMeetingApi', () => ({
     updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
     getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
     deleteMeetingRecordingClip: (...a: unknown[]) => deleteMeetingRecordingClip(...a),
+    getMeetingPrep: (...a: unknown[]) => getMeetingPrepApi(...a),
   }),
 }));
 
@@ -591,5 +593,54 @@ describe('ArisoBackend.searchMeetings', () => {
         canceled: false,
       },
     ]);
+  });
+});
+
+describe('meeting prep plumbing', () => {
+  it('maps prep_id from list rows to prepId (number or numeric string)', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 1, title: 'A', start_at: '2026-07-01T09:00:00Z', prep_id: 4339 },
+      { id: 2, title: 'B', start_at: '2026-07-02T09:00:00Z', prep_id: '77' },
+      { id: 3, title: 'C', start_at: '2026-07-03T09:00:00Z' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(items.map((i) => i.prepId)).toEqual([4339, 77, undefined]);
+  });
+
+  it('ignores a non-numeric prep_id', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 1, title: 'A', start_at: '2026-07-01T09:00:00Z', prep_id: 'garbage' },
+      { id: 2, title: 'B', start_at: '2026-07-02T09:00:00Z', prep_id: '' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(items.map((i) => i.prepId)).toEqual([undefined, undefined]);
+  });
+
+  it('getMeetingDetail carries prepId from the list item', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Sync',
+      start_at: '2026-07-01T10:00:00Z',
+    });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Sync',
+      timestamp: '2026-07-01T10:00:00Z',
+      prepId: 4339,
+    });
+    expect(d.prepId).toBe(4339);
+  });
+
+  it('ArisoBackend.getMeetingPrep delegates to the API', async () => {
+    getMeetingPrepApi.mockResolvedValue({ content: '## md', meetingId: '45565' });
+    await expect(new ArisoBackend().getMeetingPrep(4339)).resolves.toEqual({
+      content: '## md',
+      meetingId: '45565',
+    });
+    expect(getMeetingPrepApi).toHaveBeenCalledWith(4339);
+  });
+
+  it('LocalBackend.getMeetingPrep always resolves null', async () => {
+    await expect(new LocalBackend().getMeetingPrep(4339)).resolves.toBeNull();
   });
 });

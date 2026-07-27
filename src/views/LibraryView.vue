@@ -225,6 +225,7 @@ const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
+  openPrepTab?: () => void;
 };
 const detailView = ref<MeetingDetailViewExposed | null>(null);
 const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
@@ -497,8 +498,16 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     if (autoSelectFirst && !selectedItem.value && firstVisible) {
       await selectMeeting(firstVisible, { userSelected: false });
     } else if (selectedItem.value) {
-      selectedItem.value =
-        meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
+      const current = selectedItem.value;
+      const fresh = meetings.value.find((m) => m.id === current.id);
+      // A row can predate its prep (prep_id lands on a later list), so carry a
+      // known prepId across the swap — losing it would drop the Prep tab from
+      // the open meeting.
+      selectedItem.value = !fresh
+        ? current
+        : current.prepId != null && fresh.prepId == null
+          ? { ...fresh, prepId: current.prepId }
+          : fresh;
     }
   } catch (e) {
     if (requestId !== loadMeetingsRequest) return;
@@ -724,6 +733,94 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
   if (m) await selectMeeting(m, { userSelected: false });
 }
 
+// A meeting-prep notification was clicked. The prep id is queued natively (the
+// click usually *creates* this window, so an event payload would arrive before
+// anything is listening) — claim it here, on mount and on the nudge event.
+async function openPendingMeetingPrep(): Promise<void> {
+  let prepId: number | null = null;
+  try {
+    prepId = await invoke<number | null>('take_pending_meeting_prep');
+  } catch (e) {
+    console.error('Failed to claim the pending meeting prep', e);
+    return;
+  }
+  if (prepId == null) return;
+  await openMeetingPrep(prepId);
+}
+
+// Surface the prep's meeting in the detail pane with its Prep tab active.
+async function openMeetingPrep(prepId: number): Promise<void> {
+  const byPrep = (): MeetingListItem | null =>
+    displayMeetings.value.find((x) => x.prepId === prepId) ?? null;
+  // The loaded list can predate the prep (rows carry prep_id), so reload before
+  // giving up on a match.
+  let m = byPrep();
+  if (!m) {
+    await loadMeetings();
+    m = byPrep();
+  }
+  if (!m) {
+    // Still nothing — the meeting may sit outside the loaded window. The prep
+    // itself knows which meeting it belongs to.
+    m = await meetingForPrep(prepId);
+  }
+  if (!m) {
+    console.warn('Meeting prep', prepId, 'has no meeting row to open');
+    return;
+  }
+  await selectMeeting(m, { userSelected: true });
+  // selectMeeting is a no-op when that row is already selected — swap in the
+  // resolved row anyway, so a prepId the selected row lacked reaches the pane.
+  if (selectedItem.value !== m && selectedItem.value?.id === m.id) selectedItem.value = m;
+  // The detail view mounts/loads asynchronously; it holds the request (keyed by
+  // meeting id) until that meeting has loaded.
+  await nextTick();
+  detailView.value?.openPrepTab?.(m.id);
+}
+
+// Fallback resolver: ask the backend which meeting a prep belongs to, then
+// produce a row for it — the loaded one when the list has it, otherwise a
+// pinned row fetched by id (the meeting can sit outside the loaded window).
+// Returns null when the prep or its meeting can't be resolved.
+async function meetingForPrep(prepId: number): Promise<MeetingListItem | null> {
+  try {
+    const backend = activeBackend.value ?? (await getActiveBackend());
+    const prep = await backend.getMeetingPrep(prepId);
+    if (!prep?.meetingId) return null;
+    const meetingId = prep.meetingId;
+    const loaded = displayMeetings.value.find((x) => x.id === meetingId);
+    // The row can predate the prep, so it may not carry prepId — without one
+    // the detail pane renders no Prep tab. The notification knows better.
+    if (loaded) return loaded.prepId === prepId ? loaded : { ...loaded, prepId };
+    return await pinPrepMeeting(meetingId, prepId);
+  } catch (e) {
+    console.error('Failed to resolve the meeting for prep', prepId, e);
+    return null;
+  }
+}
+
+// Fetch a prep's meeting by id and keep it in the sidebar (like an ad-hoc
+// recorded meeting) so a prep for a meeting outside the loaded window still has
+// a row to select. Returns null when the meeting can't be fetched.
+async function pinPrepMeeting(id: string, prepId: number): Promise<MeetingListItem | null> {
+  try {
+    const backend = activeBackend.value ?? (await getActiveBackend());
+    const detail = await backend.getMeetingDetail({ id, title: '', timestamp: new Date().toISOString() });
+    const row: MeetingListItem = {
+      id,
+      title: detail.title,
+      timestamp: detail.startAt,
+      endTimestamp: detail.endAt,
+      prepId,
+    };
+    pinnedMeetings.value = new Map(pinnedMeetings.value).set(id, row);
+    return row;
+  } catch (e) {
+    console.error('Failed to fetch the meeting for prep', prepId, e);
+    return null;
+  }
+}
+
 // Keep the detail panel on the recorded meeting: surface its row when the
 // strip reports a recording (the synthetic row for local, the scheduled row
 // for Ariso), and reload when it ends so the finalized local recording
@@ -770,6 +867,7 @@ let unlistenRecordingState: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
+let unlistenPrepOpen: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -786,7 +884,11 @@ async function recoverActiveRecording(): Promise<void> {
 }
 
 onMounted(() => {
-  void loadMeetings(true).then(() => recoverActiveRecording());
+  void loadMeetings(true)
+    .then(() => recoverActiveRecording())
+    // A prep notification click that opened this window queued its prep before
+    // any listener existed; claim it once the list is up.
+    .then(() => openPendingMeetingPrep());
   void refreshRecordingState();
   void listen('recording://started', onRecordingStarted).then((un) => {
     unlistenRecordingStarted = un;
@@ -822,6 +924,12 @@ onMounted(() => {
   }).then((un) => {
     unlistenBackendChanged = un;
   });
+  // Prep notification clicked while this window was already open.
+  void listen('meeting-prep://open', () => {
+    void openPendingMeetingPrep();
+  }).then((un) => {
+    unlistenPrepOpen = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
@@ -838,6 +946,7 @@ onUnmounted(() => {
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();
+  unlistenPrepOpen?.();
 });
 </script>
 

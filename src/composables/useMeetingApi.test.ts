@@ -108,3 +108,67 @@ describe('multi-clip', () => {
     ]);
   });
 });
+
+describe('useMeetingApi.getMeetingPrep', () => {
+  it('GETs /meeting-preps/{id} and resolves the content plus its meeting', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { meetingPrep: { id: 4339, meeting_id: '45565', content: '## Open items' } },
+    });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toEqual({
+      content: '## Open items',
+      meetingId: '45565',
+    });
+    expect(apiRequest).toHaveBeenCalledWith('GET', '/meeting-preps/4339');
+  });
+
+  it('accepts a numeric meeting_id', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { meetingPrep: { id: 4339, meeting_id: 45565, content: '## Open items' } },
+    });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toEqual({
+      content: '## Open items',
+      meetingId: '45565',
+    });
+  });
+
+  it('resolves null on 404 (no prep)', async () => {
+    apiRequest.mockResolvedValue({ status: 404, data: null });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toBeNull();
+  });
+
+  it('resolves null content when it is missing or blank', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { meetingPrep: { id: 4339, meeting_id: '1' } } });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toEqual({
+      content: null,
+      meetingId: '1',
+    });
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { meetingPrep: { id: 4339, meeting_id: '1', content: '   ' } },
+    });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toEqual({
+      content: null,
+      meetingId: '1',
+    });
+  });
+
+  it('resolves null meetingId when meeting_id is missing or unusable', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: { meetingPrep: { id: 4339, content: 'x' } } });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toEqual({
+      content: 'x',
+      meetingId: null,
+    });
+  });
+
+  it('resolves null when the payload has no meetingPrep', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: {} });
+    await expect(useMeetingApi().getMeetingPrep(4339)).resolves.toBeNull();
+  });
+
+  it('throws the server error on other non-200 statuses', async () => {
+    apiRequest.mockResolvedValue({ status: 500, data: { error: 'boom' } });
+    await expect(useMeetingApi().getMeetingPrep(4339)).rejects.toThrow('boom');
+  });
+});

@@ -5,6 +5,7 @@ import {
   type MeetingSearchResult,
   type TranscriptChunk,
   type MeetingAudioClip,
+  type MeetingPrep,
 } from './useMeetingApi';
 import { arisoTruthy } from './autoJoin';
 import { isCanceledMeetingStatus } from './meetingStatus';
@@ -59,6 +60,8 @@ export interface MeetingListItem {
   matchedText?: string | null;
   /** Ariso scheduled meetings: Ari is set to auto-join and record server-side. */
   autoJoinScheduled?: boolean;
+  /** Ariso: id of this meeting's prep, when one exists (from the list row). */
+  prepId?: number;
   /** Ariso: the meeting was canceled (its calendar event was deleted/canceled).
    *  Rows stay in the list but are struck through. */
   canceled?: boolean;
@@ -110,6 +113,9 @@ export interface MeetingDetail {
   meetingType?: string;
   /** Ariso: Ari is scheduled to auto-join and record this meeting server-side. */
   autoJoinScheduled?: boolean;
+  /** Ariso: id of this meeting's prep, when one exists (carried from the list
+   *  row — /meeting-notes/:id does not include it). */
+  prepId?: number;
   /** Ariso: the meeting was canceled — the detail panel marks it with a chip
    *  and suppresses the "Ari will join" tag. */
   canceled?: boolean;
@@ -150,6 +156,10 @@ export interface Backend {
   getMeetingTranscript(item: MeetingListItem): Promise<string | TranscriptChunk[] | null>;
   /** Lazily load the requester's individual note (null when none). */
   getIndividualNote(item: MeetingListItem): Promise<{ content: string; title: string | null } | null>;
+  /** Fetch a meeting prep (markdown content + the meeting it belongs to); null
+   *  when absent. Only Ariso meetings ever carry a prepId, so the local backend
+   *  always resolves null. */
+  getMeetingPrep(prepId: number): Promise<MeetingPrep | null>;
   /** Rename a meeting. Ariso PATCHes the meeting-notes endpoint; local
    *  rewrites the title in the recording's meta.json. */
   renameMeeting(id: string, title: string): Promise<void>;
@@ -223,6 +233,9 @@ function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): Me
   };
   if ('snippet' in m && m.snippet) item.snippet = m.snippet;
   if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
+  // prep_id may arrive as a number or numeric string; anything else is ignored.
+  const prep = Number(m.prep_id);
+  if (m.prep_id != null && m.prep_id !== '' && Number.isFinite(prep)) item.prepId = prep;
   return item;
 }
 
@@ -358,6 +371,7 @@ export class ArisoBackend implements Backend {
       hasIndividualNote: !!data.individual_note?.content,
       isLocal: false,
       autoJoinScheduled: item.autoJoinScheduled ?? false,
+      prepId: item.prepId,
       // The notes payload carries the authoritative status; fall back to the
       // list row when it's absent so a canceled row stays marked once opened.
       canceled: data.status != null ? isCanceledMeetingStatus(data.status) : !!item.canceled,
@@ -375,6 +389,11 @@ export class ArisoBackend implements Backend {
   ): Promise<{ content: string; title: string | null } | null> {
     const { getMeetingIndividualNote } = useMeetingApi();
     return getMeetingIndividualNote(item.id);
+  }
+
+  async getMeetingPrep(prepId: number): Promise<MeetingPrep | null> {
+    const { getMeetingPrep } = useMeetingApi();
+    return getMeetingPrep(prepId);
   }
 
   async renameMeeting(id: string, title: string): Promise<void> {
@@ -483,6 +502,10 @@ export class LocalBackend implements Backend {
   // Local recordings have no per-user individual note.
   async getIndividualNote(): Promise<{ content: string; title: string | null } | null> {
     return null;
+  }
+
+  async getMeetingPrep(): Promise<MeetingPrep | null> {
+    return null; // local recordings never have meeting preps
   }
 
   async renameMeeting(id: string, title: string): Promise<void> {
