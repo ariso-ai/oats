@@ -498,8 +498,16 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     if (autoSelectFirst && !selectedItem.value && firstVisible) {
       await selectMeeting(firstVisible, { userSelected: false });
     } else if (selectedItem.value) {
-      selectedItem.value =
-        meetings.value.find((m) => m.id === selectedItem.value?.id) ?? selectedItem.value;
+      const current = selectedItem.value;
+      const fresh = meetings.value.find((m) => m.id === current.id);
+      // A row can predate its prep (prep_id lands on a later list), so carry a
+      // known prepId across the swap — losing it would drop the Prep tab from
+      // the open meeting.
+      selectedItem.value = !fresh
+        ? current
+        : current.prepId != null && fresh.prepId == null
+          ? { ...fresh, prepId: current.prepId }
+          : fresh;
     }
   } catch (e) {
     if (requestId !== loadMeetingsRequest) return;
@@ -761,22 +769,54 @@ async function openMeetingPrep(prepId: number): Promise<void> {
     return;
   }
   await selectMeeting(m, { userSelected: true });
-  // The detail view mounts/loads asynchronously; it holds the request until the
-  // meeting has loaded.
+  // selectMeeting is a no-op when that row is already selected — swap in the
+  // resolved row anyway, so a prepId the selected row lacked reaches the pane.
+  if (selectedItem.value !== m && selectedItem.value?.id === m.id) selectedItem.value = m;
+  // The detail view mounts/loads asynchronously; it holds the request (keyed by
+  // meeting id) until that meeting has loaded.
   await nextTick();
-  detailView.value?.openPrepTab?.();
+  detailView.value?.openPrepTab?.(m.id);
 }
 
-// Fallback resolver: ask the backend which meeting a prep belongs to, then find
-// that row. Returns null when the prep or its row can't be resolved.
+// Fallback resolver: ask the backend which meeting a prep belongs to, then
+// produce a row for it — the loaded one when the list has it, otherwise a
+// pinned row fetched by id (the meeting can sit outside the loaded window).
+// Returns null when the prep or its meeting can't be resolved.
 async function meetingForPrep(prepId: number): Promise<MeetingListItem | null> {
   try {
     const backend = activeBackend.value ?? (await getActiveBackend());
     const prep = await backend.getMeetingPrep(prepId);
     if (!prep?.meetingId) return null;
-    return displayMeetings.value.find((x) => x.id === prep.meetingId) ?? null;
+    const meetingId = prep.meetingId;
+    const loaded = displayMeetings.value.find((x) => x.id === meetingId);
+    // The row can predate the prep, so it may not carry prepId — without one
+    // the detail pane renders no Prep tab. The notification knows better.
+    if (loaded) return loaded.prepId === prepId ? loaded : { ...loaded, prepId };
+    return await pinPrepMeeting(meetingId, prepId);
   } catch (e) {
     console.error('Failed to resolve the meeting for prep', prepId, e);
+    return null;
+  }
+}
+
+// Fetch a prep's meeting by id and keep it in the sidebar (like an ad-hoc
+// recorded meeting) so a prep for a meeting outside the loaded window still has
+// a row to select. Returns null when the meeting can't be fetched.
+async function pinPrepMeeting(id: string, prepId: number): Promise<MeetingListItem | null> {
+  try {
+    const backend = activeBackend.value ?? (await getActiveBackend());
+    const detail = await backend.getMeetingDetail({ id, title: '', timestamp: new Date().toISOString() });
+    const row: MeetingListItem = {
+      id,
+      title: detail.title,
+      timestamp: detail.startAt,
+      endTimestamp: detail.endAt,
+      prepId,
+    };
+    pinnedMeetings.value = new Map(pinnedMeetings.value).set(id, row);
+    return row;
+  } catch (e) {
+    console.error('Failed to fetch the meeting for prep', prepId, e);
     return null;
   }
 }

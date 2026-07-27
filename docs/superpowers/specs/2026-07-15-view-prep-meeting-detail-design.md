@@ -108,8 +108,15 @@ path changes and the Prep tab can never render for a local meeting.
   existing `reqId` pattern so a stale response can't land on the wrong meeting.
 - The tab is only the *default* tab when nothing else has content
   (`firstTabFor`), so opening a meeting normally still lands on AI Notes.
-- `openPrepTab()` is exposed for the notification path. When the detail is still
-  loading it sets a pending flag that `load()` applies once the tabs exist.
+- `openPrepTab(meetingId)` is exposed for the notification path. The request
+  races the detail load the Library's selection just started, so it is **keyed
+  by meeting id**, not a bare flag: it is answered from `detail` only when that
+  detail is the wanted meeting's (mid-switch it still holds the *previous*
+  meeting's, Prep tab and all), otherwise it is held as a pending id that
+  `load()` applies once the tabs exist — and `load()`'s state reset keeps a
+  pending id that names the meeting it is loading. Either landing order works.
+- The detail reloads when `item.prepId` changes (it is carried from the row), so
+  a row that gains a prep id after the list loaded grows its Prep tab.
 
 Links inside the prep markdown (e.g. "Previous meeting note") behave exactly
 like links in AI Notes today — no new URL-opening surface is introduced.
@@ -134,11 +141,17 @@ Resolving the prep to a row:
 
 1. match a loaded row on `prepId`;
 2. if none, `loadMeetings()` and retry — the list can predate the prep;
-3. if still none, fall back to `getMeetingPrep(prepId).meetingId` and match by
-   row id (covers a meeting outside the loaded window);
-4. if still none, log and leave the pane untouched.
+3. if still none, fall back to `getMeetingPrep(prepId).meetingId`: match a
+   loaded row by id (patching the known `prepId` onto it, since a row that
+   predates the prep carries none and would render no Prep tab), otherwise fetch
+   that meeting by id and **pin** it the way an ad-hoc recorded meeting is
+   pinned — this is what covers a meeting outside the loaded window;
+4. if still none (no `meeting_id`, or the meeting can't be fetched), log and
+   leave the pane untouched.
 
-Then select the row and call the detail view's `openPrepTab()`.
+Then select the row — replacing the selected item when the same row was already
+selected, so a patched `prepId` reaches the pane — and call the detail view's
+`openPrepTab(meetingId)`.
 
 In dev / unsigned builds UNC is unavailable and the notification falls back to
 the Tauri plugin, which exposes no click handling — the in-app landing only
@@ -160,9 +173,15 @@ works in a Developer-ID-signed bundle. Unchanged from the previous behavior.
 - `MeetingDetailView.test.ts` — no Prep tab without `prepId`; tab order places
   Prep after My Notes; the tab fetches once and renders markdown; switching tabs
   leaves the pane; `openPrepTab` activates it; null / empty / error states.
+  Race coverage: a request that lands while the meeting is still loading, one
+  that lands while a pending note save delays that load's reset, and a stale
+  request naming the previously selected meeting (ignored).
 - `LibraryView.test.ts` — claims a queued prep on mount and opens the meeting's
-  Prep tab; the `meeting_id` fallback; the `meeting-prep://open` event path;
-  no-op when nothing is queued or the prep maps to no known row.
+  Prep tab (passing the meeting id); the `meeting_id` fallback; the prep id
+  patched onto a row that predates the prep; pinning a meeting outside the
+  loaded list; the `meeting-prep://open` event path; no-op when nothing is
+  queued or the prep's meeting can't be reached; the row is highlighted in the
+  sidebar; plus one end-to-end pass with the real detail view mounted.
 
 (Heavy view test files: run in isolation per repo convention.)
 

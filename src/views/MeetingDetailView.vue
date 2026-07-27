@@ -595,24 +595,37 @@ const prepLoaded = ref(false);
 const loadingPrep = ref(false);
 const prepError = ref<string | null>(null);
 
-// Set when a prep-ready notification asks for this meeting's prep before the
-// detail has finished loading; `load` applies it once the tabs exist.
-let pendingPrepOpen = false;
+// The meeting a prep-ready notification asked to open. Keyed by meeting id (not
+// a bare flag) because the request races the load the Library's selection just
+// started: it can land either side of that load's state reset, and either side
+// must reach the right meeting.
+//
+// It is a standing request, not a one-shot: the same meeting can reload right
+// after it lands (a list refresh swaps the selected row for a freshly-fetched
+// one), and that reload must not drop the user back on the content default.
+// It ends when another meeting is selected or the user picks a tab.
+let pendingPrepMeetingId: string | null = null;
 
 /** Activate the Prep tab (the notification click target). Called by the Library
- *  after it selects the prep's meeting — possibly while the detail is still
- *  loading, hence the pending flag. */
-function openPrepTab(): void {
-  if (detail.value?.prepId != null) {
+ *  right after it selects the prep's meeting, so the detail is usually still
+ *  loading — hence the pending id. `meetingId` identifies the meeting the prep
+ *  belongs to; omitting it targets the current selection. */
+function openPrepTab(meetingId?: string): void {
+  const wanted = meetingId ?? props.item?.id ?? null;
+  pendingPrepMeetingId = wanted;
+  // Answer from `detail` only when it is the wanted meeting's — mid-switch it
+  // still holds the *previous* meeting's detail (and its Prep tab). Otherwise
+  // `load` applies the request once the tabs exist.
+  if (wanted != null && detail.value?.id === wanted && detail.value.prepId != null) {
     activeTab.value = 'prep';
-    pendingPrepOpen = false;
-    return;
   }
-  pendingPrepOpen = true;
 }
 
 function onTabClick(t: { key: TabKey; disabled?: boolean }): void {
   if (t.disabled) return;
+  // An explicit tab choice outranks a pending prep request, so a later reload
+  // of this meeting can't yank the user back to Prep.
+  pendingPrepMeetingId = null;
   activeTab.value = t.key;
 }
 
@@ -808,7 +821,11 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
   activeClipId.value = null;
-  pendingPrepOpen = false;
+  // Keep a prep request that names the meeting being loaded — the Library
+  // issues it while this load is in flight — and drop one for any other.
+  if (pendingPrepMeetingId !== null && pendingPrepMeetingId !== item?.id) {
+    pendingPrepMeetingId = null;
+  }
   prepContent.value = null;
   prepLoaded.value = false;
   loadingPrep.value = false;
@@ -839,11 +856,10 @@ async function load(item: MeetingListItem | null): Promise<void> {
     detail.value = d;
     detailBackend = backend;
     activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
-    // A prep-ready notification that landed while this was loading wins over
-    // the content-driven default.
+    // A prep-ready notification for this meeting wins over the content-driven
+    // default — on this load and on any reload until the user picks a tab.
     activeTab.value =
-      pendingPrepOpen && d.prepId != null ? 'prep' : firstTabFor(d, item);
-    pendingPrepOpen = false;
+      pendingPrepMeetingId === item.id && d.prepId != null ? 'prep' : firstTabFor(d, item);
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
     }
@@ -868,6 +884,9 @@ watch(
     props.item?.timestamp,
     props.item?.durationSeconds,
     props.item?.files?.hasTranscript,
+    // The detail carries prepId from the row, so a row that gains one (a prep
+    // created after the list loaded) must reload for its Prep tab to appear.
+    props.item?.prepId,
   ],
   () => load(props.item),
   { immediate: true }

@@ -103,11 +103,11 @@ const detailStub = {
   emits: ['close', 'title-updated'],
   props: ['item'],
   methods: {
-    openPrepTab: () => openPrepTab(),
+    openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
     saveNotesNow: () => Promise.resolve(),
   },
   template:
-    '<div class="detail-stub" :data-meeting="item?.id"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
+    '<div class="detail-stub" :data-meeting="item?.id" :data-prep="item?.prepId"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
 };
 function mountWithDetailStub() {
   return mount(LibraryView, { global: { stubs: { MeetingDetailView: detailStub } } });
@@ -1421,6 +1421,9 @@ describe('LibraryView meeting-prep notification', () => {
     await flushPromises();
 
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    // The detail view needs the meeting the prep belongs to, so a request that
+    // lands mid-load can't be answered by the previous meeting's pane.
+    expect(openPrepTab).toHaveBeenCalledWith('45565');
     expect(openPrepTab).toHaveBeenCalledTimes(1);
   });
 
@@ -1465,11 +1468,119 @@ describe('LibraryView meeting-prep notification', () => {
     expect(openPrepTab).not.toHaveBeenCalled();
   });
 
-  it('leaves the pane alone when the prep resolves to no known meeting', async () => {
+  it('carries the prep id onto a loaded row that predates the prep', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '45565', title: 'Standup', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '45565' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    // Without a prepId on the row the detail pane would render no Prep tab at
+    // all — the notification already told us which prep this is.
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+  });
+
+  it('pins and opens a prep whose meeting is outside the loaded list', async () => {
     backendId.mockReturnValue('ariso');
     invokeWith(5145);
     listMeetings.mockResolvedValue([item({ id: '1', title: 'Other', files: undefined })]);
     getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '99999' });
+    getMeetingDetail.mockImplementation((meeting) =>
+      Promise.resolve({
+        id: meeting.id,
+        title: 'Quarterly review',
+        startAt: '2026-06-09T15:00:00Z',
+        endAt: '2026-06-09T16:00:00Z',
+        participants: [],
+        actionItems: [],
+        audioClips: [],
+        isLocal: false,
+      })
+    );
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('99999');
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+    expect(openPrepTab).toHaveBeenCalledWith('99999');
+  });
+
+  // The tests above stub the detail pane; this one drives the real one, so the
+  // hand-off (select the row → activate its Prep tab) is covered end to end.
+  it('lands on the real detail view with the Prep tab showing the prep', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([
+      item({ id: '1', title: 'Other', files: undefined }),
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    getMeetingDetail.mockImplementation((meeting) =>
+      Promise.resolve({
+        id: meeting.id,
+        title: meeting.title,
+        startAt: meeting.timestamp,
+        participants: [],
+        actionItems: [],
+        audioClips: [],
+        isLocal: false,
+        digest: '## AI notes',
+        prepId: meeting.prepId,
+      })
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Talking points', meetingId: '45565' });
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    expect(wrapper.find('.head-title').text()).toBe('Standup');
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+    expect(wrapper.find('.prep-pane').text()).toContain('Talking points');
+  });
+
+  it('highlights the prep\'s row in the sidebar, not just the detail pane', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    // A prep lands shortly before its meeting starts. Pinned clock so "later
+    // today" stays today in whatever timezone the suite runs in.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-06-02T12:00:00Z'));
+    listMeetings.mockResolvedValue([
+      item({ id: '1', title: 'Yesterday standup', timestamp: '2026-06-01T10:00:00Z', files: undefined }),
+      item({ id: '45565', title: 'Standup', timestamp: '2026-06-02T13:00:00Z', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    const selected = wrapper.findAll('.meeting-item').filter((r) => r.classes('selected'));
+    expect(selected).toHaveLength(1);
+    expect(selected[0].text()).toContain('Standup');
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+  });
+
+  it('keeps the prep id on the selected row across a list refresh', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '45565', title: 'Standup', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '45565' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+
+    // Focusing the window (which a notification click does) refreshes the list;
+    // the fresh row predates the prep and carries no prep_id.
+    window.dispatchEvent(new Event('focus'));
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+  });
+
+  it('leaves the pane alone when the prep resolves to no reachable meeting', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '1', title: 'Other', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '99999' });
+    getMeetingDetail.mockRejectedValue(new Error('404'));
     const wrapper = mountWithDetailStub();
     await flushPromises();
 

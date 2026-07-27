@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises, type VueWrapper, type DOMWrapper } from '@vue/test-utils';
+import { nextTick } from 'vue';
 import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 
 const getMeetingDetail = vi.fn();
@@ -1168,6 +1169,132 @@ describe('MeetingDetailView meeting prep', () => {
 
     expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
     expect(wrapper.find('.prep-pane').text()).toContain('From the notification');
+  });
+
+  // The Library selects the prep's row and asks for the Prep tab one tick
+  // later — that request races the detail load the selection just started.
+  async function selectThenOpenPrep(
+    wrapper: VueWrapper,
+    next: MeetingListItem,
+    requestedId: string
+  ): Promise<void> {
+    void wrapper.setProps({ item: next });
+    await nextTick();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab(requestedId);
+    await flushPromises();
+  }
+
+  it('opens Prep on a meeting whose detail is still loading', async () => {
+    // The previously loaded meeting carries a prep of its own, so its stale
+    // detail must not answer a request meant for the incoming meeting.
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '7', prepId: 11, digest: 'D' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+
+    getMeetingPrep.mockResolvedValue({ content: '## Next prep', meetingId: '8' });
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '8', prepId: 4339, digest: 'D' }));
+    await selectThenOpenPrep(
+      wrapper,
+      { id: '8', title: 'Next', timestamp: '2026-06-03T10:00:00Z' },
+      '8'
+    );
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+    expect(wrapper.find('.prep-pane').text()).toContain('Next prep');
+  });
+
+  it('opens Prep even when a pending note save delays the meeting switch', async () => {
+    // `load` flushes a dirty draft before resetting its state, so the reset can
+    // land *after* the Library has already asked for the Prep tab.
+    notesCanEdit.mockReturnValue(true);
+    getMeetingDetail.mockImplementation((m: MeetingListItem) =>
+      Promise.resolve(detail({ id: m.id, prepId: m.id === '8' ? 4339 : 11, digest: 'D' }))
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Next prep', meetingId: '8' });
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    // Autosave only arms once the personal note has loaded, i.e. after its tab
+    // has been opened — that is what leaves a dirty draft behind.
+    await wrapper.findAll('.seg-btn').filter((b) => b.text() === 'My Notes')[0].trigger('click');
+    await flushPromises();
+    wrapper.findComponent(MeetingNotesEditor).vm.$emit('update:modelValue', 'draft');
+    await flushPromises();
+
+    let resolveSave: (() => void) | null = null;
+    saveNote.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        })
+    );
+
+    void wrapper.setProps({ item: { id: '8', title: 'Next', timestamp: '2026-06-03T10:00:00Z' } });
+    await nextTick();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab('8');
+    resolveSave?.();
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+  });
+
+  it('stays on Prep when the same meeting reloads under it', async () => {
+    // A list refresh swaps the selected row for the freshly-fetched one, which
+    // reloads the detail. The prep request must survive that reload.
+    getMeetingDetail.mockImplementation((m: MeetingListItem) =>
+      Promise.resolve(detail({ id: m.id, prepId: 4339, digest: 'D', hasIndividualNote: true }))
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Talking points', meetingId: '7' });
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab('7');
+    await flushPromises();
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+
+    // Same meeting, fresh row object (a slightly different timestamp is enough
+    // to retrigger the load).
+    await wrapper.setProps({ item: { ...item, timestamp: '2026-06-02T10:00:01Z' } });
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+  });
+
+  it('drops the prep request once the user picks another tab', async () => {
+    getMeetingDetail.mockImplementation((m: MeetingListItem) =>
+      Promise.resolve(detail({ id: m.id, prepId: 4339, digest: 'D', hasIndividualNote: true }))
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Talking points', meetingId: '7' });
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab('7');
+    await flushPromises();
+
+    await wrapper.findAll('.seg-btn').filter((b) => b.text() === 'My Notes')[0].trigger('click');
+    await flushPromises();
+    await wrapper.setProps({ item: { ...item, timestamp: '2026-06-02T10:00:01Z' } });
+    await flushPromises();
+
+    // The user's choice outranks the notification — a reload must not yank them
+    // back to Prep.
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+  });
+
+  it('ignores a prep request aimed at a meeting that is no longer selected', async () => {
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '7', prepId: 11, digest: 'D' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '8', prepId: 4339, digest: 'D' }));
+    await selectThenOpenPrep(
+      wrapper,
+      { id: '8', title: 'Next', timestamp: '2026-06-03T10:00:00Z' },
+      '7'
+    );
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
   });
 
   it('shows an empty state when the prep API resolves null', async () => {
