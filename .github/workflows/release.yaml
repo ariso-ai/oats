@@ -300,6 +300,7 @@ jobs:
           $signer = (Resolve-Path scripts/sign-windows-artifact.ps1).Path
           $configPath = Join-Path $env:RUNNER_TEMP "tauri.windows-release.json"
           $auditPath = Join-Path $env:RUNNER_TEMP "oats-windows-signing-audit.jsonl"
+          $diagnosticPath = Join-Path $env:RUNNER_TEMP "oats-windows-signing-diagnostic.log"
           $config = [ordered]@{
             bundle = [ordered]@{
               targets = @("nsis")
@@ -324,6 +325,7 @@ jobs:
           $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configPath -Encoding utf8
           "TAURI_WINDOWS_RELEASE_CONFIG=$configPath" >> $env:GITHUB_ENV
           "OATS_SIGNING_AUDIT_PATH=$auditPath" >> $env:GITHUB_ENV
+          "OATS_SIGNING_DIAGNOSTIC_PATH=$diagnosticPath" >> $env:GITHUB_ENV
 
       - name: Build and Authenticode-sign x64 NSIS installer
         shell: pwsh
@@ -337,6 +339,16 @@ jobs:
             -Bundles nsis `
             -Target x86_64-pc-windows-msvc `
             -TauriConfig $env:TAURI_WINDOWS_RELEASE_CONFIG
+
+      - name: Show secret-scrubbed signing diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH) {
+            Get-Content -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH
+          } else {
+            Write-Output "The signer produced no safe diagnostic record."
+          }
 
       - name: Verify final installer and installed Authenticode payloads
         shell: pwsh

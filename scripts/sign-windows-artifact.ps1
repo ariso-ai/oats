@@ -14,6 +14,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Write-SafeSigningDiagnostic {
+  param([Parameter(Mandatory = $true)][string]$Message)
+
+  if ($env:OATS_SIGNING_DIAGNOSTIC_PATH) {
+    $diagnosticPath = [System.IO.Path]::GetFullPath($env:OATS_SIGNING_DIAGNOSTIC_PATH)
+    $diagnosticDirectory = Split-Path -Parent $diagnosticPath
+    if ($diagnosticDirectory) {
+      New-Item -ItemType Directory -Force -Path $diagnosticDirectory | Out-Null
+    }
+    Add-Content -LiteralPath $diagnosticPath -Value $Message -Encoding utf8
+  }
+}
+
 $requiredEnvironment = @(
   "CODE_SIGN_TOOL_PATH",
   "ES_USERNAME",
@@ -75,9 +88,12 @@ $arguments = @(
 # the assembled command, which includes all eSigner credentials.
 $providerOutput = @()
 $providerExitCode = -1
+$providerInvocationError = $null
 try {
   $providerOutput = @(& $java @arguments 2>&1)
   $providerExitCode = $LASTEXITCODE
+} catch {
+  $providerInvocationError = $_.Exception.Message
 } finally {
   # CodeSignTool may persist verbose command logs beside its jar. The hosted
   # runner is ephemeral, but remove them immediately so credentials cannot be
@@ -89,12 +105,33 @@ try {
 }
 $providerText = ($providerOutput | ForEach-Object { $_.ToString() }) -join "`n"
 $providerFailure = $providerText -match "(?im)Error|Exception|Missing required option|Unmatched argument"
-if ($providerExitCode -ne 0 -or $providerFailure) {
+if ($providerInvocationError -or $providerExitCode -ne 0 -or $providerFailure) {
+  $safeProviderText = "$providerInvocationError`n$providerText"
+  foreach ($secretName in @("ES_USERNAME", "ES_PASSWORD", "ES_CREDENTIAL_ID", "ES_TOTP_SECRET")) {
+    $secretValue = [Environment]::GetEnvironmentVariable($secretName)
+    if (-not [string]::IsNullOrEmpty($secretValue)) {
+      $safeProviderText = $safeProviderText -replace [regex]::Escape($secretValue), "***"
+    }
+  }
+  $safeProviderLines = @(
+    $safeProviderText -split "\r?\n" |
+      Where-Object {
+        $_ -notmatch "(?i)(?:^|\s)-(?:username|password|credential_id|totp_secret)="
+      } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Select-Object -First 20
+  )
+  $safeProviderSummary = (($safeProviderLines -join " | ").Trim()).Substring(
+    0,
+    [Math]::Min(2000, ($safeProviderLines -join " | ").Trim().Length)
+  )
+  Write-SafeSigningDiagnostic "Provider failure for $([System.IO.Path]::GetFileName($artifact)) (exit $providerExitCode): $safeProviderSummary"
   throw "SSL.com eSigner failed for $([System.IO.Path]::GetFileName($artifact)) (exit $providerExitCode). Provider output was suppressed to protect release secrets."
 }
 
 $signature = Get-AuthenticodeSignature -LiteralPath $artifact
 if ($signature.SignatureType -ne "Authenticode" -or $signature.Status -ne "Valid") {
+  Write-SafeSigningDiagnostic "Authenticode validation failed for $([System.IO.Path]::GetFileName($artifact)): type=$($signature.SignatureType), status=$($signature.Status), message=$($signature.StatusMessage)"
   throw "eSigner returned without a valid Authenticode signature for $([System.IO.Path]::GetFileName($artifact)): $($signature.Status)"
 }
 
