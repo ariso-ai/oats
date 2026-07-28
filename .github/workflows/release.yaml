@@ -339,6 +339,7 @@ jobs:
       - name: Build unsigned Windows release target
         shell: pwsh
         run: |
+          npm run vite:build
           . ./scripts/import-windows-build-env.ps1
           Import-WindowsBuildEnvironment
           cargo build `
