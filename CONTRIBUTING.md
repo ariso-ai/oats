@@ -192,14 +192,16 @@ Use these prefixes so the changelog and version bumps stay accurate.
 Two workflows validate and package the desktop targets:
 
 - **`Desktop App`** — CI validation. Its `macos-15` and `windows-latest` matrix builds the frontend, platform sidecar, and Tauri host without exposing signing secrets.
-- **`release`** — the release pipeline on push to `main`: macOS packaging runs on Apple Silicon and publishes the signed macOS updater (see [Cutting a release](#cutting-a-release)). Windows publication is temporarily disabled.
+- **`release`** — the release pipeline on push to `main`: macOS packages on Apple Silicon, Windows packages on `windows-latest`, and both signed updater payloads are published together (see [Cutting a release](#cutting-a-release)).
 
-| Job              | Runs when                        | What it does                                                                                                                |
-| ---------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `release-please` | every push to `main`             | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`.                                  |
-| `sync-lock`      | a Release PR was created/updated | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch.                        |
-| `release`        | a GitHub Release was just cut    | Signs + notarizes with `--features prod-api` and uploads the bundle. Uses the `release` GitHub Environment for scoped secrets. |
-| `publish`        | after the macOS package          | Publishes the DMG, macOS updater tarball, and macOS-only `latest.json` to Cloudflare R2. Gated by the `release` environment. |
+| Job                    | Runs when                        | What it does                                                                                                                     |
+| ---------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `release-please`       | every push to `main`             | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`.                                       |
+| `sync-lock`            | a Release PR was created/updated | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch.                             |
+| `release`              | a GitHub Release was just cut    | Signs + notarizes the macOS app with `--features prod-api`. Uses the `release` GitHub Environment.                               |
+| `package-windows`      | a GitHub Release was just cut    | Builds x64 NSIS only and has Tauri route every PE through SSL.com eSigner. Uses the `windows-release` GitHub Environment.         |
+| `sign-windows-updater` | after Windows Authenticode       | Generates the Tauri `.sig` from the final installer bytes, then independently verifies Authenticode and minisign. Uses `release`. |
+| `publish`              | after both platform packages     | Uploads immutable macOS and Windows payloads and publishes one combined `latest.json` last. Uses the `release` environment.       |
 
 Because the build runs as downstream jobs in the same `release` run (gated on release-please having cut a release), no cross-workflow trigger is needed — so the default `GITHUB_TOKEN` suffices throughout and no PAT is required.
 
@@ -221,7 +223,7 @@ npx @tauri-apps/cli signer generate
 1. **Generate an app-specific password** at [appleid.apple.com → Sign-In and Security → App-Specific Passwords](https://appleid.apple.com).
 2. **Create the `release` environment** at **Settings → Environments → New environment** → name `release`.
    - Add yourself under **Required reviewers** so signed builds pause for approval.
-   - Optionally restrict **Deployment branches and tags** to `Selected branches and tags` → match tags `v*` (prevents accidental use from other refs).
+   - Restrict **Deployment branches and tags** to the protected `main` branch. The workflow checks out the release tag, but the environment deployment ref is the `main` push that created it.
 3. **Add these secrets to the `release` environment** (not repo-level secrets):
 
    | Secret                               | Value                                                                                                     |
@@ -242,23 +244,41 @@ npx @tauri-apps/cli signer generate
    | `R2_ENDPOINT`           | `https://<account-id>.r2.cloudflarestorage.com`                  |
    | `R2_BUCKET`             | Bucket backing the public `r2.dev` desktop download domain      |
 
-   Public Windows publishing is temporarily disabled while Windows remains
-   internal QA and no production signing provider is configured. Re-enabling it
-   requires a new, reviewed Windows release job and a provider-specific security
-   review; do not restore publication until Authenticode and Tauri updater
-   signatures are both validated end to end.
+5. **Create a separate `windows-release` environment** and give it the same
+   required-reviewer and `main` deployment-branch protections. Keep the
+   Authenticode provider credentials out of `release`:
 
-   The release job publishes immutable macOS updater payloads and overwrites the
-   stable keys `desktop/latest.json` and `desktop/oats.dmg` with `no-cache`. The
-   updater endpoint in `tauri.conf.json` points at the macOS-only manifest.
+   | Secret / variable  | Kind     | Value                                                         |
+   | ------------------ | -------- | ------------------------------------------------------------- |
+   | `ES_USERNAME`      | secret   | SSL.com eSigner account username                              |
+   | `ES_PASSWORD`      | secret   | SSL.com eSigner account password                              |
+   | `ES_TOTP_SECRET`   | secret   | eSigner TOTP seed                                             |
+   | `ES_CREDENTIAL_ID` | variable | Credential ID for the reviewed OV/EV code-signing certificate |
+
+   The Windows job intentionally cannot read the Tauri updater private key.
+   Tauri first Authenticode-signs the main executable, sidecar, executable
+   resources, uninstaller, and final NSIS installer through `signCommand`.
+   Only the downstream `sign-windows-updater` job can generate the detached
+   updater signature, so that signature always covers the final Authenticode
+   bytes.
+
+   The publish job uploads immutable payloads below
+   `desktop/releases/<version>/`, refreshes the human download aliases
+   `desktop/oats.dmg` and `desktop/oats-windows-x86_64.exe`, then overwrites the
+   combined `desktop/latest.json` last with `no-cache`.
+
+   MSI remains a separate internal-deployment artifact and is never included in
+   the consumer updater. For Partner Center only, explicitly pass
+   `src-tauri/tauri.microsoftstore.conf.json`; it embeds the offline WebView2
+   installer and is not used by normal NSIS releases.
 
 ## Cutting a release
 
 Releases are automated by [release-please](https://github.com/googleapis/release-please) (the `release` workflow). On every push to `main` it parses conventional commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major) and maintains a **Release PR** that bumps the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, updates `CHANGELOG.md`, and (via the `sync-lock` job) keeps `package-lock.json` and `Cargo.lock` in sync.
 
 1. **Merge feature/fix PRs to `main`** with conventional-commit messages. release-please keeps the Release PR up to date.
-2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so release-please creates the `vX.Y.Z` tag and GitHub Release, then the macOS package and publish jobs run. Windows release packaging is not part of the workflow.
-3. **Approve each `release` environment deployment** if required-reviewer protection is configured: first macOS packaging, then publication.
+2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so release-please creates the `vX.Y.Z` tag and GitHub Release, then both platform packages and publication run.
+3. **Approve the protected deployments** if required-reviewer protection is configured: `release` for macOS/updater signing/publication and `windows-release` for eSigner access.
 
 > **Note:** The signing/publish jobs run from the `release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`).
 

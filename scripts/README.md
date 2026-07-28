@@ -87,22 +87,41 @@ contain the optional debug-only `mcp` plugin entry.
 
 ## Windows installers
 
-`build-windows-installers.ps1` builds both Windows installer formats through Tauri:
+`build-windows-installers.ps1` builds the x64 NSIS consumer/updater installer
+through Tauri by default:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1
 ```
 
+MSI is an explicitly separate internal-deployment build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-installers.ps1 -Bundles msi
+```
+
 Set `TAURI_SIGNING_PRIVATE_KEY` only when testing Tauri updater signatures; it
 does not Authenticode-sign the installer.
 
-The Windows release job and public Windows publication are removed until a
-production signing provider is provisioned and reviewed. The script keeps
-`-TauriConfig` optional so local QA builds can remain unsigned without creating
-public artifacts.
+Release CI supplies an ephemeral `bundle.windows.signCommand` overlay that
+routes every executable through `sign-windows-artifact.ps1` and SSL.com
+eSigner. A separate protected job generates the Tauri `.sig` only after the
+final Authenticode-signed installer exists. `verify-windows-authenticode.ps1`
+installs the NSIS bundle into a disposable directory and validates the embedded
+main executable, sidecar, llama resources, and uninstaller;
+`verify-tauri-updater-signature.ps1` independently validates the updater
+signature with the pinned official minisign binary.
+
+The script keeps `-TauriConfig` optional so local QA builds can remain unsigned
+without creating public artifacts.
 When `TAURI_SIGNING_PRIVATE_KEY` is absent, the helper uses a temporary config
 overlay to disable updater artifacts for that local build only; the checked-in
 production setting remains enabled.
+
+`src-tauri/tauri.microsoftstore.conf.json` is an explicit Partner Center
+overlay that adds the offline WebView2 installer. Do not pass it to the
+consumer/update build: that channel intentionally uses Tauri's smaller default
+download bootstrapper.
 
 The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 
@@ -112,8 +131,8 @@ The MSI uses committed WiX bitmaps under `src-tauri/windows/installer`:
 Replace these assets directly when updating the installer artwork, preserving
 their dimensions and 24-bit BMP format.
 
-Desktop CI calls the same sidecar helper. Release CI does not call this installer
-helper; local/internal QA can invoke it directly.
+Desktop CI calls the same sidecar helper. Release CI calls the installer helper
+with `-Bundles nsis`; local/internal QA can invoke MSI separately.
 
 ## Windows Local benchmark
 

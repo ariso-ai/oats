@@ -9,5 +9,12 @@
         "dialogImagePath": "windows/installer/wix-dialog.bmp"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
