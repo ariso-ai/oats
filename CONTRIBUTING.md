@@ -282,7 +282,7 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 
 > **Note:** The signing/publish jobs run from the `release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`).
 
-> **Note:** The `release` environment's deployment policy allows the `main` branch and tags matching `v*`. The `release`/`publish` jobs run on `main` (the release-please run that cut the release), so `main` must remain in the policy.
+> **Note:** The `release` and `windows-release` environment deployment policies allow the protected `main` branch. The workflow checks out the generated `v*` tag inside each job, but the protected deployment ref remains the `main` push that cut the release.
 
 ### release-please setup
 

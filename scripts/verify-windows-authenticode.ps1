@@ -103,7 +103,10 @@ if (-not $installRoot.StartsWith($runnerPrefix, [System.StringComparison]::Ordin
 
 New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
 try {
-  $install = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$installRoot") -Wait -PassThru
+  # NSIS requires /D= to be the final, unquoted portion of the raw command line,
+  # including when the destination contains spaces.
+  $installArguments = "/S /D=$installRoot"
+  $install = Start-Process -FilePath $installer -ArgumentList $installArguments -Wait -PassThru
   if ($install.ExitCode -ne 0) {
     throw "Silent NSIS install failed with exit code $($install.ExitCode)."
   }
@@ -140,9 +143,13 @@ try {
     Get-ChildItem -LiteralPath $installRoot -Filter "uninstall*.exe" -File -ErrorAction SilentlyContinue
   ) | Select-Object -First 1
   if ($uninstaller) {
-    $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
-    if ($uninstall.ExitCode -ne 0) {
-      Write-Warning "Silent cleanup uninstaller exited with code $($uninstall.ExitCode)."
+    try {
+      $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
+      if ($uninstall.ExitCode -ne 0) {
+        Write-Warning "Silent cleanup uninstaller exited with code $($uninstall.ExitCode)."
+      }
+    } catch {
+      Write-Warning "Silent cleanup uninstaller could not be completed: $($_.Exception.Message)"
     }
   }
   if (Test-Path -LiteralPath $installRoot) {

@@ -128,7 +128,7 @@ try {
   }
 }
 $providerText = ($providerOutput | ForEach-Object { $_.ToString() }) -join "`n"
-$providerFailure = $providerText -match "(?im)Error|Exception|Missing required option|Unmatched argument"
+$providerFailure = $providerText -match "(?im)^\s*(?:\[?ERROR\]?(?=\s|:)|Exception\b|Missing required option\b|Unmatched argument\b)"
 if ($providerInvocationError -or $providerExitCode -ne 0 -or $providerFailure) {
   $safeProviderText = "$providerInvocationError`n$providerText"
   foreach ($secretName in @("ES_USERNAME", "ES_PASSWORD", "ES_CREDENTIAL_ID", "ES_TOTP_SECRET")) {

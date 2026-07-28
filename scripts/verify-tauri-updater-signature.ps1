@@ -38,6 +38,9 @@ try {
     Invoke-WebRequest `
       -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" `
       -OutFile $archive `
+      -MaximumRetryCount 3 `
+      -RetryIntervalSec 5 `
+      -TimeoutSec 120 `
       -UseBasicParsing
     $expectedHash = "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479"
     $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
