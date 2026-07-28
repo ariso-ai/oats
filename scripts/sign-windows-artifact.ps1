@@ -41,6 +41,8 @@ foreach ($name in $requiredEnvironment) {
 }
 
 $artifact = (Resolve-Path -LiteralPath $FilePath).Path
+$artifactInfo = Get-Item -LiteralPath $artifact
+Write-SafeSigningDiagnostic "Starting signer for $($artifactInfo.Name): path=$artifact, cwd=$((Get-Location).Path), readOnly=$($artifactInfo.IsReadOnly)"
 $extension = [System.IO.Path]::GetExtension($artifact).ToLowerInvariant()
 if ($extension -notin @(".exe", ".dll", ".msi")) {
   throw "Refusing to Authenticode-sign unsupported artifact type '$extension'."
@@ -121,10 +123,15 @@ if ($providerInvocationError -or $providerExitCode -ne 0 -or $providerFailure) {
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
       Select-Object -First 20
   )
-  $safeProviderSummary = (($safeProviderLines -join " | ").Trim()).Substring(
-    0,
-    [Math]::Min(2000, ($safeProviderLines -join " | ").Trim().Length)
-  )
+  $safeProviderJoined = [string](($safeProviderLines -join " | ").Trim())
+  $safeProviderSummary = if ($safeProviderJoined.Length -gt 2000) {
+    $safeProviderJoined.Substring(0, 2000)
+  } else {
+    $safeProviderJoined
+  }
+  if ([string]::IsNullOrWhiteSpace($safeProviderSummary)) {
+    $safeProviderSummary = "(provider returned no safe diagnostic text)"
+  }
   Write-SafeSigningDiagnostic "Provider failure for $([System.IO.Path]::GetFileName($artifact)) (exit $providerExitCode): $safeProviderSummary"
   throw "SSL.com eSigner failed for $([System.IO.Path]::GetFileName($artifact)) (exit $providerExitCode). Provider output was suppressed to protect release secrets."
 }
