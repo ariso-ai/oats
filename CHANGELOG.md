@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.18.0](https://github.com/ariso-ai/oats/compare/v0.17.1...v0.18.0) (2026-07-28)
+
+
+### Features
+
+* add Locate button to pending upload rows ([0806d4a](https://github.com/ariso-ai/oats/commit/0806d4ae2d4e92397ab9de3ae82876043f53ef53))
+* add Locate button to pending upload rows ([32522ee](https://github.com/ariso-ai/oats/commit/32522eec4aa8426e7c5fc40245f945fbef2907e6))
+* add meeting-switch watch module ([4b0c860](https://github.com/ariso-ai/oats/commit/4b0c86068234adbb1169c2e06051bc98f234a5e9))
+* add signed Windows auto-updates ([e66b181](https://github.com/ariso-ai/oats/commit/e66b181241e46cc2f24011d3a8b1f54c92a74986))
+* add signed Windows auto-updates ([3b1a9c9](https://github.com/ariso-ai/oats/commit/3b1a9c99057442eeba6595441d6d53cf139a5628))
+* add switch mode to the meeting-started prompt card ([50feffe](https://github.com/ariso-ai/oats/commit/50feffe4546b138db3681377565758f45589f1f8))
+* improves the meeting prep user prompt ([3639c05](https://github.com/ariso-ai/oats/commit/3639c05e2e52a9e2dcc87018a92eddab99f978c4))
+* meeting prep in the desktop meeting detail view ([85f4045](https://github.com/ariso-ai/oats/commit/85f4045e0458e1983e83bcc72e72c365dbb9e6da))
+* rename meeting-end prompt window plumbing to meeting-switch ([f6a6906](https://github.com/ariso-ai/oats/commit/f6a69062832a1a87a87ebf920a046d64cec847f5))
+* trigger meeting prep from inbox-message-ready and open it in-app ([d3521d5](https://github.com/ariso-ai/oats/commit/d3521d5d2954b0a5a3cd0bc595c8b7188f63e93b))
+
+
+### Bug Fixes
+
+* add missing title_is_default to a transcribe test fixture ([364fbb9](https://github.com/ariso-ai/oats/commit/364fbb9d5455760ca8b7eea7c1e160f651f2f1bf))
+* address Windows release review findings ([7607a4c](https://github.com/ariso-ai/oats/commit/7607a4cc96de5e171e9b6b1a4a58704d75bb9283))
+* Authenticode-sign generated NSIS uninstaller ([5689a15](https://github.com/ariso-ai/oats/commit/5689a155c3fbbb0428616210793658f43966f53e))
+* build frontend before Windows cache target ([793600c](https://github.com/ariso-ai/oats/commit/793600c5ba809285804410128dd5866f156e2df4))
+* do not show canclled meeting on menu bar ([af1a42e](https://github.com/ariso-ai/oats/commit/af1a42e7c0be18e7bf489fefdb1d624ac38b3325))
+* harden Windows signer diagnostics ([0cd7a31](https://github.com/ariso-ai/oats/commit/0cd7a31b43ed5d9fbeeb050ab877fd0d3d7362ae))
+* hide future meetings from the Meetings history list ([1e841f2](https://github.com/ariso-ai/oats/commit/1e841f28548c8f398940af221c764ef772bbd14a))
+* hide future meetings from the Meetings history list ([e8c6c9e](https://github.com/ariso-ai/oats/commit/e8c6c9ec2516aa3c2fd75ea2b54693d89c6d0162)), closes [#263](https://github.com/ariso-ai/oats/issues/263)
+* indicator for cancelled meeting ([33adcce](https://github.com/ariso-ai/oats/commit/33adcce60ebc8c2bf4509fe731da7dbbb3d6ef4e))
+* keep signer cleanup from masking results ([6363aef](https://github.com/ariso-ai/oats/commit/6363aef52c9a5a421f5c1ce3099b253ab23dc825))
+* mark canceled meetings and keep them out of the menu bar ([98fac50](https://github.com/ariso-ai/oats/commit/98fac50dfd67487a748a119256c03d321ac475f1))
+* run Tauri signer with PowerShell 7 ([e827419](https://github.com/ariso-ai/oats/commit/e82741993801820d1d76931182830ce0e6886be3))
+* surface safe eSigner diagnostics ([6d0cd42](https://github.com/ariso-ai/oats/commit/6d0cd4229c4bb835bdb41bce6c5b9ea982f33319))
+
 ## [0.17.1](https://github.com/ariso-ai/oats/compare/v0.17.0...v0.17.1) (2026-07-21)
 
 
