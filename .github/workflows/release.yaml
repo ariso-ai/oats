@@ -307,7 +307,7 @@ jobs:
               createUpdaterArtifacts = $false
               windows = [ordered]@{
                 signCommand = [ordered]@{
-                  cmd = "powershell.exe"
+                  cmd = "pwsh.exe"
                   args = @(
                     "-NoLogo",
                     "-NoProfile",
@@ -327,34 +327,16 @@ jobs:
           "OATS_SIGNING_AUDIT_PATH=$auditPath" >> $env:GITHUB_ENV
           "OATS_SIGNING_DIAGNOSTIC_PATH=$diagnosticPath" >> $env:GITHUB_ENV
 
-      - name: Restore Windows release target
-        id: windows-target-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      - name: Cache Windows Rust release dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: src-tauri/target/x86_64-pc-windows-msvc
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target/x86_64-pc-windows-msvc
           key: oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'src-tauri/src/**', 'src-tauri/tauri*.json', 'src-tauri/capabilities/**') }}
           restore-keys: |
             oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-
-
-      - name: Build unsigned Windows release target
-        shell: pwsh
-        run: |
-          npm run vite:build
-          . ./scripts/import-windows-build-env.ps1
-          Import-WindowsBuildEnvironment
-          cargo build `
-            --manifest-path src-tauri/Cargo.toml `
-            --release `
-            --locked `
-            --target x86_64-pc-windows-msvc `
-            --features prod-api
-
-      - name: Save Windows release target
-        if: steps.windows-target-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: src-tauri/target/x86_64-pc-windows-msvc
-          key: oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'src-tauri/src/**', 'src-tauri/tauri*.json', 'src-tauri/capabilities/**') }}
 
       - name: Build and Authenticode-sign x64 NSIS installer
         shell: pwsh
