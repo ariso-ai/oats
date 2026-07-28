@@ -5,7 +5,9 @@ releases or provide signing credentials. Callers may pass a Tauri config overlay
 for an explicitly reviewed signing test.
 #>
 param(
-  [string]$Bundles = "nsis,msi",
+  # NSIS is the consumer/updater channel. Pass -Bundles msi explicitly for
+  # internal deployment testing; public releases never build both together.
+  [string]$Bundles = "nsis",
   [string]$Toolchain = "stable-x86_64-pc-windows-msvc",
   [string]$Target = "x86_64-pc-windows-msvc",
   [string]$TauriConfig,

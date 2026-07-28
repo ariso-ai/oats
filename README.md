@@ -16,7 +16,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&logo=apple&color=000000)](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](https://github.com/ariso-ai/oats/releases/latest)
-[![Windows internal QA](https://img.shields.io/badge/Windows-11%20internal%20QA-0078D4?logo=windows&logoColor=white)](CONTRIBUTING.md#local-backend-on-device-transcription)
+[![Windows release preview](https://img.shields.io/badge/Windows-11%20release%20preview-0078D4?logo=windows&logoColor=white)](CONTRIBUTING.md#local-backend-on-device-transcription)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
@@ -54,7 +54,7 @@ You decide where the work happens:
 | Platform | Public support | Notes |
 | --- | --- | --- |
 | macOS 14+ on Apple Silicon | Supported | Full Ariso and Local backend support. |
-| Windows 11 | Internal QA | Local transcription and notes are implemented. Public installer/updater publication is temporarily disabled pending production code signing; public support also remains blocked on system-audio capture, auto-record detection, and native sharing. |
+| Windows 11 | Release preview | Signed x64 NSIS installation and in-app auto-updating are supported. Broader public-support readiness still tracks system-audio capture, auto-record detection, and native sharing. |
 | Windows 10 | Planned smoke coverage | Not public-support ready. |
 
 ### 🍺 Homebrew
