@@ -27,6 +27,7 @@ function Write-SafeSigningDiagnostic {
   }
 }
 
+try {
 $requiredEnvironment = @(
   "CODE_SIGN_TOOL_PATH",
   "ES_USERNAME",
@@ -102,7 +103,7 @@ try {
   # picked up by a later artifact or diagnostic step.
   $providerLogs = Join-Path $toolRoot "logs"
   if (Test-Path -LiteralPath $providerLogs -PathType Container) {
-    Remove-Item -LiteralPath $providerLogs -Recurse -Force
+    Remove-Item -LiteralPath $providerLogs -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 $providerText = ($providerOutput | ForEach-Object { $_.ToString() }) -join "`n"
@@ -158,3 +159,15 @@ if ($env:OATS_SIGNING_AUDIT_PATH) {
 }
 
 Write-Output "Authenticode signed $([System.IO.Path]::GetFileName($artifact))."
+} catch {
+  $safeMessage = $_.Exception.Message
+  foreach ($secretName in @("ES_USERNAME", "ES_PASSWORD", "ES_CREDENTIAL_ID", "ES_TOTP_SECRET")) {
+    $secretValue = [Environment]::GetEnvironmentVariable($secretName)
+    if (-not [string]::IsNullOrEmpty($secretValue)) {
+      $safeMessage = $safeMessage -replace [regex]::Escape($secretValue), "***"
+    }
+  }
+  $safeMessage = $safeMessage -replace "(?i)-(?:username|password|credential_id|totp_secret)=\S+", "-credential=***"
+  Write-SafeSigningDiagnostic "Unhandled signer failure for $([System.IO.Path]::GetFileName($FilePath)): $safeMessage"
+  throw "Windows signing wrapper failed for $([System.IO.Path]::GetFileName($FilePath)). See the secret-scrubbed diagnostic record."
+}
