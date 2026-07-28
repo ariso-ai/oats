@@ -70,7 +70,10 @@ $requiredInvocations = [ordered]@{
     $record.path -imatch "[\\/]binaries[\\/]llama[\\/]" -and
       [System.IO.Path]::GetExtension($record.path) -imatch "^\.(exe|dll)$"
   }
-  "NSIS uninstaller" = { param($record) $record.file -imatch "^uninstall(?:er)?\.exe$" }
+  "NSIS uninstaller" = {
+    param($record)
+    $record.kind -eq "nsis-uninstaller" -or $record.file -imatch "^uninstall(?:er)?\.exe$"
+  }
   "final NSIS installer" = {
     param($record)
     [string]::Equals(

@@ -27,6 +27,7 @@ function Write-SafeSigningDiagnostic {
   }
 }
 
+$temporarySigningCopy = $null
 try {
 $requiredEnvironment = @(
   "CODE_SIGN_TOOL_PATH",
@@ -45,7 +46,27 @@ $artifact = (Resolve-Path -LiteralPath $FilePath).Path
 $artifactInfo = Get-Item -LiteralPath $artifact
 Write-SafeSigningDiagnostic "Starting signer for $($artifactInfo.Name): path=$artifact, cwd=$((Get-Location).Path), readOnly=$($artifactInfo.IsReadOnly)"
 $extension = [System.IO.Path]::GetExtension($artifact).ToLowerInvariant()
-if ($extension -notin @(".exe", ".dll", ".msi")) {
+$artifactKind = "artifact"
+$providerArtifact = $artifact
+if ($extension -eq ".tmp") {
+  $header = New-Object byte[] 2
+  $stream = [System.IO.File]::OpenRead($artifact)
+  try {
+    $headerLength = $stream.Read($header, 0, 2)
+  } finally {
+    $stream.Dispose()
+  }
+  if ($headerLength -ne 2 -or $header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
+    throw "Refusing to sign a temporary file that is not a Windows PE executable."
+  }
+  # NSIS names its generated uninstaller nst*.tmp. CodeSignTool filters by
+  # extension, so sign an exact .exe copy and put the signed PE bytes back at
+  # the path Tauri supplied.
+  $artifactKind = "nsis-uninstaller"
+  $temporarySigningCopy = "$artifact.oats-uninstaller.exe"
+  Copy-Item -LiteralPath $artifact -Destination $temporarySigningCopy -Force
+  $providerArtifact = $temporarySigningCopy
+} elseif ($extension -notin @(".exe", ".dll", ".msi")) {
   throw "Refusing to Authenticode-sign unsupported artifact type '$extension'."
 }
 
@@ -82,7 +103,7 @@ $arguments = @(
   "-password=$env:ES_PASSWORD",
   "-credential_id=$env:ES_CREDENTIAL_ID",
   "-totp_secret=$env:ES_TOTP_SECRET",
-  "-input_file_path=$artifact",
+  "-input_file_path=$providerArtifact",
   "-override=true",
   "-malware_block=false"
 )
@@ -137,10 +158,18 @@ if ($providerInvocationError -or $providerExitCode -ne 0 -or $providerFailure) {
   throw "SSL.com eSigner failed for $([System.IO.Path]::GetFileName($artifact)) (exit $providerExitCode). Provider output was suppressed to protect release secrets."
 }
 
-$signature = Get-AuthenticodeSignature -LiteralPath $artifact
+$signature = Get-AuthenticodeSignature -LiteralPath $providerArtifact
 if ($signature.SignatureType -ne "Authenticode" -or $signature.Status -ne "Valid") {
   Write-SafeSigningDiagnostic "Authenticode validation failed for $([System.IO.Path]::GetFileName($artifact)): type=$($signature.SignatureType), status=$($signature.Status), message=$($signature.StatusMessage)"
   throw "eSigner returned without a valid Authenticode signature for $([System.IO.Path]::GetFileName($artifact)): $($signature.Status)"
+}
+if ($temporarySigningCopy) {
+  Copy-Item -LiteralPath $temporarySigningCopy -Destination $artifact -Force
+  Remove-Item -LiteralPath $temporarySigningCopy -Force -ErrorAction SilentlyContinue
+  $signature = Get-AuthenticodeSignature -LiteralPath $artifact
+  if ($signature.SignatureType -ne "Authenticode" -or $signature.Status -ne "Valid") {
+    throw "The signed NSIS uninstaller did not survive copying back to its Tauri path."
+  }
 }
 
 if ($env:OATS_SIGNING_AUDIT_PATH) {
@@ -152,6 +181,7 @@ if ($env:OATS_SIGNING_AUDIT_PATH) {
   $record = [ordered]@{
     path = $artifact
     file = [System.IO.Path]::GetFileName($artifact)
+    kind = $artifactKind
     sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
     signer = $signature.SignerCertificate.Subject
   }
@@ -160,6 +190,9 @@ if ($env:OATS_SIGNING_AUDIT_PATH) {
 
 Write-Output "Authenticode signed $([System.IO.Path]::GetFileName($artifact))."
 } catch {
+  if ($temporarySigningCopy -and (Test-Path -LiteralPath $temporarySigningCopy)) {
+    Remove-Item -LiteralPath $temporarySigningCopy -Force -ErrorAction SilentlyContinue
+  }
   $safeMessage = $_.Exception.Message
   foreach ($secretName in @("ES_USERNAME", "ES_PASSWORD", "ES_CREDENTIAL_ID", "ES_TOTP_SECRET")) {
     $secretValue = [Environment]::GetEnvironmentVariable($secretName)
