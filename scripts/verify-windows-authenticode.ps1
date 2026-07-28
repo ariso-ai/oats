@@ -146,6 +146,10 @@ try {
     }
   }
   if (Test-Path -LiteralPath $installRoot) {
-    Remove-Item -LiteralPath $installRoot -Recurse -Force
+    Start-Sleep -Seconds 5
+    Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $installRoot) {
+      Write-Warning "Left residual files under $installRoot; the runner is disposable."
+    }
   }
 }
