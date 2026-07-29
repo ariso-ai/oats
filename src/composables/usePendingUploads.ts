@@ -1,5 +1,6 @@
 import { pending, type PendingUploadMeta } from '../tauri';
 import { useMeetingApi } from './useMeetingApi';
+import { reportUploadFailure } from './useDiagnostics';
 
 /** Merge a chronological list of pending uploads into one recording's meta:
  *  earliest start, latest end, summed duration. `meetingId` is intentionally
@@ -24,9 +25,38 @@ export function mergedMeta(items: PendingUploadMeta[]): {
 export async function combineAndUpload(items: PendingUploadMeta[]): Promise<void> {
   if (items.length === 0) return;
   const keys = items.map((i) => i.createdAt);
-  const buf = await pending.combine(keys);
+  const meta = mergedMeta(items);
+
+  // Report both legs of the retry separately: a failing `combine` (Rust-side
+  // concatenation, e.g. a missing or oversized buffer) is a different bug from
+  // a failing upload, and issue #260's "retry does nothing" symptom can't be
+  // told apart without knowing which one broke.
+  let buf: ArrayBuffer;
+  try {
+    buf = await pending.combine(keys);
+  } catch (e) {
+    await reportUploadFailure(e, {
+      attempt: 'retry',
+      stage: 'combine',
+      itemCount: items.length,
+      durationSeconds: meta.durationSeconds,
+    });
+    throw e;
+  }
+
   const blob = new Blob([buf], { type: 'audio/mpeg' });
-  await useMeetingApi().uploadAudio(blob, mergedMeta(items));
+  try {
+    await useMeetingApi().uploadAudio(blob, meta);
+  } catch (e) {
+    await reportUploadFailure(e, {
+      attempt: 'retry',
+      bytes: blob.size,
+      durationSeconds: meta.durationSeconds,
+      itemCount: items.length,
+      hasMeetingId: false,
+    });
+    throw e;
+  }
   // Upload succeeded; a buffer discard failure must not bubble up — otherwise
   // the caller would retry and double-upload. Match the per-recording path in
   // useBackend.ts/finalizeRecording.

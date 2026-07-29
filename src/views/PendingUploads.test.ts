@@ -74,6 +74,19 @@ describe('PendingUploads', () => {
     expect(wrapper.findAll('.pending-item')).toHaveLength(2);
   });
 
+  it('points at the on-disk recovery path only after a failure', async () => {
+    list.mockResolvedValue(items);
+    combineAndUpload.mockRejectedValue(new Error('offline'));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+    expect(wrapper.find('.pending-recovery').exists()).toBe(false);
+
+    await wrapper.find('.upload').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.pending-recovery').text()).toContain('~/.ariso/pending-uploads/');
+  });
+
   it('explains missing session before retrying a pending upload', async () => {
     list.mockResolvedValue(items);
     checkSession.mockResolvedValue(null);

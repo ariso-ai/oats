@@ -123,6 +123,12 @@ vi.mock('../composables/useMeetingEndReminder', () => ({
   isMeetingEndReminderEnabled: () => Promise.resolve(true),
   setMeetingEndReminderEnabled: (...a: unknown[]) => setMeetingEndReminderEnabled(...a),
 }));
+const isDiagnosticsEnabled = vi.fn(() => Promise.resolve(false));
+const setDiagnosticsEnabled = vi.fn((_v: unknown) => Promise.resolve());
+vi.mock('../composables/useDiagnostics', () => ({
+  isDiagnosticsEnabled: () => isDiagnosticsEnabled(),
+  setDiagnosticsEnabled: (v: unknown) => setDiagnosticsEnabled(v),
+}));
 
 import SettingsView from './SettingsView.vue';
 
@@ -139,6 +145,7 @@ beforeEach(() => {
     Promise.resolve({ status: 200, data: {} })
   );
   getBackendSetting.mockResolvedValue('ariso');
+  isDiagnosticsEnabled.mockResolvedValue(false);
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
@@ -435,6 +442,69 @@ describe('SettingsView silence detection toggle', () => {
     await input.trigger('change');
     await flushPromises();
     expect(setSilenceDetectionEnabled).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('SettingsView diagnostics toggle', () => {
+  function toggleFor(wrapper: ReturnType<typeof mount>, label: string) {
+    const row = wrapper
+      .findAll('.setting-row')
+      .find((r) => r.find('.setting-label').text() === label);
+    expect(row, `setting-row for "${label}"`).toBeDefined();
+    return row!.find('input.toggle-input');
+  }
+
+  it('renders unchecked by default', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Collect diagnostic data');
+    expect(input.exists()).toBe(true);
+    expect((input.element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('reflects a stored opt-in', async () => {
+    isDiagnosticsEnabled.mockResolvedValue(true);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(
+      (toggleFor(wrapper, 'Collect diagnostic data').element as HTMLInputElement).checked
+    ).toBe(true);
+  });
+
+  it('persists the opt-in when switched on', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Collect diagnostic data');
+    (input.element as HTMLInputElement).checked = true;
+    await input.trigger('change');
+    await flushPromises();
+    expect(setDiagnosticsEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it('reverts the toggle when persistence fails', async () => {
+    setDiagnosticsEnabled.mockRejectedValueOnce(new Error('store locked'));
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Collect diagnostic data');
+    (input.element as HTMLInputElement).checked = true;
+    await input.trigger('change');
+    await flushPromises();
+    expect((input.element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('explains that reporting is paused in offline mode', async () => {
+    isDiagnosticsEnabled.mockResolvedValue(true);
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Paused while oats is running on-device');
+  });
+
+  it('shows no offline notice while opted out', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Paused while oats is running on-device');
   });
 });
 

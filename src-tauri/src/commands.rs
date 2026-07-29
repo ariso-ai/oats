@@ -40,6 +40,35 @@ pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
+// Public Sentry DSN for opt-in diagnostics (`diagnosticsEnabled` in
+// settings.json). A DSN is not a secret — it only grants event ingestion.
+// Only prod-api builds ship one so dev/local runs never pollute the project;
+// see `sentry_dsn()` for the development escape hatch.
+// TODO(#260): paste the DSN from the oats Sentry project (platform: JavaScript
+// → Vue) here. Until then every build reports nothing.
+#[cfg(feature = "prod-api")]
+const DEFAULT_SENTRY_DSN: &str = "";
+#[cfg(not(feature = "prod-api"))]
+const DEFAULT_SENTRY_DSN: &str = "";
+
+/// Production builds report to the baked DSN only. Like `api_base_url`, the
+/// endpoint is fixed inside the signed app so it cannot be redirected.
+#[cfg(feature = "prod-api")]
+pub(crate) fn sentry_dsn() -> String {
+    DEFAULT_SENTRY_DSN.to_string()
+}
+
+/// Development builds default to an empty DSN (diagnostics stay a no-op) but
+/// allow pointing at a scratch Sentry project while working on instrumentation.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn sentry_dsn() -> String {
+    std::env::var("ARISO_DESKTOP_SENTRY_DSN")
+        .ok()
+        .filter(|dsn| !dsn.trim().is_empty())
+        .map(|dsn| dsn.trim().to_string())
+        .unwrap_or_else(|| DEFAULT_SENTRY_DSN.to_string())
+}
+
 #[cfg(feature = "prod-api")]
 const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
@@ -827,15 +856,21 @@ pub struct DesktopConfig {
     pub pusher_cluster: String,
     #[serde(rename = "webAppBaseUrl")]
     pub web_app_base_url: String,
+    /// Empty when this build has no diagnostics endpoint; the frontend treats
+    /// that as "diagnostics unavailable" and never initializes Sentry.
+    #[serde(rename = "sentryDsn")]
+    pub sentry_dsn: String,
 }
 
-/// Returns build-baked client config (Pusher key/cluster, web app base URL).
+/// Returns build-baked client config (Pusher key/cluster, web app base URL,
+/// Sentry DSN).
 #[tauri::command]
 pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
         web_app_base_url: web_app_base_url(),
+        sentry_dsn: sentry_dsn(),
     }
 }
 

@@ -4,7 +4,11 @@ const list = vi.fn();
 const combine = vi.fn();
 const discardAudio = vi.fn();
 const uploadAudio = vi.fn();
+const reportUploadFailure = vi.fn(() => Promise.resolve());
 
+vi.mock('./useDiagnostics', () => ({
+  reportUploadFailure: (...a: unknown[]) => reportUploadFailure(...a),
+}));
 vi.mock('../tauri', () => ({
   pending: {
     list: (...a: unknown[]) => list(...a),
@@ -63,6 +67,26 @@ describe('combineAndUpload', () => {
     uploadAudio.mockRejectedValue(new Error('offline'));
     await expect(combineAndUpload(items)).rejects.toThrow('offline');
     expect(discardAudio).not.toHaveBeenCalled();
+  });
+
+  it('reports an upload failure as a retry, with the batch size', async () => {
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockRejectedValue(new Error('offline'));
+    await expect(combineAndUpload(items)).rejects.toThrow('offline');
+    expect(reportUploadFailure).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ attempt: 'retry', itemCount: 2, durationSeconds: 420 })
+    );
+  });
+
+  it('reports a failing combine under the combine stage and never uploads', async () => {
+    combine.mockRejectedValue(new Error('buffer missing'));
+    await expect(combineAndUpload(items)).rejects.toThrow('buffer missing');
+    expect(uploadAudio).not.toHaveBeenCalled();
+    expect(reportUploadFailure).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ attempt: 'retry', stage: 'combine', itemCount: 2 })
+    );
   });
 
   it('is a no-op for an empty list', async () => {

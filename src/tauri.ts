@@ -97,6 +97,8 @@ export interface DesktopConfig {
   pusherKey: string;
   pusherCluster: string;
   webAppBaseUrl: string;
+  /** Empty string when this build ships no diagnostics endpoint. */
+  sentryDsn: string;
 }
 
 export async function getDesktopConfig(): Promise<DesktopConfig> {

@@ -18,6 +18,11 @@ const fetchMeetingAudio = vi.fn();
 const readRecordingAudio = vi.fn();
 const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
+const reportUploadFailure = vi.fn(() => Promise.resolve());
+
+vi.mock('./useDiagnostics', () => ({
+  reportUploadFailure: (...a: unknown[]) => reportUploadFailure(...a),
+}));
 
 vi.mock('../tauri', () => ({
   local: {
@@ -273,6 +278,28 @@ describe('ArisoBackend', () => {
     ).rejects.toThrow('S3 upload failed');
     expect(bufferPendingAudio).toHaveBeenCalled();
     expect(discardPendingAudio).not.toHaveBeenCalled();
+  });
+
+  it('finalizeRecording reports an upload failure as the initial attempt', async () => {
+    bufferPendingAudio.mockResolvedValue('id');
+    uploadAudio.mockRejectedValue(new Error('S3 upload failed (500)'));
+    await expect(
+      new ArisoBackend().finalizeRecording(new Blob(['xyz']), {
+        startAt: '2026-06-02T14:30:05.000Z',
+        endAt: '2026-06-02T15:10:00.000Z',
+        durationSeconds: 10,
+        meetingId: 42,
+      })
+    ).rejects.toThrow('S3 upload failed');
+    expect(reportUploadFailure).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        attempt: 'initial',
+        bytes: 3,
+        durationSeconds: 10,
+        hasMeetingId: true,
+      })
+    );
   });
 
   it('finalizeRecording still uploads when buffering itself fails', async () => {
