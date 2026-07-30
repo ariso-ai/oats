@@ -650,6 +650,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             src-tauri/target/release/bundle/windows/*.exe
+            src-tauri/target/release/bundle/windows/*.exe.sig
             src-tauri/target/release/bundle/windows/*.msi
           append_body: true
           body: |
