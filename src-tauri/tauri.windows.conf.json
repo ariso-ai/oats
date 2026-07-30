@@ -4,6 +4,9 @@
       "binaries/llama": "llama"
     },
     "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer/nsis-hooks.nsh"
+      },
       "wix": {
         "bannerPath": "windows/installer/wix-banner.bmp",
         "dialogImagePath": "windows/installer/wix-dialog.bmp"
