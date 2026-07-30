@@ -1346,3 +1346,47 @@ describe('MeetingDetailView canceled meetings', () => {
     expect(wrapper.find('.canceled-tag').exists()).toBe(false);
   });
 });
+
+describe('MeetingDetailView Ari chip', () => {
+  const NOW = new Date('2026-06-16T12:00:00Z');
+  // Started at 11:45, ends at 12:30 — running as of NOW.
+  const running = {
+    autoJoinScheduled: true,
+    startAt: '2026-06-16T11:45:00Z',
+    endAt: '2026-06-16T12:30:00Z',
+  };
+
+  async function mountAt(d: MeetingDetail, now = NOW) {
+    getMeetingDetail.mockResolvedValue(d);
+    const wrapper = mount(MeetingDetailView, { props: { item, now } });
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('says Ari has joined for a running meeting whose status is joined', async () => {
+    const wrapper = await mountAt(detail({ ...running, arisoStatus: 'joined' }));
+    expect(wrapper.find('.ari-tag').text()).toContain('Ari has joined');
+  });
+
+  it('keeps the promise while the meeting is running but Ari has not joined', async () => {
+    const wrapper = await mountAt(detail({ ...running, arisoStatus: 'joining' }));
+    expect(wrapper.find('.ari-tag').text()).toContain('Ari will join');
+  });
+
+  it('drops the chip once the meeting has ended', async () => {
+    const wrapper = await mountAt(
+      detail({
+        autoJoinScheduled: true,
+        arisoStatus: 'joined',
+        startAt: '2026-06-16T10:00:00Z',
+        endAt: '2026-06-16T11:00:00Z',
+      })
+    );
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
+  });
+
+  it('drops the chip once the meeting is done', async () => {
+    const wrapper = await mountAt(detail({ ...running, arisoStatus: 'done' }));
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
+  });
+});

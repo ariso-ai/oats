@@ -65,6 +65,9 @@ export interface MeetingListItem {
   /** Ariso: the meeting was canceled (its calendar event was deleted/canceled).
    *  Rows stay in the list but are struck through. */
   canceled?: boolean;
+  /** Ariso: raw lifecycle status ('created' | 'joined' | 'done' | 'cancelled' |
+   *  …). Kept alongside `canceled` because the Ari chip keys off more of it. */
+  arisoStatus?: string;
 }
 
 export interface MeetingActionItem {
@@ -119,6 +122,9 @@ export interface MeetingDetail {
   /** Ariso: the meeting was canceled — the detail panel marks it with a chip
    *  and suppresses the "Ari will join" tag. */
   canceled?: boolean;
+  /** Ariso: raw lifecycle status — drives the Ari chip ("will join" vs
+   *  "has joined" vs nothing once the meeting is done). */
+  arisoStatus?: string;
   /** Whether a transcript exists — drives the Live Transcript tab. Content is
    *  loaded lazily via `getMeetingTranscript`. */
   hasTranscript?: boolean;
@@ -230,6 +236,7 @@ function meetingSummaryToListItem(m: ScheduledMeeting | MeetingSearchResult): Me
     endTimestamp: m.end_at,
     autoJoinScheduled: arisoTruthy(m.auto_join_scheduled),
     canceled: isCanceledMeetingStatus(m.status),
+    arisoStatus: typeof m.status === 'string' ? m.status : undefined,
   };
   if ('snippet' in m && m.snippet) item.snippet = m.snippet;
   if ('matched_text' in m && m.matched_text) item.matchedText = m.matched_text;
@@ -375,6 +382,7 @@ export class ArisoBackend implements Backend {
       // The notes payload carries the authoritative status; fall back to the
       // list row when it's absent so a canceled row stays marked once opened.
       canceled: data.status != null ? isCanceledMeetingStatus(data.status) : !!item.canceled,
+      arisoStatus: typeof data.status === 'string' ? data.status : item.arisoStatus,
       audioClips: data.audio_clips ?? [],
     };
   }
