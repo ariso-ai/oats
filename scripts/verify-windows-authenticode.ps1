@@ -102,6 +102,7 @@ if (-not $installRoot.StartsWith($runnerPrefix, [System.StringComparison]::Ordin
 }
 
 New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+$uninstallVerified = $false
 try {
   # NSIS requires /D= to be the final, unquoted portion of the raw command line,
   # including when the destination contains spaces.
@@ -137,12 +138,37 @@ try {
     throw "The installed payload is missing signed llama executable resources."
   }
 
-  Write-Output "Verified Authenticode on the final installer and $($payloads.Count) installed PE payloads."
-} finally {
   $uninstaller = @(
-    Get-ChildItem -LiteralPath $installRoot -Filter "uninstall*.exe" -File -ErrorAction SilentlyContinue
+    $payloads | Where-Object { $_.Name -imatch "^uninstall(?:er)?\.exe$" }
   ) | Select-Object -First 1
-  if ($uninstaller) {
+  $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
+  if ($uninstall.ExitCode -ne 0) {
+    throw "Silent NSIS uninstall failed with exit code $($uninstall.ExitCode)."
+  }
+
+  $deadline = [DateTime]::UtcNow.AddSeconds(60)
+  while ((Test-Path -LiteralPath $installRoot) -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 250
+  }
+  if (Test-Path -LiteralPath $installRoot) {
+    $remaining = @(
+      Get-ChildItem -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName
+    )
+    throw "Silent NSIS uninstall returned success but left the install directory behind: $($remaining -join ', ')"
+  }
+  $uninstallVerified = $true
+
+  Write-Output "Verified Authenticode on the final installer and $($payloads.Count) installed PE payloads; silent uninstall removed the complete installation."
+} finally {
+  if (-not $uninstallVerified) {
+    $uninstaller = @(
+      Get-ChildItem -LiteralPath $installRoot -Filter "uninstall*.exe" -File -ErrorAction SilentlyContinue
+    ) | Select-Object -First 1
+  } else {
+    $uninstaller = $null
+  }
+  if ($uninstaller -and (Test-Path -LiteralPath $uninstaller.FullName)) {
     try {
       $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
       if ($uninstall.ExitCode -ne 0) {

@@ -28,10 +28,12 @@ where
         .skip_taskbar(true)
 }
 
-/// Keep Settings resident so every launcher can reuse the same webview and its
-/// in-progress form state. The close affordance hides it; application shutdown
-/// still destroys it normally.
-pub(crate) fn install_settings_close_behavior(window: &tauri::WebviewWindow) {
+/// Apply behavior owned by the Settings window rather than the application.
+/// Windows otherwise inherits the app-wide File/Edit/View/Window menu, which is
+/// useful in Meetings but consumes space and exposes unrelated actions here.
+pub(crate) fn install_settings_window_behavior(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    // Keep Settings resident so every launcher can reuse the same webview and
+    // its in-progress form state. Application shutdown still destroys it.
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -40,4 +42,9 @@ pub(crate) fn install_settings_close_behavior(window: &tauri::WebviewWindow) {
             crate::activation::refresh(window_for_close.app_handle());
         }
     });
+
+    #[cfg(target_os = "windows")]
+    window.remove_menu()?;
+
+    Ok(())
 }

@@ -771,7 +771,10 @@ pub(crate) fn open_settings_window(app: &tauri::AppHandle) -> Result<(), String>
     let win = crate::window_style::settings_window_builder(app)
         .build()
         .map_err(|e| e.to_string())?;
-    crate::window_style::install_settings_close_behavior(&win);
+    if let Err(e) = crate::window_style::install_settings_window_behavior(&win) {
+        let _ = win.destroy();
+        return Err(e.to_string());
+    }
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
 
@@ -932,6 +935,15 @@ pub(crate) fn open_waveform_window(
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
+
+    // The application menu is useful on normal Windows windows, but inheriting
+    // it here adds a File/Edit/View/Window strip to an otherwise frameless
+    // recorder pill. Remove it on this window only.
+    #[cfg(target_os = "windows")]
+    if let Err(error) = win.remove_menu() {
+        let _ = win.close();
+        return Err(format!("failed to remove waveform window menu: {error}"));
+    }
 
     // When the pill is the visible recording UI (the meetings window is hidden,
     // minimized, or closed), dock it to the right edge of the primary screen

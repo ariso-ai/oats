@@ -108,9 +108,23 @@ routes every executable through `sign-windows-artifact.ps1` and SSL.com
 eSigner. A separate protected job generates the Tauri `.sig` only after the
 final Authenticode-signed installer exists. `verify-windows-authenticode.ps1`
 installs the NSIS bundle into a disposable directory and validates the embedded
-main executable, sidecar, llama resources, and uninstaller;
+main executable, sidecar, llama resources, and uninstaller, then requires a
+successful silent uninstall.
 `verify-tauri-updater-signature.ps1` independently validates the updater
 signature with the pinned official minisign binary.
+
+`prepare-windows-nsis-template.ps1` downloads the official Tauri 2.11.4 NSIS
+template, verifies its pinned SHA-256, and applies the WiX/MSI-to-NSIS
+migration fix in the system temp directory. This avoids checking a generated
+third-party template into Git while ensuring a legacy MSI and a newer NSIS
+install can coexist during migration. The script deliberately fails when the
+installed Tauri CLI version changes so the patch must be reviewed during an
+upgrade.
+
+The Windows NSIS hook at `src-tauri/windows/installer/nsis-hooks.nsh` removes
+only `%USERPROFILE%\.ariso\models` when the user selects **Delete app data**.
+It preserves the vault, recordings, and every custom Obsidian vault location,
+and skips recursive deletion when the models root is a junction or symlink.
 
 The script keeps `-TauriConfig` optional so local QA builds can remain unsigned
 without creating public artifacts.
