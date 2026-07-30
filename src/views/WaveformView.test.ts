@@ -13,6 +13,7 @@ const closeWin = vi.fn(() => Promise.resolve());
 const setIgnoreCursorEvents = vi.fn(() => Promise.resolve());
 const showWin = vi.fn(() => Promise.resolve());
 const startDragging = vi.fn(() => Promise.resolve());
+const setPosition = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 const backendKind = vi.hoisted(() => ({ value: 'local' as 'local' | 'ariso' }));
 
@@ -31,6 +32,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
     close: closeWin,
     show: showWin,
     startDragging,
+    setPosition: (...a: unknown[]) => setPosition(...a),
     setIgnoreCursorEvents: (...a: unknown[]) => setIgnoreCursorEvents(...a),
   }),
 }));
@@ -100,6 +102,19 @@ import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch
 // Recorder views own native listeners and timers, so every test must exercise
 // their unmount cleanup before another wrapper can observe those side effects.
 enableAutoUnmount(afterEach);
+function dispatchPointer(
+  target: EventTarget,
+  type: string,
+  init: MouseEventInit & { pointerId: number; isPrimary: boolean },
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
+  Object.defineProperties(event, {
+    pointerId: { value: init.pointerId },
+    isPrimary: { value: init.isPrimary },
+  });
+  target.dispatchEvent(event);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   for (const k in eventHandlers) delete eventHandlers[k];
@@ -126,25 +141,81 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.findAll('.dot')).toHaveLength(6);
   });
 
-  it('starts native window dragging from the handle on primary-button mousedown', async () => {
+  it('starts native window dragging from the handle on non-Windows platforms', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();
 
     // A real click commonly lands on a child dot rather than the handle div.
     // The event must bubble into the explicit native drag handler either way.
-    await wrapper.find('.dot').trigger('mousedown', { button: 0, buttons: 1 });
+    dispatchPointer(wrapper.find('.dot').element, 'pointerdown', {
+      button: 0,
+      buttons: 1,
+      pointerId: 1,
+      isPrimary: true,
+    });
 
     expect(startDragging).toHaveBeenCalledTimes(1);
     expect(invoke).not.toHaveBeenCalledWith('create_library_window');
   });
 
-  it('does not start dragging for a non-primary mouse button', async () => {
+  it('does not start dragging for a non-primary pointer button', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();
 
-    await wrapper.find('.dot').trigger('mousedown', { button: 2, buttons: 2 });
+    dispatchPointer(wrapper.find('.dot').element, 'pointerdown', {
+      button: 2,
+      buttons: 2,
+      pointerId: 1,
+      isPrimary: true,
+    });
 
     expect(startDragging).not.toHaveBeenCalled();
+  });
+
+  it('moves the Windows pill on the first pointer move and stops after pointerup', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Windows');
+    vi.spyOn(window, 'screenX', 'get').mockReturnValue(100);
+    vi.spyOn(window, 'screenY', 'get').mockReturnValue(200);
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+
+    dispatchPointer(wrapper.find('.dot').element, 'pointerdown', {
+      button: 0,
+      buttons: 1,
+      pointerId: 7,
+      isPrimary: true,
+      screenX: 400,
+      screenY: 500,
+    });
+    dispatchPointer(window, 'pointermove', {
+      button: 0,
+      buttons: 1,
+      pointerId: 7,
+      isPrimary: true,
+      screenX: 350,
+      screenY: 460,
+    });
+    await flushPromises();
+
+    expect(setPosition).toHaveBeenCalledTimes(1);
+    expect(setPosition.mock.calls[0][0]).toMatchObject({ x: 50, y: 160 });
+    expect(startDragging).not.toHaveBeenCalled();
+
+    dispatchPointer(window, 'pointerup', {
+      button: 0,
+      buttons: 0,
+      pointerId: 7,
+      isPrimary: true,
+    });
+    dispatchPointer(window, 'pointermove', {
+      button: 0,
+      buttons: 1,
+      pointerId: 7,
+      isPrimary: true,
+      screenX: 300,
+      screenY: 420,
+    });
+    expect(setPosition).toHaveBeenCalledTimes(1);
   });
 
   it('uses the white logo in the dark recorder pill', async () => {

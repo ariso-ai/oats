@@ -83,11 +83,11 @@
           </button>
         </div>
 
-        <!-- Start the native move loop explicitly. The declarative drag-region
-             listener is unreliable in Windows WebView2 for this nested handle. -->
+        <!-- Windows tracks the pointer itself because WebView2 can deliver the
+             first move before Tauri's asynchronous native drag loop is ready. -->
         <div
           class="drag-handle"
-          @mousedown.left.stop.prevent="startWindowDrag"
+          @pointerdown.left.stop.prevent="startWindowDrag"
           @click.stop
         >
           <div class="divider" />
@@ -104,6 +104,7 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
+import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
@@ -293,13 +294,78 @@ function collapse() {
   isExpanded.value = false;
 }
 
-async function startWindowDrag() {
+type WindowsDragState = {
+  pointerId: number;
+  startPointerX: number;
+  startPointerY: number;
+  startWindowX: number;
+  startWindowY: number;
+  handle: HTMLElement;
+};
+
+let windowsDrag: WindowsDragState | null = null;
+
+function finishWindowsDrag(event?: PointerEvent) {
+  if (!windowsDrag || (event && event.pointerId !== windowsDrag.pointerId)) return;
+
+  const { handle, pointerId } = windowsDrag;
+  windowsDrag = null;
+  window.removeEventListener('pointermove', moveWindowsWindow, true);
+  window.removeEventListener('pointerup', finishWindowsDrag, true);
+  window.removeEventListener('pointercancel', finishWindowsDrag, true);
+  handle.removeEventListener('lostpointercapture', finishWindowsDrag);
+  if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+}
+
+function moveWindowsWindow(event: PointerEvent) {
+  if (
+    !windowsDrag
+    || event.pointerId !== windowsDrag.pointerId
+    || event.isPrimary === false
+    || (event.buttons & 1) === 0
+  ) return;
+
+  event.preventDefault();
+  const x = windowsDrag.startWindowX + event.screenX - windowsDrag.startPointerX;
+  const y = windowsDrag.startWindowY + event.screenY - windowsDrag.startPointerY;
+  // CSSOM screen coordinates and Tauri LogicalPosition use logical pixels, so
+  // this remains correct on Windows displays with non-100% scaling.
+  void getCurrentWebviewWindow().setPosition(new LogicalPosition(x, y)).catch((e) => {
+    console.error('Failed to move recorder window', e);
+    finishWindowsDrag(event);
+  });
+}
+
+async function startWindowDrag(event: PointerEvent) {
+  if (/Windows/i.test(navigator.userAgent)) {
+    if (event.isPrimary === false || event.button !== 0) return;
+    finishWindowsDrag();
+
+    const handle = event.currentTarget as HTMLElement;
+    windowsDrag = {
+      pointerId: event.pointerId,
+      startPointerX: event.screenX,
+      startPointerY: event.screenY,
+      startWindowX: window.screenX,
+      startWindowY: window.screenY,
+      handle,
+    };
+    window.addEventListener('pointermove', moveWindowsWindow, true);
+    window.addEventListener('pointerup', finishWindowsDrag, true);
+    window.addEventListener('pointercancel', finishWindowsDrag, true);
+    handle.addEventListener('lostpointercapture', finishWindowsDrag);
+    handle.setPointerCapture?.(event.pointerId);
+    return;
+  }
+
   try {
     await getCurrentWebviewWindow().startDragging();
   } catch (e) {
     console.error('Failed to start recorder window drag', e);
   }
 }
+
+onUnmounted(() => finishWindowsDrag());
 
 // Clicking the pill body (not the controls or the drag handle) brings up the
 // meetings window and surfaces the meeting being recorded. A window that was
