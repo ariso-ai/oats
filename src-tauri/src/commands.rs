@@ -771,7 +771,7 @@ pub(crate) fn open_settings_window(app: &tauri::AppHandle) -> Result<(), String>
     let win = crate::window_style::settings_window_builder(app)
         .build()
         .map_err(|e| e.to_string())?;
-    crate::window_style::install_settings_close_behavior(&win);
+    crate::window_style::install_settings_window_behavior(&win).map_err(|e| e.to_string())?;
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
 
