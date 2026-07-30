@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.18.1](https://github.com/ariso-ai/oats/compare/v0.18.0...v0.18.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* make ari will join chip conditional ([6811343](https://github.com/ariso-ai/oats/commit/6811343bf8d4d31a0c229d99ef7122c89bbfd6be))
+* make ari will join chip conditional ([a19eb01](https://github.com/ariso-ai/oats/commit/a19eb01084f2b68bfc4f1fe1d0e54176baf0519b))
+* **windows:** address remaining review findings ([bf3322e](https://github.com/ariso-ai/oats/commit/bf3322efc33ba569b01e4220fa9f7c819b0fe1a4))
+* **windows:** bundle recent installer and desktop reliability fixes ([cdb0dc6](https://github.com/ariso-ai/oats/commit/cdb0dc660691f09bc0dc7c02c8e5f3a84f8bf4c8))
+* **windows:** harden NSIS migration and uninstall cleanup ([6634890](https://github.com/ariso-ai/oats/commit/6634890d2a09fd4e172a83c558b3a58d9f839140))
+* **windows:** hide native menu in settings ([4d7c76b](https://github.com/ariso-ai/oats/commit/4d7c76b374f6a193b48020500b85d21a00289648))
+* **windows:** make NSIS template patch EOL-independent ([1c88d12](https://github.com/ariso-ai/oats/commit/1c88d12d6125a850429cba92add9422a898849e7))
+* **windows:** make recorder drag deterministic ([46715cb](https://github.com/ariso-ai/oats/commit/46715cb8f2d450bc613e2d923c57f29e160789e6))
+* **windows:** make recorder pill draggable ([2c17353](https://github.com/ariso-ai/oats/commit/2c1735363d12fa3a5b085227652908e389511fa2))
+* **windows:** preserve settings close behavior ([57933dc](https://github.com/ariso-ai/oats/commit/57933dc4efc468eed0d4e5869c1d8d82daa2b1ca))
+* **windows:** ship high-resolution shortcut icon ([903b687](https://github.com/ariso-ai/oats/commit/903b68705d43c502755a14d174fff76af9bfcfa5))
+
 ## [0.18.0](https://github.com/ariso-ai/oats/compare/v0.17.1...v0.18.0) (2026-07-28)
 
 
