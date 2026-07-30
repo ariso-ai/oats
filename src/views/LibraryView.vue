@@ -132,6 +132,7 @@
           v-if="selectedItem"
           ref="detailView"
           :item="selectedItem"
+          :now="now"
           @close="clearSelection"
           @title-updated="onTitleUpdated"
         />

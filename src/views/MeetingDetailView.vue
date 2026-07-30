@@ -127,7 +127,7 @@
         <!-- A canceled meeting is marked as such, and never advertises Ari's
              auto-join: the bot won't join a meeting that isn't happening. -->
         <MeetingCanceledTag v-if="detail?.canceled" class="meta-canceled" />
-        <AriWillJoinTag v-else-if="detail?.autoJoinScheduled" class="meta-ari" />
+        <AriWillJoinTag v-else-if="ariChip" :joined="ariChip === 'joined'" class="meta-ari" />
       </div>
 
       <div v-else class="divider" />
@@ -376,10 +376,13 @@ import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative, local } from '../tauri';
+import { ariJoinChip } from '../composables/meetingStatus';
 import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
 import { loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 
-const props = defineProps<{ item: MeetingListItem | null }>();
+// `now` is the parent's ticking clock — it lets the Ari chip retire itself when
+// the meeting's end time passes. Absent, the chip is evaluated once at render.
+const props = defineProps<{ item: MeetingListItem | null; now?: Date }>();
 const emit = defineEmits<{
   close: [];
   titleUpdated: [payload: { id: string; title: string }];
@@ -389,6 +392,20 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
+
+// "Ari will join" while the meeting is still ahead, "Ari has joined" once the
+// bot is in a running meeting, and no chip at all once the meeting is over.
+const ariChip = computed(() =>
+  ariJoinChip(
+    {
+      autoJoinScheduled: detail.value?.autoJoinScheduled,
+      status: detail.value?.arisoStatus,
+      startAt: detail.value?.startAt,
+      endAt: detail.value?.endAt,
+    },
+    props.now ?? new Date()
+  )
+);
 type TabKey = 'note' | 'transcript' | 'mynote' | 'prep' | 'assessment';
 const activeTab = ref<TabKey>('note');
 

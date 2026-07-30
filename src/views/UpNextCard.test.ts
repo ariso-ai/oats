@@ -211,3 +211,31 @@ describe('UpNextCard', () => {
     expect(rows.map((r) => r.find('.row-title').text())).toEqual(['Standup', 'Sync']);
   });
 });
+
+describe('UpNextCard Ari chip', () => {
+  // In progress at NOW (12:00Z), so the "started but not ended" branch applies.
+  const running = {
+    id: 'live',
+    timestamp: '2026-06-16T11:45:00Z',
+    endTimestamp: '2026-06-16T12:30:00Z',
+    autoJoinScheduled: true,
+  };
+
+  it('promises the join for an upcoming meeting', async () => {
+    const wrapper = mountCard([meeting({ autoJoinScheduled: true })]);
+    await flushPromises();
+    expect(wrapper.find('.ari-tag').text()).toContain('Ari will join');
+  });
+
+  it('says Ari has joined once the running meeting reports it', async () => {
+    const wrapper = mountCard([meeting({ ...running, arisoStatus: 'joined' })]);
+    await flushPromises();
+    expect(wrapper.find('.ari-tag').text()).toContain('Ari has joined');
+  });
+
+  it('drops the chip for a meeting the backend marked done', async () => {
+    const wrapper = mountCard([meeting({ ...running, arisoStatus: 'done' })]);
+    await flushPromises();
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
+  });
+});
