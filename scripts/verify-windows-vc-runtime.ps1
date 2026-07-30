@@ -62,7 +62,8 @@ function Assert-TrustedRuntimeDirectory {
 function Invoke-NativeProbe {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Arguments
+    [Parameter(Mandatory = $true)][string]$Arguments,
+    [int]$TimeoutMilliseconds = 30000
   )
 
   $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -77,12 +78,15 @@ function Invoke-NativeProbe {
   if (-not $process.Start()) {
     throw "Failed to launch native runtime probe '$Path'."
   }
-  $stdout = $process.StandardOutput.ReadToEnd()
-  $stderr = $process.StandardError.ReadToEnd()
-  $process.WaitForExit()
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
+  if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+    $process.Kill()
+    throw "Native runtime probe '$Path' timed out after ${TimeoutMilliseconds}ms."
+  }
   return [pscustomobject]@{
     exitCode = $process.ExitCode
-    output = "$stdout`n$stderr".Trim()
+    output = "$($stdoutTask.Result)`n$($stderrTask.Result)".Trim()
   }
 }
 
