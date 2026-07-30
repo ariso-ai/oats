@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.18.2](https://github.com/ariso-ai/oats/compare/v0.18.1...v0.18.2) (2026-07-30)
+
+
+### Bug Fixes
+
+* **windows:** bundle Visual C++ runtime app-local ([c9ae955](https://github.com/ariso-ai/oats/commit/c9ae955e5445aab2e4b1f64e71f1f8d6f8692751))
+* **windows:** bundle Visual C++ runtime app-local ([67f1258](https://github.com/ariso-ai/oats/commit/67f12583f931a186af0fe813a5139ff74c703e09))
+* **windows:** normalize Visual C++ file versions ([237b614](https://github.com/ariso-ai/oats/commit/237b614b20b104e8e9b0c2116e118a0a49b7b672))
+
 ## [0.18.1](https://github.com/ariso-ai/oats/compare/v0.18.0...v0.18.1) (2026-07-30)
 
 
