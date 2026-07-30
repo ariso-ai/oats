@@ -50,6 +50,7 @@ try {
     ${If} $0 <> 0
     ${OrIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
 '@
+  $oldCheck = $oldCheck.Replace("`r`n", "`n")
   $newCheck = @'
     ; A successful WiX/MSI uninstall is proven by its exit code. Only an NSIS
     ; replacement has an old executable path that this installer can verify.
@@ -59,6 +60,7 @@ try {
     ${EndIf}
     ${If} $0 <> 0
 '@
+  $newCheck = $newCheck.Replace("`r`n", "`n")
 
   $matches = ([regex]::Matches($template, [regex]::Escape($oldCheck))).Count
   if ($matches -ne 1) {
