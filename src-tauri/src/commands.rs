@@ -933,6 +933,15 @@ pub(crate) fn open_waveform_window(
         .build()
         .map_err(|e| e.to_string())?;
 
+    // The application menu is useful on normal Windows windows, but inheriting
+    // it here adds a File/Edit/View/Window strip to an otherwise frameless
+    // recorder pill. Remove it on this window only.
+    #[cfg(target_os = "windows")]
+    if let Err(error) = win.remove_menu() {
+        let _ = win.close();
+        return Err(format!("failed to remove waveform window menu: {error}"));
+    }
+
     // When the pill is the visible recording UI (the meetings window is hidden,
     // minimized, or closed), dock it to the right edge of the primary screen
     // rather than leaving it at the OS default spot. When the meetings window

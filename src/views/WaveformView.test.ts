@@ -12,6 +12,7 @@ const loadRecordingEnabled = vi.fn();
 const closeWin = vi.fn(() => Promise.resolve());
 const setIgnoreCursorEvents = vi.fn(() => Promise.resolve());
 const showWin = vi.fn(() => Promise.resolve());
+const startDragging = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 const backendKind = vi.hoisted(() => ({ value: 'local' as 'local' | 'ariso' }));
 
@@ -29,6 +30,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({
     close: closeWin,
     show: showWin,
+    startDragging,
     setIgnoreCursorEvents: (...a: unknown[]) => setIgnoreCursorEvents(...a),
   }),
 }));
@@ -122,6 +124,27 @@ describe('WaveformView vertical pill', () => {
     expect(startRecording).toHaveBeenCalledWith('mic');
     expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.findAll('.dot')).toHaveLength(6);
+  });
+
+  it('starts native window dragging from the handle on primary-button mousedown', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+
+    // A real click commonly lands on a child dot rather than the handle div.
+    // The event must bubble into the explicit native drag handler either way.
+    await wrapper.find('.dot').trigger('mousedown', { button: 0, buttons: 1 });
+
+    expect(startDragging).toHaveBeenCalledTimes(1);
+    expect(invoke).not.toHaveBeenCalledWith('create_library_window');
+  });
+
+  it('does not start dragging for a non-primary mouse button', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+
+    await wrapper.find('.dot').trigger('mousedown', { button: 2, buttons: 2 });
+
+    expect(startDragging).not.toHaveBeenCalled();
   });
 
   it('uses the white logo in the dark recorder pill', async () => {

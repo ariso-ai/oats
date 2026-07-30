@@ -83,12 +83,16 @@
           </button>
         </div>
 
-        <!-- Tauri only drags when the mousedown target itself carries the
-             attribute, so every leaf in the handle needs it. -->
-        <div class="drag-handle" data-tauri-drag-region @click.stop>
-          <div class="divider" data-tauri-drag-region />
-          <div class="drag-dots" data-tauri-drag-region>
-            <span v-for="n in 6" :key="n" class="dot" data-tauri-drag-region />
+        <!-- Start the native move loop explicitly. The declarative drag-region
+             listener is unreliable in Windows WebView2 for this nested handle. -->
+        <div
+          class="drag-handle"
+          @mousedown.left.stop.prevent="startWindowDrag"
+          @click.stop
+        >
+          <div class="divider" />
+          <div class="drag-dots">
+            <span v-for="n in 6" :key="n" class="dot" />
           </div>
         </div>
       </template>
@@ -287,6 +291,14 @@ function expand() {
 
 function collapse() {
   isExpanded.value = false;
+}
+
+async function startWindowDrag() {
+  try {
+    await getCurrentWebviewWindow().startDragging();
+  } catch (e) {
+    console.error('Failed to start recorder window drag', e);
+  }
 }
 
 // Clicking the pill body (not the controls or the drag handle) brings up the
@@ -997,8 +1009,7 @@ html, body {
   flex-shrink: 0;
   cursor: grab;
 }
-/* Children carry the drag-region attribute individually, so give them the
-   grab cursor too; switch to grabbing while actively dragging. */
+/* Give the nested handle graphics the same affordance as their hit target. */
 .drag-handle * { cursor: grab; }
 .drag-handle:active,
 .drag-handle:active * { cursor: grabbing; }
