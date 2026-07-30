@@ -281,12 +281,22 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
             src-tauri/binaries/llama
-          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
+            src-tauri/binaries/windows-runtime
+          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
 
       - name: Build Windows sidecar and executable resources
         if: steps.windows-sidecar-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./scripts/build-windows-sidecar.ps1
+
+      - name: Verify app-local Visual C++ runtime
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-vc-runtime.ps1 `
+            -RootRuntimeDirectory src-tauri/binaries/windows-runtime `
+            -LlamaRuntimeDirectory src-tauri/binaries/llama `
+            -SidecarPath src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe `
+            -LlamaServerPath src-tauri/binaries/llama/llama-server.exe
 
       # Pin the reviewed SSL.com action. This invocation only installs and
       # configures CodeSignTool; Tauri calls our secret-safe wrapper once for
@@ -432,12 +442,22 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
             src-tauri/binaries/llama
-          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
+            src-tauri/binaries/windows-runtime
+          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
 
       - name: Build Windows sidecar and executable resources
         if: steps.windows-sidecar-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./scripts/build-windows-sidecar.ps1
+
+      - name: Verify app-local Visual C++ runtime
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-vc-runtime.ps1 `
+            -RootRuntimeDirectory src-tauri/binaries/windows-runtime `
+            -LlamaRuntimeDirectory src-tauri/binaries/llama `
+            -SidecarPath src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe `
+            -LlamaServerPath src-tauri/binaries/llama/llama-server.exe
 
       - name: Cache Windows Rust release dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -484,6 +504,10 @@ jobs:
               throw "Expected unsigned installer '$($installer.Name)', found $($signature.SignatureType)."
             }
           }
+
+          ./scripts/verify-windows-installer-runtime.ps1 `
+            -NsisInstallerPath $nsis[0].FullName `
+            -MsiInstallerPath $msi[0].FullName
 
       - name: Upload unsigned Windows installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

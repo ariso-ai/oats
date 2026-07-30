@@ -136,7 +136,8 @@ jobs:
           path: |
             src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
             src-tauri/binaries/llama
-          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
+            src-tauri/binaries/windows-runtime
+          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
 
       # Exercise the sidecar's shared CLI/JSON contract before its release
       # binary is copied into Tauri's externalBin location.
@@ -154,6 +155,16 @@ jobs:
         if: runner.os == 'Windows' && steps.windows-sidecar-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./scripts/build-windows-sidecar.ps1
+
+      - name: Verify Windows app-local Visual C++ runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-vc-runtime.ps1 `
+            -RootRuntimeDirectory src-tauri/binaries/windows-runtime `
+            -LlamaRuntimeDirectory src-tauri/binaries/llama `
+            -SidecarPath src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe `
+            -LlamaServerPath src-tauri/binaries/llama/llama-server.exe
 
       # Host tests mutate process-scoped test overrides, so keep them serial on
       # Windows while exercising the same target that Tauri packages.

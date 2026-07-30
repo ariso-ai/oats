@@ -51,6 +51,12 @@ try {
   Import-WindowsBuildEnvironment
   $env:RUSTUP_TOOLCHAIN = $Toolchain
 
+  & (Join-Path $PSScriptRoot "verify-windows-vc-runtime.ps1") `
+    -RootRuntimeDirectory (Join-Path $Root "src-tauri\binaries\windows-runtime") `
+    -LlamaRuntimeDirectory (Join-Path $Root "src-tauri\binaries\llama") `
+    -SidecarPath (Join-Path $Root "src-tauri\binaries\ariso-stt-$Target.exe") `
+    -LlamaServerPath (Join-Path $Root "src-tauri\binaries\llama\llama-server.exe")
+
   $effectiveConfig = if ($TauriConfig) {
     (Resolve-Path -LiteralPath $TauriConfig).Path
   } else {
