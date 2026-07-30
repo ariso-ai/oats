@@ -352,7 +352,9 @@ fn main() {
             let settings = crate::window_style::settings_window_builder(app)
                 .visible(false)
                 .build()?;
-            crate::window_style::install_settings_window_behavior(&settings)?;
+            if let Err(e) = crate::window_style::install_settings_window_behavior(&settings) {
+                eprintln!("install settings window behavior: {e}");
+            }
 
             // Windows has no persistent application menu while every window is
             // hidden, and users commonly hide tray icons. A shortcut launch
