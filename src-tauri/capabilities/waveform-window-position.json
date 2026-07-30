@@ -3,6 +3,7 @@
   "identifier": "waveform-window-position",
   "description": "Allows only the recorder waveform window to follow pointer drags on Windows",
   "windows": ["waveform"],
+  "platforms": ["windows"],
   "permissions": [
     "core:window:allow-set-position"
   ]

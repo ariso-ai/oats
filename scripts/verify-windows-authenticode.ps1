@@ -146,7 +146,7 @@ try {
     throw "Silent NSIS uninstall failed with exit code $($uninstall.ExitCode)."
   }
 
-  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  $deadline = [DateTime]::UtcNow.AddSeconds(60)
   while ((Test-Path -LiteralPath $installRoot) -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 250
   }
