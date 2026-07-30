@@ -1,7 +1,8 @@
 {
   "bundle": {
     "resources": {
-      "binaries/llama": "llama"
+      "binaries/llama": "llama",
+      "binaries/windows-runtime/*": ""
     },
     "windows": {
       "nsis": {
