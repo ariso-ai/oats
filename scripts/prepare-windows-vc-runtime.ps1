@@ -66,12 +66,11 @@ function Test-RuntimeDirectory {
 function Get-RuntimeVersion {
   param([Parameter(Mandatory = $true)][string]$Path)
 
-  $version = (Get-Item -LiteralPath (Join-Path $Path "vcruntime140.dll")).VersionInfo.FileVersion
-  try {
-    return [version]$version
-  } catch {
-    throw "Invalid Visual C++ runtime version '$version' under $Path."
+  $rawVersion = (Get-Item -LiteralPath (Join-Path $Path "vcruntime140.dll")).VersionInfo.FileVersion
+  if ($rawVersion -notmatch "^(\d+\.\d+\.\d+\.\d+)") {
+    throw "Invalid Visual C++ runtime version '$rawVersion' under $Path."
   }
+  return [version]$matches[1]
 }
 
 function Find-VisualStudioRuntime {
@@ -119,10 +118,11 @@ function Get-ValidatedRuntimeFile {
     throw "Refusing to package untrusted VC runtime file '$Path' (signature=$($signature.Status), signer='$subject')."
   }
 
-  $version = $file.VersionInfo.FileVersion
-  if ($version -notmatch "^14\.") {
-    throw "Unexpected Visual C++ runtime version '$version' for '$Path'."
+  $rawVersion = $file.VersionInfo.FileVersion
+  if ($rawVersion -notmatch "^(14\.\d+\.\d+\.\d+)") {
+    throw "Unexpected Visual C++ runtime version '$rawVersion' for '$Path'."
   }
+  $version = $matches[1]
 
   return [ordered]@{
     name = $file.Name.ToLowerInvariant()
