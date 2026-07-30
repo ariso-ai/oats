@@ -32,9 +32,6 @@ where
 /// Windows otherwise inherits the app-wide File/Edit/View/Window menu, which is
 /// useful in Meetings but consumes space and exposes unrelated actions here.
 pub(crate) fn install_settings_window_behavior(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    #[cfg(target_os = "windows")]
-    window.remove_menu()?;
-
     // Keep Settings resident so every launcher can reuse the same webview and
     // its in-progress form state. Application shutdown still destroys it.
     let window_for_close = window.clone();
@@ -45,5 +42,9 @@ pub(crate) fn install_settings_window_behavior(window: &tauri::WebviewWindow) ->
             crate::activation::refresh(window_for_close.app_handle());
         }
     });
+
+    #[cfg(target_os = "windows")]
+    window.remove_menu()?;
+
     Ok(())
 }
