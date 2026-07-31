@@ -39,6 +39,7 @@ try {
     -Force
 
   & (Join-Path $PSScriptRoot "prepare-windows-llama-runtime.ps1")
+  & (Join-Path $PSScriptRoot "prepare-windows-vc-runtime.ps1")
 } finally {
   Pop-Location
 }

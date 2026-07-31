@@ -1,12 +1,23 @@
 {
   "bundle": {
     "resources": {
-      "binaries/llama": "llama"
+      "binaries/llama": "llama",
+      "binaries/windows-runtime/*": ""
     },
     "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer/nsis-hooks.nsh"
+      },
       "wix": {
         "bannerPath": "windows/installer/wix-banner.bmp",
         "dialogImagePath": "windows/installer/wix-dialog.bmp"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

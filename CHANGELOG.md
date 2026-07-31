@@ -1,5 +1,104 @@
 # Changelog
 
+## [0.18.2](https://github.com/ariso-ai/oats/compare/v0.18.1...v0.18.2) (2026-07-30)
+
+
+### Bug Fixes
+
+* **windows:** bundle Visual C++ runtime app-local ([c9ae955](https://github.com/ariso-ai/oats/commit/c9ae955e5445aab2e4b1f64e71f1f8d6f8692751))
+* **windows:** bundle Visual C++ runtime app-local ([67f1258](https://github.com/ariso-ai/oats/commit/67f12583f931a186af0fe813a5139ff74c703e09))
+* **windows:** normalize Visual C++ file versions ([237b614](https://github.com/ariso-ai/oats/commit/237b614b20b104e8e9b0c2116e118a0a49b7b672))
+
+## [0.18.1](https://github.com/ariso-ai/oats/compare/v0.18.0...v0.18.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* make ari will join chip conditional ([6811343](https://github.com/ariso-ai/oats/commit/6811343bf8d4d31a0c229d99ef7122c89bbfd6be))
+* make ari will join chip conditional ([a19eb01](https://github.com/ariso-ai/oats/commit/a19eb01084f2b68bfc4f1fe1d0e54176baf0519b))
+* **windows:** address remaining review findings ([bf3322e](https://github.com/ariso-ai/oats/commit/bf3322efc33ba569b01e4220fa9f7c819b0fe1a4))
+* **windows:** bundle recent installer and desktop reliability fixes ([cdb0dc6](https://github.com/ariso-ai/oats/commit/cdb0dc660691f09bc0dc7c02c8e5f3a84f8bf4c8))
+* **windows:** harden NSIS migration and uninstall cleanup ([6634890](https://github.com/ariso-ai/oats/commit/6634890d2a09fd4e172a83c558b3a58d9f839140))
+* **windows:** hide native menu in settings ([4d7c76b](https://github.com/ariso-ai/oats/commit/4d7c76b374f6a193b48020500b85d21a00289648))
+* **windows:** make NSIS template patch EOL-independent ([1c88d12](https://github.com/ariso-ai/oats/commit/1c88d12d6125a850429cba92add9422a898849e7))
+* **windows:** make recorder drag deterministic ([46715cb](https://github.com/ariso-ai/oats/commit/46715cb8f2d450bc613e2d923c57f29e160789e6))
+* **windows:** make recorder pill draggable ([2c17353](https://github.com/ariso-ai/oats/commit/2c1735363d12fa3a5b085227652908e389511fa2))
+* **windows:** preserve settings close behavior ([57933dc](https://github.com/ariso-ai/oats/commit/57933dc4efc468eed0d4e5869c1d8d82daa2b1ca))
+* **windows:** ship high-resolution shortcut icon ([903b687](https://github.com/ariso-ai/oats/commit/903b68705d43c502755a14d174fff76af9bfcfa5))
+
+## [0.18.0](https://github.com/ariso-ai/oats/compare/v0.17.1...v0.18.0) (2026-07-28)
+
+
+### Features
+
+* add Locate button to pending upload rows ([0806d4a](https://github.com/ariso-ai/oats/commit/0806d4ae2d4e92397ab9de3ae82876043f53ef53))
+* add Locate button to pending upload rows ([32522ee](https://github.com/ariso-ai/oats/commit/32522eec4aa8426e7c5fc40245f945fbef2907e6))
+* add meeting-switch watch module ([4b0c860](https://github.com/ariso-ai/oats/commit/4b0c86068234adbb1169c2e06051bc98f234a5e9))
+* add signed Windows auto-updates ([e66b181](https://github.com/ariso-ai/oats/commit/e66b181241e46cc2f24011d3a8b1f54c92a74986))
+* add signed Windows auto-updates ([3b1a9c9](https://github.com/ariso-ai/oats/commit/3b1a9c99057442eeba6595441d6d53cf139a5628))
+* add switch mode to the meeting-started prompt card ([50feffe](https://github.com/ariso-ai/oats/commit/50feffe4546b138db3681377565758f45589f1f8))
+* improves the meeting prep user prompt ([3639c05](https://github.com/ariso-ai/oats/commit/3639c05e2e52a9e2dcc87018a92eddab99f978c4))
+* meeting prep in the desktop meeting detail view ([85f4045](https://github.com/ariso-ai/oats/commit/85f4045e0458e1983e83bcc72e72c365dbb9e6da))
+* rename meeting-end prompt window plumbing to meeting-switch ([f6a6906](https://github.com/ariso-ai/oats/commit/f6a69062832a1a87a87ebf920a046d64cec847f5))
+* trigger meeting prep from inbox-message-ready and open it in-app ([d3521d5](https://github.com/ariso-ai/oats/commit/d3521d5d2954b0a5a3cd0bc595c8b7188f63e93b))
+
+
+### Bug Fixes
+
+* add missing title_is_default to a transcribe test fixture ([364fbb9](https://github.com/ariso-ai/oats/commit/364fbb9d5455760ca8b7eea7c1e160f651f2f1bf))
+* address Windows release review findings ([7607a4c](https://github.com/ariso-ai/oats/commit/7607a4cc96de5e171e9b6b1a4a58704d75bb9283))
+* Authenticode-sign generated NSIS uninstaller ([5689a15](https://github.com/ariso-ai/oats/commit/5689a155c3fbbb0428616210793658f43966f53e))
+* build frontend before Windows cache target ([793600c](https://github.com/ariso-ai/oats/commit/793600c5ba809285804410128dd5866f156e2df4))
+* do not show canclled meeting on menu bar ([af1a42e](https://github.com/ariso-ai/oats/commit/af1a42e7c0be18e7bf489fefdb1d624ac38b3325))
+* harden Windows signer diagnostics ([0cd7a31](https://github.com/ariso-ai/oats/commit/0cd7a31b43ed5d9fbeeb050ab877fd0d3d7362ae))
+* hide future meetings from the Meetings history list ([1e841f2](https://github.com/ariso-ai/oats/commit/1e841f28548c8f398940af221c764ef772bbd14a))
+* hide future meetings from the Meetings history list ([e8c6c9e](https://github.com/ariso-ai/oats/commit/e8c6c9ec2516aa3c2fd75ea2b54693d89c6d0162)), closes [#263](https://github.com/ariso-ai/oats/issues/263)
+* indicator for cancelled meeting ([33adcce](https://github.com/ariso-ai/oats/commit/33adcce60ebc8c2bf4509fe731da7dbbb3d6ef4e))
+* keep signer cleanup from masking results ([6363aef](https://github.com/ariso-ai/oats/commit/6363aef52c9a5a421f5c1ce3099b253ab23dc825))
+* mark canceled meetings and keep them out of the menu bar ([98fac50](https://github.com/ariso-ai/oats/commit/98fac50dfd67487a748a119256c03d321ac475f1))
+* run Tauri signer with PowerShell 7 ([e827419](https://github.com/ariso-ai/oats/commit/e82741993801820d1d76931182830ce0e6886be3))
+* surface safe eSigner diagnostics ([6d0cd42](https://github.com/ariso-ai/oats/commit/6d0cd4229c4bb835bdb41bce6c5b9ea982f33319))
+
+## [0.17.1](https://github.com/ariso-ai/oats/compare/v0.17.0...v0.17.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* clear the 'Upload failed' pill after a pending upload succeeds ([42aca65](https://github.com/ariso-ai/oats/commit/42aca65367a070fbd248983118101f1d619f2bee))
+* do not show failed pill after successful upload ([3288608](https://github.com/ariso-ai/oats/commit/328860866d21a58d162cb14546028756434da7d7))
+* preserve meeting id when resuming pending uploads ([2a97c2e](https://github.com/ariso-ai/oats/commit/2a97c2e9504d3d5cec30a8a67f843802e813927f))
+* preserve meeting id when resuming pending uploads ([1949ba3](https://github.com/ariso-ai/oats/commit/1949ba3219268e572991a781ba6b075a118f8d1d))
+* unblock macOS releases from Windows signing ([1fa3453](https://github.com/ariso-ai/oats/commit/1fa3453ee4bd063e149ce0e6fd2fbba571d54f7b))
+* unblock macOS releases from Windows signing ([2e234a7](https://github.com/ariso-ai/oats/commit/2e234a794747fedd99333b3ebc911065a7fb58ca))
+
+## [0.17.0](https://github.com/ariso-ai/oats/compare/v0.16.0...v0.17.0) (2026-07-19)
+
+
+### Features
+
+* add play button for buffered recordings in Pending Uploads ([1799613](https://github.com/ariso-ai/oats/commit/17996137c1217338d2b3f540ddd43d64747a91f3)), closes [#229](https://github.com/ariso-ai/oats/issues/229)
+* harden Windows local parity and releases ([e9de46b](https://github.com/ariso-ai/oats/commit/e9de46b400c266b4f460bb569c0bd87fe7846e01))
+* play button for buffered recordings in Pending Uploads ([229b490](https://github.com/ariso-ai/oats/commit/229b490d256bd3e4b2737e5e8cca75684e5f8ff2))
+* run the OAuth handshake in the default browser via a loopback c… ([f816224](https://github.com/ariso-ai/oats/commit/f816224aeeb8d12829d99f340edd9f74f07c5326))
+* run the OAuth handshake in the default browser via a loopback callback ([ea3cd55](https://github.com/ariso-ai/oats/commit/ea3cd5587c9476a16dceccfecedfd530d7781f3a))
+* treat the next meeting's start as the stop-prompt transition point ([4ab1d41](https://github.com/ariso-ai/oats/commit/4ab1d41a15d7132935a1b072ec0a4ab85d0bb9fd)), closes [#230](https://github.com/ariso-ai/oats/issues/230)
+* **windows:** add native audio parity ([2835acd](https://github.com/ariso-ai/oats/commit/2835acdb65cf2ee378784d09df39e15c495e757a))
+
+
+### Bug Fixes
+
+* adds required permission ([a6a4667](https://github.com/ariso-ai/oats/commit/a6a466705b74b0143638b8fb11aa0e761bc7ea03))
+* **ci:** scope MLX resource to macOS ([17798ca](https://github.com/ariso-ai/oats/commit/17798cac10f33d6df41dad72a71c683a807717eb))
+* harden Windows local production paths ([1e564d0](https://github.com/ariso-ai/oats/commit/1e564d09465674cae5de501d3de8a2cc5792e637))
+* match settings titlebar background ([071d900](https://github.com/ariso-ai/oats/commit/071d900acc756683ae62555a5b939eed969d70c7))
+* prompt to stop recording when the next calendar meeting starts ([6ba6fa6](https://github.com/ariso-ai/oats/commit/6ba6fa6ee5accbd38d1a36efcbd3ad9d54b8cd05))
+* **recording:** preserve recorder lifecycle and titles ([5554367](https://github.com/ariso-ai/oats/commit/55543679521989f4bf4c144d03f00ae39f9a1242))
+* **recording:** unify Windows launch and refresh flows ([fd307f5](https://github.com/ariso-ai/oats/commit/fd307f5bbc5f5021a7394cb15022723acd01b81d))
+* repair autofix regressions in play-button a11y change ([3aa332c](https://github.com/ariso-ai/oats/commit/3aa332cae513877d9c1fcb880205c6f2ce527ef9))
+* **updater:** publish immutable payloads ([f56b48f](https://github.com/ariso-ai/oats/commit/f56b48f357607d69558e9ea90c98ac9edc74bbb6))
+* **windows:** harden audio capture lifecycle ([2ad04c5](https://github.com/ariso-ai/oats/commit/2ad04c52b4edca113d2d9d8a1872e19bf19b7cf0))
+* **windows:** hide local inference consoles ([73395ce](https://github.com/ariso-ai/oats/commit/73395cec3dd08c601dd77d0edf3cac2e07a79677))
+
 ## [0.16.0](https://github.com/ariso-ai/oats/compare/v0.15.0...v0.16.0) (2026-07-08)
 
 

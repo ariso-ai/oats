@@ -15,6 +15,8 @@ const writeRecordingNote = vi.fn();
 const invoke = vi.fn(() => Promise.resolve());
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
+const getMeetingPrep = vi.fn();
+const openPrepTab = vi.fn();
 const listPendingUploads = vi.fn(() => Promise.resolve([]));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
@@ -26,6 +28,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 // handlers, `emitEvent` drives them the way the Rust side would.
 type EventHandler = (e: { payload: unknown }) => void;
 const eventHandlers = new Map<string, EventHandler[]>();
+const emitAppEvent = vi.fn(() => Promise.resolve());
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (name: string, cb: EventHandler) => {
     const arr = eventHandlers.get(name) ?? [];
@@ -37,6 +40,7 @@ vi.mock('@tauri-apps/api/event', () => ({
       if (i >= 0) list.splice(i, 1);
     });
   },
+  emit: (...a: unknown[]) => emitAppEvent(...a),
 }));
 
 function emitEvent(name: string, payload: unknown): void {
@@ -54,6 +58,7 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
         listMeetings: () => listMeetings(),
         searchMeetings: (query: string) => searchMeetings(query),
         getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
+        getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
       }),
   };
 });
@@ -96,7 +101,13 @@ function item(over: Record<string, unknown>) {
 const detailStub = {
   name: 'MeetingDetailView',
   emits: ['close', 'title-updated'],
-  template: '<div class="detail-stub"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
+  props: ['item'],
+  methods: {
+    openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
+    saveNotesNow: () => Promise.resolve(),
+  },
+  template:
+    '<div class="detail-stub" :data-meeting="item?.id" :data-prep="item?.prepId"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
 };
 function mountWithDetailStub() {
   return mount(LibraryView, { global: { stubs: { MeetingDetailView: detailStub } } });
@@ -123,6 +134,7 @@ beforeEach(() => {
     })
   );
   invoke.mockResolvedValue(undefined);
+  getMeetingPrep.mockResolvedValue(null);
   listPendingUploads.mockResolvedValue([]);
   readRecordingNote.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
@@ -542,6 +554,20 @@ describe('LibraryView', () => {
     expect(row.find('.mi-sub').text()).toContain('min');
   });
 
+  it('strikes through the title of a canceled meeting only', async () => {
+    listMeetings.mockResolvedValue([
+      item({ id: 'a', title: 'Dropped Sync', canceled: true }),
+      item({ id: 'b', title: 'Live Sync' }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    const titles = wrapper.findAll('.mi-title');
+    const canceled = titles.find((t) => t.text() === 'Dropped Sync')!;
+    const live = titles.find((t) => t.text() === 'Live Sync')!;
+    expect(canceled.classes()).toContain('mi-title--canceled');
+    expect(live.classes()).not.toContain('mi-title--canceled');
+  });
+
   it('opens the floating recorder window forcing a new recording when the detail pane is empty', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
@@ -747,6 +773,32 @@ describe('LibraryView', () => {
     expect(wrapper.text()).not.toContain('Old Sync');
     expect(wrapper.get('button[title="Today"]').classes()).toContain('nav-tab--active');
     expect(wrapper.get('button[title="Meetings"]').classes()).not.toContain('nav-tab--active');
+  });
+
+  it('Meetings tab hides meetings scheduled beyond today', async () => {
+    const inAWeek = new Date();
+    inAWeek.setDate(inAWeek.getDate() + 7);
+    listMeetings.mockResolvedValue([
+      item({ id: 'today', title: 'Today Standup', timestamp: todayAt(9) }),
+      item({ id: 'old', title: 'Old Sync', timestamp: '2020-01-02T10:00:00Z' }),
+      item({ id: 'moved', title: 'Rescheduled Sync', timestamp: inAWeek.toISOString() }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(2);
+    expect(wrapper.text()).not.toContain('Rescheduled Sync');
+  });
+
+  it('Meetings tab shows a past-specific hint when only future meetings exist', async () => {
+    const inAWeek = new Date();
+    inAWeek.setDate(inAWeek.getDate() + 7);
+    listMeetings.mockResolvedValue([
+      item({ id: 'moved', title: 'Rescheduled Sync', timestamp: inAWeek.toISOString() }),
+    ]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
+    expect(wrapper.text()).toContain('No past meetings.');
   });
 
   it('Today tab shows the empty hint when there are no meetings today', async () => {
@@ -1238,6 +1290,30 @@ describe('LibraryView', () => {
     expect(wrapper.find('.pending-stub').exists()).toBe(true);
   });
 
+  it('notifies the recorder window when a sidebar pending upload succeeds', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: {
+            name: 'PendingUploads',
+            emits: ['uploaded'],
+            template: '<div class="pending-stub" />',
+          },
+        },
+      },
+    });
+    await flushPromises();
+    emitAppEvent.mockClear();
+
+    wrapper.findComponent({ name: 'PendingUploads' }).vm.$emit('uploaded');
+    await flushPromises();
+
+    // Broadcasts the stand-down so a still-open failed pill (mirrored into the
+    // recorder strip) clears instead of lingering after a successful retry.
+    expect(emitAppEvent).toHaveBeenCalledWith('pending-upload://succeeded');
+  });
+
   it('confirms before recording an ariso auto-join meeting, and records only on confirm', async () => {
     backendId.mockReturnValue('ariso');
     usesMeetingPicker.mockReturnValue(true);
@@ -1321,5 +1397,196 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('open_meeting_picker', { defaultMeetingId: 42 });
+  });
+});
+
+// Clicking a "Meeting prep ready" notification opens this window (or focuses
+// it) and queues the prep id natively; the Library claims it and opens the
+// prep's meeting with its Prep tab active.
+describe('LibraryView meeting-prep notification', () => {
+  function invokeWith(pendingPrepId: number | null) {
+    invoke.mockImplementation((cmd: unknown) =>
+      Promise.resolve(cmd === 'take_pending_meeting_prep' ? pendingPrepId : undefined)
+    );
+  }
+
+  it('claims the queued prep on mount and opens that meeting on its Prep tab', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([
+      item({ id: '1', title: 'Other', files: undefined }),
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    // The detail view needs the meeting the prep belongs to, so a request that
+    // lands mid-load can't be answered by the previous meeting's pane.
+    expect(openPrepTab).toHaveBeenCalledWith('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the prep\'s meeting_id when no loaded row carries the prep id', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([
+      item({ id: '45565', title: 'Standup', files: undefined }),
+    ]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '45565' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(getMeetingPrep).toHaveBeenCalledWith(5145);
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('claims the prep on the event when the window was already open', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(null);
+    listMeetings.mockResolvedValue([
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(openPrepTab).not.toHaveBeenCalled();
+
+    invokeWith(5145);
+    emitEvent('meeting-prep://open', {});
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when nothing is queued', async () => {
+    invokeWith(null);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    mountWithDetailStub();
+    await flushPromises();
+    expect(openPrepTab).not.toHaveBeenCalled();
+  });
+
+  it('carries the prep id onto a loaded row that predates the prep', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '45565', title: 'Standup', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '45565' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    // Without a prepId on the row the detail pane would render no Prep tab at
+    // all — the notification already told us which prep this is.
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+  });
+
+  it('pins and opens a prep whose meeting is outside the loaded list', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '1', title: 'Other', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '99999' });
+    getMeetingDetail.mockImplementation((meeting) =>
+      Promise.resolve({
+        id: meeting.id,
+        title: 'Quarterly review',
+        startAt: '2026-06-09T15:00:00Z',
+        endAt: '2026-06-09T16:00:00Z',
+        participants: [],
+        actionItems: [],
+        audioClips: [],
+        isLocal: false,
+      })
+    );
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('99999');
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+    expect(openPrepTab).toHaveBeenCalledWith('99999');
+  });
+
+  // The tests above stub the detail pane; this one drives the real one, so the
+  // hand-off (select the row → activate its Prep tab) is covered end to end.
+  it('lands on the real detail view with the Prep tab showing the prep', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([
+      item({ id: '1', title: 'Other', files: undefined }),
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    getMeetingDetail.mockImplementation((meeting) =>
+      Promise.resolve({
+        id: meeting.id,
+        title: meeting.title,
+        startAt: meeting.timestamp,
+        participants: [],
+        actionItems: [],
+        audioClips: [],
+        isLocal: false,
+        digest: '## AI notes',
+        prepId: meeting.prepId,
+      })
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Talking points', meetingId: '45565' });
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    expect(wrapper.find('.head-title').text()).toBe('Standup');
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+    expect(wrapper.find('.prep-pane').text()).toContain('Talking points');
+  });
+
+  it('highlights the prep\'s row in the sidebar, not just the detail pane', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    // A prep lands shortly before its meeting starts. Pinned clock so "later
+    // today" stays today in whatever timezone the suite runs in.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-06-02T12:00:00Z'));
+    listMeetings.mockResolvedValue([
+      item({ id: '1', title: 'Yesterday standup', timestamp: '2026-06-01T10:00:00Z', files: undefined }),
+      item({ id: '45565', title: 'Standup', timestamp: '2026-06-02T13:00:00Z', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    const selected = wrapper.findAll('.meeting-item').filter((r) => r.classes('selected'));
+    expect(selected).toHaveLength(1);
+    expect(selected[0].text()).toContain('Standup');
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+  });
+
+  it('keeps the prep id on the selected row across a list refresh', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '45565', title: 'Standup', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '45565' });
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+
+    // Focusing the window (which a notification click does) refreshes the list;
+    // the fresh row predates the prep and carries no prep_id.
+    window.dispatchEvent(new Event('focus'));
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-prep')).toBe('5145');
+  });
+
+  it('leaves the pane alone when the prep resolves to no reachable meeting', async () => {
+    backendId.mockReturnValue('ariso');
+    invokeWith(5145);
+    listMeetings.mockResolvedValue([item({ id: '1', title: 'Other', files: undefined })]);
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '99999' });
+    getMeetingDetail.mockRejectedValue(new Error('404'));
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(openPrepTab).not.toHaveBeenCalled();
+    // The auto-selected first row stays put — no meeting is yanked out from
+    // under the user for a prep we can't place.
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('1');
   });
 });

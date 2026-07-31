@@ -25,6 +25,22 @@ describe('RecordingAudioPlayer', () => {
     expect(wrapper.find('audio').attributes('src')).toBe('blob:test');
   });
 
+  it('describes via title without overriding the accessible state name', async () => {
+    const load = vi.fn().mockResolvedValue(new ArrayBuffer(4));
+    const wrapper = mount(RecordingAudioPlayer, { props: { load, title: 'Plays the local copy' } });
+
+    // The title supplements the visible label ("▶ Play" / "Failed" / …) as the
+    // accessible description; aria-label would replace that state name entirely.
+    const btn = wrapper.find('button.play-btn');
+    expect(btn.attributes('title')).toBe('Plays the local copy');
+    expect(btn.attributes('aria-label')).toBeUndefined();
+    expect(btn.text()).toContain('Play');
+
+    await btn.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('audio').attributes('title')).toBe('Plays the local copy');
+  });
+
   it('shows a disabled "No audio" state when load resolves null', async () => {
     const load = vi.fn().mockResolvedValue(null);
     const wrapper = mount(RecordingAudioPlayer, { props: { load } });

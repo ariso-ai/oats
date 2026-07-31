@@ -70,7 +70,7 @@
               >{{ featured.title }}</button>
             </div>
             <div
-              v-if="attendees.length || featured.autoJoinScheduled"
+              v-if="attendees.length || ariChip"
               class="head-right"
             >
               <div v-if="attendees.length" class="avatars">
@@ -91,7 +91,7 @@
                 </template>
                 <span v-if="attendees.length > 3" class="avatar avatar--more">+{{ attendees.length - 3 }}</span>
               </div>
-              <AriWillJoinTag v-if="featured.autoJoinScheduled" />
+              <AriWillJoinTag v-if="ariChip" :joined="ariChip === 'joined'" />
             </div>
           </div>
           <div class="head-actions">
@@ -152,6 +152,7 @@ import {
   type MeetingListItem,
   type MeetingParticipantInfo,
 } from '../composables/useBackend';
+import { ariJoinChip } from '../composables/meetingStatus';
 import {
   groupTodaysMeetings,
   nextDaySection,
@@ -237,6 +238,22 @@ const safeIndex = computed(() =>
 const featured = computed<MeetingListItem | null>(() => upcoming.value[safeIndex.value] ?? null);
 const featuredRel = computed(() =>
   featured.value ? upcomingRelLabel(featured.value, props.now).replace(/^in /, '') : ''
+);
+
+// Ari's chip for the featured meeting: the scheduled promise until Ari is in
+// the meeting, then "Ari has joined", then nothing once the meeting is over.
+const ariChip = computed(() =>
+  featured.value
+    ? ariJoinChip(
+        {
+          autoJoinScheduled: featured.value.autoJoinScheduled,
+          status: featured.value.arisoStatus,
+          startAt: featured.value.timestamp,
+          endAt: featured.value.endTimestamp,
+        },
+        props.now
+      )
+    : null
 );
 
 // Everything after the featured meeting fills the list, capped with a "N more…"

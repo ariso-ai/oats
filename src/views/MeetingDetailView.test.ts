@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
+import { mount, flushPromises, type VueWrapper, type DOMWrapper } from '@vue/test-utils';
+import { nextTick } from 'vue';
 import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
 
 const getMeetingDetail = vi.fn();
@@ -8,6 +9,7 @@ const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const getMeetingAudio = vi.fn();
 const deleteMeetingClip = vi.fn();
+const getMeetingPrep = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
 const loadNote = vi.fn();
@@ -74,6 +76,9 @@ async function mountWith(d: MeetingDetail) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps queued `mockResolvedValueOnce` implementations, so an
+  // unconsumed one would answer the next test's first detail load.
+  getMeetingDetail.mockReset();
   renameMeeting.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
   getMeetingAudio.mockResolvedValue(null);
@@ -83,6 +88,7 @@ beforeEach(() => {
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
     getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
     deleteMeetingClip: (...a: [MeetingListItem, string]) => deleteMeetingClip(...a),
+    getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
   });
   notesCanEdit.mockReturnValue(false);
   loadNote.mockResolvedValue({ content: '', title: '' });
@@ -105,6 +111,7 @@ beforeEach(() => {
   readRecordingFile.mockResolvedValue(null);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
+  getMeetingPrep.mockResolvedValue(null);
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -1099,5 +1106,287 @@ describe('MeetingDetailView per-clip delete', () => {
     // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
     expect(wrapper.text()).toContain('from clip two');
     expect(wrapper.text()).not.toContain('from clip one');
+  });
+});
+
+describe('MeetingDetailView meeting prep', () => {
+  const tabLabels = (wrapper: VueWrapper): string[] =>
+    wrapper.findAll('.seg-btn').map((b) => b.text());
+  const prepTab = (wrapper: VueWrapper): DOMWrapper<Element> =>
+    wrapper.findAll('.seg-btn').filter((b) => b.text() === 'Prep')[0];
+
+  it('shows no Prep tab when the meeting has no prepId', async () => {
+    const wrapper = await mountWith(detail({ digest: 'D' }));
+    expect(tabLabels(wrapper)).not.toContain('Prep');
+  });
+
+  it('places the Prep tab after My Notes', async () => {
+    const wrapper = await mountWith(
+      detail({ prepId: 4339, digest: 'D', hasIndividualNote: true, hasTranscript: true })
+    );
+    expect(tabLabels(wrapper)).toEqual(['AI Notes', 'Transcript', 'My Notes', 'Prep']);
+  });
+
+  it('the Prep tab fetches once and renders the markdown', async () => {
+    getMeetingPrep.mockResolvedValue({ content: '## Open items', meetingId: '45565' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(getMeetingPrep).toHaveBeenCalledTimes(1);
+    expect(getMeetingPrep).toHaveBeenCalledWith(4339);
+    expect(wrapper.find('.prep-pane').text()).toContain('Open items');
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+
+    // Away and back: the cached prep is reused (no second fetch).
+    await wrapper.find('.seg-btn').trigger('click'); // "AI Notes"
+    expect(wrapper.find('.prep-pane').exists()).toBe(false);
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+    expect(getMeetingPrep).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking another tab leaves the prep pane and activates that tab', async () => {
+    getMeetingPrep.mockResolvedValue({ content: '## P', meetingId: '1' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').exists()).toBe(true);
+
+    await wrapper.find('.seg-btn').trigger('click'); // "AI Notes"
+    expect(wrapper.find('.prep-pane').exists()).toBe(false);
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+  });
+
+  it('openPrepTab activates the Prep tab (the notification click target)', async () => {
+    getMeetingPrep.mockResolvedValue({ content: '## From the notification', meetingId: '1' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+
+    (wrapper.vm as unknown as { openPrepTab: () => void }).openPrepTab();
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+    expect(wrapper.find('.prep-pane').text()).toContain('From the notification');
+  });
+
+  // The Library selects the prep's row and asks for the Prep tab one tick
+  // later — that request races the detail load the selection just started.
+  async function selectThenOpenPrep(
+    wrapper: VueWrapper,
+    next: MeetingListItem,
+    requestedId: string
+  ): Promise<void> {
+    void wrapper.setProps({ item: next });
+    await nextTick();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab(requestedId);
+    await flushPromises();
+  }
+
+  it('opens Prep on a meeting whose detail is still loading', async () => {
+    // The previously loaded meeting carries a prep of its own, so its stale
+    // detail must not answer a request meant for the incoming meeting.
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '7', prepId: 11, digest: 'D' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+
+    getMeetingPrep.mockResolvedValue({ content: '## Next prep', meetingId: '8' });
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '8', prepId: 4339, digest: 'D' }));
+    await selectThenOpenPrep(
+      wrapper,
+      { id: '8', title: 'Next', timestamp: '2026-06-03T10:00:00Z' },
+      '8'
+    );
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+    expect(wrapper.find('.prep-pane').text()).toContain('Next prep');
+  });
+
+  it('opens Prep even when a pending note save delays the meeting switch', async () => {
+    // `load` flushes a dirty draft before resetting its state, so the reset can
+    // land *after* the Library has already asked for the Prep tab.
+    notesCanEdit.mockReturnValue(true);
+    getMeetingDetail.mockImplementation((m: MeetingListItem) =>
+      Promise.resolve(detail({ id: m.id, prepId: m.id === '8' ? 4339 : 11, digest: 'D' }))
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Next prep', meetingId: '8' });
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    // Autosave only arms once the personal note has loaded, i.e. after its tab
+    // has been opened — that is what leaves a dirty draft behind.
+    await wrapper.findAll('.seg-btn').filter((b) => b.text() === 'My Notes')[0].trigger('click');
+    await flushPromises();
+    wrapper.findComponent(MeetingNotesEditor).vm.$emit('update:modelValue', 'draft');
+    await flushPromises();
+
+    let resolveSave: (() => void) | null = null;
+    saveNote.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        })
+    );
+
+    void wrapper.setProps({ item: { id: '8', title: 'Next', timestamp: '2026-06-03T10:00:00Z' } });
+    await nextTick();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab('8');
+    resolveSave?.();
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+  });
+
+  it('stays on Prep when the same meeting reloads under it', async () => {
+    // A list refresh swaps the selected row for the freshly-fetched one, which
+    // reloads the detail. The prep request must survive that reload.
+    getMeetingDetail.mockImplementation((m: MeetingListItem) =>
+      Promise.resolve(detail({ id: m.id, prepId: 4339, digest: 'D', hasIndividualNote: true }))
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Talking points', meetingId: '7' });
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab('7');
+    await flushPromises();
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+
+    // Same meeting, fresh row object (a slightly different timestamp is enough
+    // to retrigger the load).
+    await wrapper.setProps({ item: { ...item, timestamp: '2026-06-02T10:00:01Z' } });
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
+  });
+
+  it('drops the prep request once the user picks another tab', async () => {
+    getMeetingDetail.mockImplementation((m: MeetingListItem) =>
+      Promise.resolve(detail({ id: m.id, prepId: 4339, digest: 'D', hasIndividualNote: true }))
+    );
+    getMeetingPrep.mockResolvedValue({ content: '## Talking points', meetingId: '7' });
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    (wrapper.vm as unknown as { openPrepTab: (id?: string) => void }).openPrepTab('7');
+    await flushPromises();
+
+    await wrapper.findAll('.seg-btn').filter((b) => b.text() === 'My Notes')[0].trigger('click');
+    await flushPromises();
+    await wrapper.setProps({ item: { ...item, timestamp: '2026-06-02T10:00:01Z' } });
+    await flushPromises();
+
+    // The user's choice outranks the notification — a reload must not yank them
+    // back to Prep.
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+  });
+
+  it('ignores a prep request aimed at a meeting that is no longer selected', async () => {
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '7', prepId: 11, digest: 'D' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '8', prepId: 4339, digest: 'D' }));
+    await selectThenOpenPrep(
+      wrapper,
+      { id: '8', title: 'Next', timestamp: '2026-06-03T10:00:00Z' },
+      '7'
+    );
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+  });
+
+  it('shows an empty state when the prep API resolves null', async () => {
+    getMeetingPrep.mockResolvedValue(null);
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').text()).toContain('No prep available.');
+  });
+
+  it('shows an empty state when the prep has no content', async () => {
+    getMeetingPrep.mockResolvedValue({ content: null, meetingId: '1' });
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').text()).toContain('No prep available.');
+  });
+
+  it('shows an error state when the prep fetch fails', async () => {
+    getMeetingPrep.mockRejectedValue(new Error('boom'));
+    const wrapper = await mountWith(detail({ prepId: 4339, digest: 'D' }));
+    await prepTab(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.prep-pane').text()).toContain('Could not load the meeting prep.');
+  });
+});
+
+describe('MeetingDetailView canceled meetings', () => {
+  it('marks a canceled meeting with a chip', async () => {
+    const wrapper = await mountWith(detail({ canceled: true }));
+    expect(wrapper.find('.canceled-tag').exists()).toBe(true);
+    expect(wrapper.find('.canceled-tag').text()).toContain('Canceled');
+  });
+
+  it('hides the "Ari will join" tag on a canceled meeting', async () => {
+    const wrapper = await mountWith(detail({ canceled: true, autoJoinScheduled: true }));
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
+    expect(wrapper.find('.canceled-tag').exists()).toBe(true);
+  });
+
+  it('still shows the "Ari will join" tag on a live meeting', async () => {
+    const wrapper = await mountWith(detail({ autoJoinScheduled: true }));
+    expect(wrapper.find('.ari-tag').exists()).toBe(true);
+    expect(wrapper.find('.canceled-tag').exists()).toBe(false);
+  });
+
+  it('shows no canceled chip for a normal meeting', async () => {
+    const wrapper = await mountWith(detail());
+    expect(wrapper.find('.canceled-tag').exists()).toBe(false);
+  });
+});
+
+describe('MeetingDetailView Ari chip', () => {
+  const NOW = new Date('2026-06-16T12:00:00Z');
+  // Started at 11:45, ends at 12:30 — running as of NOW.
+  const running = {
+    autoJoinScheduled: true,
+    startAt: '2026-06-16T11:45:00Z',
+    endAt: '2026-06-16T12:30:00Z',
+  };
+
+  async function mountAt(d: MeetingDetail, now = NOW) {
+    getMeetingDetail.mockResolvedValue(d);
+    const wrapper = mount(MeetingDetailView, { props: { item, now } });
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('says Ari has joined for a running meeting whose status is joined', async () => {
+    const wrapper = await mountAt(detail({ ...running, arisoStatus: 'joined' }));
+    expect(wrapper.find('.ari-tag').text()).toContain('Ari has joined');
+  });
+
+  it('keeps the promise while the meeting is running but Ari has not joined', async () => {
+    const wrapper = await mountAt(detail({ ...running, arisoStatus: 'joining' }));
+    expect(wrapper.find('.ari-tag').text()).toContain('Ari will join');
+  });
+
+  it('drops the chip once the meeting has ended', async () => {
+    const wrapper = await mountAt(
+      detail({
+        autoJoinScheduled: true,
+        arisoStatus: 'joined',
+        startAt: '2026-06-16T10:00:00Z',
+        endAt: '2026-06-16T11:00:00Z',
+      })
+    );
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
+  });
+
+  it('drops the chip once the meeting is done', async () => {
+    const wrapper = await mountAt(detail({ ...running, arisoStatus: 'done' }));
+    expect(wrapper.find('.ari-tag').exists()).toBe(false);
   });
 });

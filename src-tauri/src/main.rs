@@ -189,6 +189,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
+            commands::cancel_google_sign_in,
             commands::check_session,
             commands::sign_out,
             commands::api_request,
@@ -218,6 +219,7 @@ fn main() {
             commands::discard_pending_audio,
             commands::list_pending_uploads,
             commands::combine_pending_audio,
+            commands::reveal_pending_upload,
             commands::fetch_meeting_audio,
             commands::share_text_native,
             transcribe::local_recording_id_for_start,
@@ -229,15 +231,16 @@ fn main() {
             model_manager::download_local_llm,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
+            meeting_notifications::take_pending_meeting_prep,
             platform::platform_capabilities,
             meeting_notifications::show_silence_prompt,
             meeting_notifications::dismiss_silence_prompt,
             meeting_notifications::resolve_silence_prompt,
             meeting_notifications::resize_silence_prompt,
-            meeting_notifications::show_meeting_end_prompt,
-            meeting_notifications::dismiss_meeting_end_prompt,
-            meeting_notifications::resolve_meeting_end_prompt,
-            meeting_notifications::resize_meeting_end_prompt,
+            meeting_notifications::show_meeting_switch_prompt,
+            meeting_notifications::dismiss_meeting_switch_prompt,
+            meeting_notifications::resolve_meeting_switch_prompt,
+            meeting_notifications::resize_meeting_switch_prompt,
             meeting_notifications::resolve_meeting_prompt,
             meeting_notifications::resize_meeting_prompt,
             tray_meeting::sync_tray_meeting,
@@ -349,7 +352,9 @@ fn main() {
             let settings = crate::window_style::settings_window_builder(app)
                 .visible(false)
                 .build()?;
-            crate::window_style::install_settings_close_behavior(&settings);
+            if let Err(e) = crate::window_style::install_settings_window_behavior(&settings) {
+                eprintln!("install settings window behavior: {e}");
+            }
 
             // Windows has no persistent application menu while every window is
             // hidden, and users commonly hide tray icons. A shortcut launch

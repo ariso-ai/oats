@@ -77,6 +77,7 @@ impl Resampler {
 /// Average interleaved Float32 frames into mono. Windows requests this exact
 /// format from the shared-mode audio engine, so conversion stays independent
 /// of WASAPI handles and can be unit tested without audio hardware.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn downmix_interleaved_f32(input: &[u8], channels: usize) -> Result<Vec<f32>, String> {
     if channels == 0 {
         return Err("audio stream reported zero channels".into());

@@ -1,11 +1,13 @@
 <#
-Builds Windows installer bundles through the same Tauri path used by release
-CI. This script owns local artifact cleanup and shape validation; it
-does not publish releases or provide signing credentials. Release CI can pass a
-Tauri config overlay that selects its imported Authenticode certificate.
+Builds Windows installer bundles for local/internal QA through Tauri. This
+script owns local artifact cleanup and shape validation; it does not publish
+releases or provide signing credentials. Callers may pass a Tauri config overlay
+for an explicitly reviewed signing test.
 #>
 param(
-  [string]$Bundles = "nsis,msi",
+  # NSIS is the consumer/updater channel. Pass -Bundles msi explicitly for
+  # internal deployment testing; public releases never build both together.
+  [string]$Bundles = "nsis",
   [string]$Toolchain = "stable-x86_64-pc-windows-msvc",
   [string]$Target = "x86_64-pc-windows-msvc",
   [string]$TauriConfig,
@@ -19,6 +21,7 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $Root
 $generatedConfig = $null
+$generatedTemplate = $null
 
 # Cleanup is intentionally constrained to the target bundle directory. This
 # guard exists because installer builds remove stale outputs before packaging;
@@ -48,27 +51,32 @@ try {
   Import-WindowsBuildEnvironment
   $env:RUSTUP_TOOLCHAIN = $Toolchain
 
-  $effectiveConfig = $null
-  if ($TauriConfig) {
-    $effectiveConfig = (Resolve-Path -LiteralPath $TauriConfig).Path
+  & (Join-Path $PSScriptRoot "verify-windows-vc-runtime.ps1") `
+    -RootRuntimeDirectory (Join-Path $Root "src-tauri\binaries\windows-runtime") `
+    -LlamaRuntimeDirectory (Join-Path $Root "src-tauri\binaries\llama") `
+    -SidecarPath (Join-Path $Root "src-tauri\binaries\ariso-stt-$Target.exe") `
+    -LlamaServerPath (Join-Path $Root "src-tauri\binaries\llama\llama-server.exe")
+
+  $effectiveConfig = if ($TauriConfig) {
+    (Resolve-Path -LiteralPath $TauriConfig).Path
+  } else {
+    $null
+  }
+
+  $localConfig = if ($effectiveConfig) {
+    Get-Content -LiteralPath $effectiveConfig -Raw | ConvertFrom-Json
+  } else {
+    [pscustomobject]@{}
+  }
+  if (-not $localConfig.PSObject.Properties["bundle"]) {
+    $localConfig | Add-Member -NotePropertyName bundle -NotePropertyValue ([pscustomobject]@{})
   }
   if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-    $localConfig = if ($effectiveConfig) {
-      Get-Content -LiteralPath $effectiveConfig -Raw | ConvertFrom-Json
-    } else {
-      [pscustomobject]@{}
-    }
-    if (-not $localConfig.PSObject.Properties["bundle"]) {
-      $localConfig | Add-Member -NotePropertyName bundle -NotePropertyValue ([pscustomobject]@{})
-    }
     if ($localConfig.bundle.PSObject.Properties["createUpdaterArtifacts"]) {
       $localConfig.bundle.createUpdaterArtifacts = $false
     } else {
       $localConfig.bundle | Add-Member -NotePropertyName createUpdaterArtifacts -NotePropertyValue $false
     }
-    $generatedConfig = Join-Path ([System.IO.Path]::GetTempPath()) "oats-tauri-local-$PID.json"
-    $localConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $generatedConfig -Encoding utf8
-    $effectiveConfig = $generatedConfig
   }
 
   $bundleNames = @([regex]::Split($Bundles, "[,\s]+") |
@@ -85,6 +93,28 @@ try {
       throw "Unsupported Windows bundle '$bundleName'. Use 'nsis', 'msi', or 'nsis,msi'."
     }
   }
+
+  if ($bundleNames -contains "nsis") {
+    if (-not $localConfig.bundle.PSObject.Properties["windows"]) {
+      $localConfig.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{})
+    }
+    if (-not $localConfig.bundle.windows.PSObject.Properties["nsis"]) {
+      $localConfig.bundle.windows | Add-Member -NotePropertyName nsis -NotePropertyValue ([pscustomobject]@{})
+    }
+
+    $generatedTemplate = Join-Path ([System.IO.Path]::GetTempPath()) "oats-tauri-nsis-$PID.nsi"
+    & (Join-Path $PSScriptRoot "prepare-windows-nsis-template.ps1") -OutputPath $generatedTemplate | Out-Null
+    if ($localConfig.bundle.windows.nsis.PSObject.Properties["template"]) {
+      $localConfig.bundle.windows.nsis.template = $generatedTemplate
+    } else {
+      $localConfig.bundle.windows.nsis |
+        Add-Member -NotePropertyName template -NotePropertyValue $generatedTemplate
+    }
+  }
+
+  $generatedConfig = Join-Path ([System.IO.Path]::GetTempPath()) "oats-tauri-local-$PID.json"
+  $localConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $generatedConfig -Encoding utf8
+  $effectiveConfig = $generatedConfig
 
   $bundleRoot = Assert-ChildPath `
     -Path (Join-Path $Root "src-tauri\target\$Target\release\bundle") `
@@ -146,6 +176,9 @@ try {
 } finally {
   if ($generatedConfig) {
     Remove-Item -LiteralPath $generatedConfig -Force -ErrorAction SilentlyContinue
+  }
+  if ($generatedTemplate) {
+    Remove-Item -LiteralPath $generatedTemplate -Force -ErrorAction SilentlyContinue
   }
   Pop-Location
 }

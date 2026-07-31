@@ -83,12 +83,16 @@
           </button>
         </div>
 
-        <!-- Tauri only drags when the mousedown target itself carries the
-             attribute, so every leaf in the handle needs it. -->
-        <div class="drag-handle" data-tauri-drag-region @click.stop>
-          <div class="divider" data-tauri-drag-region />
-          <div class="drag-dots" data-tauri-drag-region>
-            <span v-for="n in 6" :key="n" class="dot" data-tauri-drag-region />
+        <!-- Windows tracks the pointer itself because WebView2 can deliver the
+             first move before Tauri's asynchronous native drag loop is ready. -->
+        <div
+          class="drag-handle"
+          @pointerdown.left.stop.prevent="startWindowDrag"
+          @click.stop
+        >
+          <div class="divider" />
+          <div class="drag-dots">
+            <span v-for="n in 6" :key="n" class="dot" />
           </div>
         </div>
       </template>
@@ -100,6 +104,7 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
+import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
@@ -289,6 +294,79 @@ function collapse() {
   isExpanded.value = false;
 }
 
+type WindowsDragState = {
+  pointerId: number;
+  startPointerX: number;
+  startPointerY: number;
+  startWindowX: number;
+  startWindowY: number;
+  handle: HTMLElement;
+};
+
+let windowsDrag: WindowsDragState | null = null;
+
+function finishWindowsDrag(event?: PointerEvent) {
+  if (!windowsDrag || (event && event.pointerId !== windowsDrag.pointerId)) return;
+
+  const { handle, pointerId } = windowsDrag;
+  windowsDrag = null;
+  window.removeEventListener('pointermove', moveWindowsWindow, true);
+  window.removeEventListener('pointerup', finishWindowsDrag, true);
+  window.removeEventListener('pointercancel', finishWindowsDrag, true);
+  handle.removeEventListener('lostpointercapture', finishWindowsDrag);
+  if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+}
+
+function moveWindowsWindow(event: PointerEvent) {
+  if (
+    !windowsDrag
+    || event.pointerId !== windowsDrag.pointerId
+    || event.isPrimary === false
+    || (event.buttons & 1) === 0
+  ) return;
+
+  event.preventDefault();
+  const x = windowsDrag.startWindowX + event.screenX - windowsDrag.startPointerX;
+  const y = windowsDrag.startWindowY + event.screenY - windowsDrag.startPointerY;
+  // CSSOM screen coordinates and Tauri LogicalPosition use logical pixels, so
+  // this remains correct on Windows displays with non-100% scaling.
+  void getCurrentWebviewWindow().setPosition(new LogicalPosition(x, y)).catch((e) => {
+    console.error('Failed to move recorder window', e);
+    finishWindowsDrag(event);
+  });
+}
+
+async function startWindowDrag(event: PointerEvent) {
+  if (/Windows/i.test(navigator.userAgent)) {
+    if (event.isPrimary === false || event.button !== 0) return;
+    finishWindowsDrag();
+
+    const handle = event.currentTarget as HTMLElement;
+    windowsDrag = {
+      pointerId: event.pointerId,
+      startPointerX: event.screenX,
+      startPointerY: event.screenY,
+      startWindowX: window.screenX,
+      startWindowY: window.screenY,
+      handle,
+    };
+    window.addEventListener('pointermove', moveWindowsWindow, true);
+    window.addEventListener('pointerup', finishWindowsDrag, true);
+    window.addEventListener('pointercancel', finishWindowsDrag, true);
+    handle.addEventListener('lostpointercapture', finishWindowsDrag);
+    handle.setPointerCapture?.(event.pointerId);
+    return;
+  }
+
+  try {
+    await getCurrentWebviewWindow().startDragging();
+  } catch (e) {
+    console.error('Failed to start recorder window drag', e);
+  }
+}
+
+onUnmounted(() => finishWindowsDrag());
+
 // Clicking the pill body (not the controls or the drag handle) brings up the
 // meetings window and surfaces the meeting being recorded. A window that was
 // only minimized is already running, so it needs the explicit `reveal` nudge;
@@ -313,6 +391,7 @@ async function applyPillVisibility(hidden: boolean) {
 }
 
 let unlistenPillVisible: UnlistenFn | null = null;
+let unlistenPendingUploaded: UnlistenFn | null = null;
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
@@ -663,6 +742,20 @@ async function dismissFailed() {
   await closeWindow();
 }
 
+// The sidebar "Pending uploads" retry uploaded (and discarded) this recording's
+// on-disk buffer out from under us. Our failed pill — and the library strip it
+// heartbeats — is now stale, and our held blob would double-upload on Retry.
+// Drop the in-memory copy without re-discarding the (already-gone) buffer, then
+// close so both pills clear. Ignored unless we're actually showing the failed
+// pill: a live recording or an in-flight resume must not be torn down.
+async function handlePendingUploadSucceeded() {
+  if (uploadResult.value !== 'failed') return;
+  inFlightFinalize = null;
+  stoppedBlob.value = null;
+  stoppedMeta.value = null;
+  await closeWindow();
+}
+
 // Keep the failed recording's audio and resume capturing into a fresh buffer.
 // The next stop concatenates the held blob with the new segment (see handleStop).
 async function resumeFailed() {
@@ -710,6 +803,8 @@ onMounted(async () => {
   unlistenPillVisible = await listen<boolean>('recorder://pill-visible', (e) => {
     void applyPillVisibility(!e.payload);
   });
+
+  unlistenPendingUploaded = await listen('pending-upload://succeeded', handlePendingUploadSucceeded);
 
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);
@@ -834,6 +929,7 @@ onUnmounted(() => {
   if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
   unlistenPillVisible?.();
+  unlistenPendingUploaded?.();
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();
@@ -979,8 +1075,7 @@ html, body {
   flex-shrink: 0;
   cursor: grab;
 }
-/* Children carry the drag-region attribute individually, so give them the
-   grab cursor too; switch to grabbing while actively dragging. */
+/* Give the nested handle graphics the same affordance as their hit target. */
 .drag-handle * { cursor: grab; }
 .drag-handle:active,
 .drag-handle:active * { cursor: grabbing; }

@@ -1,9 +1,7 @@
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use tauri::webview::WebviewWindowBuilder;
 use tauri::{Emitter, Manager};
 use tauri_plugin_store::StoreExt;
-use tokio::sync::oneshot;
 use url::Url;
 
 const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
@@ -221,24 +219,306 @@ pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> 
     store.save().map_err(|e| e.to_string())
 }
 
-/// Initiates Google OAuth sign-in using a native webview window.
-/// Opens an OAuth window, intercepts the magic-link redirect, exchanges
-/// the token for a session, and returns the result.
+/// Error string emitted when a pending browser sign-in is canceled. The
+/// frontend treats this value as a silent cancel, not a failure to display.
+pub(crate) const SIGN_IN_CANCELED: &str = "Sign-in canceled";
+
+/// How long the loopback listener waits for the browser to deliver the
+/// magic-link token before the flow fails with a retryable error.
+const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// At most one browser sign-in flow is pending at a time; starting a new one
+/// (or canceling) aborts the previous listener task. The attempt is tracked
+/// from the moment `google_sign_in` is invoked — before the prepare-state
+/// request, not just once the loopback listener task exists — so a cancel
+/// that arrives while prepare-state is in flight still has something to
+/// cancel instead of being silently dropped.
+struct PendingSignIn {
+    id: u64,
+    handle: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+static SIGN_IN_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PENDING_SIGN_IN: std::sync::Mutex<Option<PendingSignIn>> = std::sync::Mutex::new(None);
+
+fn abort_pending_handle(handle: tauri::async_runtime::JoinHandle<()>) {
+    if !handle.inner().is_finished() {
+        handle.abort();
+    }
+}
+
+/// Register a new attempt and take the slot, aborting whatever attempt (with
+/// or without a listener task yet) was previously in it. Returns the new
+/// attempt's id, checked at each subsequent await via `sign_in_attempt_active`.
+fn begin_sign_in_attempt() -> u64 {
+    let id = SIGN_IN_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let mut slot = PENDING_SIGN_IN.lock().unwrap();
+    if let Some(prev) = slot.take() {
+        if let Some(handle) = prev.handle {
+            abort_pending_handle(handle);
+        }
+    }
+    *slot = Some(PendingSignIn { id, handle: None });
+    id
+}
+
+/// Whether `id` is still the active attempt, i.e. it hasn't been superseded
+/// by a newer `google_sign_in` call or dropped by `cancel_google_sign_in`.
+fn sign_in_attempt_active(id: u64) -> bool {
+    matches!(&*PENDING_SIGN_IN.lock().unwrap(), Some(p) if p.id == id)
+}
+
+/// Attach the loopback listener task to attempt `id` now that it exists. If
+/// the attempt was superseded or canceled while spawning, the slot no longer
+/// matches — abort the just-spawned task immediately rather than leaking it.
+fn attach_sign_in_handle(id: u64, handle: tauri::async_runtime::JoinHandle<()>) {
+    let mut slot = PENDING_SIGN_IN.lock().unwrap();
+    match slot.as_mut() {
+        Some(p) if p.id == id => p.handle = Some(handle),
+        _ => abort_pending_handle(handle),
+    }
+}
+
+/// Cancel whatever sign-in attempt is pending, if any. Returns true if there
+/// was one (whether or not its listener task existed yet).
+fn abort_pending_sign_in() -> bool {
+    match PENDING_SIGN_IN.lock().unwrap().take() {
+        Some(p) => {
+            if let Some(handle) = p.handle {
+                abort_pending_handle(handle);
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Atomically retire attempt `id` — clear the slot only if it still holds
+/// `id` — and report whether it did. Used right before a result is emitted so
+/// a cancel that arrives after the listener task's final await (too late for
+/// `JoinHandle::abort` to stop, since abort only takes effect at an await
+/// point) still prevents the stale result from being published, and so a
+/// naturally completed attempt doesn't linger in the slot for a later
+/// `cancel_google_sign_in` to emit a bogus cancellation over.
+fn retire_sign_in_attempt(id: u64) -> bool {
+    let mut slot = PENDING_SIGN_IN.lock().unwrap();
+    match slot.as_ref() {
+        Some(p) if p.id == id => {
+            *slot = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Constant-time-ish nonce check: comparing SHA-256 digests instead of the
+/// raw strings keeps a local process from recovering the nonce byte-by-byte
+/// through comparison timing.
+fn nonce_matches(candidate: &str, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(candidate.as_bytes()) == Sha256::digest(expected.as_bytes())
+}
+
+/// 32 hex chars from the OS RNG. Binds the loopback callback to this sign-in
+/// attempt so nothing else on the machine can forge a token delivery.
+fn random_nonce() -> Result<String, String> {
+    let mut buf = [0u8; 16];
+    getrandom::fill(&mut buf).map_err(|e| format!("RNG unavailable: {e}"))?;
+    Ok(hex::encode(buf))
+}
+
+/// The web-app path passed to `/oauth2/prepare-state` as `redirect`. The API's
+/// sign-in callback recognizes this shape and redirects the magic-link token
+/// to `http://127.0.0.1:<port>/callback` instead of the web magic-link page.
+fn desktop_auth_redirect(port: u16, nonce: &str) -> String {
+    format!("/desktop-auth?callback_port={port}&nonce={nonce}")
+}
+
+/// The auth URL handed to the default browser comes from server data (the
+/// identity provider's own consent URL, e.g. accounts.google.com — its host
+/// isn't known ahead of time, so https is allowed generally). The plain-http
+/// loopback exception is for local dev API builds only; production must
+/// never open a local HTTP auth URL.
+fn validate_browser_auth_url(url: &Url) -> Result<(), String> {
+    match url.scheme() {
+        "https" => Ok(()),
+        #[cfg(not(feature = "prod-api"))]
+        "http" if matches!(url.host_str(), Some("localhost") | Some("127.0.0.1")) => Ok(()),
+        other => Err(format!("refusing to open auth URL with scheme {other}")),
+    }
+}
+
+/// Parse an HTTP request line (`GET /callback?token=…&nonce=… HTTP/1.1`) from
+/// the loopback listener. Returns `(token, nonce)` for well-formed callbacks.
+fn parse_loopback_callback(request_line: &str) -> Option<(String, String)> {
+    let mut parts = request_line.split_whitespace();
+    if parts.next() != Some("GET") {
+        return None;
+    }
+    let target = parts.next()?;
+    let url = Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
+    if url.path() != "/callback" {
+        return None;
+    }
+    let mut token = None;
+    let mut nonce = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "token" if !value.is_empty() => token = Some(value.into_owned()),
+            "nonce" if !value.is_empty() => nonce = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    Some((token?, nonce?))
+}
+
+// Loopback responses. The success page must never echo the token.
+const CALLBACK_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
+<!doctype html><html><head><title>oats</title></head>\
+<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;\
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">\
+<div style=\"text-align:center\"><h2>You&rsquo;re signed in</h2>\
+<p>You can close this tab and return to oats.</p></div></body></html>";
+
+const CALLBACK_NOT_FOUND_RESPONSE: &str =
+    "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+
+/// Accept loopback connections until one delivers `/callback` with a token and
+/// the expected nonce. Requests that don't match get a 404 and don't consume
+/// the listener, so stray or forged hits can't terminate a pending sign-in.
+async fn accept_loopback_callback(
+    listener: &tokio::net::TcpListener,
+    expected_nonce: &str,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let (mut conn, _) = listener.accept().await.map_err(|e| e.to_string())?;
+
+        // Bound per-connection work so a stalled client can't hold the loop
+        // (connections are handled serially; a real browser delivers the
+        // request line in milliseconds).
+        let handled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut buf = vec![0u8; 8192];
+            let mut len = 0;
+            while len < buf.len() {
+                let n = match conn.read(&mut buf[len..]).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                len += n;
+                if buf[..len].windows(2).any(|w| w == b"\r\n") {
+                    break;
+                }
+            }
+            let request_line = String::from_utf8_lossy(&buf[..len])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+
+            let matched = parse_loopback_callback(&request_line)
+                .filter(|(_, nonce)| nonce_matches(nonce, expected_nonce))
+                .map(|(token, _)| token);
+
+            let response = if matched.is_some() {
+                CALLBACK_OK_RESPONSE
+            } else {
+                CALLBACK_NOT_FOUND_RESPONSE
+            };
+            let _ = conn.write_all(response.as_bytes()).await;
+            let _ = conn.shutdown().await;
+            matched
+        })
+        .await;
+
+        if let Ok(Some(token)) = handled {
+            return Ok(token);
+        }
+    }
+}
+
+/// Drive the post-browser half of sign-in: wait for the loopback callback,
+/// exchange the magic-link token for a session, and report via `oauth-result`.
+/// Emits on `window` (the webview that started this attempt) rather than
+/// broadcasting the session token to every window. Retires `attempt_id`
+/// immediately before emitting so a cancel that arrives too late to abort
+/// this task (abort only takes effect at an await point, and there are none
+/// left after the callback resolves) still suppresses the stale result.
+async fn run_browser_sign_in(
+    attempt_id: u64,
+    window: tauri::WebviewWindow,
+    listener: tokio::net::TcpListener,
+    nonce: String,
+) {
+    let result =
+        match tokio::time::timeout(SIGN_IN_TIMEOUT, accept_loopback_callback(&listener, &nonce))
+            .await
+        {
+            Ok(Ok(token)) => exchange_token_for_session(window.app_handle(), &token).await,
+            Ok(Err(err)) => SignInResult {
+                success: None,
+                session_token: None,
+                error: Some(err),
+            },
+            Err(_) => SignInResult {
+                success: None,
+                session_token: None,
+                error: Some("Sign-in timed out — please try again".into()),
+            },
+        };
+    if retire_sign_in_attempt(attempt_id) {
+        let _ = window.emit("oauth-result", result);
+    }
+}
+
+/// Initiates Google OAuth sign-in in the user's default browser (native
+/// webviews break passkeys and are blocked by identity providers). A loopback
+/// listener bound before the flow starts receives the magic-link token from
+/// the API's desktop redirect, and the token is exchanged for a session.
 #[tauri::command]
-pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, String> {
-    let client = http_client();
+pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    // Register this attempt before any await — a cancel that arrives while
+    // prepare-state is in flight still has something in the slot to cancel,
+    // instead of being silently dropped because no listener task exists yet.
+    // This also supersedes any still-pending attempt (e.g. the user closed
+    // the browser tab and clicked Sign in again).
+    let attempt_id = begin_sign_in_attempt();
+
+    // Bind before prepare-state so the advertised port is already ours.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("bind loopback listener: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let nonce = random_nonce()?;
 
     // Step 1: Get the OAuth redirect URL from the API. The backend expands
-    // these service names into Google scopes and owns credential persistence.
+    // these service names into Google scopes and owns credential persistence;
+    // `redirect` tells its sign-in callback to deliver the magic-link token to
+    // our loopback listener instead of the web app.
+    let client = http_client();
     let response = client
         .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
-        .body(
-            r#"{"integration":"google-signin","scopes":["calendar-readonly"],"newUserSignupIntent":"personal_unless_domain_autojoin"}"#,
-        )
+        .json(&serde_json::json!({
+            "integration": "google-signin",
+            "scopes": ["calendar-readonly"],
+            "newUserSignupIntent": "personal_unless_domain_autojoin",
+            "redirect": desktop_auth_redirect(port, &nonce),
+        }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(SignInResult {
+            success: None,
+            session_token: None,
+            error: Some(SIGN_IN_CANCELED.into()),
+        });
+    }
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -251,70 +531,37 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
 
     let body: PrepareStateResponse = response.json().await.map_err(|e| e.to_string())?;
 
-    // Step 2: Open a native webview window for OAuth
-    let (tx, rx) = oneshot::channel::<Result<String, String>>();
-    let tx = std::sync::Mutex::new(Some(tx));
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(SignInResult {
+            success: None,
+            session_token: None,
+            error: Some(SIGN_IN_CANCELED.into()),
+        });
+    }
 
-    let auth_window = WebviewWindowBuilder::new(&app, "oauth", tauri::WebviewUrl::External(
-        Url::parse(&body.redirect_url).map_err(|e| e.to_string())?,
-    ))
-    .title("Sign in with Google")
-    .inner_size(500.0, 700.0)
-    .on_navigation(move |url| {
-        // Intercept magic-link redirect
-        if url.path().contains("magic-link") {
-            let token = url
-                .query_pairs()
-                .find(|(key, _)| key == "token")
-                .map(|(_, value)| value.to_string());
+    // Step 2: Hand the auth URL to the default browser.
+    let auth_url = Url::parse(&body.redirect_url).map_err(|e| e.to_string())?;
+    validate_browser_auth_url(&auth_url)?;
 
-            if let Some(sender) = tx.lock().unwrap().take() {
-                match token {
-                    Some(t) => { let _ = sender.send(Ok(t)); }
-                    None => { let _ = sender.send(Err("No token in callback URL".into())); }
-                }
-            }
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(SignInResult {
+            success: None,
+            session_token: None,
+            error: Some(SIGN_IN_CANCELED.into()),
+        });
+    }
 
-            // Block navigation — we've captured the token
-            return false;
-        }
-        true
-    })
-    .build()
-    .map_err(|e| e.to_string())?;
+    window
+        .opener()
+        .open_url(body.redirect_url, None::<&str>)
+        .map_err(|e| e.to_string())?;
 
-    // Listen for the window being closed by the user
-    let auth_window_clone = auth_window.clone();
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = rx.await;
-
-        // Close the OAuth window if it's still open
-        let _ = auth_window_clone.close();
-
-        match result {
-            Ok(Ok(token)) => {
-                // Step 3: Exchange the magic-link token for a session
-                let exchange_result = exchange_token_for_session(&app_clone, &token).await;
-                let _ = app_clone.emit("oauth-result", exchange_result);
-            }
-            Ok(Err(err)) => {
-                let _ = app_clone.emit("oauth-result", SignInResult {
-                    success: None,
-                    session_token: None,
-                    error: Some(err),
-                });
-            }
-            Err(_) => {
-                // Channel dropped — window was closed
-                let _ = app_clone.emit("oauth-result", SignInResult {
-                    success: None,
-                    session_token: None,
-                    error: Some("Auth window closed".into()),
-                });
-            }
-        }
-    });
+    // Step 3: Wait for the browser to hit the loopback callback. If this
+    // attempt was superseded or canceled while the browser was opening,
+    // `attach_sign_in_handle` aborts the task instead of letting it run.
+    let handle =
+        tauri::async_runtime::spawn(run_browser_sign_in(attempt_id, window, listener, nonce));
+    attach_sign_in_handle(attempt_id, handle);
 
     // Return immediately — the frontend listens for the "oauth-result" event
     Ok(SignInResult {
@@ -322,6 +569,23 @@ pub async fn google_sign_in(app: tauri::AppHandle) -> Result<SignInResult, Strin
         session_token: None,
         error: None,
     })
+}
+
+/// Abort a pending browser sign-in (the user gave up waiting). Resolves the
+/// frontend's pending `oauth-result` wait with the silent-cancel error.
+#[tauri::command]
+pub async fn cancel_google_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
+    if abort_pending_sign_in() {
+        let _ = window.emit(
+            "oauth-result",
+            SignInResult {
+                success: None,
+                session_token: None,
+                error: Some(SIGN_IN_CANCELED.into()),
+            },
+        );
+    }
+    Ok(())
 }
 
 async fn exchange_token_for_session(
@@ -537,7 +801,10 @@ pub(crate) fn open_settings_window(app: &tauri::AppHandle) -> Result<(), String>
     let win = crate::window_style::settings_window_builder(app)
         .build()
         .map_err(|e| e.to_string())?;
-    crate::window_style::install_settings_close_behavior(&win);
+    if let Err(e) = crate::window_style::install_settings_window_behavior(&win) {
+        let _ = win.destroy();
+        return Err(e.to_string());
+    }
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
 
@@ -698,6 +965,15 @@ pub(crate) fn open_waveform_window(
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
+
+    // The application menu is useful on normal Windows windows, but inheriting
+    // it here adds a File/Edit/View/Window strip to an otherwise frameless
+    // recorder pill. Remove it on this window only.
+    #[cfg(target_os = "windows")]
+    if let Err(error) = win.remove_menu() {
+        let _ = win.close();
+        return Err(format!("failed to remove waveform window menu: {error}"));
+    }
 
     // When the pill is the visible recording UI (the meetings window is hidden,
     // minimized, or closed), dock it to the right edge of the primary screen
@@ -954,6 +1230,29 @@ pub fn combine_pending_audio(
     let root = crate::storage::ariso_root()?;
     let bytes = crate::storage::combine_pending_audio(&root, &created_at_keys, MAX_AUDIO_BYTES)?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Reveal a buffered pending upload in the OS file manager (Finder on macOS,
+/// Explorer on Windows). If the mp3 is gone, still open `pending-uploads/`
+/// itself so the button always lands the user in the right folder.
+#[tauri::command]
+pub fn reveal_pending_upload(app: tauri::AppHandle, created_at: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let root = crate::storage::ariso_root()?;
+    let audio = crate::storage::pending_audio_path(&root, &created_at)?;
+    if audio.is_file() {
+        return app
+            .opener()
+            .reveal_item_in_dir(&audio)
+            .map_err(|e| e.to_string());
+    }
+
+    let dir = crate::storage::pending_uploads_dir(&root);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create pending-uploads dir: {e}"))?;
+    app.opener()
+        .open_path(dir.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 /// Resolve a recording's directory under `<vault>/.oats/recordings/<id>`,
@@ -1408,6 +1707,152 @@ pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_auth_redirect_encodes_port_and_nonce() {
+        assert_eq!(
+            desktop_auth_redirect(51234, "abc123"),
+            "/desktop-auth?callback_port=51234&nonce=abc123"
+        );
+    }
+
+    #[test]
+    fn random_nonce_is_32_hex_chars_and_unique() {
+        let a = random_nonce().unwrap();
+        let b = random_nonce().unwrap();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn validate_browser_auth_url_allows_https_and_local_http_only() {
+        let ok = |s: &str| validate_browser_auth_url(&Url::parse(s).unwrap());
+        assert!(ok("https://accounts.google.com/o/oauth2/v2/auth?x=1").is_ok());
+        assert!(ok("http://localhost:4000/oauth").is_ok());
+        assert!(ok("http://127.0.0.1:4000/oauth").is_ok());
+        assert!(ok("http://evil.example.com/oauth").is_err());
+        assert!(ok("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn sign_in_attempt_cancel_during_prepare_is_not_dropped() {
+        let id = begin_sign_in_attempt();
+        assert!(sign_in_attempt_active(id));
+
+        // Cancel arrives before the loopback listener task exists (still
+        // awaiting prepare-state) — it must still find something to cancel
+        // instead of silently no-oping.
+        assert!(abort_pending_sign_in());
+        assert!(!sign_in_attempt_active(id));
+
+        // A cancel with nothing pending is a no-op, not an error.
+        assert!(!abort_pending_sign_in());
+    }
+
+    #[test]
+    fn retire_sign_in_attempt_only_clears_the_matching_slot() {
+        let id = begin_sign_in_attempt();
+
+        // A superseded attempt's retire is a no-op — its slot is already gone
+        // (or belongs to a newer attempt), so it must not clear the winner's
+        // state or report success.
+        let superseded_id = begin_sign_in_attempt();
+        assert!(!retire_sign_in_attempt(id));
+        assert!(sign_in_attempt_active(superseded_id));
+
+        // Retiring the current attempt clears it and reports true exactly
+        // once; a second retire (e.g. a late cancel racing the emit) is a
+        // no-op instead of clearing a newer attempt that took the slot.
+        assert!(retire_sign_in_attempt(superseded_id));
+        assert!(!sign_in_attempt_active(superseded_id));
+        assert!(!retire_sign_in_attempt(superseded_id));
+    }
+
+    #[tokio::test]
+    async fn sign_in_attempt_out_of_order_completion_supersedes_cleanly() {
+        let first_id = begin_sign_in_attempt();
+        // A second attempt starts (e.g. the user retried) before the first's
+        // prepare-state call returned, superseding it before it ever got a
+        // listener handle.
+        let second_id = begin_sign_in_attempt();
+        assert!(!sign_in_attempt_active(first_id));
+        assert!(sign_in_attempt_active(second_id));
+
+        // The first attempt's prepare-state call eventually resolves and
+        // spawns its listener task anyway — attaching it must abort it
+        // immediately rather than letting a superseded flow run unattended.
+        let stale_handle =
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            });
+        attach_sign_in_handle(first_id, stale_handle);
+        assert!(sign_in_attempt_active(second_id));
+
+        // The second attempt's own listener task attaches normally.
+        let handle = tauri::async_runtime::spawn(async {});
+        attach_sign_in_handle(second_id, handle);
+        assert!(sign_in_attempt_active(second_id));
+
+        assert!(abort_pending_sign_in());
+        assert!(!sign_in_attempt_active(second_id));
+    }
+
+    #[test]
+    fn parse_loopback_callback_extracts_token_and_nonce() {
+        assert_eq!(
+            parse_loopback_callback("GET /callback?token=tok123&nonce=n456 HTTP/1.1"),
+            Some(("tok123".into(), "n456".into()))
+        );
+        // Percent-encoded values are decoded.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?token=a%2Bb&nonce=n HTTP/1.1"),
+            Some(("a+b".into(), "n".into()))
+        );
+    }
+
+    #[test]
+    fn parse_loopback_callback_rejects_malformed_requests() {
+        // Wrong method, wrong path, or missing/empty params never match.
+        assert_eq!(parse_loopback_callback("POST /callback?token=t&nonce=n HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback("GET /favicon.ico HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback("GET /callback?token=t HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback("GET /callback?nonce=n HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback("GET /callback?token=&nonce=n HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback(""), None);
+    }
+
+    #[tokio::test]
+    async fn accept_loopback_callback_ignores_forged_hits_and_returns_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let accept = tokio::spawn(async move {
+            accept_loopback_callback(&listener, "goodnonce").await
+        });
+
+        let send = |req: String| async move {
+            let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            conn.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = String::new();
+            conn.read_to_string(&mut resp).await.unwrap();
+            resp
+        };
+
+        // A forged callback (wrong nonce) gets a 404 and must not consume the
+        // listener; the real callback afterwards still succeeds.
+        let forged = send("GET /callback?token=stolen&nonce=wrong HTTP/1.1\r\n\r\n".into()).await;
+        assert!(forged.starts_with("HTTP/1.1 404"));
+
+        let real = send("GET /callback?token=tok123&nonce=goodnonce HTTP/1.1\r\n\r\n".into()).await;
+        assert!(real.starts_with("HTTP/1.1 200"));
+        // The success page never echoes the token.
+        assert!(!real.contains("tok123"));
+
+        assert_eq!(accept.await.unwrap().unwrap(), "tok123");
+    }
 
     #[test]
     fn get_vault_dir_returns_resolved_path() {

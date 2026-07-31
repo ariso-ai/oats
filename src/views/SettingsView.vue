@@ -208,7 +208,14 @@
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
             </svg>
             <span v-if="!isSigningIn">Sign in with Google</span>
-            <span v-else>Signing in...</span>
+            <span v-else>Continue in your browser…</span>
+          </button>
+          <button
+            v-if="isSigningIn"
+            class="sign-out-btn"
+            @click="handleCancelSignIn"
+          >
+            Cancel
           </button>
           <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
         </div>
@@ -431,7 +438,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_SIGNED_IN_EVENT, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -1151,7 +1158,7 @@ async function handleGoogleSignIn() {
   try {
     const result = await auth.googleSignIn();
     if (result.error) {
-      if (result.error !== 'Auth window closed') {
+      if (result.error !== SIGN_IN_CANCELED_ERROR) {
         errorMessage.value = result.error;
       }
       return;
@@ -1166,6 +1173,16 @@ async function handleGoogleSignIn() {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {
     isSigningIn.value = false;
+  }
+}
+
+// Abort a pending browser sign-in. The backend resolves the waiting
+// googleSignIn() call with the silent-cancel error, which resets the UI.
+async function handleCancelSignIn() {
+  try {
+    await auth.cancelSignIn();
+  } catch {
+    /* nothing pending — ignore */
   }
 }
 

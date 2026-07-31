@@ -18,6 +18,7 @@ const fetchMeetingAudio = vi.fn();
 const readRecordingAudio = vi.fn();
 const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
+const getMeetingPrepApi = vi.fn();
 const reportUploadFailure = vi.fn(() => Promise.resolve());
 
 vi.mock('./useDiagnostics', () => ({
@@ -53,6 +54,7 @@ vi.mock('./useMeetingApi', () => ({
     updateMeetingNotesTitle: (...a: unknown[]) => updateMeetingNotesTitle(...a),
     getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
     deleteMeetingRecordingClip: (...a: unknown[]) => deleteMeetingRecordingClip(...a),
+    getMeetingPrep: (...a: unknown[]) => getMeetingPrepApi(...a),
   }),
 }));
 
@@ -365,6 +367,48 @@ describe('ArisoBackend', () => {
     expect(d.shareMeetingNotesToPublic).toBe('host_only');
     expect(d.participants[0].id).toBe(11);
   });
+
+  it('marks the detail canceled from the meeting-notes status', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Dropped',
+      start_at: '2026-06-01T10:00:00Z',
+      status: 'cancelled',
+    });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Dropped',
+      timestamp: '2026-06-01T10:00:00Z',
+    });
+    expect(d.canceled).toBe(true);
+  });
+
+  it('keeps the list row canceled flag when the notes payload omits status', async () => {
+    getMeetingNotes.mockResolvedValue({ id: 7, title: 'Dropped', start_at: '2026-06-01T10:00:00Z' });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Dropped',
+      timestamp: '2026-06-01T10:00:00Z',
+      canceled: true,
+    });
+    expect(d.canceled).toBe(true);
+  });
+
+  it('is not canceled for a live meeting', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Live',
+      start_at: '2026-06-01T10:00:00Z',
+      status: 'done',
+    });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Live',
+      timestamp: '2026-06-01T10:00:00Z',
+      canceled: true,
+    });
+    expect(d.canceled).toBe(false);
+  });
 });
 
 describe('ArisoBackend clips', () => {
@@ -533,9 +577,18 @@ describe('ArisoBackend.listMeetings', () => {
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)
     );
     expect(items).toEqual([
-      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z', autoJoinScheduled: false },
-      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z', autoJoinScheduled: false },
+      { id: '7', title: 'Standup', timestamp: '2026-06-08T09:00:00Z', autoJoinScheduled: false, canceled: false },
+      { id: '8', title: 'Untitled meeting', timestamp: '2026-06-09T09:00:00Z', autoJoinScheduled: false, canceled: false },
     ]);
+  });
+
+  it('flags meetings whose calendar event was canceled', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 7, title: 'Dropped', start_at: '2026-06-08T09:00:00Z', status: 'cancelled' },
+      { id: 8, title: 'Live', start_at: '2026-06-09T09:00:00Z', status: 'done' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(items.map((i) => i.canceled)).toEqual([true, false]);
   });
 });
 
@@ -564,7 +617,57 @@ describe('ArisoBackend.searchMeetings', () => {
         snippet: 'Discussed pipeline notes',
         matchedText: 'pipeline',
         autoJoinScheduled: false,
+        canceled: false,
       },
     ]);
+  });
+});
+
+describe('meeting prep plumbing', () => {
+  it('maps prep_id from list rows to prepId (number or numeric string)', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 1, title: 'A', start_at: '2026-07-01T09:00:00Z', prep_id: 4339 },
+      { id: 2, title: 'B', start_at: '2026-07-02T09:00:00Z', prep_id: '77' },
+      { id: 3, title: 'C', start_at: '2026-07-03T09:00:00Z' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(items.map((i) => i.prepId)).toEqual([4339, 77, undefined]);
+  });
+
+  it('ignores a non-numeric prep_id', async () => {
+    listMeetingsInWindow.mockResolvedValue([
+      { id: 1, title: 'A', start_at: '2026-07-01T09:00:00Z', prep_id: 'garbage' },
+      { id: 2, title: 'B', start_at: '2026-07-02T09:00:00Z', prep_id: '' },
+    ]);
+    const items = await new ArisoBackend().listMeetings();
+    expect(items.map((i) => i.prepId)).toEqual([undefined, undefined]);
+  });
+
+  it('getMeetingDetail carries prepId from the list item', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Sync',
+      start_at: '2026-07-01T10:00:00Z',
+    });
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Sync',
+      timestamp: '2026-07-01T10:00:00Z',
+      prepId: 4339,
+    });
+    expect(d.prepId).toBe(4339);
+  });
+
+  it('ArisoBackend.getMeetingPrep delegates to the API', async () => {
+    getMeetingPrepApi.mockResolvedValue({ content: '## md', meetingId: '45565' });
+    await expect(new ArisoBackend().getMeetingPrep(4339)).resolves.toEqual({
+      content: '## md',
+      meetingId: '45565',
+    });
+    expect(getMeetingPrepApi).toHaveBeenCalledWith(4339);
+  });
+
+  it('LocalBackend.getMeetingPrep always resolves null', async () => {
+    await expect(new LocalBackend().getMeetingPrep(4339)).resolves.toBeNull();
   });
 });

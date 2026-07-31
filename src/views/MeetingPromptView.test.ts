@@ -68,4 +68,52 @@ describe('MeetingPromptView', () => {
     await wrapper.find('[data-test="menu-dismiss"]').trigger('click');
     expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: false });
   });
+
+  it('labels the menu item Dismiss in start mode', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await wrapper.find('[data-test="more-options"]').trigger('click');
+    expect(wrapper.find('[data-test="menu-dismiss"]').text()).toBe('Dismiss');
+  });
+});
+
+describe('MeetingPromptView switch mode', () => {
+  beforeEach(() => {
+    window.location.hash = '#/meeting-prompt?mode=switch&seconds=30&subtitle=Design%20review';
+  });
+
+  it('shows the same heading with the next meeting as the subtitle', () => {
+    const wrapper = mount(MeetingPromptView);
+    expect(wrapper.text()).toContain('Meeting started');
+    expect(wrapper.find('[data-test="subtitle"]').text()).toBe('Design review');
+  });
+
+  it('hides the subtitle line when the next meeting has no title', () => {
+    window.location.hash = '#/meeting-prompt?mode=switch&seconds=30';
+    const wrapper = mount(MeetingPromptView);
+    expect(wrapper.find('[data-test="subtitle"]').exists()).toBe(false);
+  });
+
+  it('resolves the switch command when Take notes is clicked', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await byText(wrapper, 'Take notes')!.trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resolve_meeting_switch_prompt', { switch: true });
+  });
+
+  it('offers Keep recording behind the chevron and resizes the switch window', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await wrapper.find('[data-test="more-options"]').trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resize_meeting_switch_prompt', { expanded: true });
+    const keep = wrapper.find('[data-test="menu-dismiss"]');
+    expect(keep.text()).toBe('Keep recording');
+    await keep.trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resolve_meeting_switch_prompt', { switch: false });
+  });
+
+  it('keeps recording from the corner dismiss', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await wrapper.find('[data-test="dismiss"]').trigger('click');
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledWith('resolve_meeting_switch_prompt', { switch: false });
+    expect(close).toHaveBeenCalled();
+  });
 });

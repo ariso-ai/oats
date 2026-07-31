@@ -23,13 +23,26 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::commands::{
-    api_base_url, clear_session_token, get_session_token, http_client, web_app_base_url,
-    PUSHER_CLUSTER, PUSHER_KEY,
+    api_base_url, clear_session_token, get_session_token, http_client, PUSHER_CLUSTER, PUSHER_KEY,
 };
 
 const SETTINGS_PATH: &str = "settings.json";
 const ENABLED_KEY: &str = "meetingNotificationsEnabled";
 const MEETING_PREP_SOURCE: &str = "meeting_prep";
+
+/// The Pusher event the API fires when an inbox message finishes generating.
+/// It is a generic inbox signal — `source` says what kind of message it is, so
+/// we act only on `meeting_prep` and ignore every other source.
+const INBOX_MESSAGE_READY_EVENT: &str = "inbox-message-ready";
+
+/// Notification identifiers carry this scheme + the prep id, so the click
+/// delegate can route back into the app instead of opening the web app.
+const PREP_LINK_SCHEME: &str = "oats-prep://";
+
+/// Emitted to the library window when a prep notification is clicked. The id
+/// itself travels through `take_pending_meeting_prep` (not the payload) so a
+/// window that is still booting can pick it up on mount.
+const PREP_OPEN_EVENT: &str = "meeting-prep://open";
 
 /// Hard cap on a single websocket handshake. Without this a hung TCP/TLS
 /// connect can stall the orchestrator past the point where run_loop's
@@ -239,8 +252,8 @@ async fn handle_message(
             catch_up(app, seen, *first).await?;
             *first = false;
         }
-        "meeting-prep-complete" => {
-            if let Some(prep_id) = inner_json(&v).get("meetingPrepId").and_then(Value::as_i64) {
+        INBOX_MESSAGE_READY_EVENT => {
+            if let Some(prep_id) = meeting_prep_id_from_event(&inner_json(&v)) {
                 handle_prep(app, prep_id, seen).await?;
             }
         }
@@ -257,6 +270,18 @@ fn inner_json(v: &Value) -> Value {
         Some(other) => other.clone(),
         None => Value::Null,
     }
+}
+
+/// Pure selector (testable): the meeting-prep id carried by an
+/// `inbox-message-ready` payload — `{ source, sourceId }`. Returns None for any
+/// other source, so unrelated inbox messages never raise a prep notification.
+/// `sourceId` may arrive as a number or a numeric string.
+fn meeting_prep_id_from_event(data: &Value) -> Option<i64> {
+    let source = data.get("source").and_then(Value::as_str)?;
+    if source != MEETING_PREP_SOURCE {
+        return None;
+    }
+    parse_id(data.get("sourceId"))
 }
 
 /// GET /auth/me → (org_id, user_id) for the channel name. Both fields may come
@@ -425,7 +450,7 @@ async fn handle_prep(
         }
     };
     let (title, body) = build_notification(message.as_deref());
-    show(app, &title, &body, &prep_url(prep_id));
+    show(app, &title, &body, prep_id);
     Ok(())
 }
 
@@ -454,7 +479,7 @@ async fn catch_up(
             seen.insert(id);
         } else if item.unread && seen.insert(id) {
             let (title, body) = build_notification(item.message.as_deref());
-            show(app, &title, &body, &prep_url(id));
+            show(app, &title, &body, id);
         }
     }
     Ok(())
@@ -469,9 +494,48 @@ fn build_notification(message: Option<&str>) -> (String, String) {
     (title, body)
 }
 
-/// The web deep link a meeting-prep notification opens when clicked.
-fn prep_url(prep_id: i64) -> String {
-    format!("{}/my/meeting-prep-v2/{prep_id}", web_app_base_url())
+/// The identifier a meeting-prep notification carries, so the click delegate
+/// can recover the prep id. Not a registered URL scheme — nothing outside this
+/// module ever resolves it; it only has to round-trip through UNC.
+fn prep_link(prep_id: i64) -> String {
+    format!("{PREP_LINK_SCHEME}{prep_id}")
+}
+
+/// Pure selector (testable): the prep id inside a notification identifier, or
+/// None if the identifier isn't one of ours.
+fn prep_id_from_link(identifier: &str) -> Option<i64> {
+    identifier.strip_prefix(PREP_LINK_SCHEME)?.parse().ok()
+}
+
+/// The prep a notification click asked to open, waiting to be claimed by the
+/// library window. Handed over through a slot (rather than the event payload)
+/// because the click usually *creates* the library window — the frontend
+/// listener isn't mounted yet, so an emitted payload would be dropped.
+fn pending_prep_slot() -> &'static Mutex<Option<i64>> {
+    static SLOT: OnceLock<Mutex<Option<i64>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Claim the prep queued by a notification click (clearing it, so it opens
+/// exactly once). Called by the library window on mount and on `PREP_OPEN_EVENT`.
+#[tauri::command]
+pub fn take_pending_meeting_prep() -> Option<i64> {
+    pending_prep_slot().lock().unwrap().take()
+}
+
+/// Handle a meeting-prep notification click: queue the prep, then open (or
+/// focus) the library window and nudge it. The window opens the meeting the
+/// prep belongs to with its Prep tab active. Must run on the main thread —
+/// `open_library_window` builds a webview.
+fn open_prep_from_notification(app: &AppHandle, prep_id: i64) {
+    use tauri::Emitter;
+    *pending_prep_slot().lock().unwrap() = Some(prep_id);
+    if let Err(e) = crate::commands::open_library_window(app) {
+        eprintln!("meeting-notifications: failed to open library window: {e}");
+    }
+    // No-op when the window was just created (nothing is listening yet); that
+    // case is covered by the mount-time claim.
+    let _ = app.emit(PREP_OPEN_EVENT, ());
 }
 
 // ---------------------------------------------------------------------------
@@ -797,32 +861,34 @@ fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>) {
 pub fn init_native(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
-        macos_un::init();
+        macos_un::init(app);
     }
 }
 
 /// Show the notification. On a macOS bundle we use UNUserNotificationCenter
 /// directly (the plugin exposes no click handling on desktop) so the delegate
-/// can open the deep link on click; the URL rides along as the request id. In
-/// dev and on other platforms we fall back to the plugin (no click).
-fn show(app: &AppHandle, title: &str, body: &str, url: &str) {
+/// can open the prep in-app on click; the prep link rides along as the request
+/// id. In dev and on other platforms we fall back to the plugin (no click).
+fn show(app: &AppHandle, title: &str, body: &str, prep_id: i64) {
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
-        macos_un::show(app, title, body, url);
+        macos_un::show(app, title, body, &prep_link(prep_id));
         return;
     }
-    let _ = url; // click-to-open is only wired up for the macOS bundle
+    let _ = prep_id; // click-to-open is only wired up for the macOS bundle
     if let Err(e) = app.notification().builder().title(title).body(body).show() {
         eprintln!("meeting-notifications: failed to show notification: {e}");
     }
 }
 
 /// UNUserNotificationCenter integration: a delegate receives the click on the
-/// main thread (non-blocking) and opens the deep link carried as the request
-/// identifier. UNC requires a properly signed (Developer ID) app; in unsigned
-/// builds `addNotificationRequest` errors and we fall back to the plugin.
+/// main thread (non-blocking) and opens the prep the request identifier points
+/// at. UNC requires a properly signed (Developer ID) app; in unsigned builds
+/// `addNotificationRequest` errors and we fall back to the plugin.
 #[cfg(target_os = "macos")]
 mod macos_un {
+    use std::sync::OnceLock;
+
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
@@ -860,7 +926,9 @@ mod macos_un {
                 completion.call((opts,));
             }
 
-            // Open the deep link carried as the request identifier.
+            // Open the prep the request identifier points at, in-app. This
+            // callback already runs on the main thread, which is what window
+            // creation in `open_prep_from_notification` requires.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -868,9 +936,11 @@ mod macos_un {
                 response: &UNNotificationResponse,
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
-                let url = response.notification().request().identifier().to_string();
-                if url.starts_with("http") {
-                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                let identifier = response.notification().request().identifier().to_string();
+                if let (Some(prep_id), Some(app)) =
+                    (super::prep_id_from_link(&identifier), app_handle())
+                {
+                    super::open_prep_from_notification(app, prep_id);
                 }
                 completion.call(());
             }
@@ -891,9 +961,18 @@ mod macos_un {
         }
     }
 
+    /// The handle the click callback routes through. Stored once at init: the
+    /// ObjC delegate is a plain class with no Rust state of its own.
+    static APP: OnceLock<AppHandle> = OnceLock::new();
+
+    fn app_handle() -> Option<&'static AppHandle> {
+        APP.get()
+    }
+
     /// Install the delegate (retained for the process lifetime — it's a weak
     /// property) and request authorization. Must run on the main thread.
-    pub fn init() {
+    pub fn init(app: &AppHandle) {
+        let _ = APP.set(app.clone());
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let delegate = Delegate::new();
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1106,52 +1185,46 @@ pub async fn resize_silence_prompt(app: AppHandle, expanded: bool) -> Result<(),
 }
 
 // ---------------------------------------------------------------------------
-// Meeting-end stop prompt
+// Meeting-switch prompt
 //
-// Sibling of the silence prompt. When a recording attached to a calendar meeting
-// runs past that meeting's scheduled end, the frontend watch shows this card
-// offering Stop / Keep. Same borderless top-right chrome; the click is forwarded
-// as `meeting-end-prompt://stop` | `://keep`. Ignoring it keeps recording.
+// Sibling of the silence prompt. When the NEXT calendar meeting starts while a
+// recording attached to the previous one is still running, the frontend watch
+// shows this "Meeting started" card offering Take notes (finalize the current
+// recording in the background and immediately record the new meeting) / Keep
+// recording. Same borderless top-right chrome; the click is forwarded as
+// `meeting-switch-prompt://switch` | `://keep`. Ignoring it keeps recording.
 // ---------------------------------------------------------------------------
 
 /// Cosmetic countdown (seconds) on the card. MUST equal the frontend
-/// MEETING_END_PROMPT_TIMEOUT_MS (30_000) that actually returns the watch to idle.
-const MEETING_END_PROMPT_SECONDS: u64 = 30;
+/// MEETING_SWITCH_PROMPT_TIMEOUT_MS (30_000) that actually dismisses the card.
+const MEETING_SWITCH_PROMPT_SECONDS: u64 = 30;
 
-/// Route + params for the meeting-end prompt window. `seconds` drives the
-/// cosmetic countdown bar; `subtitle`, when present, is the meeting title;
-/// `title`, when present, overrides the card's "Meeting ended" heading (e.g.
-/// "Next meeting started" when the next calendar meeting is the trigger).
-fn meeting_end_prompt_url(seconds: u64, subtitle: Option<&str>, title: Option<&str>) -> String {
+/// Route + params for the meeting-switch prompt window. This loads the SAME
+/// card view as the meeting-start prompt — `mode=switch` swaps its resolve
+/// commands and the secondary button label. `seconds` drives the cosmetic
+/// countdown bar; `subtitle`, when present, is the NEXT meeting's title.
+fn meeting_switch_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
     let mut ser = url::form_urlencoded::Serializer::new(String::new());
     ser.append_pair("seconds", &seconds.to_string());
+    ser.append_pair("mode", "switch");
     if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
         ser.append_pair("subtitle", s);
     }
-    if let Some(t) = title.filter(|t| !t.is_empty()) {
-        ser.append_pair("title", t);
-    }
-    format!("/#/meeting-end-prompt?{}", ser.finish())
+    format!("/#/meeting-prompt?{}", ser.finish())
 }
 
-/// Build (or replace) the borderless top-right meeting-end prompt window. Same
-/// chrome as the silence prompt. Must run on the main thread.
-fn open_meeting_end_prompt_window(
-    app: &AppHandle,
-    subtitle: Option<&str>,
-    title: Option<&str>,
-) -> Result<(), String> {
+/// Build (or replace) the borderless top-right meeting-switch prompt window.
+/// Same chrome as the silence prompt. Must run on the main thread.
+fn open_meeting_switch_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    if let Some(existing) = app.get_webview_window("meeting-end-prompt") {
+    if let Some(existing) = app.get_webview_window("meeting-switch-prompt") {
         let _ = existing.close();
     }
     let win = WebviewWindowBuilder::new(
         app,
-        "meeting-end-prompt",
-        WebviewUrl::App(
-            meeting_end_prompt_url(MEETING_END_PROMPT_SECONDS, subtitle, title).into(),
-        ),
+        "meeting-switch-prompt",
+        WebviewUrl::App(meeting_switch_prompt_url(MEETING_SWITCH_PROMPT_SECONDS, subtitle).into()),
     )
     .title("")
     .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
@@ -1178,54 +1251,53 @@ fn open_meeting_end_prompt_window(
     Ok(())
 }
 
-/// Close the meeting-end prompt window if it is still up.
-fn close_meeting_end_prompt_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("meeting-end-prompt") {
+/// Close the meeting-switch prompt window if it is still up.
+fn close_meeting_switch_prompt_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("meeting-switch-prompt") {
         let _ = win.close();
     }
 }
 
-/// Show the meeting-end prompt. `subtitle`, when present, is the meeting title;
-/// `title`, when present, overrides the card heading to say why the prompt
-/// appeared. Window creation must happen on the main thread.
+/// Show the meeting-switch prompt. `subtitle`, when present, is the next
+/// meeting's title. Window creation must happen on the main thread.
 #[tauri::command]
-pub fn show_meeting_end_prompt(app: AppHandle, subtitle: Option<String>, title: Option<String>) {
+pub fn show_meeting_switch_prompt(app: AppHandle, subtitle: Option<String>) {
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Err(e) =
-            open_meeting_end_prompt_window(&app_main, subtitle.as_deref(), title.as_deref())
-        {
-            eprintln!("meeting-end-prompt: failed to open prompt window: {e}");
+        if let Err(e) = open_meeting_switch_prompt_window(&app_main, subtitle.as_deref()) {
+            eprintln!("meeting-switch-prompt: failed to open prompt window: {e}");
         }
     });
 }
 
-/// Close the meeting-end prompt window (kept, ignored/timed-out, or recording ended).
+/// Close the meeting-switch prompt window (kept, ignored/timed-out, or the
+/// recording ended).
 #[tauri::command]
-pub fn dismiss_meeting_end_prompt(app: AppHandle) {
+pub fn dismiss_meeting_switch_prompt(app: AppHandle) {
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || close_meeting_end_prompt_window(&app_main));
+    let _ = app.run_on_main_thread(move || close_meeting_switch_prompt_window(&app_main));
 }
 
-/// The view's choice: `stop` stops the recording, otherwise keep. Emits the event
-/// the recorder window listens for, then closes the prompt window.
+/// The view's choice: `switch` finalizes the current recording and starts the
+/// next meeting's, otherwise keep. Emits the event the recorder window listens
+/// for, then closes the prompt window.
 #[tauri::command]
-pub fn resolve_meeting_end_prompt(app: AppHandle, stop: bool) {
+pub fn resolve_meeting_switch_prompt(app: AppHandle, switch: bool) {
     use tauri::Emitter;
-    let event = if stop {
-        "meeting-end-prompt://stop"
+    let event = if switch {
+        "meeting-switch-prompt://switch"
     } else {
-        "meeting-end-prompt://keep"
+        "meeting-switch-prompt://keep"
     };
     let _ = app.emit(event, ());
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || close_meeting_end_prompt_window(&app_main));
+    let _ = app.run_on_main_thread(move || close_meeting_switch_prompt_window(&app_main));
 }
 
 /// Grow/shrink the window so the view can reveal the "Keep recording" menu below
 /// the card. Sizing must happen on the main thread; the top-left stays pinned.
 #[tauri::command]
-pub async fn resize_meeting_end_prompt(app: AppHandle, expanded: bool) -> Result<(), String> {
+pub async fn resize_meeting_switch_prompt(app: AppHandle, expanded: bool) -> Result<(), String> {
     let height = if expanded {
         MEETING_PROMPT_H_EXPANDED
     } else {
@@ -1233,7 +1305,7 @@ pub async fn resize_meeting_end_prompt(app: AppHandle, expanded: bool) -> Result
     };
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Some(win) = app_main.get_webview_window("meeting-end-prompt") {
+        if let Some(win) = app_main.get_webview_window("meeting-switch-prompt") {
             let _ = win.set_size(tauri::LogicalSize::new(MEETING_PROMPT_W, height));
         }
     });
@@ -1244,6 +1316,61 @@ pub async fn resize_meeting_end_prompt(app: AppHandle, expanded: bool) -> Result
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inbox_event_yields_the_meeting_prep_id() {
+        let data = json!({ "source": "meeting_prep", "sourceId": 5145 });
+        assert_eq!(meeting_prep_id_from_event(&data), Some(5145));
+    }
+
+    #[test]
+    fn inbox_event_accepts_a_numeric_string_source_id() {
+        let data = json!({ "source": "meeting_prep", "sourceId": "5145" });
+        assert_eq!(meeting_prep_id_from_event(&data), Some(5145));
+    }
+
+    #[test]
+    fn inbox_event_ignores_other_sources() {
+        let data = json!({ "source": "slack_summary", "sourceId": 7 });
+        assert_eq!(meeting_prep_id_from_event(&data), None);
+    }
+
+    #[test]
+    fn inbox_event_without_a_usable_source_id_is_ignored() {
+        assert_eq!(
+            meeting_prep_id_from_event(&json!({ "source": "meeting_prep" })),
+            None
+        );
+        assert_eq!(
+            meeting_prep_id_from_event(&json!({ "source": "meeting_prep", "sourceId": null })),
+            None
+        );
+        assert_eq!(meeting_prep_id_from_event(&json!({ "sourceId": 5145 })), None);
+    }
+
+    #[test]
+    fn inbox_event_survives_pushers_json_encoded_data() {
+        // Pusher delivers `data` as a JSON-encoded string; `inner_json` decodes
+        // it before the selector sees it.
+        let frame = json!({
+            "event": "inbox-message-ready",
+            "data": r#"{"source":"meeting_prep","sourceId":5145}"#
+        });
+        assert_eq!(meeting_prep_id_from_event(&inner_json(&frame)), Some(5145));
+    }
+
+    #[test]
+    fn prep_link_round_trips_the_prep_id() {
+        assert_eq!(prep_link(5145), "oats-prep://5145");
+        assert_eq!(prep_id_from_link(&prep_link(5145)), Some(5145));
+    }
+
+    #[test]
+    fn prep_id_from_link_rejects_foreign_identifiers() {
+        assert_eq!(prep_id_from_link("https://web.ari.ariso.ai/x"), None);
+        assert_eq!(prep_id_from_link("oats-prep://not-a-number"), None);
+        assert_eq!(prep_id_from_link(""), None);
+    }
 
     #[test]
     fn meeting_prompt_url_carries_the_timeout_seconds() {
@@ -1392,38 +1519,22 @@ mod tests {
     }
 
     #[test]
-    fn meeting_end_prompt_url_carries_the_seconds() {
+    fn meeting_switch_prompt_url_carries_the_seconds_and_switch_mode() {
         assert_eq!(
-            super::meeting_end_prompt_url(30, None, None),
-            "/#/meeting-end-prompt?seconds=30"
+            super::meeting_switch_prompt_url(30, None),
+            "/#/meeting-prompt?seconds=30&mode=switch"
         );
     }
 
     #[test]
-    fn meeting_end_prompt_url_encodes_the_subtitle_and_omits_when_empty() {
+    fn meeting_switch_prompt_url_encodes_the_subtitle_and_omits_when_empty() {
         assert_eq!(
-            super::meeting_end_prompt_url(30, Some("Q3 Plan & Review"), None),
-            "/#/meeting-end-prompt?seconds=30&subtitle=Q3+Plan+%26+Review"
+            super::meeting_switch_prompt_url(30, Some("Q3 Plan & Review")),
+            "/#/meeting-prompt?seconds=30&mode=switch&subtitle=Q3+Plan+%26+Review"
         );
         assert_eq!(
-            super::meeting_end_prompt_url(30, Some(""), None),
-            "/#/meeting-end-prompt?seconds=30"
-        );
-        assert_eq!(
-            super::meeting_end_prompt_url(30, None, None),
-            "/#/meeting-end-prompt?seconds=30"
-        );
-    }
-
-    #[test]
-    fn meeting_end_prompt_url_encodes_the_title_and_omits_when_empty() {
-        assert_eq!(
-            super::meeting_end_prompt_url(30, Some("Standup"), Some("Next meeting started")),
-            "/#/meeting-end-prompt?seconds=30&subtitle=Standup&title=Next+meeting+started"
-        );
-        assert_eq!(
-            super::meeting_end_prompt_url(30, None, Some("")),
-            "/#/meeting-end-prompt?seconds=30"
+            super::meeting_switch_prompt_url(30, Some("")),
+            "/#/meeting-prompt?seconds=30&mode=switch"
         );
     }
 }

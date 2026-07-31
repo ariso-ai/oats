@@ -53,9 +53,23 @@ interface ScheduledMeeting {
   title: string | null;
   start_at: string;
   end_at?: string;
+  /** Lifecycle status ('created' | 'recording' | 'done' | 'cancelled' | …).
+   *  A deleted/canceled calendar event surfaces here as 'cancelled'. */
+  status?: string | null;
   /** Ariso: when truthy, Ari (the notetaker bot) is scheduled to auto-join and
    *  record this meeting server-side. May arrive as bool / 0-1 / "true"-"1". */
   auto_join_scheduled?: boolean | number | string;
+  /** Ariso: present when a meeting prep exists for this meeting. May arrive
+   *  as a number or numeric string. */
+  prep_id?: number | string;
+}
+
+/** A meeting prep, reduced to the two fields the desktop consumes: the markdown
+ *  to render, and the meeting it belongs to (used to resolve a prep-ready
+ *  notification back to a row in the library). */
+export interface MeetingPrep {
+  content: string | null;
+  meetingId: string | null;
 }
 
 // Search currently returns the same meeting shape as `/meetings`, with optional
@@ -366,6 +380,32 @@ export function useMeetingApi() {
     return { content, title };
   }
 
+  // Fetch a meeting prep: its markdown content plus the meeting it belongs to
+  // (the notification path only knows the prep id, so it resolves the meeting
+  // from here). Resolves to null on 404, so callers can treat "absent"
+  // distinctly from a real error (same convention as getMeetingTranscript);
+  // `content` is null on its own when the payload holds no usable markdown.
+  async function getMeetingPrep(prepId: number): Promise<MeetingPrep | null> {
+    const res = await api.request('GET', `/meeting-preps/${encodeURIComponent(String(prepId))}`);
+    if (res.status === 404) return null;
+    assertOk(res, 200, 'get meeting prep');
+    const prep = (res.data as { meetingPrep?: Record<string, unknown> } | null)?.meetingPrep;
+    if (!prep) return null;
+    const content = prep.content;
+    // meeting_id comes back as a string ("45565") but tolerate a number, the
+    // way prep_id is tolerated on the meeting row.
+    const meetingId = prep.meeting_id;
+    return {
+      content: typeof content === 'string' && content.trim() ? content : null,
+      meetingId:
+        typeof meetingId === 'string' && meetingId !== ''
+          ? meetingId
+          : typeof meetingId === 'number' && Number.isFinite(meetingId)
+            ? String(meetingId)
+            : null,
+    };
+  }
+
   async function updateMeeting(
     meetingId: number,
     updates: { status?: string; title?: string }
@@ -575,6 +615,7 @@ export function useMeetingApi() {
     deleteMeetingRecordingClip,
     getMeetingTranscript,
     getMeetingIndividualNote,
+    getMeetingPrep,
     updateMeeting,
     endMeeting,
     saveTranscript,

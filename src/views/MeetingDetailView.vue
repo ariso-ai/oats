@@ -124,7 +124,10 @@
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
         </span>
-        <AriWillJoinTag v-if="detail?.autoJoinScheduled" class="meta-ari" />
+        <!-- A canceled meeting is marked as such, and never advertises Ari's
+             auto-join: the bot won't join a meeting that isn't happening. -->
+        <MeetingCanceledTag v-if="detail?.canceled" class="meta-canceled" />
+        <AriWillJoinTag v-else-if="ariChip" :joined="ariChip === 'joined'" class="meta-ari" />
       </div>
 
       <div v-else class="divider" />
@@ -139,7 +142,7 @@
             :class="{ 'seg-btn--active': activeTab === t.key }"
             type="button"
             :disabled="t.disabled"
-            @click="t.disabled || (activeTab = t.key)"
+            @click="onTabClick(t)"
           >{{ t.label }}</button>
         </div>
         <div v-if="showStatusChip" class="tab-status">
@@ -171,6 +174,15 @@
       <div class="card-content">
         <div v-if="!availableTabs.length" class="content-empty">
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
+        </div>
+
+        <!-- Prep pane. v-if (not v-show) is fine — the pane holds no editor
+             state worth preserving. -->
+        <div v-if="activeTab === 'prep'" class="tab-pane prep-pane">
+          <div v-if="loadingPrep" class="card-state"><span class="spinner" /><span>Loading prep…</span></div>
+          <div v-else-if="prepError" class="card-state card-state--error">{{ prepError }}</div>
+          <div v-else-if="prepContent" class="md" v-html="renderMarkdown(prepContent)" />
+          <div v-else class="content-empty">No prep available.</div>
         </div>
 
         <div v-show="activeTab === 'note'" class="tab-pane">
@@ -357,16 +369,20 @@ import {
   type MeetingCoaching,
 } from '../composables/useBackend';
 import AriWillJoinTag from './AriWillJoinTag.vue';
+import MeetingCanceledTag from './MeetingCanceledTag.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative, local } from '../tauri';
+import { ariJoinChip } from '../composables/meetingStatus';
 import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
 import { loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 
-const props = defineProps<{ item: MeetingListItem | null }>();
+// `now` is the parent's ticking clock — it lets the Ari chip retire itself when
+// the meeting's end time passes. Absent, the chip is evaluated once at render.
+const props = defineProps<{ item: MeetingListItem | null; now?: Date }>();
 const emit = defineEmits<{
   close: [];
   titleUpdated: [payload: { id: string; title: string }];
@@ -376,7 +392,22 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const detail = ref<MeetingDetail | null>(null);
 const showFullNotes = ref(false);
-const activeTab = ref<'note' | 'transcript' | 'mynote' | 'assessment'>('note');
+
+// "Ari will join" while the meeting is still ahead, "Ari has joined" once the
+// bot is in a running meeting, and no chip at all once the meeting is over.
+const ariChip = computed(() =>
+  ariJoinChip(
+    {
+      autoJoinScheduled: detail.value?.autoJoinScheduled,
+      status: detail.value?.arisoStatus,
+      startAt: detail.value?.startAt,
+      endAt: detail.value?.endAt,
+    },
+    props.now ?? new Date()
+  )
+);
+type TabKey = 'note' | 'transcript' | 'mynote' | 'prep' | 'assessment';
+const activeTab = ref<TabKey>('note');
 
 // Inline title editing. Both backends rename through Backend.renameMeeting
 // (ariso PATCHes the server; local rewrites meta.json). Local titles are
@@ -573,6 +604,71 @@ function onRegenerate(): void {
   void progress.retryNotes();
 }
 
+// Meeting prep (Ariso only): the Prep tab renders it, fetched on demand the
+// first time that tab opens and then cached for the lifetime of the loaded
+// meeting.
+const prepContent = ref<string | null>(null);
+const prepLoaded = ref(false);
+const loadingPrep = ref(false);
+const prepError = ref<string | null>(null);
+
+// The meeting a prep-ready notification asked to open. Keyed by meeting id (not
+// a bare flag) because the request races the load the Library's selection just
+// started: it can land either side of that load's state reset, and either side
+// must reach the right meeting.
+//
+// It is a standing request, not a one-shot: the same meeting can reload right
+// after it lands (a list refresh swaps the selected row for a freshly-fetched
+// one), and that reload must not drop the user back on the content default.
+// It ends when another meeting is selected or the user picks a tab.
+let pendingPrepMeetingId: string | null = null;
+
+/** Activate the Prep tab (the notification click target). Called by the Library
+ *  right after it selects the prep's meeting, so the detail is usually still
+ *  loading — hence the pending id. `meetingId` identifies the meeting the prep
+ *  belongs to; omitting it targets the current selection. */
+function openPrepTab(meetingId?: string): void {
+  const wanted = meetingId ?? props.item?.id ?? null;
+  pendingPrepMeetingId = wanted;
+  // Answer from `detail` only when it is the wanted meeting's — mid-switch it
+  // still holds the *previous* meeting's detail (and its Prep tab). Otherwise
+  // `load` applies the request once the tabs exist.
+  if (wanted != null && detail.value?.id === wanted && detail.value.prepId != null) {
+    activeTab.value = 'prep';
+  }
+}
+
+function onTabClick(t: { key: TabKey; disabled?: boolean }): void {
+  if (t.disabled) return;
+  // An explicit tab choice outranks a pending prep request, so a later reload
+  // of this meeting can't yank the user back to Prep.
+  pendingPrepMeetingId = null;
+  activeTab.value = t.key;
+}
+
+// Fetch the prep the first time the pane opens. Guarded by reqId (same pattern
+// as loadTranscript) so a meeting switch mid-fetch drops the stale result.
+async function loadPrep(): Promise<void> {
+  const d = detail.value;
+  const backend = detailBackend;
+  if (!d || d.prepId == null || !backend || prepLoaded.value || loadingPrep.value) return;
+  const my = reqId;
+  loadingPrep.value = true;
+  prepError.value = null;
+  try {
+    const prep = await backend.getMeetingPrep(d.prepId);
+    if (my !== reqId) return;
+    prepContent.value = prep?.content ?? null;
+    prepLoaded.value = true;
+  } catch (e) {
+    if (my !== reqId) return;
+    console.error('Failed to load meeting prep', e);
+    prepError.value = 'Could not load the meeting prep.';
+  } finally {
+    if (my === reqId) loadingPrep.value = false;
+  }
+}
+
 // When the poller reports a newly-ready artifact, read it into `detail` so the
 // now-enabled tab renders its content. Guarded by reqId so a meeting switch
 // mid-read drops the stale result.
@@ -742,6 +838,15 @@ async function load(item: MeetingListItem | null): Promise<void> {
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
   activeClipId.value = null;
+  // Keep a prep request that names the meeting being loaded — the Library
+  // issues it while this load is in flight — and drop one for any other.
+  if (pendingPrepMeetingId !== null && pendingPrepMeetingId !== item?.id) {
+    pendingPrepMeetingId = null;
+  }
+  prepContent.value = null;
+  prepLoaded.value = false;
+  loadingPrep.value = false;
+  prepError.value = null;
   progress.reset();
   individualNote.value = null;
   individualNoteLoaded.value = false;
@@ -768,7 +873,10 @@ async function load(item: MeetingListItem | null): Promise<void> {
     detail.value = d;
     detailBackend = backend;
     activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
-    activeTab.value = firstTabFor(d, item); // default to the first available tab
+    // A prep-ready notification for this meeting wins over the content-driven
+    // default — on this load and on any reload until the user picks a tab.
+    activeTab.value =
+      pendingPrepMeetingId === item.id && d.prepId != null ? 'prep' : firstTabFor(d, item);
     if (activeTab.value === 'mynote') {
       await loadIndividualNote();
     }
@@ -793,6 +901,9 @@ watch(
     props.item?.timestamp,
     props.item?.durationSeconds,
     props.item?.files?.hasTranscript,
+    // The detail carries prepId from the row, so a row that gains one (a prep
+    // created after the list loaded) must reload for its Prep tab to appear.
+    props.item?.prepId,
   ],
   () => load(props.item),
   { immediate: true }
@@ -907,10 +1018,11 @@ function assessmentPresent(d: MeetingDetail): boolean {
 }
 // The initial tab follows available content, but editable personal notes count
 // as available even before the first note has been saved.
-function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcript' | 'mynote' | 'assessment' {
+function firstTabFor(d: MeetingDetail, item: MeetingListItem): TabKey {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
   if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
+  if (d.prepId != null) return 'prep';
   if (assessmentPresent(d)) return 'assessment';
   return 'note';
 }
@@ -918,13 +1030,13 @@ function firstTabFor(d: MeetingDetail, item: MeetingListItem): 'note' | 'transcr
 // Tabs appear when their content exists. For local recordings the AI Notes and
 // Transcript tabs are always present (disabled until their content is ready) so
 // the row stays stable while generation runs; the inline status chip reports
-// progress. Ariso meetings keep the content-gated behavior.
-const availableTabs = computed<
-  { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[]
->(() => {
+// progress. Ariso meetings keep the content-gated behavior. The Prep tab sits
+// after My Notes and only exists for Ariso meetings that carry a prepId (set on
+// the /meetings list row when a meeting prep exists).
+const availableTabs = computed<{ key: TabKey; label: string; disabled?: boolean }[]>(() => {
   const d = detail.value;
   if (!d) return [];
-  const out: { key: 'note' | 'transcript' | 'mynote' | 'assessment'; label: string; disabled?: boolean }[] = [];
+  const out: { key: TabKey; label: string; disabled?: boolean }[] = [];
   if (d.isLocal) {
     out.push({ key: 'note', label: 'AI Notes', disabled: !d.note });
     out.push({ key: 'transcript', label: 'Transcript', disabled: !d.hasTranscript });
@@ -938,6 +1050,7 @@ const availableTabs = computed<
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
   }
+  if (d.prepId != null) out.push({ key: 'prep', label: 'Prep' });
   if (assessmentPresent(d)) out.push({ key: 'assessment', label: 'AI Assessment' });
   return out;
 });
@@ -1040,7 +1153,7 @@ async function saveNotesNow(): Promise<void> {
   }
 }
 
-defineExpose({ saveNotesNow });
+defineExpose({ saveNotesNow, openPrepTab });
 
 // Flushes the loaded note before the detail pane clears local draft state.
 // This protects quick tab/meeting/window changes where the 700ms debounce has
@@ -1053,6 +1166,7 @@ async function flushPendingNoteBeforeReset(): Promise<void> {
 watch(activeTab, (t) => {
   if (t === 'transcript') void loadTranscript();
   else if (t === 'mynote') void loadIndividualNote();
+  else if (t === 'prep') void loadPrep();
 });
 
 // Debounced autosave shared by the note body and its title so an edit to either
@@ -1101,7 +1215,14 @@ const hasCoaching = computed(() => {
 // The meta band (duration · attendees · category) renders only when at least
 // one of its fields is present; otherwise a plain divider separates header and tabs.
 const hasMeta = computed(
-  () => !!(durationLabel.value || detail.value?.participants.length || detail.value?.meetingType || detail.value?.autoJoinScheduled)
+  () =>
+    !!(
+      durationLabel.value ||
+      detail.value?.participants.length ||
+      detail.value?.meetingType ||
+      detail.value?.autoJoinScheduled ||
+      detail.value?.canceled
+    )
 );
 
 const otesEmpty = computed(() => {
@@ -1271,7 +1392,7 @@ const durationLabel = computed<string | null>(() => {
 
 /* Meta band — full-bleed strip below the header (Figma 2827:34384) */
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 11px 24px; background: #f7f6f4; border-bottom: 1px solid #e5e6e3; font-size: 14px; }
-.meta-ari { margin-left: auto; }
+.meta-ari, .meta-canceled { margin-left: auto; }
 .card-audio { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
 .clip-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .clip-row--active { background: #f7f6f4; }

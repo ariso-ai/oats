@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 
 const googleSignIn = vi.fn();
+const cancelSignIn = vi.fn();
 const setOnboarded = vi.fn();
 const openSettingsWindow = vi.fn();
 const emitNotificationsSync = vi.fn();
@@ -11,7 +12,8 @@ const close = vi.fn();
 
 vi.mock('../tauri', () => ({
   AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
-  auth: { googleSignIn: () => googleSignIn() },
+  SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
+  auth: { googleSignIn: () => googleSignIn(), cancelSignIn: () => cancelSignIn() },
   openSettingsWindow: () => openSettingsWindow(),
   setOnboarded: (v: boolean) => setOnboarded(v),
 }));
@@ -52,7 +54,7 @@ describe('OnboardingView', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('does not allow Skip while Google sign-in is in progress', async () => {
+  it('replaces Skip with Cancel while browser sign-in is pending', async () => {
     let resolveSignIn!: (value: { success: boolean; sessionToken: string }) => void;
     googleSignIn.mockReturnValue(new Promise((resolve) => {
       resolveSignIn = resolve;
@@ -60,13 +62,27 @@ describe('OnboardingView', () => {
     const wrapper = mount(OnboardingView);
     await wrapper.find('.google-btn').trigger('click');
     await flushPromises();
-    const skip = wrapper.find<HTMLButtonElement>('.skip-btn');
-    expect(skip.element.disabled).toBe(true);
-    await skip.trigger('click');
+    // Skip is replaced by a cancel affordance; clicking it must not finish
+    // onboarding — it asks the backend to abort the pending flow.
+    expect(wrapper.text()).toContain('Continue in your browser');
+    const cancel = wrapper.find('.cancel-btn');
+    expect(cancel.exists()).toBe(true);
+    await cancel.trigger('click');
+    expect(cancelSignIn).toHaveBeenCalled();
     expect(setOnboarded).not.toHaveBeenCalled();
     resolveSignIn({ success: true, sessionToken: 't' });
     await flushPromises();
     expect(setOnboarded).toHaveBeenCalledWith(true);
+  });
+
+  it('treats a canceled sign-in silently and restores the step', async () => {
+    googleSignIn.mockResolvedValue({ error: 'Sign-in canceled' });
+    const wrapper = mount(OnboardingView);
+    await wrapper.find('.google-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.error').exists()).toBe(false);
+    expect(wrapper.find('.cancel-btn').exists()).toBe(false);
+    expect(setOnboarded).not.toHaveBeenCalled();
   });
 
   it('shows a completion error when Skip cannot finish onboarding', async () => {
