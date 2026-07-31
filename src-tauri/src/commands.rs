@@ -1568,16 +1568,23 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
     }
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
-    // the same row, just to the right of them. Other platforms keep native
-    // window chrome because this AppKit-specific composition has no equivalent
-    // role in the library UI.
+    // the same row, just to the right of them.
     #[cfg(target_os = "macos")]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings")
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
-    #[cfg(not(target_os = "macos"))]
+    // Tauri's overlay title-bar style is macOS-only. Its supported Windows
+    // custom-titlebar path is an undecorated window plus webview controls;
+    // shadow(true) restores the Windows 11 border, rounded corners and shadow.
+    #[cfg(target_os = "windows")]
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings")
+            .decorations(false)
+            .shadow(true);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings");
