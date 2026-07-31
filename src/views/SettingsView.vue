@@ -195,6 +195,18 @@
           </div>
           <button class="sign-out-btn" @click="handleSignOut">Sign Out</button>
         </div>
+        <div v-if="isSignedIn && calendarConnected === false" class="calendar-connect">
+          <p class="calendar-connect-text">
+            Calendar isn’t connected, so oats can’t see your meetings.
+          </p>
+          <button
+            :disabled="isConnectingCalendar"
+            class="sign-out-btn"
+            @click="refreshCalendarAccess"
+          >
+            {{ isConnectingCalendar ? 'Continue in your browser…' : 'Connect Calendar' }}
+          </button>
+        </div>
         <div v-else class="sign-in-container">
           <button
             :disabled="isSigningIn"
@@ -475,6 +487,9 @@ import {
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
+const isConnectingCalendar = ref(false);
+// null = not checked this session; false = checked and missing.
+const calendarConnected = ref<boolean | null>(null);
 const errorMessage = ref('');
 const displayName = ref('');
 const email = ref('');
@@ -1169,10 +1184,32 @@ async function handleGoogleSignIn() {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync notifications after sign-in', err);
     });
+    // Sign-in may not carry Calendar — a user who already granted Google
+    // Workspace keeps their broader grant, which might not cover it.
+    await refreshCalendarAccess();
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {
     isSigningIn.value = false;
+  }
+}
+
+/**
+ * Acquire Calendar if the API says it is missing. Deliberately not run on mount
+ * or window focus: the connect hop opens a browser consent screen, so it fires
+ * only on an explicit sign-in or a click of Connect below.
+ */
+async function refreshCalendarAccess() {
+  isConnectingCalendar.value = true;
+  calendarConnected.value = null;
+  try {
+    const status = await auth.ensureCalendarAccess();
+    calendarConnected.value = status.connected;
+  } catch (err) {
+    console.warn('Could not connect Google Calendar', err);
+    calendarConnected.value = false;
+  } finally {
+    isConnectingCalendar.value = false;
   }
 }
 
@@ -1329,6 +1366,20 @@ async function handleSignOut() {
 
 .sign-out-btn:hover {
   text-decoration: underline;
+}
+
+.calendar-connect {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.calendar-connect-text {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0;
 }
 
 .sign-in-container {

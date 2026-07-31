@@ -17,6 +17,16 @@ interface SessionResult {
   sessionToken: string;
 }
 
+interface CalendarConnectResult {
+  status?: string;
+  error?: string;
+}
+
+/** Why the desktop app has no Calendar read access, per the API. */
+export type CalendarStatus =
+  | { connected: true }
+  | { connected: false; reason?: string };
+
 interface ApiResponse {
   status: number;
   data: unknown;
@@ -63,6 +73,66 @@ export const auth = {
 
   async cancelSignIn(): Promise<void> {
     await invoke('cancel_google_sign_in');
+  },
+
+  /** Whether the API already holds Calendar read access for this user. */
+  async calendarStatus(): Promise<CalendarStatus> {
+    const res = await api.request('GET', '/desktop/google-calendar-status');
+    if (res.status !== 200) {
+      throw new Error(`calendar status: ${res.status}`);
+    }
+    return res.data as CalendarStatus;
+  },
+
+  /**
+   * Second hop of desktop Google auth. Sign-in cannot widen an existing grant
+   * without dropping the scopes already on file, so Calendar is acquired here
+   * through the additive Workspace connect flow. Mirrors googleSignIn(), but
+   * the loopback carries no token — only a status marker.
+   */
+  async connectGoogleCalendar(): Promise<CalendarConnectResult> {
+    let resolveResult: (result: CalendarConnectResult) => void;
+    const resultPromise = new Promise<CalendarConnectResult>((resolve) => {
+      resolveResult = resolve;
+    });
+
+    const unlisten = await getCurrentWebviewWindow().listen<CalendarConnectResult>(
+      'calendar-connect-result',
+      (event) => {
+        resolveResult(event.payload);
+      }
+    );
+
+    try {
+      const immediate = await invoke<CalendarConnectResult>('connect_google_calendar');
+      if (immediate.error) {
+        return { error: immediate.error };
+      }
+      return await resultPromise;
+    } finally {
+      unlisten();
+    }
+  },
+
+  /**
+   * Run the Calendar hop only when the API says access is missing.
+   *
+   * Callers invoke this right after a sign-in, never on plain app launch, so a
+   * user who declines Calendar on the granular-consent screen is not
+   * re-prompted every time they open the app — only next time they sign in.
+   */
+  async ensureCalendarAccess(): Promise<CalendarStatus> {
+    const status = await auth.calendarStatus();
+    if (status.connected) {
+      return status;
+    }
+    const result = await auth.connectGoogleCalendar();
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    return result.status === 'connected'
+      ? { connected: true }
+      : { connected: false, reason: result.status };
   },
 
   async checkSession(): Promise<{ sessionToken: string } | null> {
