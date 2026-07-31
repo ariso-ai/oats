@@ -35,7 +35,7 @@ set -euo pipefail
 #   FORCE=1          overwrite an existing R2 prefix (defeats immutability)
 #   R2_PUBLIC_BASE   public host for printed URLs (default the app's r2.dev)
 #
-# Upload requires (same as .github/scripts/release-publish.sh); absent => skipped:
+# Upload requires (same as .github/scripts/release-publish-macos.sh); absent => skipped:
 #   R2_ENDPOINT   https://<account-id>.r2.cloudflarestorage.com
 #   R2_BUCKET     bucket NAME backing the public pub-...r2.dev domain (no dots)
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY    R2 API token credentials
