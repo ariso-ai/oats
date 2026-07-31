@@ -179,7 +179,10 @@
     <section v-if="backend === 'ariso'" class="section">
       <h2 class="section-title">Account</h2>
       <div class="card">
-        <div v-if="isSignedIn" class="account-info">
+        <!-- template wrapper so the sign-in v-else stays adjacent to this
+             v-if: an element between them would silently re-pair the v-else. -->
+        <template v-if="isSignedIn">
+        <div class="account-info">
           <img
             v-if="avatarUrl"
             class="avatar"
@@ -195,7 +198,7 @@
           </div>
           <button class="sign-out-btn" @click="handleSignOut">Sign Out</button>
         </div>
-        <div v-if="isSignedIn && calendarConnected === false" class="calendar-connect">
+        <div v-if="calendarConnected === false" class="calendar-connect">
           <p class="calendar-connect-text">
             Calendar isn’t connected, so oats can’t see your meetings.
           </p>
@@ -207,6 +210,7 @@
             {{ isConnectingCalendar ? 'Continue in your browser…' : 'Connect Calendar' }}
           </button>
         </div>
+        </template>
         <div v-else class="sign-in-container">
           <button
             :disabled="isSigningIn"
