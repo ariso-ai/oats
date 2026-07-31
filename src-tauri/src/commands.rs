@@ -745,6 +745,7 @@ pub async fn connect_google_calendar(
             "scopes": ["calendar-readonly"],
             "redirect": desktop_auth_redirect(port, &nonce),
         }))
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| e.to_string())?;
