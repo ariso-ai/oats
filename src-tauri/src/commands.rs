@@ -44,10 +44,11 @@ pub(crate) const PUSHER_CLUSTER: &str = "us2";
 // settings.json). A DSN is not a secret — it only grants event ingestion.
 // Only prod-api builds ship one so dev/local runs never pollute the project;
 // see `sentry_dsn()` for the development escape hatch.
-// TODO(#260): paste the DSN from the oats Sentry project (platform: JavaScript
-// → Vue) here. Until then every build reports nothing.
+// The DSN belongs to the `oats` project (platform: JavaScript → Vue); both the
+// macOS and Windows builds report to it and are told apart by the `os` tag.
 #[cfg(feature = "prod-api")]
-const DEFAULT_SENTRY_DSN: &str = "";
+const DEFAULT_SENTRY_DSN: &str = "https://ee14ea66d04a590f3b4375c1ef651e36@o4510868247216128.ingest.us.sentry.io/4511831828856832";
+// Dev builds stay silent unless ARISO_DESKTOP_SENTRY_DSN points somewhere.
 #[cfg(not(feature = "prod-api"))]
 const DEFAULT_SENTRY_DSN: &str = "";
 

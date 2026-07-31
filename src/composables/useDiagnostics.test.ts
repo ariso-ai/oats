@@ -6,6 +6,7 @@ const getBackendSetting = vi.fn();
 const getDesktopConfig = vi.fn();
 const sentryInit = vi.fn();
 const captureException = vi.fn();
+const loadPlatformCapabilities = vi.fn();
 
 vi.mock('@tauri-apps/plugin-store', () => ({
   load: () => Promise.resolve({ get: storeGet, set: storeSet }),
@@ -13,6 +14,9 @@ vi.mock('@tauri-apps/plugin-store', () => ({
 vi.mock('../tauri', () => ({
   getBackendSetting: (...a: unknown[]) => getBackendSetting(...a),
   getDesktopConfig: (...a: unknown[]) => getDesktopConfig(...a),
+}));
+vi.mock('./usePlatformCapabilities', () => ({
+  loadPlatformCapabilities: (...a: unknown[]) => loadPlatformCapabilities(...a),
 }));
 vi.mock('@sentry/browser', () => ({
   init: (...a: unknown[]) => sentryInit(...a),
@@ -35,6 +39,7 @@ beforeEach(() => {
   storeGet.mockResolvedValue(true);
   getBackendSetting.mockResolvedValue('ariso');
   getDesktopConfig.mockResolvedValue({ sentryDsn: 'https://key@sentry.io/1' });
+  loadPlatformCapabilities.mockResolvedValue({ os: 'macos' });
 });
 
 describe('the diagnostics opt-in', () => {
@@ -115,6 +120,22 @@ describe('reportUploadFailure', () => {
     expect(options.defaultIntegrations).toBe(false);
     expect(options.integrations).toEqual([]);
     expect(options.sendDefaultPii).toBe(false);
+  });
+
+  // Stripping default integrations also strips the User-Agent header Sentry
+  // would otherwise use to infer the OS, so the tag has to be explicit — it is
+  // the only thing separating a Windows-only bug from a macOS one.
+  it('tags the OS so one project can serve both platforms', async () => {
+    loadPlatformCapabilities.mockResolvedValue({ os: 'windows' });
+    await reportUploadFailure(new Error('boom'), { attempt: 'initial' });
+    expect(sentryInit.mock.calls[0][0].initialScope).toEqual({ tags: { os: 'windows' } });
+  });
+
+  it('still reports when the capability lookup fails', async () => {
+    loadPlatformCapabilities.mockRejectedValue(new Error('ipc down'));
+    await reportUploadFailure(new Error('boom'), { attempt: 'initial' });
+    expect(sentryInit.mock.calls[0][0].initialScope).toEqual({ tags: { os: 'unknown' } });
+    expect(captureException).toHaveBeenCalledTimes(1);
   });
 
   it('initializes only once across reports', async () => {

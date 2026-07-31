@@ -1,5 +1,6 @@
 import { load } from '@tauri-apps/plugin-store';
 import { getBackendSetting, getDesktopConfig } from '../tauri';
+import { loadPlatformCapabilities } from './usePlatformCapabilities';
 
 // Opt-in crash/error diagnostics (issue #260). Three independent gates must all
 // pass before a single byte leaves the machine:
@@ -90,6 +91,20 @@ function inferHttpStatus(error: unknown): number | null {
   return match ? Number(match[1]) : null;
 }
 
+// macOS and Windows ship the same bundle to the same Sentry project, so the OS
+// has to be tagged to tell their issues apart. Nothing else carries it:
+// `defaultIntegrations: false` drops the integration that would attach a
+// User-Agent header, and `beforeSend` deletes `event.request` anyway, leaving
+// Sentry nothing to infer the platform from. A capability lookup that fails
+// costs the tag, never the report.
+async function platformOsTag(): Promise<string> {
+  try {
+    return (await loadPlatformCapabilities()).os;
+  } catch {
+    return 'unknown';
+  }
+}
+
 type SentryModule = typeof import('@sentry/browser');
 
 let clientPromise: Promise<SentryModule | null> | null = null;
@@ -105,6 +120,7 @@ function ensureClient(): Promise<SentryModule | null> {
       Sentry.init({
         dsn: sentryDsn,
         release: __APP_VERSION__,
+        initialScope: { tags: { os: await platformOsTag() } },
         // Everything is reported by an explicit captureException call. Default
         // integrations would add global error handlers plus console/DOM/fetch
         // breadcrumbs, which in this app can carry meeting content and
