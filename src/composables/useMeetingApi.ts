@@ -579,10 +579,13 @@ export function useMeetingApi() {
       presignedUrl: string;
     };
 
-    const audioBytes = [...new Uint8Array(await new Response(audioBlob).arrayBuffer())];
-    const putStatus = await withStage('s3-put', () =>
-      api.putPresigned(presignedUrl, audioBytes, 'audio/mpeg')
-    );
+    // The byte conversion is inside the stage on purpose: turning a long
+    // recording into a number[] can blow up (RangeError/OOM) before anything
+    // reaches S3, and that failure belongs to this leg.
+    const putStatus = await withStage('s3-put', async () => {
+      const audioBytes = [...new Uint8Array(await new Response(audioBlob).arrayBuffer())];
+      return api.putPresigned(presignedUrl, audioBytes, 'audio/mpeg');
+    });
     if (putStatus < 200 || putStatus >= 300) {
       throw new UploadStageError('s3-put', `S3 upload failed (${putStatus})`, putStatus);
     }

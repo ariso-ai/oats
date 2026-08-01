@@ -500,6 +500,10 @@ describe('SettingsView diagnostics toggle', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
     expect(wrapper.text()).toContain('Paused while oats is running on-device');
+    // Windows ships the local backend too (cpp-sidecar), so the promise this
+    // notice makes has to hold on both platforms.
+    expect(wrapper.text()).toContain('nothing leaves your device');
+    expect(wrapper.text()).not.toContain('your Mac');
   });
 
   it('shows no offline notice while opted out', async () => {

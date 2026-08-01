@@ -28,8 +28,10 @@ export async function setDiagnosticsEnabled(enabled: boolean): Promise<void> {
   await store.set(ENABLED_KEY, enabled);
 }
 
-/** Which leg of the three-step upload failed. */
-export type UploadStage = 'presign' | 's3-put' | 'confirm' | 'combine' | 'buffer';
+/** Which leg of the three-step upload failed. `unknown` is the honest answer
+ *  for an error that reached us without a stage — filing those under a real
+ *  stage would poison that stage's issue group. */
+export type UploadStage = 'presign' | 's3-put' | 'confirm' | 'combine' | 'buffer' | 'unknown';
 
 /** Error carrying the upload leg that produced it, so a report can be grouped
  *  by stage instead of by the (highly variable) message text. */
@@ -66,9 +68,13 @@ export interface UploadFailureContext {
 // Redact any URL before it reaches Sentry. Also strip bare `?...` tails so a
 // half-logged URL can't leak credentials either.
 const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+// The scheme-anchored pattern above misses a URL that arrives without one (a
+// truncated or reformatted error string), and the query tail is the half that
+// carries the signature. Anything shaped like `?k=v` goes too.
+const QUERY_TAIL_PATTERN = /\?[^\s)]*=[^\s)]*/g;
 
 export function scrubMessage(message: string): string {
-  return message.replace(URL_PATTERN, (url) => {
+  const withoutUrls = message.replace(URL_PATTERN, (url) => {
     try {
       const parsed = new URL(url);
       return `${parsed.protocol}//${parsed.host}/<redacted>`;
@@ -76,6 +82,7 @@ export function scrubMessage(message: string): string {
       return '<redacted-url>';
     }
   });
+  return withoutUrls.replace(QUERY_TAIL_PATTERN, '?<redacted>');
 }
 
 function errorMessage(error: unknown): string {
@@ -84,10 +91,12 @@ function errorMessage(error: unknown): string {
   return String(error ?? 'Unknown error');
 }
 
-/** Best-effort HTTP status pulled out of an error message like "… (503)". */
+/** Best-effort HTTP status pulled out of an error message like "… (503)".
+ *  Scans the *scrubbed* message: a presigned URL's `X-Amz-Expires=432` would
+ *  otherwise read as a status and split one issue across two fingerprints. */
 function inferHttpStatus(error: unknown): number | null {
   if (error instanceof UploadStageError && error.httpStatus != null) return error.httpStatus;
-  const match = /\b([45]\d{2})\b/.exec(errorMessage(error));
+  const match = /\b([45]\d{2})\b/.exec(scrubMessage(errorMessage(error)));
   return match ? Number(match[1]) : null;
 }
 
@@ -139,7 +148,13 @@ function ensureClient(): Promise<SentryModule | null> {
         },
       });
       return Sentry;
-    })().catch(() => null);
+    })().catch(() => {
+      // A config IPC hiccup or a failed chunk fetch is transient. Memoizing the
+      // failure would silence diagnostics for the window's whole life, so drop
+      // the memo and let the next report try again.
+      clientPromise = null;
+      return null;
+    });
   }
   return clientPromise;
 }
@@ -161,7 +176,7 @@ export async function reportUploadFailure(
     const Sentry = await ensureClient();
     if (!Sentry) return;
 
-    const stage = context.stage ?? (error instanceof UploadStageError ? error.stage : 'presign');
+    const stage = context.stage ?? (error instanceof UploadStageError ? error.stage : 'unknown');
     const httpStatus = inferHttpStatus(error);
     const reported =
       error instanceof Error ? error : new Error(errorMessage(error));

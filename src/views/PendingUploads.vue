@@ -44,7 +44,7 @@
          name the recovery path rather than letting the user assume the
          recording is gone. -->
     <p v-if="error" class="pending-recovery">
-      Your recording is still saved at ~/.ariso/pending-uploads/.
+      Your recording is still saved at {{ bufferPath }}.
     </p>
   </div>
 </template>
@@ -61,6 +61,11 @@ const items = ref<PendingUploadMeta[]>([]);
 const busy = ref(false);
 const error = ref<string | null>(null);
 const confirmingDiscard = ref(false);
+// Rust resolves this ($HOME on macOS, %USERPROFILE% on Windows, ARISO_ROOT in
+// dev), so the recovery line names a folder the user can actually open. The
+// literal is only the pre-IPC placeholder and the fallback when the lookup
+// fails — better a shorthand path than none at all.
+const bufferPath = ref('~/.ariso/pending-uploads');
 
 // Keep pending-upload failures specific enough to explain auth/session states,
 // while preserving a short generic fallback for transient network or S3 errors.
@@ -152,7 +157,15 @@ async function onDiscard(): Promise<void> {
   }
 }
 
-onMounted(refresh);
+onMounted(async () => {
+  await refresh();
+  try {
+    bufferPath.value = await pending.bufferPath();
+  } catch (e) {
+    // Keep the placeholder: a missing path must not cost the user the list.
+    console.error('Failed to resolve the pending uploads path', e);
+  }
+});
 </script>
 
 <style scoped>

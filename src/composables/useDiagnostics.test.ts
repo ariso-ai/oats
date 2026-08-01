@@ -90,6 +90,16 @@ describe('scrubMessage', () => {
   it('leaves URL-free messages alone', () => {
     expect(scrubMessage('S3 upload failed (403)')).toBe('S3 upload failed (403)');
   });
+
+  // A URL that lost its scheme and host on the way into the error string still
+  // carries the signature in its query tail, so the scheme-anchored pattern
+  // alone is not enough.
+  it('strips a signed query string that lost its scheme and host', () => {
+    const scrubbed = scrubMessage('failed at rec.mp3?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA');
+    expect(scrubbed).not.toContain('X-Amz-Signature');
+    expect(scrubbed).not.toContain('AKIA');
+    expect(scrubbed).toContain('rec.mp3');
+  });
 });
 
 describe('reportUploadFailure', () => {
@@ -145,6 +155,18 @@ describe('reportUploadFailure', () => {
     expect(captureException).toHaveBeenCalledTimes(2);
   });
 
+  // A config IPC hiccup or a failed chunk fetch is transient; memoizing that
+  // failure would silence diagnostics for the rest of the window's life.
+  it('retries initialization after a transient failure', async () => {
+    getDesktopConfig.mockRejectedValueOnce(new Error('ipc down'));
+    await reportUploadFailure(new Error('one'), { attempt: 'initial' });
+    expect(captureException).not.toHaveBeenCalled();
+
+    await reportUploadFailure(new Error('two'), { attempt: 'initial' });
+    expect(sentryInit).toHaveBeenCalledTimes(1);
+    expect(captureException).toHaveBeenCalledTimes(1);
+  });
+
   it('tags the stage and status carried by an UploadStageError', async () => {
     await reportUploadFailure(new UploadStageError('s3-put', 'S3 upload failed (403)', 403), {
       attempt: 'retry',
@@ -182,6 +204,27 @@ describe('reportUploadFailure', () => {
       attempt: 'initial',
     });
     expect(captureException.mock.calls[0][1].tags.http_status).toBe('502');
+  });
+
+  // Presigned URLs carry three-digit query values (X-Amz-Expires) that would
+  // otherwise read as an HTTP status and split one issue across fingerprints.
+  it('does not mistake a URL query value for an HTTP status', async () => {
+    await reportUploadFailure(
+      new Error('error sending request for url (https://b.s3.amazonaws.com/rec.mp3?X-Amz-Expires=432)'),
+      { attempt: 'initial' }
+    );
+    const hint = captureException.mock.calls[0][1];
+    expect(hint.tags.http_status).toBe('none');
+    expect(hint.fingerprint[2]).toBe('none');
+  });
+
+  // useBackend and the retry-upload leg pass no stage. Defaulting those to
+  // 'presign' would file unrelated failures under the presign issue.
+  it('tags a stageless plain error as an unknown stage', async () => {
+    await reportUploadFailure(new Error('out of memory'), { attempt: 'initial' });
+    const hint = captureException.mock.calls[0][1];
+    expect(hint.tags.upload_stage).toBe('unknown');
+    expect(hint.fingerprint).toEqual(['recording-upload', 'unknown', 'none']);
   });
 
   it('reports a non-Error rejection without throwing', async () => {

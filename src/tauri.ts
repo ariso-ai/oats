@@ -371,6 +371,11 @@ export const pending = {
   reveal(createdAt: string): Promise<void> {
     return invoke('reveal_pending_upload', { createdAt });
   },
+  /** The buffer folder as Rust resolved it — platform- and `ARISO_ROOT`-aware,
+   *  so recovery copy can name a path the user will actually find. */
+  bufferPath(): Promise<string> {
+    return invoke<string>('pending_uploads_path');
+  },
 };
 
 export async function getBackendSetting(): Promise<'ariso' | 'local'> {

@@ -388,7 +388,7 @@
           us fix bugs. Never includes audio, transcripts, or meeting notes.
         </p>
         <p v-if="diagnosticsEnabled && backend === 'local'" class="notif-status notif-status--err">
-          Paused while oats is running on-device — nothing leaves your Mac in this mode.
+          Paused while oats is running on-device — nothing leaves your device in this mode.
         </p>
       </div>
     </section>

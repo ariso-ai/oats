@@ -1255,6 +1255,18 @@ pub fn reveal_pending_upload(app: tauri::AppHandle, created_at: String) -> Resul
         .map_err(|e| e.to_string())
 }
 
+/// The buffer folder as actually resolved: `$HOME/.ariso` on macOS,
+/// `%USERPROFILE%\.ariso` on Windows, or whatever `ARISO_ROOT` overrides it to.
+/// The upload-failure recovery copy names this instead of guessing a POSIX
+/// `~/...` path that is wrong on Windows and under the override.
+#[tauri::command]
+pub fn pending_uploads_path() -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    Ok(crate::storage::pending_uploads_dir(&root)
+        .to_string_lossy()
+        .into_owned())
+}
+
 /// Resolve a recording's directory under `<vault>/.oats/recordings/<id>`,
 /// guarding against path traversal. Ids are normally sanitized timestamps
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
@@ -2033,6 +2045,25 @@ mod tests {
         // Neither a vault note nor a legacy file exists yet.
 
         assert_eq!(read_recording_file(id.into(), "note".into()).unwrap(), None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The recovery copy in PendingUploads.vue renders this verbatim, so it has
+    /// to be the real resolved folder rather than a POSIX-shaped `~/...` guess
+    /// that is wrong on Windows and under the override.
+    #[test]
+    fn pending_uploads_path_reports_the_resolved_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let path = pending_uploads_path().unwrap();
+
+        assert_eq!(
+            std::path::PathBuf::from(&path),
+            tmp.path().join("pending-uploads")
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
