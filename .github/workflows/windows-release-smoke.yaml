@@ -1,0 +1,238 @@
+name: Windows release signing smoke test
+
+# Proves the SSL.com eSigner path in release-windows.yaml's
+# `package-windows-authenticode` job end to end, without cutting a release.
+#
+# Tag-triggered, not workflow_dispatch, for two reasons: workflow_dispatch is
+# only offered for workflows that exist on the default branch, and the
+# `windows-release` environment already allows deployments from the `v*` tag
+# policy. So this runs from any branch, against that branch's own scripts:
+#
+#   git tag vwindows-signing-smoke-$(date +%Y%m%d)-1 && git push origin --tags
+#
+# Delete the tag when done. This file is temporary by design — it duplicates
+# the real job because GitHub cannot share a job across workflows without
+# converting it to workflow_call.
+on:
+  push:
+    tags:
+      - 'vwindows-signing-smoke-*'
+
+permissions:
+  contents: read
+
+jobs:
+  package-windows:
+    name: Authenticode-sign x64 NSIS bundle
+    runs-on: windows-latest
+    environment: windows-release
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          cache: 'npm'
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - run: npm ci --prefer-offline
+
+      - id: windows-toolchain
+        shell: pwsh
+        run: |
+          $version = (rustc --version).Replace(' ', '-')
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      # Path and key kept identical to release-windows.yaml so this shares the
+      # real pipeline's caches instead of rebuilding the sidecar from scratch.
+      - id: windows-sidecar-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
+            src-tauri/binaries/llama
+            src-tauri/binaries/windows-runtime
+          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
+
+      - if: steps.windows-sidecar-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/build-windows-sidecar.ps1
+
+      - name: Verify app-local Visual C++ runtime
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-vc-runtime.ps1 `
+            -RootRuntimeDirectory src-tauri/binaries/windows-runtime `
+            -LlamaRuntimeDirectory src-tauri/binaries/llama `
+            -SidecarPath src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe `
+            -LlamaServerPath src-tauri/binaries/llama/llama-server.exe
+
+      - uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b  # v1.3.2
+        with:
+          command: --version
+          environment_name: PROD
+          signing_method: v2
+
+      - name: Create remote-signing overlay
+        shell: pwsh
+        run: |
+          $signer = (Resolve-Path scripts/sign-windows-artifact.ps1).Path
+          $configPath = Join-Path $env:RUNNER_TEMP "tauri.windows-release.json"
+          $auditPath = Join-Path $env:RUNNER_TEMP "oats-windows-signing-audit.jsonl"
+          $diagnosticPath = Join-Path $env:RUNNER_TEMP "oats-windows-signing-diagnostic.log"
+          $config = [ordered]@{
+            bundle = [ordered]@{
+              targets = @("nsis")
+              createUpdaterArtifacts = $false
+              windows = [ordered]@{
+                signCommand = [ordered]@{
+                  cmd = "pwsh.exe"
+                  args = @(
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    $signer,
+                    "%1"
+                  )
+                }
+              }
+            }
+          }
+          $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configPath -Encoding utf8
+          "TAURI_WINDOWS_RELEASE_CONFIG=$configPath" >> $env:GITHUB_ENV
+          "OATS_SIGNING_AUDIT_PATH=$auditPath" >> $env:GITHUB_ENV
+          "OATS_SIGNING_DIAGNOSTIC_PATH=$diagnosticPath" >> $env:GITHUB_ENV
+
+      # Fail on bad credentials in ~1 minute rather than after a 30-minute
+      # Tauri build. One disposable PE, one eSigner session.
+      - name: Preflight eSigner on a disposable sidecar copy
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ vars.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          $source = "src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe"
+          $copy = "src-tauri/binaries/ariso-stt-signing-preflight.exe"
+          Copy-Item -LiteralPath $source -Destination $copy -Force
+          ./scripts/sign-windows-artifact.ps1 -FilePath $copy
+          Remove-Item -LiteralPath $copy -Force
+
+      - name: Restore Windows release target
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: src-tauri/target/x86_64-pc-windows-msvc
+          key: oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'src-tauri/src/**', 'src-tauri/tauri*.json', 'src-tauri/capabilities/**') }}
+          restore-keys: |
+            oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-
+
+      - name: Build and verify Authenticode-signed NSIS
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ vars.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          ./scripts/build-windows-installers.ps1 `
+            -Bundles nsis `
+            -Target x86_64-pc-windows-msvc `
+            -TauriConfig $env:TAURI_WINDOWS_RELEASE_CONFIG
+          $installers = @(
+            Get-ChildItem `
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis `
+              -Filter *.exe `
+              -File
+          )
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one x64 NSIS installer, found $($installers.Count)."
+          }
+          ./scripts/verify-windows-authenticode.ps1 `
+            -InstallerPath $installers[0].FullName `
+            -SigningAuditPath $env:OATS_SIGNING_AUDIT_PATH
+
+      - name: Show secret-scrubbed signing diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH) {
+            Get-Content -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH
+          } else {
+            Write-Output "The signer produced no safe diagnostic record."
+          }
+
+      # Carries no credentials: path, filename, kind, sha256, cert subject.
+      - name: Upload Tauri signCommand audit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: smoke-signing-audit
+          if-no-files-found: warn
+          retention-days: 1
+          path: ${{ env.OATS_SIGNING_AUDIT_PATH }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: smoke-authenticode-nsis
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+  sign-updater:
+    name: Sign and verify the updater signature over the signed bytes
+    needs: package-windows
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          cache: 'npm'
+          node-version: '24'
+
+      - run: npm ci --prefer-offline
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: smoke-authenticode-nsis
+          path: artifacts/windows
+
+      - name: Sign final bytes and independently verify both signatures
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $installers = @(Get-ChildItem artifacts/windows -Filter *.exe -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Authenticode-signed installer, found $($installers.Count)."
+          }
+          $installer = $installers[0].FullName
+          $before = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+          $authenticode = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($authenticode.SignatureType -ne "Authenticode" -or $authenticode.Status -ne "Valid") {
+            throw "Downloaded installer has invalid Authenticode: $($authenticode.Status)"
+          }
+          Write-Output "Authenticode signer: $($authenticode.SignerCertificate.Subject)"
+          ./node_modules/.bin/tauri.cmd signer sign $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tauri updater signer failed."
+          }
+          $after = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+          if ($after -ne $before) {
+            throw "Updater signing changed the Authenticode-signed installer."
+          }
+          ./scripts/verify-tauri-updater-signature.ps1 -ArtifactPath $installer
