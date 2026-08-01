@@ -25,6 +25,11 @@ on:
         required: false
         default: false
         type: boolean
+      sign:
+        description: 'Exercise the SSL.com eSigner path instead of the unsigned one. Signs and verifies only — its installer is never published.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -36,12 +41,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Disabled while the project does not have a production Authenticode
-  # certificate. Keep this protected SSL.com path intact so it can be restored
-  # by replacing the active unsigned package-windows job below.
+  # Off by default while the project does not have a production Authenticode
+  # certificate in the consumer release path. Dispatch with `-f sign=true` to
+  # exercise it: nothing downstream consumes its artifact, so it is a dead-end
+  # lane that proves eSigner works without being able to publish anything.
   package-windows-authenticode:
     name: Authenticode-sign x64 NSIS bundle
-    if: ${{ false && inputs.tag != '' }}
+    if: ${{ inputs.sign }}
     runs-on: windows-latest
     # SSL.com credentials are isolated from Apple/R2/updater-key credentials.
     # In particular, this job cannot produce a Tauri .sig before Authenticode.
@@ -180,16 +186,6 @@ jobs:
             -Target x86_64-pc-windows-msvc `
             -TauriConfig $env:TAURI_WINDOWS_RELEASE_CONFIG
 
-      - name: Show secret-scrubbed signing diagnostics
-        if: failure()
-        shell: pwsh
-        run: |
-          if (Test-Path -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH) {
-            Get-Content -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH
-          } else {
-            Write-Output "The signer produced no safe diagnostic record."
-          }
-
       - name: Verify final installer and installed Authenticode payloads
         shell: pwsh
         run: |
@@ -206,6 +202,31 @@ jobs:
             -InstallerPath $installers[0].FullName `
             -SigningAuditPath $env:OATS_SIGNING_AUDIT_PATH
 
+      # After the verify step, not before it: `failure()` means "an earlier step
+      # failed", so sitting above the verify left a signed-but-unverifiable
+      # installer with no diagnostics printed at all.
+      - name: Show secret-scrubbed signing diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH) {
+            Get-Content -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH
+          } else {
+            Write-Output "The signer produced no safe diagnostic record."
+          }
+
+      # Records only path, filename, kind, sha256 and certificate subject — no
+      # credentials. Without it, "audit is missing the <X>" cannot be diagnosed
+      # because the records that WERE written are invisible.
+      - name: Upload Tauri signCommand audit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-signing-audit
+          if-no-files-found: warn
+          retention-days: 1
+          path: ${{ env.OATS_SIGNING_AUDIT_PATH }}
+
       - name: Upload Authenticode-signed NSIS installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -217,6 +238,10 @@ jobs:
 
   package-windows:
     name: Build unsigned x64 NSIS and MSI installers
+    # A `sign=true` dispatch is a signing test, not a release: skip the unsigned
+    # path entirely so it cannot spend half an hour of runner time or reach
+    # publish-windows through sign-windows-updater.
+    if: ${{ !inputs.sign }}
     runs-on: windows-latest
     permissions:
       contents: read

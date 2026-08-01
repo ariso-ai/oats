@@ -211,8 +211,8 @@ The two platforms ship independently: they build on different runners, hold diff
 
 | Job                           | Runs when                  | What it does                                                                                                                        |
 | ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `package-windows-authenticode`| never (disabled)           | The SSL.com eSigner path, kept intact for the day a production Authenticode certificate exists. Uses the `windows-release` Environment. |
-| `package-windows`             | dispatch                   | Builds the **unsigned** x64 NSIS and MSI installers and verifies the app-local Visual C++ runtime. Needs no signing credentials.        |
+| `package-windows-authenticode`| only with `-f sign=true`   | The SSL.com eSigner path. Nothing consumes its artifact, so it proves signing works without being able to publish. Uses the `windows-release` Environment. |
+| `package-windows`             | dispatch, unless `sign`    | Builds the **unsigned** x64 NSIS and MSI installers and verifies the app-local Visual C++ runtime. Needs no signing credentials.        |
 | `sign-windows-updater`        | after `package-windows`    | Generates the Tauri `.sig` from the final NSIS bytes and independently verifies minisign. Uses `release`.                               |
 | `publish-windows`             | unless `skip_publish`      | Uploads the immutable Windows payload, the `.exe` alias, and `latest-windows-x86_64.json`, and attaches the installers to the Release. Uses `release`. |
 
@@ -222,13 +222,19 @@ To debug a Windows signing failure without cutting a throwaway release, dispatch
 # Full run, including the R2 publish.
 gh workflow run release-windows.yaml --ref main -f tag=v0.18.0
 
-# Dry run: build, Authenticode-sign, updater-sign and verify, but touch neither
-# R2 nor the GitHub Release. The signed installer is still uploaded to the run
-# as the `windows-release-bundle` artifact.
+# Dry run: build, updater-sign and verify, but touch neither R2 nor the GitHub
+# Release. The installer is still uploaded to the run as the
+# `windows-release-bundle` artifact.
 gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f skip_publish=true
+
+# Exercise the SSL.com eSigner path instead of the unsigned one. This skips
+# package-windows entirely, so nothing can reach publish; the signed installer
+# lands on the run as `windows-authenticode-nsis`, alongside the
+# `windows-signing-audit` record of every PE Tauri routed through signCommand.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f sign=true
 ```
 
-Always pass `--ref main`: the `release` and `windows-release` environments restrict deployments to the protected `main` branch, and the workflow checks out `tag` itself.
+Always pass `--ref main`: the `release` and `windows-release` environments restrict deployments to the protected `main` branch, and the workflow checks out `tag` itself. Note that consequence — the workflow YAML comes from `--ref`, but every script comes from `tag`, so iterating on `scripts/sign-windows-artifact.ps1` means testing against a tag that already contains the change.
 
 No PAT is required. The macOS build runs as downstream jobs in the same `Release` run, and `workflow_dispatch` is one of the two events the default `GITHUB_TOKEN` is still allowed to trigger, so it can reach the Windows workflow too.
 
