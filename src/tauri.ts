@@ -118,6 +118,8 @@ export interface DesktopConfig {
   pusherKey: string;
   pusherCluster: string;
   webAppBaseUrl: string;
+  /** Empty string when this build ships no diagnostics endpoint. */
+  sentryDsn: string;
 }
 
 export async function getDesktopConfig(): Promise<DesktopConfig> {
@@ -368,6 +370,11 @@ export const pending = {
   /** Open `~/.ariso/pending-uploads` in Finder/Explorer, selecting this buffer. */
   reveal(createdAt: string): Promise<void> {
     return invoke('reveal_pending_upload', { createdAt });
+  },
+  /** The buffer folder as Rust resolved it — platform- and `ARISO_ROOT`-aware,
+   *  so recovery copy can name a path the user will actually find. */
+  bufferPath(): Promise<string> {
+    return invoke<string>('pending_uploads_path');
   },
 };
 

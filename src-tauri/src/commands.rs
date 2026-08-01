@@ -38,6 +38,36 @@ pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
 
+// Public Sentry DSN for opt-in diagnostics (`diagnosticsEnabled` in
+// settings.json). A DSN is not a secret — it only grants event ingestion.
+// Only prod-api builds ship one so dev/local runs never pollute the project;
+// see `sentry_dsn()` for the development escape hatch.
+// The DSN belongs to the `oats` project (platform: JavaScript → Vue); both the
+// macOS and Windows builds report to it and are told apart by the `os` tag.
+#[cfg(feature = "prod-api")]
+const DEFAULT_SENTRY_DSN: &str = "https://ee14ea66d04a590f3b4375c1ef651e36@o4510868247216128.ingest.us.sentry.io/4511831828856832";
+// Dev builds stay silent unless ARISO_DESKTOP_SENTRY_DSN points somewhere.
+#[cfg(not(feature = "prod-api"))]
+const DEFAULT_SENTRY_DSN: &str = "";
+
+/// Production builds report to the baked DSN only. Like `api_base_url`, the
+/// endpoint is fixed inside the signed app so it cannot be redirected.
+#[cfg(feature = "prod-api")]
+pub(crate) fn sentry_dsn() -> String {
+    DEFAULT_SENTRY_DSN.to_string()
+}
+
+/// Development builds default to an empty DSN (diagnostics stay a no-op) but
+/// allow pointing at a scratch Sentry project while working on instrumentation.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn sentry_dsn() -> String {
+    std::env::var("ARISO_DESKTOP_SENTRY_DSN")
+        .ok()
+        .filter(|dsn| !dsn.trim().is_empty())
+        .map(|dsn| dsn.trim().to_string())
+        .unwrap_or_else(|| DEFAULT_SENTRY_DSN.to_string())
+}
+
 #[cfg(feature = "prod-api")]
 const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
 #[cfg(feature = "dev-api")]
@@ -1103,15 +1133,21 @@ pub struct DesktopConfig {
     pub pusher_cluster: String,
     #[serde(rename = "webAppBaseUrl")]
     pub web_app_base_url: String,
+    /// Empty when this build has no diagnostics endpoint; the frontend treats
+    /// that as "diagnostics unavailable" and never initializes Sentry.
+    #[serde(rename = "sentryDsn")]
+    pub sentry_dsn: String,
 }
 
-/// Returns build-baked client config (Pusher key/cluster, web app base URL).
+/// Returns build-baked client config (Pusher key/cluster, web app base URL,
+/// Sentry DSN).
 #[tauri::command]
 pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
         web_app_base_url: web_app_base_url(),
+        sentry_dsn: sentry_dsn(),
     }
 }
 
@@ -1217,6 +1253,18 @@ pub fn reveal_pending_upload(app: tauri::AppHandle, created_at: String) -> Resul
     app.opener()
         .open_path(dir.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// The buffer folder as actually resolved: `$HOME/.ariso` on macOS,
+/// `%USERPROFILE%\.ariso` on Windows, or whatever `ARISO_ROOT` overrides it to.
+/// The upload-failure recovery copy names this instead of guessing a POSIX
+/// `~/...` path that is wrong on Windows and under the override.
+#[tauri::command]
+pub fn pending_uploads_path() -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    Ok(crate::storage::pending_uploads_dir(&root)
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Resolve a recording's directory under `<vault>/.oats/recordings/<id>`,
@@ -1997,6 +2045,25 @@ mod tests {
         // Neither a vault note nor a legacy file exists yet.
 
         assert_eq!(read_recording_file(id.into(), "note".into()).unwrap(), None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The recovery copy in PendingUploads.vue renders this verbatim, so it has
+    /// to be the real resolved folder rather than a POSIX-shaped `~/...` guess
+    /// that is wrong on Windows and under the override.
+    #[test]
+    fn pending_uploads_path_reports_the_resolved_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let path = pending_uploads_path().unwrap();
+
+        assert_eq!(
+            std::path::PathBuf::from(&path),
+            tmp.path().join("pending-uploads")
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

@@ -5,6 +5,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 const list = vi.fn();
 const combine = vi.fn();
 const reveal = vi.fn();
+const bufferPath = vi.fn();
 const checkSession = vi.fn();
 const combineAndUpload = vi.fn();
 const discardAll = vi.fn();
@@ -15,6 +16,7 @@ vi.mock('../tauri', () => ({
     list: (...a: unknown[]) => list(...a),
     combine: (...a: unknown[]) => combine(...a),
     reveal: (...a: unknown[]) => reveal(...a),
+    bufferPath: (...a: unknown[]) => bufferPath(...a),
   },
 }));
 vi.mock('../composables/usePendingUploads', () => ({
@@ -33,6 +35,7 @@ const items = [
 beforeEach(() => {
   vi.clearAllMocks();
   checkSession.mockResolvedValue({ user: { email: 'tester@example.com' } });
+  bufferPath.mockResolvedValue('/Users/tester/.ariso/pending-uploads');
 });
 
 describe('PendingUploads', () => {
@@ -130,6 +133,37 @@ describe('PendingUploads', () => {
     expect(wrapper.find('.pending-error').exists()).toBe(true);
     expect(wrapper.find('.pending-error').text()).toBe('Upload failed — try again.');
     expect(wrapper.findAll('.pending-item')).toHaveLength(2);
+  });
+
+  // The buffer folder is `$HOME/.ariso` on macOS, `%USERPROFILE%\.ariso` on
+  // Windows, and whatever `ARISO_ROOT` says in dev — so the recovery line has
+  // to name the path Rust actually resolved, not a POSIX-shaped guess.
+  it('points at the resolved recovery path only after a failure', async () => {
+    list.mockResolvedValue(items);
+    combineAndUpload.mockRejectedValue(new Error('offline'));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+    expect(wrapper.find('.pending-recovery').exists()).toBe(false);
+
+    await wrapper.find('.upload').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.pending-recovery').text()).toContain(
+      '/Users/tester/.ariso/pending-uploads'
+    );
+  });
+
+  it('still names a recovery folder when the path lookup fails', async () => {
+    list.mockResolvedValue(items);
+    bufferPath.mockRejectedValue(new Error('neither HOME nor USERPROFILE is set'));
+    combineAndUpload.mockRejectedValue(new Error('offline'));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.find('.upload').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.pending-recovery').text()).toContain('.ariso/pending-uploads');
   });
 
   it('explains missing session before retrying a pending upload', async () => {
