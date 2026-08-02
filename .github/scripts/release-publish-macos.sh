@@ -41,6 +41,12 @@ MAC_SHA256="$(sha256_of "$TARBALL")"
 MAC_ASSET_KEY="desktop/releases/${VERSION}/oats-${MAC_SHA256}.app.tar.gz"
 MAC_ASSET_URL="${PUBLIC_R2_BASE}/${MAC_ASSET_KEY}"
 
+# The Homebrew cask (published by publish-homebrew-cask.sh) downloads the DMG
+# from this same hash-addressed key, so a later release can never replace the
+# bytes a merged cask PR points at the way a mutable alias could.
+DMG_SHA256="$(sha256_of "$DMG")"
+DMG_ASSET_KEY="desktop/releases/${VERSION}/oats-${DMG_SHA256}.dmg"
+
 write_manifest latest-darwin-aarch64.json \
   "$VERSION" darwin-aarch64 "$(cat "$SIGFILE")" "$MAC_ASSET_URL"
 
@@ -57,8 +63,12 @@ fi
 # so a client reading the new manifest never points at a missing object.
 r2_cp "$TARBALL" "$MAC_ASSET_KEY" application/gzip "$IMMUTABLE_CACHE"
 
-# The DMG alias is not an updater target, but publish it before the manifest so
-# the manifest remains the final atomic release-visibility step.
+# Publish the DMG under its immutable, hash-addressed key first — the cask PR
+# opened later in this job reads DMG_SHA256 off this exact object. The mutable
+# desktop/oats.dmg alias is not an updater or cask target; it only backs the
+# direct "Download for macOS" link, so publish it before the manifest so the
+# manifest remains the final atomic release-visibility step.
+r2_cp "$DMG" "$DMG_ASSET_KEY" application/x-apple-diskimage "$IMMUTABLE_CACHE"
 r2_cp "$DMG" desktop/oats.dmg application/x-apple-diskimage "$NOCACHE"
 
 r2_cp latest-darwin-aarch64.json desktop/latest-darwin-aarch64.json \

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
 # Open a PR that updates the generated Homebrew cask fields. This runs after
-# release-publish-macos.sh has shipped the signed DMG to R2 (desktop/oats.dmg),
-# so the cask checksum is computed from the very bytes that R2 now serves — the
-# cask's `url` points straight at that R2 object, so there is no separate asset
-# to upload here. It shares that script's artifact-discovery helpers, so it needs
-# the same bash 4+ interpreter (see the publish job in release.yaml).
+# release-publish-macos.sh has shipped the signed DMG to R2 under its
+# immutable, hash-addressed key (desktop/releases/<version>/oats-<sha256>.dmg),
+# so the cask checksum computed here matches the very bytes that key serves —
+# the cask's `url` is templated from generated_version/generated_sha256, so it
+# points straight at that R2 object and there is no separate asset to upload
+# here. It shares that script's artifact-discovery helpers, so it needs the
+# same bash 4+ interpreter (see the publish job in release.yaml).
 #
 # `main` is a protected branch (changes must go through a pull request that
 # passes the required Validate check), so we never push the cask update to main
