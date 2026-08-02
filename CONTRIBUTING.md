@@ -349,7 +349,7 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 4. **If Windows fails**, macOS has already shipped. Fix the cause and re-dispatch just the Windows workflow against the same tag — see [CI: validation and signed releases](#ci-validation-and-signed-releases).
 
 > **Note:** The macOS signing/publish jobs run from the `Release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`). Windows is reached only by the dispatch that same run makes — a hand-made Release triggers neither platform.
-
+>
 > **Note:** The `release` and `windows-release` environment deployment policies allow the protected `main` branch. The workflow checks out the generated `v*` tag inside each job, but the protected deployment ref remains the `main` push that cut the release.
 
 ### release-please setup

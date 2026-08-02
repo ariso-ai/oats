@@ -120,6 +120,14 @@ jobs:
         # --raw-field, not --field: the latter treats a leading '@' as a file
         # reference. Tags never start with '@', but the literal form is correct.
         run: |
+          # Recorded before the dispatch so every run we accept below was
+          # created by it. Polling for the newest workflow_dispatch run
+          # unconditionally would return a PREVIOUS dispatch of the same
+          # workflow whenever ours has not been created yet, and the loop would
+          # stop on it — linking the summary to a stale run, which is the exact
+          # failure the summary exists to prevent.
+          DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
           gh workflow run release-windows.yaml --ref main --raw-field tag="$TAG"
 
           # Dispatch is asynchronous; give the run a moment to appear so the
@@ -128,7 +136,9 @@ jobs:
           for _ in 1 2 3 4 5 6; do
             sleep 5
             URL="$(gh run list --workflow release-windows.yaml \
-              --event workflow_dispatch --limit 1 --json url --jq '.[0].url' || true)"
+              --event workflow_dispatch --limit 20 --json url,createdAt \
+              | jq -r --arg since "$DISPATCHED_AT" \
+                '[.[] | select(.createdAt >= $since)] | .[0].url // empty' || true)"
             [[ -n "$URL" ]] && break
           done
           {

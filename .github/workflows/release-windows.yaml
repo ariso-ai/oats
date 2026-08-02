@@ -518,9 +518,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      # persist-credentials: false even though this job holds contents: write —
+      # nothing here authenticates to git. The publish script uses R2
+      # credentials and the Release steps use GH_TOKEN, so persisting the
+      # write-scoped token into .git/config would only leave it on disk while
+      # the third-party release action runs.
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          persist-credentials: false
           ref: ${{ inputs.ref || inputs.tag }}
 
       - name: Download verified Windows release bundle
