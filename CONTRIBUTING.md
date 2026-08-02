@@ -211,30 +211,36 @@ The two platforms ship independently: they build on different runners, hold diff
 
 | Job                           | Runs when                  | What it does                                                                                                                        |
 | ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `package-windows-authenticode`| only with `-f sign=true`   | The SSL.com eSigner path. Nothing consumes its artifact, so it proves signing works without being able to publish. Uses the `windows-release` Environment. |
-| `package-windows`             | dispatch, unless `sign`    | Builds the **unsigned** x64 NSIS and MSI installers and verifies the app-local Visual C++ runtime. Needs no signing credentials.        |
-| `sign-windows-updater`        | after `package-windows`    | Generates the Tauri `.sig` from the final NSIS bytes and independently verifies minisign. Uses `release`.                               |
+| `package-windows-authenticode`| **default** (`sign`)       | Builds x64 NSIS + MSI and has Tauri route every PE through SSL.com eSigner, then verifies the result against the signing audit. Uses the `windows-release` Environment. |
+| `package-windows`             | only with `-f sign=false`  | Escape hatch for shipping while eSigner is down: the same installers, **unsigned**. Needs no signing credentials.                       |
+| `sign-windows-updater`        | after whichever ran        | Generates the Tauri `.sig` from the final NSIS bytes and independently verifies minisign. Uses `release`.                               |
 | `publish-windows`             | unless `skip_publish`      | Uploads the immutable Windows payload, the `.exe` alias, and `latest-windows-x86_64.json`, and attaches the installers to the Release. Uses `release`. |
 
-To debug a Windows signing failure without cutting a throwaway release, dispatch it directly against an existing tag:
+The two packaging jobs are mutually exclusive and upload the **same artifact name** (`windows-installers`), so everything downstream is identical whichever one ran. `sign-windows-updater` therefore depends on both and proceeds when either succeeded — without that explicit `if`, a skipped dependency would skip the whole publish chain while the run still reported success.
+
+Dispatch it directly against an existing tag to re-run or debug without cutting a throwaway release:
 
 ```shell
 # Full run, including the R2 publish.
 gh workflow run release-windows.yaml --ref main -f tag=v0.18.0
 
-# Dry run: build, updater-sign and verify, but touch neither R2 nor the GitHub
-# Release. The installer is still uploaded to the run as the
-# `windows-release-bundle` artifact.
+# Dry run: build, sign, updater-sign and verify, but touch neither R2 nor the
+# GitHub Release. The signed installers are still uploaded to the run as the
+# `windows-release-bundle` artifact, alongside `windows-signing-audit` — the
+# record of every PE Tauri routed through signCommand.
 gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f skip_publish=true
 
-# Exercise the SSL.com eSigner path instead of the unsigned one. This skips
-# package-windows entirely, so nothing can reach publish; the signed installer
-# lands on the run as `windows-authenticode-nsis`, alongside the
-# `windows-signing-audit` record of every PE Tauri routed through signCommand.
-gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f sign=true
+# Emergency unsigned build, when eSigner is down and a release cannot wait.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f sign=false
+
+# Build a branch's scripts while still labelling the release from `tag`. Without
+# `ref`, a dispatch always tests the *tag's* copy of the signing scripts.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f ref=my-branch
 ```
 
-Always pass `--ref main`: the `release` and `windows-release` environments restrict deployments to the protected `main` branch, and the workflow checks out `tag` itself. Note that consequence — the workflow YAML comes from `--ref`, but every script comes from `tag`, so iterating on `scripts/sign-windows-artifact.ps1` means testing against a tag that already contains the change.
+Always pass `--ref main`: the `release` and `windows-release` environments restrict deployments to the protected `main` branch. Note that `--ref` selects the workflow **file** while `ref`/`tag` selects the **scripts** it runs.
+
+Because the signing job deploys to `windows-release`, which has required reviewers, **a release now pauses for approval** before Windows packaging starts. Drop that protection rule if you would rather releases run unattended.
 
 No PAT is required. The macOS build runs as downstream jobs in the same `Release` run, and `workflow_dispatch` is one of the two events the default `GITHUB_TOKEN` is still allowed to trigger, so it can reach the Windows workflow too.
 
