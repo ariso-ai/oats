@@ -189,21 +189,60 @@ Use these prefixes so the changelog and version bumps stay accurate.
 
 ## CI: validation and signed releases
 
-Two workflows validate and package the desktop targets:
+Three workflows validate and package the desktop targets:
 
 - **`Desktop App`** — CI validation. Its `macos-15` and `windows-latest` matrix builds the frontend, platform sidecar, and Tauri host without exposing signing secrets.
-- **`release`** — the release pipeline on push to `main`: macOS packages on Apple Silicon, Windows packages on `windows-latest`, and both signed updater payloads are published together (see [Cutting a release](#cutting-a-release)).
+- **`Release`** — the **macOS** release pipeline on push to `main` (see [Cutting a release](#cutting-a-release)).
+- **`Release (Windows)`** — the **Windows** release pipeline, dispatched by `Release` and re-runnable on its own.
 
-| Job                    | Runs when                        | What it does                                                                                                                     |
-| ---------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `release-please`       | every push to `main`             | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`.                                       |
-| `sync-lock`            | a Release PR was created/updated | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch.                             |
-| `release`              | a GitHub Release was just cut    | Signs + notarizes the macOS app with `--features prod-api`. Uses the `release` GitHub Environment.                               |
-| `package-windows`      | a GitHub Release was just cut    | Builds x64 NSIS only and has Tauri route every PE through SSL.com eSigner. Uses the `windows-release` GitHub Environment.         |
-| `sign-windows-updater` | after Windows Authenticode       | Generates the Tauri `.sig` from the final installer bytes, then independently verifies Authenticode and minisign. Uses `release`. |
-| `publish`              | after both platform packages     | Uploads immutable macOS and Windows payloads and publishes one combined `latest.json` last. Uses the `release` environment.       |
+The two platforms ship independently: they build on different runners, hold different signing credentials, and publish separate R2 objects. An eSigner/Authenticode failure therefore cannot hold back a macOS build that already signed and notarized — which is exactly what used to happen when both lived in one workflow.
 
-Because the build runs as downstream jobs in the same `release` run (gated on release-please having cut a release), no cross-workflow trigger is needed — so the default `GITHUB_TOKEN` suffices throughout and no PAT is required.
+**`Release`** (`.github/workflows/release.yaml`):
+
+| Job                | Runs when                        | What it does                                                                                                       |
+| ------------------ | -------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `release-please`   | every push to `main`             | Maintains the Release PR / cuts the GitHub Release + tag. Uses the default `GITHUB_TOKEN`.                          |
+| `sync-lock`        | a Release PR was created/updated | Keeps `package-lock.json` and `Cargo.lock` in sync with the bumped version on the Release PR branch.                |
+| `dispatch-windows` | a GitHub Release was just cut    | `gh workflow run release-windows.yaml --ref main -f tag=<tag>`. Does not wait on it and cannot be failed by it.     |
+| `release`          | a GitHub Release was just cut    | Signs + notarizes the macOS app with `--features prod-api`. Uses the `release` GitHub Environment.                  |
+| `publish`          | after `release`                  | Uploads the immutable macOS payload, the DMG alias, and `latest-darwin-aarch64.json`. Uses the `release` environment. |
+
+**`Release (Windows)`** (`.github/workflows/release-windows.yaml`), `workflow_dispatch` only, with a required `tag` input:
+
+| Job                           | Runs when                  | What it does                                                                                                                        |
+| ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `package-windows-authenticode`| **default** (`sign`)       | Builds x64 NSIS + MSI and has Tauri route every PE through SSL.com eSigner, then verifies the result against the signing audit. Uses the `windows-release` Environment. |
+| `package-windows`             | only with `-f sign=false`  | Escape hatch for shipping while eSigner is down: the same installers, **unsigned**. Needs no signing credentials.                       |
+| `sign-windows-updater`        | after whichever ran        | Generates the Tauri `.sig` from the final NSIS bytes and independently verifies minisign. Uses `release`.                               |
+| `publish-windows`             | unless `skip_publish`      | Uploads the immutable Windows payload, the `.exe` alias, and `latest-windows-x86_64.json`, and attaches the installers to the Release. Uses `release`. |
+
+The two packaging jobs are mutually exclusive and upload the **same artifact name** (`windows-installers`), so everything downstream is identical whichever one ran. `sign-windows-updater` therefore depends on both and proceeds when either succeeded — without that explicit `if`, a skipped dependency would skip the whole publish chain while the run still reported success.
+
+Dispatch it directly against an existing tag to re-run or debug without cutting a throwaway release:
+
+```shell
+# Full run, including the R2 publish.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0
+
+# Dry run: build, sign, updater-sign and verify, but touch neither R2 nor the
+# GitHub Release. The signed installers are still uploaded to the run as the
+# `windows-release-bundle` artifact, alongside `windows-signing-audit` — the
+# record of every PE Tauri routed through signCommand.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f skip_publish=true
+
+# Emergency unsigned build, when eSigner is down and a release cannot wait.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f sign=false
+
+# Build a branch's scripts while still labelling the release from `tag`. Without
+# `ref`, a dispatch always tests the *tag's* copy of the signing scripts.
+gh workflow run release-windows.yaml --ref main -f tag=v0.18.0 -f ref=my-branch
+```
+
+Always pass `--ref main`: the `release` and `windows-release` environments restrict deployments to the protected `main` branch. Note that `--ref` selects the workflow **file** while `ref`/`tag` selects the **scripts** it runs.
+
+Because the signing job deploys to `windows-release`, which has required reviewers, **a release now pauses for approval** before Windows packaging starts. Drop that protection rule if you would rather releases run unattended.
+
+No PAT is required. The macOS build runs as downstream jobs in the same `Release` run, and `workflow_dispatch` is one of the two events the default `GITHUB_TOKEN` is still allowed to trigger, so it can reach the Windows workflow too.
 
 ### One-time setup on the runner Mac
 
@@ -262,31 +301,60 @@ npx @tauri-apps/cli signer generate
    updater signature, so that signature always covers the final Authenticode
    bytes.
 
-   The publish job uploads immutable payloads below
-   `desktop/releases/<version>/`, refreshes the human download aliases
-   `desktop/oats.dmg` and `desktop/oats-windows-x86_64.exe`, then overwrites the
-   combined `desktop/latest.json` last with `no-cache`.
+   Each publish job uploads its immutable payload below
+   `desktop/releases/<version>/`, refreshes its human download alias
+   (`desktop/oats.dmg` / `desktop/oats-windows-x86_64.exe`), then overwrites its
+   own updater manifest last with `no-cache`.
 
-   MSI remains a separate internal-deployment artifact and is never included in
-   the consumer updater. For Partner Center only, explicitly pass
+   **Manifests are per-platform**, because a Tauri static manifest carries a
+   single top-level `version` and could not honestly describe macOS on 0.19.0
+   while Windows is still on 0.18.0:
+
+   | Object                                | Written by | Read by                                                    |
+   | ------------------------------------- | ---------- | ---------------------------------------------------------- |
+   | `desktop/latest-darwin-aarch64.json`  | macOS      | macOS clients (`endpoints[0]`, `{{target}}`/`{{arch}}`)    |
+   | `desktop/latest-windows-x86_64.json`  | Windows    | Windows clients (`endpoints[0]`)                           |
+   | `desktop/latest.json`                 | macOS only | macOS clients installed before per-platform manifests existed |
+
+   Updater endpoints are compiled into the app, so every client shipped before
+   this split still polls the bare `desktop/latest.json`. The macOS publisher
+   keeps writing a macOS-only copy there; the Windows publisher never touches
+   it, so that object can never advertise a version macOS has not shipped.
+
+   **When can `desktop/latest.json` go?** Not on a date — we have no client
+   version telemetry, so we cannot observe the remaining population. Treat it as
+   permanent: it costs one extra ~2 KB `PUT` per release. Drop it only if
+   telemetry later shows no client older than the first release carrying
+   per-platform endpoints (0.19.0) still checking in.
+
+   `latest.json` stays second in `endpoints` purely as a safety net: Tauri walks
+   the list and skips any endpoint that does not return 2xx. Do not delete a
+   published `latest-<target>-<arch>.json` — a client that falls through to
+   `latest.json` and finds no entry for its platform surfaces an update-check
+   error rather than a clean "no update available".
+
+   MSI ships only as a direct-download GitHub Release asset: it never reaches R2,
+   is never included in the consumer updater, and carries no Tauri updater
+   signature. For Partner Center only, explicitly pass
    `src-tauri/tauri.microsoftstore.conf.json`; it embeds the offline WebView2
    installer and is not used by normal NSIS releases.
 
 ## Cutting a release
 
-Releases are automated by [release-please](https://github.com/googleapis/release-please) (the `release` workflow). On every push to `main` it parses conventional commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major) and maintains a **Release PR** that bumps the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, updates `CHANGELOG.md`, and (via the `sync-lock` job) keeps `package-lock.json` and `Cargo.lock` in sync.
+Releases are automated by [release-please](https://github.com/googleapis/release-please) (the `Release` workflow). On every push to `main` it parses conventional commits (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major) and maintains a **Release PR** that bumps the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, updates `CHANGELOG.md`, and (via the `sync-lock` job) keeps `package-lock.json` and `Cargo.lock` in sync.
 
 1. **Merge feature/fix PRs to `main`** with conventional-commit messages. release-please keeps the Release PR up to date.
-2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so release-please creates the `vX.Y.Z` tag and GitHub Release, then both platform packages and publication run.
-3. **Approve the protected deployments** if required-reviewer protection is configured: `release` for macOS/updater signing/publication and `windows-release` for eSigner access.
+2. **Merge the Release PR** when ready to ship. That merge is a push to `main`, so release-please creates the `vX.Y.Z` tag and GitHub Release, the macOS pipeline runs in the same workflow, and the Windows pipeline is dispatched as a separate `Release (Windows)` run.
+3. **Approve the protected deployments** if required-reviewer protection is configured: `release` for macOS/updater signing/publication and `windows-release` for eSigner access. The two runs approve independently.
+4. **If Windows fails**, macOS has already shipped. Fix the cause and re-dispatch just the Windows workflow against the same tag — see [CI: validation and signed releases](#ci-validation-and-signed-releases).
 
-> **Note:** The signing/publish jobs run from the `release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`).
-
+> **Note:** The macOS signing/publish jobs run from the `Release` workflow on push to `main`, so creating a GitHub Release by hand (e.g. `gh release create`) no longer triggers the build. To ship, merge the Release PR (or push the version bumps to `main`). Windows is reached only by the dispatch that same run makes — a hand-made Release triggers neither platform.
+>
 > **Note:** The `release` and `windows-release` environment deployment policies allow the protected `main` branch. The workflow checks out the generated `v*` tag inside each job, but the protected deployment ref remains the `main` push that cut the release.
 
 ### release-please setup
 
-No PAT is required: the `release` workflow uses the default `GITHUB_TOKEN` (with `contents: write` + `pull-requests: write` granted at the job level). This works because the signing pipeline runs as downstream jobs in the same run rather than relying on the published Release to trigger a separate workflow — the one thing the default token can't do.
+No PAT is required: the `Release` workflow uses the default `GITHUB_TOKEN` (with `contents: write` + `pull-requests: write` granted at the job level). This works because the macOS signing pipeline runs as downstream jobs in the same run rather than relying on the published Release to trigger a separate workflow — the one thing the default token can't do. The Windows workflow is reached by `workflow_dispatch` (with `actions: write`), which is explicitly exempt from that restriction.
 
 ## Troubleshooting
 

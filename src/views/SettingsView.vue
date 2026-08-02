@@ -364,6 +364,35 @@
       </div>
     </section>
 
+    <!-- Privacy Section -->
+    <section class="section">
+      <h2 class="section-title">Privacy</h2>
+      <div class="card">
+        <div class="setting-row">
+          <span id="diagnostics-label" class="setting-label">Collect diagnostic data</span>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              class="toggle-input"
+              aria-labelledby="diagnostics-label"
+              :checked="diagnosticsEnabled"
+              @change="onToggleDiagnostics"
+            />
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+        <p class="setting-hint">
+          Sends anonymous error reports (such as failed recording uploads) to help
+          us fix bugs. Never includes audio, transcripts, or meeting notes.
+        </p>
+        <p v-if="diagnosticsEnabled && backend === 'local'" class="notif-status notif-status--err">
+          Paused while oats is running on-device — nothing leaves your device in this mode.
+        </p>
+      </div>
+    </section>
+
     <!-- About / Updates Section -->
     <section class="section">
       <h2 class="section-title">About</h2>
@@ -413,6 +442,7 @@ import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, api, updater, getBa
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
+import { isDiagnosticsEnabled, setDiagnosticsEnabled } from '../composables/useDiagnostics';
 import {
   loadRecordingEnabled,
   setMicEnabled,
@@ -464,6 +494,9 @@ const systemAudioToggling = ref(false);
 const recordingToggleBusy = computed(
   () => micToggling.value || systemAudioToggling.value,
 );
+// Opt-in diagnostics (issue #260). Defaults to false so a load failure leaves
+// the user opted out rather than silently opted in.
+const diagnosticsEnabled = ref(false);
 const meetingNotifications = ref(true);
 const notifStatus = ref<'' | 'granted' | 'denied'>('');
 const signInPrompt = ref(false);
@@ -892,6 +925,17 @@ async function onToggleSilenceDetection(e: Event) {
   }
 }
 
+async function onToggleDiagnostics(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const previous = diagnosticsEnabled.value;
+  diagnosticsEnabled.value = checked;
+  try {
+    await setDiagnosticsEnabled(checked);
+  } catch {
+    diagnosticsEnabled.value = previous;
+  }
+}
+
 async function onToggleMeetingEndReminder(e: Event) {
   const checked = (e.target as HTMLInputElement).checked;
   const previous = meetingEndReminder.value;
@@ -1030,6 +1074,13 @@ onMounted(async () => {
   }
 
   meetingNotifications.value = await isMeetingNotificationsEnabled();
+  // Isolated: a settings-store read failure must leave diagnostics off, not
+  // abort the remaining onMounted wiring.
+  try {
+    diagnosticsEnabled.value = await isDiagnosticsEnabled();
+  } catch (e) {
+    console.warn('Failed to load diagnostics setting', e);
+  }
 
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;

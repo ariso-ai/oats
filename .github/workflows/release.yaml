@@ -1,5 +1,8 @@
-name: release
+name: Release
 
+# macOS only. Windows packaging lives in release-windows.yaml, dispatched from
+# the `dispatch-windows` job below, so an eSigner/Authenticode failure can never
+# hold back a macOS build that already signed and notarized.
 on:
   push:
     branches:
@@ -30,10 +33,12 @@ jobs:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         id: release
         with:
-          # The default GITHUB_TOKEN is sufficient: the release/publish jobs run
-          # in THIS workflow run (gated on releases_created), so we don't rely on
-          # the published Release firing a separate workflow — the one thing the
-          # default token can't do. Creating the Release itself needs only
+          # The default GITHUB_TOKEN is sufficient: the macOS release/publish
+          # jobs run in THIS workflow run (gated on releases_created), so we
+          # don't rely on the published Release firing a separate workflow — the
+          # one thing the default token can't do. Windows runs in its own
+          # workflow, but it is reached by workflow_dispatch, which the default
+          # token IS allowed to trigger. Creating the Release itself needs only
           # contents: write.
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
@@ -86,6 +91,63 @@ jobs:
           git add package-lock.json src-tauri/Cargo.lock
           git commit -m "chore: sync lockfiles for release"
           git push
+
+  # Kick off the Windows pipeline as a sibling of the macOS one, not a
+  # dependent: neither waits on the other, and neither can fail the other.
+  # workflow_dispatch is one of the two events the default GITHUB_TOKEN is
+  # allowed to trigger, so this needs no PAT. --ref main (not the tag) because
+  # the `release`/`windows-release` environments restrict deployments to the
+  # protected main branch; release-windows.yaml checks out the tag itself.
+  #
+  # Its own job rather than a step on release-please: that job holds
+  # contents+pull-requests write on every push to main, and dispatching is the
+  # only thing here that needs actions: write.
+  dispatch-windows:
+    name: Dispatch the Windows release workflow
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      # `gh workflow run` exits 0 on accept and prints nothing, so without the
+      # summary below a Windows-less release looks identical to a complete one.
+      - name: Trigger release-windows.yaml for the new tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        # --raw-field, not --field: the latter treats a leading '@' as a file
+        # reference. Tags never start with '@', but the literal form is correct.
+        run: |
+          # Recorded before the dispatch so every run we accept below was
+          # created by it. Polling for the newest workflow_dispatch run
+          # unconditionally would return a PREVIOUS dispatch of the same
+          # workflow whenever ours has not been created yet, and the loop would
+          # stop on it — linking the summary to a stale run, which is the exact
+          # failure the summary exists to prevent.
+          DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          gh workflow run release-windows.yaml --ref main --raw-field tag="$TAG"
+
+          # Dispatch is asynchronous; give the run a moment to appear so the
+          # summary can link straight to it. Never fail the release over this —
+          # the dispatch itself already succeeded.
+          for _ in 1 2 3 4 5 6; do
+            sleep 5
+            URL="$(gh run list --workflow release-windows.yaml \
+              --event workflow_dispatch --limit 20 --json url,createdAt \
+              | jq -r --arg since "$DISPATCHED_AT" \
+                '[.[] | select(.createdAt >= $since)] | .[0].url // empty' || true)"
+            [[ -n "$URL" ]] && break
+          done
+          {
+            echo "### Windows release"
+            echo
+            echo "Dispatched \`release-windows.yaml\` for \`${TAG}\`: ${URL:-see the Actions tab}"
+            echo
+            echo "macOS does not wait on it. If it fails, fix and re-dispatch the same tag."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
     name: Sign, notarize, and bundle
@@ -219,7 +281,7 @@ jobs:
 
       # Hand the bundler outputs to the publish job. Paths share the common
       # ancestor bundle/, so the artifact preserves the macos/ and dmg/
-      # subdirectories that release-publish.sh expects. The DMG and tarball are
+      # subdirectories that release-publish-macos.sh expects. The DMG and tarball are
       # already compressed, so skip recompression.
       - name: Upload release bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -233,373 +295,9 @@ jobs:
             src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/release/bundle/dmg/*.dmg
 
-  # Disabled while the project does not have a production Authenticode
-  # certificate. Keep this protected SSL.com path intact so it can be restored
-  # by replacing the active unsigned package-windows job below.
-  package-windows-authenticode:
-    name: Authenticode-sign x64 NSIS bundle
-    needs: release-please
-    if: ${{ false && needs.release-please.outputs.releases_created == 'true' }}
-    runs-on: windows-latest
-    # SSL.com credentials are isolated from Apple/R2/updater-key credentials.
-    # In particular, this job cannot produce a Tauri .sig before Authenticode.
-    environment: windows-release
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-          ref: ${{ needs.release-please.outputs.tag_name }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
-        with:
-          cache: 'npm'
-          node-version: '24'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install dependencies
-        run: npm ci --prefer-offline
-
-      - name: Fingerprint Windows Rust toolchain
-        id: windows-toolchain
-        shell: pwsh
-        run: |
-          $version = (rustc --version).Replace(' ', '-')
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Cache Windows sidecar and executable resources
-        id: windows-sidecar-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
-            src-tauri/binaries/llama
-            src-tauri/binaries/windows-runtime
-          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
-
-      - name: Build Windows sidecar and executable resources
-        if: steps.windows-sidecar-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: ./scripts/build-windows-sidecar.ps1
-
-      - name: Verify app-local Visual C++ runtime
-        shell: pwsh
-        run: |
-          ./scripts/verify-windows-vc-runtime.ps1 `
-            -RootRuntimeDirectory src-tauri/binaries/windows-runtime `
-            -LlamaRuntimeDirectory src-tauri/binaries/llama `
-            -SidecarPath src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe `
-            -LlamaServerPath src-tauri/binaries/llama/llama-server.exe
-
-      # Pin the reviewed SSL.com action. This invocation only installs and
-      # configures CodeSignTool; Tauri calls our secret-safe wrapper once for
-      # every binary through bundle.windows.signCommand.
-      - name: Set up SSL.com eSigner CodeSignTool
-        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b  # v1.3.2
-        with:
-          command: --version
-          environment_name: PROD
-          signing_method: v2
-
-      - name: Create Tauri remote-signing overlay
-        shell: pwsh
-        run: |
-          $signer = (Resolve-Path scripts/sign-windows-artifact.ps1).Path
-          $configPath = Join-Path $env:RUNNER_TEMP "tauri.windows-release.json"
-          $auditPath = Join-Path $env:RUNNER_TEMP "oats-windows-signing-audit.jsonl"
-          $diagnosticPath = Join-Path $env:RUNNER_TEMP "oats-windows-signing-diagnostic.log"
-          $config = [ordered]@{
-            bundle = [ordered]@{
-              targets = @("nsis")
-              createUpdaterArtifacts = $false
-              windows = [ordered]@{
-                signCommand = [ordered]@{
-                  cmd = "pwsh.exe"
-                  args = @(
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    $signer,
-                    "%1"
-                  )
-                }
-              }
-            }
-          }
-          $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configPath -Encoding utf8
-          "TAURI_WINDOWS_RELEASE_CONFIG=$configPath" >> $env:GITHUB_ENV
-          "OATS_SIGNING_AUDIT_PATH=$auditPath" >> $env:GITHUB_ENV
-          "OATS_SIGNING_DIAGNOSTIC_PATH=$diagnosticPath" >> $env:GITHUB_ENV
-
-      - name: Cache Windows Rust release dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target/x86_64-pc-windows-msvc
-          key: oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'src-tauri/src/**', 'src-tauri/tauri*.json', 'src-tauri/capabilities/**') }}
-          restore-keys: |
-            oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-
-
-      - name: Build and Authenticode-sign x64 NSIS installer
-        shell: pwsh
-        env:
-          ES_USERNAME: ${{ secrets.ES_USERNAME }}
-          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
-          ES_CREDENTIAL_ID: ${{ vars.ES_CREDENTIAL_ID }}
-          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
-        run: |
-          ./scripts/build-windows-installers.ps1 `
-            -Bundles nsis `
-            -Target x86_64-pc-windows-msvc `
-            -TauriConfig $env:TAURI_WINDOWS_RELEASE_CONFIG
-
-      - name: Show secret-scrubbed signing diagnostics
-        if: failure()
-        shell: pwsh
-        run: |
-          if (Test-Path -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH) {
-            Get-Content -LiteralPath $env:OATS_SIGNING_DIAGNOSTIC_PATH
-          } else {
-            Write-Output "The signer produced no safe diagnostic record."
-          }
-
-      - name: Verify final installer and installed Authenticode payloads
-        shell: pwsh
-        run: |
-          $installers = @(
-            Get-ChildItem `
-              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis `
-              -Filter *.exe `
-              -File
-          )
-          if ($installers.Count -ne 1) {
-            throw "Expected exactly one x64 NSIS installer, found $($installers.Count)."
-          }
-          ./scripts/verify-windows-authenticode.ps1 `
-            -InstallerPath $installers[0].FullName `
-            -SigningAuditPath $env:OATS_SIGNING_AUDIT_PATH
-
-      - name: Upload Authenticode-signed NSIS installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: windows-authenticode-nsis
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-
-  package-windows:
-    name: Build unsigned x64 NSIS and MSI installers
-    needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
-    runs-on: windows-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-          ref: ${{ needs.release-please.outputs.tag_name }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
-        with:
-          cache: 'npm'
-          node-version: '24'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install dependencies
-        run: npm ci --prefer-offline
-
-      - name: Fingerprint Windows Rust toolchain
-        id: windows-toolchain
-        shell: pwsh
-        run: |
-          $version = (rustc --version).Replace(' ', '-')
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Cache Windows sidecar and executable resources
-        id: windows-sidecar-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
-            src-tauri/binaries/llama
-            src-tauri/binaries/windows-runtime
-          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
-
-      - name: Build Windows sidecar and executable resources
-        if: steps.windows-sidecar-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: ./scripts/build-windows-sidecar.ps1
-
-      - name: Verify app-local Visual C++ runtime
-        shell: pwsh
-        run: |
-          ./scripts/verify-windows-vc-runtime.ps1 `
-            -RootRuntimeDirectory src-tauri/binaries/windows-runtime `
-            -LlamaRuntimeDirectory src-tauri/binaries/llama `
-            -SidecarPath src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe `
-            -LlamaServerPath src-tauri/binaries/llama/llama-server.exe
-
-      - name: Cache Windows Rust release dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target/x86_64-pc-windows-msvc
-          key: oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/build.rs', 'src-tauri/src/**', 'src-tauri/tauri*.json', 'src-tauri/capabilities/**') }}
-          restore-keys: |
-            oats-windows-x64-${{ steps.windows-toolchain.outputs.version }}-
-
-      # Intentionally omit the SSL.com signing overlay. The build helper also
-      # disables Tauri updater artifacts until the final NSIS bytes are signed
-      # separately by sign-windows-updater.
-      - name: Build unsigned x64 NSIS and MSI installers
-        shell: pwsh
-        run: |
-          ./scripts/build-windows-installers.ps1 `
-            -Bundles nsis,msi `
-            -Target x86_64-pc-windows-msvc
-
-      - name: Validate unsigned installer outputs
-        shell: pwsh
-        run: |
-          $nsis = @(
-            Get-ChildItem `
-              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis `
-              -Filter *.exe `
-              -File
-          )
-          $msi = @(
-            Get-ChildItem `
-              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi `
-              -Filter *.msi `
-              -File
-          )
-          if ($nsis.Count -ne 1 -or $msi.Count -ne 1) {
-            throw "Expected exactly one unsigned NSIS and one unsigned MSI; found NSIS=$($nsis.Count), MSI=$($msi.Count)."
-          }
-          foreach ($installer in @($nsis[0], $msi[0])) {
-            $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
-            if ($signature.SignatureType -ne "None") {
-              throw "Expected unsigned installer '$($installer.Name)', found $($signature.SignatureType)."
-            }
-          }
-
-          ./scripts/verify-windows-installer-runtime.ps1 `
-            -NsisInstallerPath $nsis[0].FullName `
-            -MsiInstallerPath $msi[0].FullName
-
-      - name: Upload unsigned Windows installers
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: windows-unsigned-installers
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-          path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-
-  sign-windows-updater:
-    name: Sign and verify unsigned Windows NSIS updater artifact
-    needs: [release-please, package-windows]
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
-    runs-on: windows-latest
-    # The updater key is deliberately available only after the remote
-    # Authenticode job has completed and uploaded its immutable bytes.
-    environment: release
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-          ref: ${{ needs.release-please.outputs.tag_name }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
-        with:
-          cache: 'npm'
-          node-version: '24'
-
-      - name: Install dependencies
-        run: npm ci --prefer-offline
-
-      - name: Download unsigned Windows installers
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: windows-unsigned-installers
-          path: artifacts/windows
-
-      - name: Generate updater signature from final installer bytes
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          $installers = @(Get-ChildItem artifacts/windows -Filter *.exe -File -Recurse)
-          $msi = @(Get-ChildItem artifacts/windows -Filter *.msi -File -Recurse)
-          if ($installers.Count -ne 1 -or $msi.Count -ne 1) {
-            throw "Expected exactly one unsigned NSIS and one unsigned MSI; found NSIS=$($installers.Count), MSI=$($msi.Count)."
-          }
-          $installer = $installers[0].FullName
-          $before = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
-
-          ./node_modules/.bin/tauri.cmd signer sign $installer
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tauri updater signer failed."
-          }
-          $after = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
-          if ($after -ne $before) {
-            throw "Tauri updater signing unexpectedly modified the Authenticode-signed installer."
-          }
-
-          ./scripts/verify-tauri-updater-signature.ps1 -ArtifactPath $installer
-
-          # Flatten both direct-download installers and the NSIS updater
-          # signature into one immutable handoff for publish. MSI intentionally
-          # has no .sig because it is never referenced by latest.json.
-          $releaseDir = New-Item -ItemType Directory -Force artifacts/release
-          Copy-Item -LiteralPath $installer -Destination $releaseDir
-          Copy-Item -LiteralPath "$installer.sig" -Destination $releaseDir
-          Copy-Item -LiteralPath $msi[0].FullName -Destination $releaseDir
-
-      - name: Upload verified Windows release bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: windows-release-bundle
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-          path: |
-            artifacts/release/*.exe
-            artifacts/release/*.exe.sig
-            artifacts/release/*.msi
-
   publish:
-    name: Generate manifest and publish artifacts to R2
-    needs: [release-please, release, sign-windows-updater]
+    name: Publish macOS artifacts to R2
+    needs: [release-please, release]
     runs-on: macos-15
     # The R2 credentials live in the `release` environment alongside the Apple
     # signing secrets (see CONTRIBUTING → One-time setup in the repo).
@@ -621,12 +319,6 @@ jobs:
           name: release-bundle
           path: src-tauri/target/release/bundle
 
-      - name: Download verified Windows release bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: windows-release-bundle
-          path: src-tauri/target/release/bundle/windows
-
       # The release name/body are no longer delivered via a `release` event
       # payload, so read them back off the Release that release-please created.
       - name: Fetch release metadata
@@ -642,14 +334,14 @@ jobs:
             echo "RELEASE_BODY_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # release-publish.sh uses `mapfile`, a bash 4.0+ builtin. The hosted
+      # The publish scripts use `mapfile`, a bash 4.0+ builtin. The hosted
       # macos-15 runner's system bash is 3.2, so install a modern bash from
-      # Homebrew and run the script with it explicitly (the next step's full
-      # path overrides the script's `#!/usr/bin/env bash` shebang).
+      # Homebrew and run them with it explicitly (the full path in the steps
+      # below overrides each script's `#!/usr/bin/env bash` shebang).
       - name: Install modern bash
         run: brew install bash
 
-      - name: Generate manifest and publish artifacts to R2
+      - name: Publish macOS artifacts and manifest to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -659,27 +351,25 @@ jobs:
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
           RELEASE_BODY: ${{ steps.rel.outputs.body }}
           RELEASE_NAME: ${{ steps.rel.outputs.name }}
-        run: /opt/homebrew/bin/bash .github/scripts/release-publish.sh
+        run: /opt/homebrew/bin/bash .github/scripts/release-publish-macos.sh
 
       - name: Open Homebrew cask checksum PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: .github/scripts/publish-homebrew-cask.sh
+        run: /opt/homebrew/bin/bash .github/scripts/publish-homebrew-cask.sh
 
-      - name: Add R2 download link to GitHub Release
+      # release-windows.yaml appends the Windows line to the same Release body
+      # on its own schedule; either platform may finish first, and either may
+      # fail without the other, so each owns only its own line.
+      - name: Add macOS download links to GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
-          fail_on_unmatched_files: true
-          files: |
-            src-tauri/target/release/bundle/windows/*.exe
-            src-tauri/target/release/bundle/windows/*.exe.sig
-            src-tauri/target/release/bundle/windows/*.msi
           append_body: true
           body: |
 
             ---
-            **Downloads:** [macOS DMG](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg) · [Windows x64 installer](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats-windows-x86_64.exe)
+            **macOS** — [Download DMG](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
 
             **Homebrew:** `brew tap ariso-ai/oats https://github.com/ariso-ai/oats && brew trust ariso-ai/oats && brew install --cask oats`

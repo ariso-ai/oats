@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 #
 # Open a PR that updates the generated Homebrew cask fields. This runs after
-# release-publish.sh has shipped the signed DMG to R2 (desktop/oats.dmg), so the
-# cask checksum is computed from the very bytes that R2 now serves — the cask's
-# `url` points straight at that R2 object, so there is no separate asset to
-# upload here.
+# release-publish-macos.sh has shipped the signed DMG to R2 under its
+# immutable, hash-addressed key (desktop/releases/<version>/oats-<sha256>.dmg),
+# so the cask checksum computed here matches the very bytes that key serves —
+# the cask's `url` is templated from generated_version/generated_sha256, so it
+# points straight at that R2 object and there is no separate asset to upload
+# here. It shares that script's artifact-discovery helpers, so it needs the
+# same bash 4+ interpreter (see the publish job in release.yaml).
 #
 # `main` is a protected branch (changes must go through a pull request that
 # passes the required Validate check), so we never push the cask update to main
@@ -12,25 +15,15 @@
 # push a dedicated branch and open a PR for a maintainer to merge instead.
 set -euo pipefail
 
-if [[ -z "${RELEASE_TAG:-}" ]]; then
-  echo "Missing required environment variable: RELEASE_TAG" >&2
-  exit 1
-fi
+# shellcheck source=.github/scripts/release-publish-common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-publish-common.sh"
 
-VERSION="${RELEASE_TAG#v}"
-BUNDLE_DMG_DIR="src-tauri/target/release/bundle/dmg"
+VERSION="$(release_version)"
 
-DMG_COUNT="$(find "$BUNDLE_DMG_DIR" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
-if [[ "$DMG_COUNT" != "1" ]]; then
-  echo "Expected exactly 1 DMG, found ${DMG_COUNT}:" >&2
-  find "$BUNDLE_DMG_DIR" -maxdepth 1 -type f -name '*.dmg' -print >&2
-  exit 1
-fi
-
-# Hash the local DMG: these are the same bytes release-publish.sh just uploaded
-# to R2, so the checksum matches what `brew install` will download.
-DMG="$(find "$BUNDLE_DMG_DIR" -maxdepth 1 -type f -name '*.dmg')"
-DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+# Hash the local DMG: these are the same bytes release-publish-macos.sh just
+# uploaded to R2, so the checksum matches what `brew install` will download.
+DMG="$(find_one src-tauri/target/release/bundle/dmg '*.dmg' 'DMG')"
+DMG_SHA256="$(sha256_of "$DMG")"
 
 # Apply the deterministic cask update on a fresh branch off the latest main, so
 # the PR diff is exactly the version/checksum bump for this release.
