@@ -56,6 +56,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
+        "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/latest-{{target}}-{{arch}}.json",
         "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZGOTkzRTNGRTdFRDkyNDgKUldSSWt1M25QejZaLzR3MVdSUVp2UG5XbUwvV0pyOEZYMGZNa1ZZdEdrOVpUWnJWUFZHbGhKOW4K"
