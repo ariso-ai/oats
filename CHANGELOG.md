@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.19.0](https://github.com/ariso-ai/oats/compare/v0.18.2...v0.19.0) (2026-08-02)
+
+
+### Features
+
+* **ci:** Authenticode-sign Windows releases by default ([3c7089d](https://github.com/ariso-ai/oats/commit/3c7089d072bdeb286f1aa3ba0a4bfae0a82cf2d1))
+* opt-in upload diagnostic data to Sentry.io when using ariso.ai backend ([1861e24](https://github.com/ariso-ai/oats/commit/1861e24a15731d36f263c5e676c0ab52b15dbd33))
+* tag diagnostics with the host OS and ship the prod DSN ([bf409a1](https://github.com/ariso-ai/oats/commit/bf409a11eb0a25fa280e91f579d32880b6a5623d))
+
+
+### Bug Fixes
+
+* address CodeRabbit findings on the upload diagnostics path ([bc457ee](https://github.com/ariso-ai/oats/commit/bc457eecdc503db9548192b705decfa16ae411cc))
+* **ci:** address CodeRabbit findings on the Windows release split ([87f805d](https://github.com/ariso-ai/oats/commit/87f805dae4836f5ed74b7fa7ee0df78f931aa334))
+
 ## [0.18.2](https://github.com/ariso-ai/oats/compare/v0.18.1...v0.18.2) (2026-07-30)
 
 
