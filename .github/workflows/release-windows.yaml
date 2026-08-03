@@ -627,10 +627,16 @@ jobs:
   # had shipped no Windows bytes. Unless a dry run was explicitly requested, a
   # green `Release (Windows)` must mean the artifacts are on R2, and this job is
   # what makes that true.
+  #
+  # `!cancelled()`, not `always()`: a cancelled run is not green, so the
+  # assertion is not needed there, and `always()` would fire anyway and blame a
+  # deliberate cancellation on the publish gate. Naming a status check function
+  # is what waives the implicit `success()` on `needs`, so this still runs when
+  # a dependency failed OR was skipped — which is the only case that matters.
   verify-published:
     name: Verify Windows artifacts reached R2
     needs: [package-windows, package-windows-authenticode, sign-windows-updater, publish-windows]
-    if: ${{ always() && format('{0}', inputs.skip_publish) != 'true' }}
+    if: ${{ !cancelled() && format('{0}', inputs.skip_publish) != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
