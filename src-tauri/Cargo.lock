@@ -2667,7 +2667,7 @@ dependencies = [
  "block2",
  "chrono",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "hex",
  "objc2",
  "objc2-app-kit",
