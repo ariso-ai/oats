@@ -1002,6 +1002,10 @@ pub(crate) fn open_waveform_window(
                 .state::<crate::recording_state::RecordingState>()
                 .clear();
             let _ = app_for_event.emit("recording://state", false);
+            // Same path also restores the idle tray menu and icon; otherwise a
+            // force-closed recorder leaves the menu bar claiming we are still
+            // recording.
+            crate::tray::set_menu(&app_for_event, false, false);
         }
     });
 

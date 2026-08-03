@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -5,52 +6,88 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
-// The menu-bar icon is a macOS template image: AppKit uses the PNG alpha mask
-// and tints it for the current menu-bar material, matching system status items.
+// Tray icons are picked from two axes: idle vs recording, and the shell's
+// light/dark appearance. Every asset is a concrete color image rather than a
+// macOS template mask — the light-appearance mark carries opaque counters
+// (the eyes and mouth of the logo are painted, not cut out), so an alpha-only
+// template would flatten it into a featureless blob.
 #[cfg(not(target_os = "windows"))]
-const TRAY_ICON_TEMPLATE: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
+const TRAY_ICON_IDLE_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray@2x.png");
+#[cfg(not(target_os = "windows"))]
+const TRAY_ICON_IDLE_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light@128.png");
 // Windows does not reliably template-tint tray icons, so use concrete color
 // assets and swap them on theme changes.
 #[cfg(target_os = "windows")]
 /// Concrete icon selected when the Windows shell reports a light theme; the
 /// asset, rather than shell tinting, owns the required contrast.
-const TRAY_ICON_WINDOWS_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
+const TRAY_ICON_IDLE_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tray-light.png");
 #[cfg(target_os = "windows")]
 /// Companion asset for a dark Windows shell theme. Keeping it bundled avoids
 /// runtime image manipulation and preserves predictable alpha rendering.
-const TRAY_ICON_WINDOWS_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
+const TRAY_ICON_IDLE_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
 
-/// Resolves the platform-appropriate icon bytes behind one tray construction
-/// path. macOS keeps template semantics, while Windows receives already-colored
-/// pixels because its notification area does not honor AppKit-style masks.
-fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
-    #[cfg(target_os = "windows")]
-    {
-        let bytes = match theme {
-            tauri::Theme::Dark => TRAY_ICON_WINDOWS_DARK,
-            _ => TRAY_ICON_WINDOWS_LIGHT,
-        };
-        return Image::from_bytes(bytes);
-    }
+// While recording, the tray shows the full-color logo instead of the flat mark
+// so an active capture is obvious at a glance (issue #249). Templating these
+// would flatten the brand colors to a silhouette and erase exactly the
+// difference they exist to convey.
+const TRAY_ICON_RECORDING_DARK: &[u8] = include_bytes!("../../src/assets/oats-dark.png");
+const TRAY_ICON_RECORDING_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-light.png");
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = theme;
-        Image::from_bytes(TRAY_ICON_TEMPLATE)
+/// Last appearance the shell reported. Recording starts and stops long after
+/// the theme event, so the icon swap needs the theme cached here rather than
+/// re-querying a window that may be hidden or already gone.
+static TRAY_THEME_IS_DARK: AtomicBool = AtomicBool::new(false);
+/// Whether the tray is currently showing a recording. Cached for the mirror
+/// case: a theme change mid-recording must redraw the *recording* icon.
+static TRAY_IS_RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// Resolves the icon bytes for one (recording, appearance) combination behind a
+/// single tray construction path.
+fn tray_icon(theme: tauri::Theme, is_recording: bool) -> tauri::Result<Image<'static>> {
+    let is_dark = matches!(theme, tauri::Theme::Dark);
+    let bytes = match (is_recording, is_dark) {
+        (true, true) => TRAY_ICON_RECORDING_DARK,
+        (true, false) => TRAY_ICON_RECORDING_LIGHT,
+        (false, true) => TRAY_ICON_IDLE_DARK,
+        (false, false) => TRAY_ICON_IDLE_LIGHT,
+    };
+    Image::from_bytes(bytes)
+}
+
+fn cached_theme() -> tauri::Theme {
+    if TRAY_THEME_IS_DARK.load(Ordering::Relaxed) {
+        tauri::Theme::Dark
+    } else {
+        tauri::Theme::Light
     }
 }
 
-/// Re-applies the platform icon after startup and theme notifications. macOS
-/// reuses one template mask and delegates tinting to AppKit; Windows swaps the
-/// concrete asset selected above. Menu state is intentionally untouched.
-pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+/// Push the icon for the given state onto the live tray. The asset — not shell
+/// tinting — owns the contrast on every platform, so macOS explicitly drops
+/// template mode here as well as at build time.
+fn set_icon(app: &AppHandle, theme: tauri::Theme, is_recording: bool) {
     let Some(tray) = app.tray_by_id("main") else { return };
-    if let Ok(icon) = tray_icon(theme) {
+    if let Ok(icon) = tray_icon(theme, is_recording) {
         #[cfg(target_os = "macos")]
-        let _ = tray.set_icon_with_as_template(Some(icon), true);
+        let _ = tray.set_icon_with_as_template(Some(icon), false);
         #[cfg(not(target_os = "macos"))]
         let _ = tray.set_icon(Some(icon));
     }
+}
+
+/// Re-applies the platform icon after startup and theme notifications, keeping
+/// whichever recording state the tray is already in. Menu state is
+/// intentionally untouched.
+pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+    TRAY_THEME_IS_DARK.store(matches!(theme, tauri::Theme::Dark), Ordering::Relaxed);
+    set_icon(app, theme, TRAY_IS_RECORDING.load(Ordering::Relaxed));
+}
+
+/// Swap between the idle mark and the recording logo. Driven by `set_menu` so
+/// the icon and the menu can never disagree about whether we are recording.
+fn apply_recording(app: &AppHandle, is_recording: bool) {
+    TRAY_IS_RECORDING.store(is_recording, Ordering::Relaxed);
+    set_icon(app, cached_theme(), is_recording);
 }
 
 /// Rebuild the tray menu in-place. Called from tray events (main thread)
@@ -76,6 +113,7 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
     if let Ok(menu) = menu {
         let _ = tray.set_menu(Some(menu));
     }
+    apply_recording(app, is_recording);
     refresh_tray_title(app);
 }
 
@@ -116,7 +154,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_idle_menu(app, None)?;
 
     let builder = TrayIconBuilder::with_id("main")
-        .icon(tray_icon(tauri::Theme::Light)?)
+        .icon(tray_icon(tauri::Theme::Light, false)?)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
@@ -187,12 +225,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 _ => {}
             }
         });
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        // Mark it as a template so AppKit tints it alongside the other menu-bar
-        // status icons instead of preserving the brand colors.
-        .icon_as_template(true);
-    #[cfg(not(target_os = "macos"))]
+    // Never a template: the appearance-specific assets already carry the right
+    // contrast, and AppKit tinting would erase the recording icon's colors.
     let builder = builder.icon_as_template(false);
     builder.build(app)?;
 
@@ -293,4 +327,42 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
         .item(&library)
         .item(&check_updates)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixels(theme: tauri::Theme, is_recording: bool) -> Vec<u8> {
+        tray_icon(theme, is_recording)
+            .expect("tray icon should decode")
+            .rgba()
+            .to_vec()
+    }
+
+    #[test]
+    fn every_tray_icon_variant_decodes() {
+        for is_recording in [false, true] {
+            for theme in [tauri::Theme::Light, tauri::Theme::Dark] {
+                assert!(!pixels(theme, is_recording).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn recording_uses_a_different_icon_than_idle() {
+        for theme in [tauri::Theme::Light, tauri::Theme::Dark] {
+            assert_ne!(pixels(theme, false), pixels(theme, true));
+        }
+    }
+
+    #[test]
+    fn each_state_has_its_own_light_and_dark_icon() {
+        for is_recording in [false, true] {
+            assert_ne!(
+                pixels(tauri::Theme::Light, is_recording),
+                pixels(tauri::Theme::Dark, is_recording)
+            );
+        }
+    }
 }
