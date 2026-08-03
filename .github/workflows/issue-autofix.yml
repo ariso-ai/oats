@@ -1,0 +1,398 @@
+name: Autofix approved bug
+
+# Triggered when shawnzhu applies the `autofix:approved` label to a bug issue.
+# Branches from main, runs Claude with edit tools to produce a fix, verifies the
+# frontend tests + both builds, then commits, pushes, and opens a non-draft PR
+# as github-actions[bot]. The PR then flows into the existing review loop:
+# CodeRabbit reviews it and apply-fixes.yml applies the findings. Merging stays
+# human.
+#
+# SECURITY: the issue body and its comments are public, attacker-controlled
+# text, and this job has edit tools and push access. Layered defenses, in the
+# order they take effect:
+#
+#   1. Trigger gate — the label must be applied BY shawnzhu (`sender.login`).
+#      Nothing else starts this job.
+#   2. Author partitioning — shawnzhu's comments are requirements, everyone
+#      else's are untrusted context (see the Stage issue context step).
+#   3. Credential denial — .github/claude-agent-settings.json blocks reads of
+#      secrets and writes to the agent's own config on this persistent runner.
+#   4. Diff denylist — the paths a fix may touch are enforced on the diff
+#      BEFORE anything is committed. This is the important one: `.claude/`,
+#      `.agents/`, and `.github/` are all inputs to agents that run later
+#      (apply-fixes.yml checks out this PR head and runs claude in it), so a
+#      committed change there would be an agent-to-agent escalation.
+#   5. Build gate — the workflow re-runs the verification itself rather than
+#      trusting the model's claim that it passed.
+#
+# Note the guardrails in the prompt are NOT in this list. They shape good
+# behavior; they do not constrain a subverted run. Only the steps below do.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  autofix:
+    name: Fix issue and open PR
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+    # `sender.login` is the account that applied the label — this, not the
+    # issue author, is the authorization we care about.
+    if: >-
+      github.event.label.name == 'autofix:approved' &&
+      github.event.sender.login == 'shawnzhu' &&
+      github.event.issue.state == 'open'
+    env:
+      # Model-authored text is posted with the default token on purpose (see
+      # the comment steps). PUSH_TOKEN is used only for git push and gh pr
+      # create: a push or PR made with the default GITHUB_TOKEN deliberately
+      # does not trigger other workflows, so desktop.yaml CI would never run on
+      # the PR this job opens. Set an AUTOFIX_TOKEN secret (a PAT or GitHub App
+      # token with repo scope) to get full CI. Without it everything still
+      # works and CodeRabbit — a GitHub App, unaffected by that rule — still
+      # reviews; only Actions CI is skipped.
+      GH_TOKEN: ${{ github.token }}
+      PUSH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+      ISSUE: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+      BRANCH: autofix/issue-${{ github.event.issue.number }}
+    steps:
+      # Visible status while the run is in flight; removed in the always() step
+      # at the end. Best-effort so a labeling hiccup never aborts the fix.
+      - name: Mark issue autofix:working
+        run: |
+          gh label create "autofix:working" \
+            --repo "$REPO" \
+            --color FBCA04 \
+            --description "An automation workflow is working on this" \
+            2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "autofix:working" \
+            || echo "::warning::could not add autofix:working label"
+
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # Credentials persisted here are what `git push` uses below, so this
+          # must be the push token for the resulting PR to trigger CI.
+          token: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Reuse an existing branch if the label is re-applied after a failed
+      # attempt, so a second run builds on the first instead of colliding.
+      # Distinguish "branch absent" (ls-remote exit 2) from a transport or auth
+      # failure — treating a network blip as "absent" would branch from main
+      # and then fail the non-forced push on a non-fast-forward.
+      - name: Create or reuse fix branch
+        id: branch
+        run: |
+          set -euo pipefail
+          set +e
+          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1
+          rc=$?
+          set -e
+          case "$rc" in
+            0)
+              echo "Branch $BRANCH exists on origin — reusing it."
+              git fetch origin "$BRANCH"
+              git checkout -B "$BRANCH" "origin/$BRANCH"
+              ;;
+            2)
+              echo "Branch $BRANCH does not exist — creating it."
+              git checkout -b "$BRANCH"
+              ;;
+            *)
+              echo "::error::git ls-remote failed (exit $rc) — refusing to guess at branch state."
+              exit 1
+              ;;
+          esac
+          existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // ""')
+          echo "existing_pr=$existing" >> "$GITHUB_OUTPUT"
+
+      # Untrusted text reaches the job only through this file. Comments are
+      # partitioned by author so the prompt can apply different trust to each.
+      - name: Stage issue context
+        run: |
+          set -euo pipefail
+          jq '{
+            number: .issue.number,
+            title: .issue.title,
+            body: .issue.body,
+            author: .issue.user.login,
+            labels: [.issue.labels[].name]
+          }' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/issue.json"
+
+          gh api --paginate "repos/$REPO/issues/$ISSUE/comments" \
+            | jq -s '[.[][] | {author: .user.login, body: .body}]' \
+            > "$RUNNER_TEMP/all-comments.json"
+
+          jq '{
+            trusted:   [.[] | select(.author == "shawnzhu")],
+            untrusted: [.[] | select(.author != "shawnzhu")]
+          }' "$RUNNER_TEMP/all-comments.json" > "$RUNNER_TEMP/comments.json"
+
+          echo "Trusted comments:   $(jq '.trusted   | length' "$RUNNER_TEMP/comments.json")"
+          echo "Untrusted comments: $(jq '.untrusted | length' "$RUNNER_TEMP/comments.json")"
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      # The sidecar is a gitignored build artifact that tauri's `externalBin`
+      # requires before `cargo build` will link. actions/checkout runs
+      # `git clean -ffdx`, which deletes it on every run, so restore or rebuild
+      # it here — otherwise build verification fails for reasons that have
+      # nothing to do with the fix. Keyed on the Xcode toolchain so an artifact
+      # built by a different toolchain is never restored.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ariso-stt sidecar artifacts
+        id: sidecar-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
+            src-tauri/binaries/mlx-swift_Cmlx.bundle
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved', 'src-tauri/ariso-stt/macos/Sources/**') }}
+
+      - name: Build ariso-stt sidecar
+        if: steps.sidecar-cache.outputs.cache-hit != 'true'
+        working-directory: src-tauri/ariso-stt/macos
+        run: |
+          mkdir -p ../../binaries
+          xcodebuild build -scheme ariso-stt -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation
+          cp .xcode/Build/Products/Release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
+
+      - name: Run Claude to investigate and fix
+        env:
+          # Deliberately NOT inheriting GH_TOKEN/PUSH_TOKEN: the agent has no
+          # business calling the GitHub API, and a token in the environment is
+          # readable by any process it starts.
+          GH_TOKEN: ""
+          PUSH_TOKEN: ""
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP"/{commit-message.txt,pr-title.txt,pr-body.md,no-fix-report.md}
+          prompt="$(cat .github/issue-autofix-prompt.md)
+
+          Issue file (absolute path):    $RUNNER_TEMP/issue.json
+          Comments file (absolute path): $RUNNER_TEMP/comments.json
+
+          Write your output files to:
+            $RUNNER_TEMP/commit-message.txt
+            $RUNNER_TEMP/pr-title.txt
+            $RUNNER_TEMP/pr-body.md
+            $RUNNER_TEMP/no-fix-report.md"
+          # Exact build commands rather than Bash(npm:*) / Bash(cargo:*). A
+          # prefix rule combined with Edit is arbitrary code execution — edit
+          # package.json's scripts, then run npm. This does not fully close
+          # that door (npm test still runs whatever scripts.test says), which
+          # is why the diff denylist and the build gate below are enforced by
+          # the workflow and not by this allowlist.
+          claude -p "$prompt" \
+            --output-format json \
+            --settings .github/claude-agent-settings.json \
+            --allowed-tools "Read Edit Write Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(npm test) Bash(npm run vite:build) Bash(cargo build --locked --manifest-path src-tauri/Cargo.toml)" \
+            --permission-mode acceptEdits \
+            > "$RUNNER_TEMP/claude-output.json"
+          fence="stop-$(uuidgen)"
+          echo "Claude finished. Result:"
+          echo "::stop-commands::$fence"
+          jq -r '.result // "(no result field)"' "$RUNNER_TEMP/claude-output.json"
+          echo "::$fence::"
+
+      - name: Detect changes
+        id: changes
+        run: |
+          if [ -z "$(git status --porcelain -uall)" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Claude made no file changes."
+          else
+            echo "no_changes=false" >> "$GITHUB_OUTPUT"
+            echo "Changes:"
+            git status --short -uall
+          fi
+
+      # THE containment step. Everything denied here is an input to some agent
+      # or pipeline that runs later with more privilege than this job:
+      #   .claude/, .agents/  — settings, hooks, and skills that apply-fixes.yml
+      #                         loads when it checks out this PR head
+      #   .github/            — the workflows and prompts driving all of this
+      #   .coderabbit.yaml    — the review gate's own config
+      #   capabilities/       — the Tauri permission allowlist
+      #   tauri.conf.json,
+      #   Info.plist,
+      #   entitlements        — signing and notarization
+      #   lockfiles           — dependency substitution
+      # A fix legitimately needing any of these is a human's call, not an
+      # agent's, so failing the run is the correct outcome.
+      - name: Enforce diff denylist
+        if: steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          blocked=$(git status --porcelain -uall | awk '{print $NF}' | grep -E \
+            -e '^\.github/' \
+            -e '^\.claude/' \
+            -e '^\.agents/' \
+            -e '^\.coderabbit\.yaml$' \
+            -e '^src-tauri/src/capabilities/' \
+            -e '^src-tauri/tauri\.conf\.json$' \
+            -e '(^|/)Info\.plist$' \
+            -e '\.entitlements$' \
+            -e '^package-lock\.json$' \
+            -e '^src-tauri/Cargo\.lock$' \
+            || true)
+          if [ -n "$blocked" ]; then
+            echo "::error::The fix touched paths that automation may not change:"
+            echo "$blocked"
+            echo "These are agent/pipeline inputs or signing config. A change here needs a human."
+            exit 1
+          fi
+          echo "Diff is within the permitted paths."
+
+      # Re-run verification here rather than trusting the model's claim. The
+      # prompt requires these; only this step enforces them.
+      - name: Verify the fix builds
+        if: steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          npm test
+          npm run vite:build
+          cargo build --locked --manifest-path src-tauri/Cargo.toml
+
+      # release-please derives version bumps from commit messages and PR
+      # titles, so a non-conforming title silently breaks releases.
+      - name: Validate fix artifacts
+        if: steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          for f in commit-message.txt pr-title.txt pr-body.md; do
+            if [ ! -s "$RUNNER_TEMP/$f" ]; then
+              echo "::error::Claude changed files but wrote no $f"
+              exit 1
+            fi
+          done
+          title=$(head -1 "$RUNNER_TEMP/pr-title.txt")
+          if ! printf '%s' "$title" | grep -Eq '^(fix|feat|docs|chore|refactor|perf|test|build|ci)(\([a-z0-9._-]+\))?!?: .+'; then
+            echo "::error::PR title is not Conventional Commits: $title"
+            exit 1
+          fi
+          echo "PR title: $title"
+
+      - name: Commit and push fix
+        if: steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit -F "$RUNNER_TEMP/commit-message.txt"
+          git push origin "HEAD:$BRANCH"
+
+      # Non-draft on purpose: it hands the branch straight to CodeRabbit, whose
+      # review then triggers apply-fixes.yml. A draft would stall the loop.
+      - name: Open or update pull request
+        if: steps.changes.outputs.no_changes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "---"
+            echo "🤖 Opened automatically from #$ISSUE by \`issue-autofix.yml\`."
+            echo "This is a first attempt — review it as you would any PR."
+          } >> "$RUNNER_TEMP/pr-body.md"
+
+          if [ -n "${{ steps.branch.outputs.existing_pr }}" ]; then
+            echo "PR #${{ steps.branch.outputs.existing_pr }} already open for $BRANCH — added a commit."
+          else
+            gh pr create --repo "$REPO" \
+              --base main \
+              --head "$BRANCH" \
+              --title "$(head -1 "$RUNNER_TEMP/pr-title.txt")" \
+              --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
+          url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // ""')
+          echo "pr_url=$url" >> "$GITHUB_ENV"
+
+      # Posted with the default token, not the PAT. Model-authored text
+      # published as shawnzhu would be able to satisfy feature-shaping.yml's
+      # `comment.user.login == 'shawnzhu' && startsWith(body, '/shape')` gate
+      # and self-trigger the next workflow.
+      - name: Link the PR on the issue
+        if: steps.changes.outputs.no_changes == 'false'
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Opened ${pr_url:-a pull request} with an attempted fix for this issue." \
+            2>/dev/null || true
+
+      # Mirror of apply-fixes.yml's "no silent no-op" rule: producing neither a
+      # fix nor an explanation is a failed run, not a pass.
+      - name: Report when no fix was produced
+        if: steps.changes.outputs.no_changes == 'true'
+        run: |
+          set -euo pipefail
+          # A reused branch whose fix already landed leaves a clean tree. That
+          # is "nothing further to do", not "no fix found" — don't contradict
+          # the PR sitting open on the issue.
+          if [ -n "${{ steps.branch.outputs.existing_pr }}" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" \
+              --body "🤖 Re-ran autofix and found nothing further to change. PR #${{ steps.branch.outputs.existing_pr }} still stands." \
+              2>/dev/null || true
+            exit 0
+          fi
+          if [ ! -s "$RUNNER_TEMP/no-fix-report.md" ]; then
+            echo "::error::Claude produced no fix and no no-fix-report.md. Per the prompt it must explain what it investigated — treating this as a failed run."
+            exit 1
+          fi
+          {
+            echo
+            echo "---"
+            echo "🤖 \`issue-autofix.yml\` found no confident fix and cleared \`autofix:approved\`. Re-apply the label once the questions above are answered."
+          } >> "$RUNNER_TEMP/no-fix-report.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/no-fix-report.md"
+
+      # A crash between "started" and "produced a verdict" is otherwise silent:
+      # the labels get cleared below and nothing on the issue says why.
+      - name: Flag failure on the issue
+        if: failure()
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "ai-failed" 2>/dev/null || true
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 The autofix run failed before producing a fix. [Run log]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID) — re-apply \`autofix:approved\` to retry." \
+            2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/{commit-message.txt,pr-title.txt,pr-body.md,no-fix-report.md,claude-output.json}
+
+      # Always clear both labels, whatever the outcome (PR opened, no fix,
+      # crash, or cancellation). `issues: labeled` only fires on transition, so
+      # a lingering `autofix:approved` would make the trigger un-reusable —
+      # clearing it unconditionally keeps re-applying the label a clean retry
+      # even when the run died before producing a verdict.
+      - name: Clear status labels
+        if: always()
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --remove-label "autofix:working" \
+            --remove-label "autofix:approved" \
+            2>/dev/null || true
