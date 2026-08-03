@@ -50,13 +50,23 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+# Every gate below on a boolean input goes through `format('{0}', …) == 'true'`
+# rather than testing the input directly. `type: boolean` only yields a real
+# boolean when a human ticks the checkbox in the UI; a REST/`gh workflow run`
+# dispatch delivers inputs as strings, and in an Actions expression EVERY
+# non-empty string is truthy — including 'false'. So `if: ${{ !inputs.skip_publish }}`
+# reads `!'false'` → `!true` → false and silently skips, which is exactly how
+# run 30753377275 signed a release and then published nothing while reporting
+# success. `format` stringifies both shapes to 'true'/'false' first, so the
+# comparison is correct whether the value arrived as a boolean or a string.
+
 jobs:
   # The default packaging path. It and the unsigned `package-windows` job below
   # are mutually exclusive on `inputs.sign` and upload the SAME artifact name,
   # so `sign-windows-updater` consumes whichever one ran without caring which.
   package-windows-authenticode:
     name: Build and Authenticode-sign x64 NSIS and MSI installers
-    if: ${{ inputs.sign }}
+    if: ${{ format('{0}', inputs.sign) == 'true' }}
     runs-on: windows-latest
     # SSL.com credentials are isolated from Apple/R2/updater-key credentials.
     # In particular, this job cannot produce a Tauri .sig before Authenticode.
@@ -289,7 +299,7 @@ jobs:
     # The escape hatch for shipping while eSigner is down. Mutually exclusive
     # with the Authenticode job above, and uploads the same artifact name so the
     # rest of the pipeline is identical either way.
-    if: ${{ !inputs.sign }}
+    if: ${{ format('{0}', inputs.sign) != 'true' }}
     runs-on: windows-latest
     permissions:
       contents: read
@@ -508,7 +518,16 @@ jobs:
     needs: sign-windows-updater
     # `skip_publish` stops here: the run still leaves a fully signed, verified
     # installer on the `windows-release-bundle` artifact for inspection.
-    if: ${{ !inputs.skip_publish }}
+    #
+    # The upstream result is asserted explicitly rather than left to implicit
+    # skip propagation. `sign-windows-updater` already overrides its own gate
+    # with `!cancelled()` to tolerate the packaging job it did not use being
+    # skipped, and this job must not inherit any of that reasoning second-hand —
+    # it publishes only when the updater signature genuinely succeeded.
+    if: >-
+      ${{ !cancelled()
+      && needs.sign-windows-updater.result == 'success'
+      && format('{0}', inputs.skip_publish) != 'true' }}
     # Linux, not macOS: this job only downloads an artifact and talks to R2, and
     # the hosted Ubuntu image already ships bash 5, jq, and the AWS CLI.
     runs-on: ubuntu-latest
@@ -601,3 +620,44 @@ jobs:
           body: |
 
             **Windows** — [Download x64 installer](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats-windows-x86_64.exe)
+
+  # The assertion that run 30753377275 was missing. That run Authenticode-signed
+  # a release, generated the updater signature, skipped the publish job on a
+  # miscast boolean, and reported SUCCESS — so nothing anywhere said the release
+  # had shipped no Windows bytes. Unless a dry run was explicitly requested, a
+  # green `Release (Windows)` must mean the artifacts are on R2, and this job is
+  # what makes that true.
+  verify-published:
+    name: Verify Windows artifacts reached R2
+    needs: [package-windows, package-windows-authenticode, sign-windows-updater, publish-windows]
+    if: ${{ always() && format('{0}', inputs.skip_publish) != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require a successful publish
+        env:
+          PACKAGE_SIGNED: ${{ needs.package-windows-authenticode.result }}
+          PACKAGE_UNSIGNED: ${{ needs.package-windows.result }}
+          SIGN: ${{ needs.sign-windows-updater.result }}
+          PUBLISH: ${{ needs.publish-windows.result }}
+        run: |
+          if [[ "$PUBLISH" == "success" ]]; then
+            echo "Windows artifacts published to R2."
+            exit 0
+          fi
+
+          echo "This run did not publish Windows artifacts to R2." >&2
+          echo >&2
+          echo "  package-windows-authenticode: ${PACKAGE_SIGNED}" >&2
+          echo "  package-windows (unsigned):   ${PACKAGE_UNSIGNED}" >&2
+          echo "  sign-windows-updater:         ${SIGN}" >&2
+          echo "  publish-windows:              ${PUBLISH}" >&2
+          echo >&2
+          if [[ "$PUBLISH" == "skipped" && "$SIGN" == "success" ]]; then
+            echo "The signing chain succeeded but publish was skipped — check the" >&2
+            echo "'if' gate on publish-windows before re-dispatching." >&2
+          else
+            echo "Fix the failing job above, then re-dispatch the same tag." >&2
+          fi
+          exit 1
