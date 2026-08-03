@@ -128,7 +128,14 @@ jobs:
           # failure the summary exists to prevent.
           DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          gh workflow run release-windows.yaml --ref main --raw-field tag="$TAG"
+          # sign/skip_publish are passed explicitly even though these are the
+          # workflow's declared defaults. This is the release path: it must
+          # always Authenticode-sign AND publish to R2, so the intent belongs in
+          # the call rather than in a default another edit could flip.
+          gh workflow run release-windows.yaml --ref main \
+            --raw-field tag="$TAG" \
+            --raw-field sign=true \
+            --raw-field skip_publish=false
 
           # Dispatch is asynchronous; give the run a moment to appear so the
           # summary can link straight to it. Never fail the release over this —
