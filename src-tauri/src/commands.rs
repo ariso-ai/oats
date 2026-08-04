@@ -1549,6 +1549,39 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     open_library_window(&app)
 }
 
+/// Make the Meetings window visible and put it at the front of the user's
+/// current workspace. Windows can reject foreground activation while a native
+/// tray menu is still dismissing, so briefly enter the topmost band and retry
+/// focus after the menu has had time to close. The window is then returned to
+/// normal z-order; this is a raise operation, not permanent always-on-top.
+fn present_library_window(win: &tauri::WebviewWindow) -> Result<(), String> {
+    win.unminimize().map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        win.set_always_on_top(true).map_err(|e| e.to_string())?;
+        if let Err(error) = win.set_focus() {
+            eprintln!("Initial Meetings window focus was deferred: {error}");
+        }
+
+        let win = win.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if let Err(error) = win.set_focus() {
+                eprintln!("Failed to focus Meetings window after tray dismissal: {error}");
+            }
+            if let Err(error) = win.set_always_on_top(false) {
+                eprintln!("Failed to restore normal Meetings window z-order: {error}");
+            }
+        });
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    win.set_focus().map_err(|e| e.to_string())
+}
+
 /// Open (or focus) the meetings library window. Shared by the
 /// `create_library_window` command and the macOS dock-icon Reopen handler.
 pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -1560,11 +1593,7 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
-        // Restore the window if it was minimized/hidden before focusing it.
-        let _ = win.unminimize();
-        let _ = win.show();
-        win.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
+        return present_library_window(&win);
     }
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
@@ -1588,14 +1617,14 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings");
-    builder
+    let win = builder
         .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
-    Ok(())
+    present_library_window(&win)
 }
 
 #[derive(serde::Deserialize)]
