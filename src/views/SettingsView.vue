@@ -248,6 +248,49 @@
           Permission not granted
         </p>
 
+        <div
+          v-if="platformCapabilities.os === 'windows'"
+          class="setting-row"
+          style="margin-top: 16px"
+        >
+          <label for="recording-input-device" class="setting-label">Input device</label>
+          <select
+            id="recording-input-device"
+            class="input-device-select"
+            :value="selectedAudioInputId"
+            :disabled="audioInputBusy || recordingActive"
+            @change="onSelectAudioInput"
+          >
+            <option value="">System default</option>
+            <option
+              v-if="selectedAudioInputUnavailable"
+              :value="selectedAudioInputId"
+            >
+              {{ audioInputPreference.label || 'Selected microphone' }} (unavailable)
+            </option>
+            <option
+              v-for="device in audioInputDevices"
+              :key="device.deviceId"
+              :value="device.deviceId"
+            >
+              {{ device.label }}
+            </option>
+          </select>
+        </div>
+        <p
+          v-if="platformCapabilities.os === 'windows' && selectedAudioInputUnavailable"
+          class="notif-status notif-status--err"
+          data-test="audio-input-unavailable"
+        >
+          This microphone is unavailable. New recordings will use System default until it reconnects or you choose another input.
+        </p>
+        <p
+          v-else-if="platformCapabilities.os === 'windows' && audioInputError"
+          class="notif-status notif-status--err"
+        >
+          {{ audioInputError }}
+        </p>
+
         <div class="setting-row" style="margin-top: 16px">
           <span class="setting-label">System Audio</span>
           <label class="toggle">
@@ -472,6 +515,14 @@ import {
   isMeetingEndReminderEnabled,
   setMeetingEndReminderEnabled,
 } from '../composables/useMeetingEndReminder';
+import {
+  listAudioInputDevices,
+  loadAudioInputPreference,
+  saveAudioInputPreference,
+  watchAudioInputDevices,
+  type AudioInputDevice,
+  type AudioInputPreference,
+} from '../composables/useAudioInputDevices';
 
 const isSignedIn = ref(false);
 const isSigningIn = ref(false);
@@ -505,6 +556,86 @@ const appVersion = __APP_VERSION__;
 // blocks on IPC. `onMounted` replaces it with native truth before model and
 // recording support are evaluated.
 const platformCapabilities = ref(defaultPlatformCapabilities());
+const audioInputDevices = ref<AudioInputDevice[]>([]);
+const audioInputPreference = ref<AudioInputPreference>({ deviceId: null, label: null });
+const audioInputRefreshing = ref(false);
+const audioInputSaving = ref(false);
+const audioInputBusy = computed(
+  () => audioInputRefreshing.value || audioInputSaving.value,
+);
+const audioInputsLoaded = ref(false);
+const audioInputError = ref('');
+let stopWatchingAudioInputs: (() => void) | null = null;
+let audioInputRefreshId = 0;
+
+const selectedAudioInputId = computed(() => audioInputPreference.value.deviceId ?? '');
+const selectedAudioInputUnavailable = computed(
+  () =>
+    audioInputsLoaded.value &&
+    audioInputPreference.value.deviceId !== null &&
+    !audioInputDevices.value.some(
+      (device) => device.deviceId === audioInputPreference.value.deviceId,
+    ),
+);
+
+async function refreshAudioInputs() {
+  if (platformCapabilities.value.os !== 'windows') return;
+  const refreshId = ++audioInputRefreshId;
+  audioInputRefreshing.value = true;
+  try {
+    const devices = await listAudioInputDevices();
+    if (refreshId !== audioInputRefreshId) return;
+    audioInputDevices.value = devices;
+    audioInputsLoaded.value = true;
+    audioInputError.value = '';
+  } catch {
+    if (refreshId !== audioInputRefreshId) return;
+    audioInputsLoaded.value = false;
+    audioInputError.value = 'Microphone inputs could not be refreshed.';
+  } finally {
+    if (refreshId === audioInputRefreshId) {
+      audioInputRefreshing.value = false;
+    }
+  }
+}
+
+async function initializeAudioInputs() {
+  // Subscribe before the first await so unmount cleanup always owns the
+  // listener, even if store loading or enumeration is still pending.
+  stopWatchingAudioInputs = watchAudioInputDevices(() => {
+    void refreshAudioInputs();
+  });
+  audioInputPreference.value = await loadAudioInputPreference();
+  await refreshAudioInputs();
+}
+
+async function onSelectAudioInput(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  if (audioInputBusy.value) {
+    select.value = selectedAudioInputId.value;
+    return;
+  }
+  const deviceId = select.value;
+  const previous = audioInputPreference.value;
+  const selected = deviceId === ''
+    ? null
+    : audioInputDevices.value.find((device) => device.deviceId === deviceId) ?? null;
+  if (deviceId !== '' && !selected) return;
+
+  audioInputPreference.value = selected
+    ? { deviceId: selected.deviceId, label: selected.label }
+    : { deviceId: null, label: null };
+  audioInputSaving.value = true;
+  try {
+    await saveAudioInputPreference(selected);
+    audioInputError.value = '';
+  } catch {
+    audioInputPreference.value = previous;
+    audioInputError.value = 'The microphone preference could not be saved.';
+  } finally {
+    audioInputSaving.value = false;
+  }
+}
 
 const backend = ref<'ariso' | 'local'>('ariso');
 const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
@@ -588,6 +719,7 @@ async function refreshRecordingState() {
 
 function onWindowFocus() {
   void refreshRecordingState();
+  void refreshAudioInputs();
 }
 
 watch(recordingActive, (active) => {
@@ -898,6 +1030,7 @@ async function onToggleMic(e: Event) {
     });
     micEnabled.value = res.enabled;
     micStatus.value = res.status;
+    if (res.status === 'granted') void refreshAudioInputs();
   } finally {
     micToggling.value = false;
   }
@@ -1052,6 +1185,13 @@ onMounted(async () => {
     console.error('Failed to load platform capabilities', error);
     errorMessage.value = 'Platform features are unavailable. Restart oats and try again.';
   }
+  if (platformCapabilities.value.os === 'windows') {
+    try {
+      await initializeAudioInputs();
+    } catch {
+      audioInputError.value = 'Microphone inputs could not be loaded.';
+    }
+  }
   await refreshSignedInAccount();
 
   // Bootstrap recording toggles in its own try/catch so a settings-store or
@@ -1147,8 +1287,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  audioInputRefreshId += 1;
   unlistenSignInPrompt?.();
   unlistenUpdates.forEach((un) => un());
+  stopWatchingAudioInputs?.();
   window.removeEventListener('focus', onWindowFocus);
 });
 
@@ -1384,6 +1526,26 @@ async function handleSignOut() {
 .setting-label {
   font-size: 14px;
   color: #1c1c1c;
+}
+
+.input-device-select {
+  max-width: 240px;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid #d6d6d6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1c1c1c;
+  font: inherit;
+  font-size: 13px;
+}
+
+.input-device-select:disabled {
+  opacity: 0.55;
+}
+
+.input-device-select:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
 }
 
 .model-controls {

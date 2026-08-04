@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
 import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
+import { resolveAudioInputDeviceId } from './useAudioInputDevices';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
@@ -192,15 +193,40 @@ export function useRecorder() {
         } else {
           // Windows keeps microphone capture in the webview; its native mic
           // command is intentionally macOS-only.
-          micStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              channelCount: 1,
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-              sampleRate: 44100,
-            },
-          });
+          const selectedDeviceId = caps.os === 'windows'
+            ? await resolveAudioInputDeviceId()
+            : null;
+          const audio: MediaTrackConstraints = {
+            channelCount: 1,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 44100,
+          };
+          if (selectedDeviceId) {
+            audio.deviceId = { exact: selectedDeviceId };
+          }
+          try {
+            micStream = await navigator.mediaDevices.getUserMedia({ audio });
+          } catch (captureError) {
+            const errorName = captureError instanceof DOMException
+              ? captureError.name
+              : (captureError as { name?: unknown } | null)?.name;
+            const selectedDeviceBecameUnavailable =
+              selectedDeviceId !== null &&
+              (errorName === 'NotFoundError' || errorName === 'OverconstrainedError');
+            if (!selectedDeviceBecameUnavailable) throw captureError;
+
+            // The selected endpoint can disappear after the availability check
+            // but before getUserMedia opens it. Match the Settings promise and
+            // retry once with the current Windows default. Permission and other
+            // capture failures are never converted into a fallback.
+            const fallbackAudio = { ...audio };
+            delete fallbackAudio.deviceId;
+            micStream = await navigator.mediaDevices.getUserMedia({
+              audio: fallbackAudio,
+            });
+          }
           micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(analyserNode);
         }

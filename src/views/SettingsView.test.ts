@@ -24,6 +24,18 @@ const setVaultDir = vi.fn((_path: string) => Promise.resolve());
 const pickVaultFolder = vi.fn(
   (_current?: string): Promise<string | null> => Promise.resolve(null)
 );
+const platformOs = vi.hoisted(() => ({ value: 'macos' as 'macos' | 'windows' }));
+const audioInputPreference = vi.hoisted(() => ({
+  value: { deviceId: null as string | null, label: null as string | null },
+}));
+const listAudioInputDevices = vi.hoisted(() => vi.fn(() => Promise.resolve([] as { deviceId: string; label: string }[])));
+const saveAudioInputPreference = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+const stopWatchingAudioInputDevices = vi.hoisted(() => vi.fn());
+const audioInputChangeHandler = vi.hoisted(() => ({ value: null as (() => void) | null }));
+const watchAudioInputDevices = vi.hoisted(() => vi.fn((callback: () => void) => {
+  audioInputChangeHandler.value = callback;
+  return stopWatchingAudioInputDevices;
+}));
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -85,6 +97,12 @@ vi.mock('../composables/useRecordingPermissions', () => ({
   openMicSettings: vi.fn(),
   openSystemAudioSettings: vi.fn(),
 }));
+vi.mock('../composables/useAudioInputDevices', () => ({
+  listAudioInputDevices: () => listAudioInputDevices(),
+  loadAudioInputPreference: () => Promise.resolve(audioInputPreference.value),
+  saveAudioInputPreference: (device: unknown) => saveAudioInputPreference(device),
+  watchAudioInputDevices: (callback: () => void) => watchAudioInputDevices(callback),
+}));
 vi.mock('../composables/useMeetingNotifications', () => ({
   isMeetingNotificationsEnabled: () => Promise.resolve(false),
   setMeetingNotificationsEnabled: vi.fn(),
@@ -99,7 +117,7 @@ vi.mock('../composables/useAutoRecord', () => ({
 }));
 vi.mock('../composables/usePlatformCapabilities', () => {
   const capabilities = () => ({
-    os: 'macos',
+    os: platformOs.value,
     localBackend: { supported: true, engine: 'swift-mlx' },
     systemAudio: {
       supported: true,
@@ -151,6 +169,15 @@ beforeEach(() => {
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
+  platformOs.value = 'macos';
+  audioInputPreference.value = { deviceId: null, label: null };
+  listAudioInputDevices.mockResolvedValue([]);
+  saveAudioInputPreference.mockResolvedValue(undefined);
+  audioInputChangeHandler.value = null;
+  watchAudioInputDevices.mockImplementation((callback: () => void) => {
+    audioInputChangeHandler.value = callback;
+    return stopWatchingAudioInputDevices;
+  });
 });
 
 function fireRecordingState(active: boolean) {
@@ -158,6 +185,121 @@ function fireRecordingState(active: boolean) {
   expect(cb).toBeDefined();
   cb!({ payload: active });
 }
+
+describe('SettingsView Windows input device selection', () => {
+  it('keeps the input selector off macOS', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find('#recording-input-device').exists()).toBe(false);
+    expect(listAudioInputDevices).not.toHaveBeenCalled();
+  });
+
+  it('shows available Windows inputs and persists a selection', async () => {
+    platformOs.value = 'windows';
+    listAudioInputDevices.mockResolvedValue([
+      { deviceId: 'laptop', label: 'Laptop Microphone' },
+      { deviceId: 'usb', label: 'USB Microphone' },
+    ]);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const select = wrapper.get('#recording-input-device');
+    expect(select.text()).toContain('System default');
+    expect(select.text()).toContain('USB Microphone');
+
+    await select.setValue('usb');
+    await flushPromises();
+    expect(saveAudioInputPreference).toHaveBeenCalledWith({
+      deviceId: 'usb',
+      label: 'USB Microphone',
+    });
+  });
+
+  it('keeps a disconnected saved input visible and explains the fallback', async () => {
+    platformOs.value = 'windows';
+    audioInputPreference.value = { deviceId: 'usb', label: 'USB Microphone' };
+    listAudioInputDevices.mockResolvedValue([
+      { deviceId: 'laptop', label: 'Laptop Microphone' },
+    ]);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.get('#recording-input-device').text()).toContain(
+      'USB Microphone (unavailable)',
+    );
+    expect(wrapper.get('[data-test="audio-input-unavailable"]').text()).toContain(
+      'New recordings will use System default',
+    );
+  });
+
+  it('serializes preference saves so a rapid second change cannot win out of order', async () => {
+    platformOs.value = 'windows';
+    listAudioInputDevices.mockResolvedValue([
+      { deviceId: 'laptop', label: 'Laptop Microphone' },
+      { deviceId: 'usb', label: 'USB Microphone' },
+    ]);
+    let finishSave!: () => void;
+    saveAudioInputPreference.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finishSave = resolve; }),
+    );
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const select = wrapper.get('#recording-input-device');
+
+    await select.setValue('usb');
+    await select.setValue('laptop');
+
+    expect(saveAudioInputPreference).toHaveBeenCalledTimes(1);
+    expect(saveAudioInputPreference).toHaveBeenCalledWith({
+      deviceId: 'usb',
+      label: 'USB Microphone',
+    });
+    finishSave();
+    await flushPromises();
+    expect((select.element as HTMLSelectElement).value).toBe('usb');
+  });
+
+  it('removes the device listener when unmounted during enumeration', async () => {
+    platformOs.value = 'windows';
+    listAudioInputDevices.mockImplementationOnce(() => new Promise(() => {}));
+    const wrapper = mount(SettingsView);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(watchAudioInputDevices).toHaveBeenCalledOnce();
+    wrapper.unmount();
+    expect(stopWatchingAudioInputDevices).toHaveBeenCalledOnce();
+  });
+
+  it('does not let an older refresh overwrite a newer device-change snapshot', async () => {
+    platformOs.value = 'windows';
+    let finishInitial!: (devices: { deviceId: string; label: string }[]) => void;
+    let finishLatest!: (devices: { deviceId: string; label: string }[]) => void;
+    listAudioInputDevices
+      .mockImplementationOnce(
+        () => new Promise((resolve) => { finishInitial = resolve; }),
+      )
+      .mockImplementationOnce(
+        () => new Promise((resolve) => { finishLatest = resolve; }),
+      );
+    const wrapper = mount(SettingsView);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audioInputChangeHandler.value).not.toBeNull();
+
+    audioInputChangeHandler.value!();
+    finishLatest([{ deviceId: 'laptop', label: 'Laptop Microphone' }]);
+    await flushPromises();
+    expect(wrapper.get('#recording-input-device').text()).toContain('Laptop Microphone');
+
+    finishInitial([{ deviceId: 'usb', label: 'Disconnected USB Microphone' }]);
+    await flushPromises();
+    expect(wrapper.get('#recording-input-device').text()).not.toContain(
+      'Disconnected USB Microphone',
+    );
+  });
+});
 
 describe('SettingsView backend switching during recording', () => {
   it('enables the backend trigger when no recording is active', async () => {
