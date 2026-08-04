@@ -59,6 +59,11 @@
       </button>
     </div>
 
+    <div v-if="recordingStartError" class="recording-start-error" role="alert">
+      <span>{{ recordingStartError }}</span>
+      <button type="button" aria-label="Dismiss recording error" @click="recordingStartError = null">×</button>
+    </div>
+
     <aside v-if="leftPanelVisible" class="sidebar">
 
       <button
@@ -204,10 +209,12 @@ import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
 import { decideStartRecording } from '../composables/decideStartRecording';
 import { useRecordingStartChoice } from '../composables/useRecordingStartChoice';
 import RecordingStartChoiceDialog from './RecordingStartChoiceDialog.vue';
+import { recordingStartErrorMessage } from '../composables/recordingStartError';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const recordingStartError = ref<string | null>(null);
 const recording = ref(false);
 type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 const recordingPhase = ref<RecorderPhase | null>(null);
@@ -559,6 +566,7 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
 // Open the floating recorder pill (its own always-on-top window) for a specific
 // meeting — the featured meeting behind "Start Meeting Early" on the Up Next card.
 async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
+  recordingStartError.value = null;
   try {
     const backend = await getActiveBackend();
     if (
@@ -585,6 +593,7 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
     await invoke('start_recording_window', {});
   } catch (e) {
     clearRecordingLaunch();
+    recordingStartError.value = recordingStartErrorMessage(e);
     console.error('Failed to start recording', e);
   }
 }
@@ -595,6 +604,7 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
 // falling back to the picker when neither applies. Non-picker (local) backends
 // just open the recorder with no meeting attached.
 async function startRecording(): Promise<void> {
+  recordingStartError.value = null;
   try {
     const backend = await getActiveBackend();
     const usesPicker = backend.usesMeetingPicker;
@@ -630,6 +640,7 @@ async function startRecording(): Promise<void> {
     await invoke('start_recording_window', {});
   } catch (e) {
     clearRecordingLaunch();
+    recordingStartError.value = recordingStartErrorMessage(e);
     console.error('Failed to start recording', e);
   }
 }
@@ -694,6 +705,19 @@ function onNativeRecordingState(event: { payload: unknown }): void {
   } else if (!recorderOwnsLifecycle.value) {
     clearRecordingLaunch();
   }
+}
+
+function onRecordingStartFailed(event: { payload: unknown }): void {
+  const payload = event.payload;
+  recordingStartError.value =
+    typeof payload === 'object'
+    && payload !== null
+    && 'message' in payload
+    && typeof payload.message === 'string'
+    && payload.message.length <= 300
+      ? payload.message
+      : recordingStartErrorMessage(payload);
+  clearRecordingLaunch();
 }
 
 // Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
@@ -865,6 +889,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingState: UnlistenFn | null = null;
+let unlistenRecordingStartFailed: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
@@ -896,6 +921,9 @@ onMounted(() => {
   });
   void listen('recording://state', onNativeRecordingState).then((un) => {
     unlistenRecordingState = un;
+  });
+  void listen('recording://start-failed', onRecordingStartFailed).then((un) => {
+    unlistenRecordingStartFailed = un;
   });
   // The floating recorder pill asks (on click) to surface the meeting it's
   // recording — re-dock the strip even if the user had navigated away.
@@ -944,6 +972,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
   unlistenRecordingState?.();
+  unlistenRecordingStartFailed?.();
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();
@@ -975,6 +1004,35 @@ onUnmounted(() => {
   align-items: center;
   padding: 3px 5px 0 78px;
   background: transparent;
+}
+.recording-start-error {
+  position: absolute;
+  top: 34px;
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(520px, calc(100% - 32px));
+  padding: 10px 12px;
+  transform: translateX(-50%);
+  border: 1px solid #e4aaa6;
+  border-radius: 10px;
+  background: #fff4f3;
+  box-shadow: 0 6px 20px rgba(80, 20, 16, 0.12);
+  color: #8f2722;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.recording-start-error button {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  cursor: pointer;
 }
 .panel-toggle {
   display: flex;

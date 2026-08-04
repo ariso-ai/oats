@@ -1277,6 +1277,22 @@ describe('LibraryView', () => {
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { forceNew: true });
   });
 
+  it('shows an actionable recorder startup failure and unlocks Start', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://start-failed', {
+      message: 'No microphone was found. Connect or enable a microphone, then try again.',
+    });
+    await flushPromises();
+
+    expect(wrapper.get('.recording-start-error').attributes('role')).toBe('alert');
+    expect(wrapper.get('.recording-start-error').text()).toContain('Connect or enable a microphone');
+    expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
+  });
+
   it('renders the PendingUploads section inside the sidebar', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView, {
