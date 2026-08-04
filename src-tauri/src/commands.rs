@@ -891,46 +891,6 @@ fn waveform_url(
     url
 }
 
-#[cfg(target_os = "windows")]
-const WINDOWS_DEV_SERVER_ADDRESS: &str = "localhost:1420";
-
-#[cfg(target_os = "windows")]
-fn dev_server_accepting_connections(address: &str) -> bool {
-    use std::net::ToSocketAddrs;
-
-    address
-        .to_socket_addrs()
-        .map(|addresses| {
-            addresses.into_iter().any(|address| {
-                std::net::TcpStream::connect_timeout(
-                    &address,
-                    std::time::Duration::from_millis(150),
-                )
-                .is_ok()
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// On Windows, an orphaned `tauri dev` process can outlive Vite. Creating the
-/// recorder webview in that state replaces the pill with WebView2's narrow
-/// ERR_CONNECTION_REFUSED page and marks a recording active even though its
-/// frontend never mounted. Refuse that dev-only creation before mutating any
-/// recorder state. Production uses bundled assets and bypasses this guard.
-fn ensure_waveform_assets_available() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if tauri::is_dev() {
-        if !dev_server_accepting_connections(WINDOWS_DEV_SERVER_ADDRESS) {
-            return Err(
-                "Oats development server is unavailable at http://localhost:1420; restart `npm.cmd run tauri:dev`"
-                    .to_string(),
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
@@ -953,7 +913,6 @@ pub(crate) fn open_waveform_window(
         let _ = existing.set_focus();
         return Ok(());
     }
-    ensure_waveform_assets_available()?;
     // Born hidden (painted-empty) when the meetings window already owns the
     // recorder UI, so the pill never flashes over it. The window is still
     // created visible for getUserMedia; only its painting is suppressed.
@@ -1970,16 +1929,6 @@ mod tests {
             waveform_url(None, true, false, Some("abc"), false),
             "/#/waveform?localAppendId=abc&auto=1"
         );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn dev_server_probe_distinguishes_listening_and_refused_ports() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        assert!(dev_server_accepting_connections(
-            &listener.local_addr().unwrap().to_string()
-        ));
-        assert!(!dev_server_accepting_connections("127.0.0.1:0"));
     }
 
     #[test]
