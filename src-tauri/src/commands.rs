@@ -11,6 +11,12 @@ const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 // tray, and webview requests arrive together.
 static SETTINGS_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LIBRARY_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Serializes each temporary Windows z-order presentation with its deferred
+// cleanup. The generation lets a cleanup detect that a newer presentation
+// superseded it, while the mutex prevents either side from changing the
+// topmost state between that validation and the corresponding window calls.
+#[cfg(target_os = "windows")]
+static LIBRARY_PRESENTATION_GENERATION: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -1597,6 +1603,59 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     open_library_window(&app)
 }
 
+/// Make the Meetings window visible and put it at the front of the user's
+/// current workspace. Windows can reject foreground activation while a native
+/// tray menu is still dismissing, so briefly enter the topmost band and retry
+/// focus after the menu has had time to close. The window is then returned to
+/// normal z-order; this is a raise operation, not permanent always-on-top.
+fn present_library_window(win: &tauri::WebviewWindow) -> Result<(), String> {
+    win.unminimize().map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut presentation_generation = LIBRARY_PRESENTATION_GENERATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        win.set_always_on_top(true).map_err(|e| e.to_string())?;
+        if let Err(error) = win.set_focus() {
+            eprintln!("Initial Meetings window focus was deferred: {error}");
+        }
+
+        *presentation_generation = presentation_generation.wrapping_add(1);
+        let generation = *presentation_generation;
+        drop(presentation_generation);
+
+        let win = win.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let presentation_generation = LIBRARY_PRESENTATION_GENERATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *presentation_generation != generation {
+                // Superseded by a newer presentation call; let its own
+                // deferred task own the cleanup instead.
+                return;
+            }
+            if let Err(error) = win.set_focus() {
+                eprintln!("Failed to focus Meetings window after tray dismissal: {error}");
+            }
+            if let Err(error) = win.set_always_on_top(false) {
+                eprintln!("Failed to restore normal Meetings window z-order: {error}, retrying");
+                if let Err(retry_error) = win.set_always_on_top(false) {
+                    eprintln!(
+                        "Failed to restore normal Meetings window z-order after retry: {retry_error}"
+                    );
+                }
+            }
+        });
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    win.set_focus().map_err(|e| e.to_string())
+}
+
 /// Open (or focus) the meetings library window. Shared by the
 /// `create_library_window` command and the macOS dock-icon Reopen handler.
 pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -1608,35 +1667,38 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
-        // Restore the window if it was minimized/hidden before focusing it.
-        let _ = win.unminimize();
-        let _ = win.show();
-        win.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
+        return present_library_window(&win);
     }
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
-    // the same row, just to the right of them. Other platforms keep native
-    // window chrome because this AppKit-specific composition has no equivalent
-    // role in the library UI.
+    // the same row, just to the right of them.
     #[cfg(target_os = "macos")]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings")
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
-    #[cfg(not(target_os = "macos"))]
+    // Tauri's overlay title-bar style is macOS-only. Its supported Windows
+    // custom-titlebar path is an undecorated window plus webview controls;
+    // shadow(true) restores the Windows 11 border, rounded corners and shadow.
+    #[cfg(target_os = "windows")]
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings")
+            .decorations(false)
+            .shadow(true);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings");
-    builder
+    let win = builder
         .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
-    Ok(())
+    present_library_window(&win)
 }
 
 #[derive(serde::Deserialize)]

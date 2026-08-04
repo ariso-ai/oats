@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "library-window-controls",
+  "description": "Allow the frameless Windows Meetings titlebar to minimize and maximize its own window",
+  "windows": ["library"],
+  "permissions": [
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize"
+  ]
+}
