@@ -11,12 +11,12 @@ const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 // tray, and webview requests arrive together.
 static SETTINGS_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LIBRARY_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-// Bumped on every `present_library_window` call so a stale deferred cleanup
-// task (see below) can detect it has been superseded by a newer presentation
-// and skip touching always-on-top / focus.
+// Serializes each temporary Windows z-order presentation with its deferred
+// cleanup. The generation lets a cleanup detect that a newer presentation
+// superseded it, while the mutex prevents either side from changing the
+// topmost state between that validation and the corresponding window calls.
 #[cfg(target_os = "windows")]
-static LIBRARY_PRESENTATION_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static LIBRARY_PRESENTATION_GENERATION: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -1607,23 +1607,25 @@ fn present_library_window(win: &tauri::WebviewWindow) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        let mut presentation_generation = LIBRARY_PRESENTATION_GENERATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         win.set_always_on_top(true).map_err(|e| e.to_string())?;
         if let Err(error) = win.set_focus() {
             eprintln!("Initial Meetings window focus was deferred: {error}");
         }
 
-        // Claim this generation before spawning so a second presentation that
-        // starts while this one's cleanup is still pending is detected below,
-        // and the older task's cleanup no longer clears the newer
-        // presentation's always-on-top state.
-        let generation =
-            LIBRARY_PRESENTATION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        *presentation_generation = presentation_generation.wrapping_add(1);
+        let generation = *presentation_generation;
+        drop(presentation_generation);
+
         let win = win.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            if LIBRARY_PRESENTATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
-                != generation
-            {
+            let presentation_generation = LIBRARY_PRESENTATION_GENERATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *presentation_generation != generation {
                 // Superseded by a newer presentation call; let its own
                 // deferred task own the cleanup instead.
                 return;
