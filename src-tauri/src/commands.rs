@@ -11,6 +11,12 @@ const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 // tray, and webview requests arrive together.
 static SETTINGS_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LIBRARY_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Bumped on every `present_library_window` call so a stale deferred cleanup
+// task (see below) can detect it has been superseded by a newer presentation
+// and skip touching always-on-top / focus.
+#[cfg(target_os = "windows")]
+static LIBRARY_PRESENTATION_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -1606,14 +1612,32 @@ fn present_library_window(win: &tauri::WebviewWindow) -> Result<(), String> {
             eprintln!("Initial Meetings window focus was deferred: {error}");
         }
 
+        // Claim this generation before spawning so a second presentation that
+        // starts while this one's cleanup is still pending is detected below,
+        // and the older task's cleanup no longer clears the newer
+        // presentation's always-on-top state.
+        let generation =
+            LIBRARY_PRESENTATION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let win = win.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if LIBRARY_PRESENTATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+                != generation
+            {
+                // Superseded by a newer presentation call; let its own
+                // deferred task own the cleanup instead.
+                return;
+            }
             if let Err(error) = win.set_focus() {
                 eprintln!("Failed to focus Meetings window after tray dismissal: {error}");
             }
             if let Err(error) = win.set_always_on_top(false) {
-                eprintln!("Failed to restore normal Meetings window z-order: {error}");
+                eprintln!("Failed to restore normal Meetings window z-order: {error}, retrying");
+                if let Err(retry_error) = win.set_always_on_top(false) {
+                    eprintln!(
+                        "Failed to restore normal Meetings window z-order after retry: {retry_error}"
+                    );
+                }
             }
         });
         return Ok(());
