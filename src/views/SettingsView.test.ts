@@ -39,12 +39,15 @@ const watchAudioInputDevices = vi.hoisted(() => vi.fn((callback: () => void) => 
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
-
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+const listenEvent = vi.fn(
+  (name: string, cb: (e: { payload: unknown }) => void): Promise<() => void> => {
     listeners.set(name, cb);
     return Promise.resolve(() => listeners.delete(name));
   },
+);
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => listenEvent(name, cb),
   emit: (...args: unknown[]) => emit(...args),
 }));
 vi.mock('../tauri', () => ({
@@ -175,6 +178,10 @@ beforeEach(() => {
   watchAudioInputDevices.mockImplementation((callback: () => void) => {
     audioInputChangeHandler.value = callback;
     return stopWatchingAudioInputDevices;
+  });
+  listenEvent.mockImplementation((name, cb) => {
+    listeners.set(name, cb);
+    return Promise.resolve(() => listeners.delete(name));
   });
 });
 
@@ -378,6 +385,50 @@ describe('SettingsView backend switching during recording', () => {
     expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeUndefined();
   });
 
+  it('registers recording events before querying initial native state', async () => {
+    let finishRegistration!: (unlisten: () => void) => void;
+    listenEvent.mockImplementation((name, cb) => {
+      listeners.set(name, cb);
+      if (name !== 'recording://state') {
+        return Promise.resolve(() => listeners.delete(name));
+      }
+      return new Promise((resolve) => { finishRegistration = resolve; });
+    });
+    isRecordingActive.mockResolvedValue(true);
+
+    const wrapper = mount(SettingsView);
+    await Promise.resolve();
+
+    expect(listeners.has('recording://state')).toBe(true);
+    expect(isRecordingActive).not.toHaveBeenCalled();
+    fireRecordingState(true);
+    finishRegistration(() => listeners.delete('recording://state'));
+    await flushPromises();
+
+    expect(isRecordingActive).toHaveBeenCalledTimes(1);
+    expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeDefined();
+  });
+
+  it('still queries native state when recording listener registration fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    listenEvent.mockImplementation((name, cb) => {
+      if (name === 'recording://state') return Promise.reject(new Error('listen failed'));
+      listeners.set(name, cb);
+      return Promise.resolve(() => listeners.delete(name));
+    });
+    isRecordingActive.mockResolvedValue(true);
+
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(isRecordingActive).toHaveBeenCalledTimes(1);
+    expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeDefined();
+    expect(consoleError).toHaveBeenCalledWith(
+      'Failed to listen for recording state',
+      expect.any(Error),
+    );
+  });
+
   it('ignores a backend selection that lands as recording starts', async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
@@ -397,6 +448,27 @@ describe('SettingsView backend switching during recording', () => {
     await flushPromises();
     expect(listeners.has('recording://state')).toBe(true);
     wrapper.unmount();
+    expect(listeners.has('recording://state')).toBe(false);
+  });
+
+  it('disposes a recording listener that resolves after unmount', async () => {
+    let finishRegistration!: (unlisten: () => void) => void;
+    const lateUnlisten = vi.fn(() => listeners.delete('recording://state'));
+    listenEvent.mockImplementation((name, cb) => {
+      listeners.set(name, cb);
+      if (name !== 'recording://state') {
+        return Promise.resolve(() => listeners.delete(name));
+      }
+      return new Promise((resolve) => { finishRegistration = resolve; });
+    });
+
+    const wrapper = mount(SettingsView);
+    await Promise.resolve();
+    wrapper.unmount();
+    finishRegistration(lateUnlisten);
+    await flushPromises();
+
+    expect(lateUnlisten).toHaveBeenCalledTimes(1);
     expect(listeners.has('recording://state')).toBe(false);
   });
 });

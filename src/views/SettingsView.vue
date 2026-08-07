@@ -1280,17 +1280,32 @@ onMounted(async () => {
 
 // Registered as its own hook so a failure in the main bootstrap above can't
 // prevent the recording guard from arming.
+let recordingGuardMounted = false;
 onMounted(async () => {
-  void refreshRecordingState();
+  recordingGuardMounted = true;
   window.addEventListener('focus', onWindowFocus);
-  const unRecording = await listen<boolean>('recording://state', (e) => {
-    recordingStateRefreshId += 1;
-    recordingActive.value = e.payload;
-  });
-  unlistenUpdates.push(unRecording);
+  try {
+    const unRecording = await listen<boolean>('recording://state', (e) => {
+      recordingStateRefreshId += 1;
+      recordingActive.value = e.payload;
+    });
+    if (recordingGuardMounted) {
+      unlistenUpdates.push(unRecording);
+    } else {
+      // Registration can settle after teardown; dispose it immediately rather
+      // than retaining a listener that references the destroyed component.
+      unRecording();
+    }
+  } catch (e) {
+    console.error('Failed to listen for recording state', e);
+  }
+  // Query after listener registration so a recording that begins during mount
+  // cannot slip through the gap. Registration failure must not skip the query.
+  if (recordingGuardMounted) void refreshRecordingState();
 });
 
 onUnmounted(() => {
+  recordingGuardMounted = false;
   recordingStateRefreshId += 1;
   audioInputRefreshId += 1;
   unlistenSignInPrompt?.();
