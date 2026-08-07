@@ -541,6 +541,24 @@ async function discardRecording() {
   await closeWindow();
 }
 
+async function localFinalizationId(startAt: string | null): Promise<string | undefined> {
+  if (backend.value?.id !== 'local' || !startAt) return undefined;
+  if (effectiveLocalRecordingId.value) return effectiveLocalRecordingId.value;
+  if (localAppendId) return localAppendId;
+
+  // A very short recording can stop before the startedAt watcher finishes its
+  // lookup. Resolve the same target here so failure recovery never falls back
+  // to a fresh timestamp id when Rust actually appended to an older recording.
+  try {
+    const id = await local.recordingIdForStart(startAt, forceNew);
+    effectiveLocalRecordingId.value = id;
+    return id;
+  } catch (e) {
+    console.error('Failed to resolve local finalization id at stop', e);
+    return localRecordingIdFromStart(startAt);
+  }
+}
+
 async function handleStop() {
   if (isStopping.value) return;
   // Auto recordings that stop almost immediately (late mic-on / quick-off
@@ -586,6 +604,8 @@ async function handleStop() {
     : newBlob;
 
   if (combinedBlob.size > 0 && backend.value) {
+    const finalizedLocalId =
+      prevMeta?.localRecordingId ?? await localFinalizationId(prevMeta?.startAt ?? startAt);
     stoppedBlob.value = combinedBlob;
     stoppedMeta.value = {
       startAt: prevMeta?.startAt ?? startAt,
@@ -594,6 +614,7 @@ async function handleStop() {
         (prevMeta?.durationSeconds ?? 0) + recorder.durationSeconds.value,
       meetingId: prevMeta?.meetingId ?? effectiveMeetingId.value ?? undefined,
       localAppendId: prevMeta?.localAppendId ?? localAppendId ?? undefined,
+      localRecordingId: finalizedLocalId,
       forceNew: prevMeta?.forceNew ?? forceNew ?? undefined,
     };
     await runFinalize();
@@ -735,7 +756,8 @@ async function runFinalize() {
     // waveform (and block a new recording) once persistence is confirmed.
     const meta = stoppedMeta.value;
     if (backend.value.id === 'local' && meta) {
-      const failedId = localRecordingIdFromStart(meta.startAt ?? meta.endAt);
+      const failedId =
+        meta.localRecordingId ?? localRecordingIdFromStart(meta.startAt ?? meta.endAt);
       try {
         const persisted = await local.recordingStatus(failedId);
         if (persisted.status === 'failed') {

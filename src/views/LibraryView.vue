@@ -628,7 +628,10 @@ async function refreshRecordingState(): Promise<void> {
         recordingPhase.value = 'starting';
       }
       setRecording(true);
-    } else {
+    } else if (recordingPhase.value !== 'starting') {
+      // A launch marks the phase before Rust creates the waveform window.
+      // Preserve that lock across the short pre-window gap; the command's
+      // error path or recorder lifecycle event owns clearing it.
       clearRecordingLaunch();
     }
   } catch (e) {

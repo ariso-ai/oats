@@ -418,6 +418,46 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.find('.status-icon.err').exists()).toBe(false);
   });
 
+  it('checks the explicit append target after a persisted local finalize failure', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('transcription failed'));
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-01T09-00-00Z');
+    expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('checks the resolved automatic append target after a persisted local finalize failure', async () => {
+    recordingIdForStart.mockResolvedValueOnce('2026-06-08T09-30-00Z');
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('transcription failed'));
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-08T09-30-00Z');
+    expect(closeWin).toHaveBeenCalled();
+  });
+
   it('never broadcasts a success phase when finalize fails', async () => {
     stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
     finalizeRecording.mockRejectedValue(new Error('offline'));

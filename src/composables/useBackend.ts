@@ -32,6 +32,10 @@ export interface RecordingMeta {
   /** Local "Continue this meeting": append into this existing recording id,
    *  bypassing the 5-minute auto-append window. */
   localAppendId?: string;
+  /** Actual local recording id selected for finalization. This can differ from
+   *  the current session's timestamp when Rust appends automatically or when
+   *  the user explicitly continues an existing recording. */
+  localRecordingId?: string;
   /** Local "start fresh": force a brand-new recording, skipping the 5-minute
    *  auto-append. Set when the detail pane was empty at Start. */
   forceNew?: boolean;

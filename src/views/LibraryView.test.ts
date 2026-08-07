@@ -675,6 +675,25 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
   });
 
+  it('keeps Start locked when a window refresh finishes before recorder creation', async () => {
+    let finishWindowQuery!: (windows: { label: string }[]) => void;
+    getAllWebviewWindows.mockImplementationOnce(
+      () => new Promise((resolve) => { finishWindowQuery = resolve; }),
+    );
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await Promise.resolve();
+
+    // The launch command has been sent, but Rust has not created the waveform
+    // window yet. The older refresh must not interpret that gap as idle.
+    await wrapper.find('.add-btn').trigger('click');
+    finishWindowQuery([]);
+    await flushPromises();
+
+    expect(wrapper.find('.add-btn').text()).toContain('Starting recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
   it('shows initializing feedback for a recording started from the native menu', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
