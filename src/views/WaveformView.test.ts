@@ -141,6 +141,18 @@ describe('WaveformView vertical pill', () => {
     expect(wrapper.findAll('.dot')).toHaveLength(6);
   });
 
+  it('reports an actionable startup failure before closing the recorder window', async () => {
+    startRecording.mockRejectedValueOnce(new DOMException('', 'NotFoundError'));
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(emitEvent).toHaveBeenCalledWith('recording://start-failed', {
+      message: 'No microphone was found. Connect or enable a microphone, then try again.',
+    });
+    expect(closeWin).toHaveBeenCalled();
+  });
+
   it('starts native window dragging from the handle on non-Windows platforms', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();

@@ -197,11 +197,9 @@ export function useRecorder() {
             ? await resolveAudioInputDeviceId()
             : null;
           const audio: MediaTrackConstraints = {
-            channelCount: 1,
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
-            sampleRate: 44100,
           };
           if (selectedDeviceId) {
             audio.deviceId = { exact: selectedDeviceId };
