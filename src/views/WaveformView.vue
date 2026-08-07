@@ -108,6 +108,7 @@ import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
+import { recordingStartErrorMessage } from '../composables/recordingStartError';
 import { useWaveform } from '../composables/useWaveform';
 import {
   getActiveBackend,
@@ -443,11 +444,17 @@ async function startRecording() {
   let mode: ReturnType<typeof deriveRecordingMode>;
   try {
     mode = deriveRecordingMode(await loadRecordingEnabled());
-  } catch {
+  } catch (error) {
+    await emit('recording://start-failed', {
+      message: recordingStartErrorMessage(error),
+    }).catch(() => {});
     await rollbackAndClose();
     return;
   }
   if (mode === null) {
+    await emit('recording://start-failed', {
+      message: 'No recording source is enabled. Enable Microphone or System Audio in Settings, then try again.',
+    }).catch(() => {});
     await rollbackAndClose();
     return;
   }
@@ -465,7 +472,10 @@ async function startRecording() {
 
   try {
     await recorder.startRecording(mode);
-  } catch {
+  } catch (error) {
+    await emit('recording://start-failed', {
+      message: recordingStartErrorMessage(error),
+    }).catch(() => {});
     await rollbackAndClose();
     return;
   }
