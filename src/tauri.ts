@@ -255,6 +255,12 @@ export interface ModelStatus {
   llmReady?: boolean;
 }
 
+/** Whether a recording is starting or actively capturing. Finalization and a
+ * terminal waveform window do not count as active recording. */
+export function isRecordingActive(): Promise<boolean> {
+  return invoke<boolean>('is_recording_active');
+}
+
 export const local = {
   finalizeRecording(
     audio: number[],

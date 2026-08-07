@@ -83,17 +83,21 @@ vi.mock('../composables/useMeetingApi', () => ({
 
 // vi.mock is hoisted before top-level consts, so shared mock handles that the
 // factory closes over must live in vi.hoisted() to avoid TDZ errors.
-const { discardPendingAudio, recordingIdForStart } = vi.hoisted(() => ({
+const { discardPendingAudio, recordingIdForStart, recordingStatus } = vi.hoisted(() => ({
   discardPendingAudio: vi.fn(() => Promise.resolve()),
   // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
   // i.e. a fresh recording. Tests that exercise the append case override this.
   recordingIdForStart: vi.fn((createdAt: string) =>
     Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
   ),
+  recordingStatus: vi.fn(() => Promise.reject(new Error('recording not persisted'))),
 }));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
-  local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
+  local: {
+    recordingIdForStart: (...a: [string]) => recordingIdForStart(...a),
+    recordingStatus: (...a: [string]) => recordingStatus(...a),
+  },
 }));
 
 import WaveformView from './WaveformView.vue';
@@ -126,6 +130,7 @@ beforeEach(() => {
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
+  recordingStatus.mockRejectedValue(new Error('recording not persisted'));
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -391,6 +396,26 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(wrapper.find('.status-icon.err').exists()).toBe(true);
     expect(closeWin).not.toHaveBeenCalled();
+  });
+
+  it('closes a local failed finalize once its audio is persisted for library retry', async () => {
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('transcription failed'));
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
+    expect(closeWin).toHaveBeenCalled();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(false);
   });
 
   it('never broadcasts a success phase when finalize fails', async () => {

@@ -729,6 +729,26 @@ async function runFinalize() {
     closeTimer = setTimeout(() => { closeTimer = null; void closeWindow(); }, SUCCESS_CLOSE_MS);
   } catch (err) {
     console.error('Finalize failed:', err);
+    // Local transcription failures are terminal but recoverable: Rust writes
+    // the audio + Failed metadata before returning the error, and Meeting
+    // detail owns retry from that persisted audio. Do not retain the hidden
+    // waveform (and block a new recording) once persistence is confirmed.
+    const meta = stoppedMeta.value;
+    if (backend.value.id === 'local' && meta) {
+      const failedId = localRecordingIdFromStart(meta.startAt ?? meta.endAt);
+      try {
+        const persisted = await local.recordingStatus(failedId);
+        if (persisted.status === 'failed') {
+          stoppedBlob.value = null;
+          stoppedMeta.value = null;
+          await closeWindow();
+          return;
+        }
+      } catch {
+        // If persistence cannot be confirmed, retain the in-memory blob and
+        // recovery controls exactly as before so audio is never discarded.
+      }
+    }
     // Stay open on failure so the user can retry or dismiss.
     uploadResult.value = 'failed';
   } finally {

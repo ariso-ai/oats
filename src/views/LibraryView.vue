@@ -37,8 +37,8 @@
         v-if="recordingOffscreen"
         class="add-btn add-btn--recording"
         type="button"
-        aria-label="Show current recording"
-        title="Show current recording"
+        :aria-label="offscreenRecordingLabel"
+        :title="offscreenRecordingLabel"
         @click="showRecordingMeeting"
       >
         <span class="rec-wave" aria-hidden="true">
@@ -47,7 +47,7 @@
           <span class="rec-wave-bar" />
           <span class="rec-wave-bar" />
         </span>
-        <span class="add-btn-label">In recording</span>
+        <span class="add-btn-label">{{ offscreenRecordingLabel }}</span>
       </button>
       <button
         v-else
@@ -308,7 +308,16 @@ const recorderStripVisible = computed(
 // A recording is running but its meeting isn't on-screen (the user closed the
 // detail or navigated to another meeting). The titlebar then shows a
 // "Recording" indicator instead of the Start button.
-const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
+const recordingOffscreen = computed(
+  () =>
+    !recorderStripVisible.value &&
+    (recordingActive.value || recordingPhase.value === 'uploading' || recordingPhase.value === 'failed'),
+);
+const offscreenRecordingLabel = computed(() => {
+  if (recordingPhase.value === 'failed') return 'Needs attention';
+  if (recordingPhase.value === 'uploading') return 'Saving recording';
+  return 'In recording';
+});
 // A single waveform window owns capture, upload, and failed-upload recovery.
 // Keep every launcher disabled for that window's full lifetime so a second
 // click cannot race native creation or replace a recoverable failed session.
@@ -524,12 +533,16 @@ function setRecording(next: boolean): void {
   recording.value = next;
 }
 
+let recordingStateRefreshId = 0;
+
 function markRecordingStarting(): void {
+  recordingStateRefreshId += 1;
   recordingPhase.value = 'starting';
   setRecording(true);
 }
 
 function clearRecordingLaunch(): void {
+  recordingStateRefreshId += 1;
   recorderOwnsLifecycle.value = false;
   recordingActive.value = false;
   recordingPhase.value = null;
@@ -605,8 +618,10 @@ async function onPendingUploaded(): Promise<void> {
 
 // Recording runs in the separate "waveform" window; its presence is our signal.
 async function refreshRecordingState(): Promise<void> {
+  const requestId = ++recordingStateRefreshId;
   try {
     const wins = await getAllWebviewWindows();
+    if (requestId !== recordingStateRefreshId) return;
     const hasRecorder = wins.some((w) => w.label === 'waveform');
     if (hasRecorder) {
       if (!recordingActive.value && recordingPhase.value === null) {

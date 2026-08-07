@@ -719,12 +719,12 @@ describe('LibraryView', () => {
       bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'uploading',
     });
     await flushPromises();
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.add-btn--recording').text()).toContain('Saving recording');
 
     // Native capture has stopped, but the waveform still owns upload/retry.
     emitEvent('recording://state', false);
     await flushPromises();
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.add-btn--recording').text()).toContain('Saving recording');
 
     emitEvent('recorder://state', {
       bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'closed',
@@ -757,6 +757,25 @@ describe('LibraryView', () => {
     await btn.trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('does not let a stale waveform-window query re-lock Start after close', async () => {
+    let finishWindowQuery!: (windows: { label: string }[]) => void;
+    getAllWebviewWindows.mockImplementationOnce(
+      () => new Promise((resolve) => { finishWindowQuery = resolve; }),
+    );
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await Promise.resolve();
+
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'closed',
+    });
+    finishWindowQuery([{ label: 'waveform' }]);
+    await flushPromises();
+
+    expect(wrapper.find('.add-btn').text()).toContain('Start recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
@@ -1141,6 +1160,22 @@ describe('LibraryView', () => {
     // It renders the mini waveform, not the plain "Start recording" button.
     expect(pill.find('.rec-wave').exists()).toBe(true);
     expect(wrapper.find('.add-btn').text()).not.toContain('Start recording');
+  });
+
+  it('keeps a failed recorder session discoverable when its meeting is off-screen', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recording://state', true);
+    emitEvent('recorder://state', localRecorderState({ phase: 'failed' }));
+    await flushPromises();
+
+    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    await flushPromises();
+
+    const indicator = wrapper.find('.add-btn--recording');
+    expect(indicator.exists()).toBe(true);
+    expect(indicator.text()).toContain('Needs attention');
   });
 
   // Req 2: clicking the indicator re-docks the strip on the recording meeting.

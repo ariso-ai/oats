@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
-const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
+const isRecordingActive = vi.fn(() => Promise.resolve(false));
 const emit = vi.fn((..._a: unknown[]) => Promise.resolve());
 const getBackendSetting = vi.fn(() => Promise.resolve('ariso' as const));
 const setBackendSetting = vi.fn((_b: unknown) => Promise.resolve());
@@ -40,9 +40,6 @@ const watchAudioInputDevices = vi.hoisted(() => vi.fn((callback: () => void) => 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
 
-vi.mock('@tauri-apps/api/webviewWindow', () => ({
-  getAllWebviewWindows: () => getAllWebviewWindows(),
-}));
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (name: string, cb: (e: { payload: unknown }) => void) => {
     listeners.set(name, cb);
@@ -81,6 +78,7 @@ vi.mock('../tauri', () => ({
   getVaultDir: () => getVaultDir(),
   setVaultDir: (path: string) => setVaultDir(path),
   pickVaultFolder: (current?: string) => pickVaultFolder(current),
+  isRecordingActive: () => isRecordingActive(),
   local: {
     modelStatus: () => Promise.resolve({ state: 'not_downloaded' }),
     downloadStt: () => downloadStt(),
@@ -157,7 +155,7 @@ enableAutoUnmount(afterEach);
 beforeEach(() => {
   vi.clearAllMocks();
   listeners.clear();
-  getAllWebviewWindows.mockResolvedValue([]);
+  isRecordingActive.mockResolvedValue(false);
   // clearAllMocks keeps the last-set implementation, so restore the signed-out
   // defaults for every test; the avatar suite overrides these explicitly.
   checkSession.mockResolvedValue(null);
@@ -310,8 +308,8 @@ describe('SettingsView backend switching during recording', () => {
     expect(wrapper.text()).not.toContain("Backend can't be changed while recording.");
   });
 
-  it('disables the trigger and shows a hint when the waveform window exists', async () => {
-    getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
+  it('disables the trigger and shows a hint when native recording state is active', async () => {
+    isRecordingActive.mockResolvedValue(true);
     const wrapper = mount(SettingsView);
     await flushPromises();
     const trigger = wrapper.get('.backend-trigger');
@@ -344,15 +342,40 @@ describe('SettingsView backend switching during recording', () => {
     expect(wrapper.find('.backend-menu').exists()).toBe(false);
   });
 
-  it('re-checks the waveform window on window focus', async () => {
+  it('re-checks native recording state on window focus', async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
     expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeUndefined();
 
-    getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
+    isRecordingActive.mockResolvedValue(true);
     window.dispatchEvent(new Event('focus'));
     await flushPromises();
     expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeDefined();
+  });
+
+  it('does not disable controls for a terminal waveform window after capture ends', async () => {
+    isRecordingActive.mockResolvedValue(false);
+    platformOs.value = 'windows';
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeUndefined();
+    expect(wrapper.get('#recording-input-device').attributes('disabled')).toBeUndefined();
+  });
+
+  it('does not let a stale active-state query override a later stop event', async () => {
+    let finishQuery!: (active: boolean) => void;
+    isRecordingActive.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { finishQuery = resolve; }),
+    );
+    const wrapper = mount(SettingsView);
+    await Promise.resolve();
+
+    fireRecordingState(false);
+    finishQuery(true);
+    await flushPromises();
+
+    expect(wrapper.get('.backend-trigger').attributes('disabled')).toBeUndefined();
   });
 
   it('ignores a backend selection that lands as recording starts', async () => {

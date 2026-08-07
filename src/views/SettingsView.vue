@@ -480,8 +480,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
-import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
+import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, isRecordingActive, type ModelStatus } from '../tauri';
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -704,16 +703,20 @@ const backendOptions = [
 ] as const;
 const backendOpen = ref(false);
 const recordingActive = ref(false);
+let recordingStateRefreshId = 0;
 
-// Recording runs in the separate "waveform" window; its presence is the
-// source of truth on mount/focus, and recording://state keeps it live while
-// this (persistent) window stays open in the background.
+// Query native capture/session state on mount/focus. A waveform window can
+// legitimately outlive capture while it finalizes or exposes recovery, so
+// window presence alone must not lock backend or input controls.
 async function refreshRecordingState() {
+  const requestId = ++recordingStateRefreshId;
   try {
-    const wins = await getAllWebviewWindows();
-    recordingActive.value = wins.some((w) => w.label === 'waveform');
+    const active = await isRecordingActive();
+    if (requestId === recordingStateRefreshId) recordingActive.value = active;
   } catch (e) {
-    console.error('Failed to read window state', e);
+    if (requestId === recordingStateRefreshId) {
+      console.error('Failed to read recording state', e);
+    }
   }
 }
 
@@ -1281,12 +1284,14 @@ onMounted(async () => {
   void refreshRecordingState();
   window.addEventListener('focus', onWindowFocus);
   const unRecording = await listen<boolean>('recording://state', (e) => {
+    recordingStateRefreshId += 1;
     recordingActive.value = e.payload;
   });
   unlistenUpdates.push(unRecording);
 });
 
 onUnmounted(() => {
+  recordingStateRefreshId += 1;
   audioInputRefreshId += 1;
   unlistenSignInPrompt?.();
   unlistenUpdates.forEach((un) => un());

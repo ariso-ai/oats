@@ -784,6 +784,15 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
     Ok(())
 }
 
+/// Return whether a recording session is still starting or actively capturing.
+/// Unlike waveform-window presence, this becomes false as soon as capture stops,
+/// so Settings does not remain locked during finalization or terminal recovery.
+#[tauri::command]
+pub fn is_recording_active(app: tauri::AppHandle) -> bool {
+    app.state::<crate::recording_state::RecordingState>()
+        .is_active()
+}
+
 #[tauri::command]
 pub async fn create_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     open_settings_window(&app)
