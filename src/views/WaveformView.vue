@@ -743,6 +743,15 @@ async function runFinalize() {
     ) {
       effectiveMeetingId.value = result.meetingId;
     }
+    if (
+      result.backend === 'local' &&
+      typeof result.id === 'string' &&
+      stoppedMeta.value
+    ) {
+      // Rust is authoritative: a requested append can fall back to a fresh
+      // recording if the target is no longer appendable.
+      stoppedMeta.value.localRecordingId = result.id;
+    }
     uploadResult.value = 'success';
     stoppedBlob.value = null;
     stoppedMeta.value = null;
@@ -756,19 +765,28 @@ async function runFinalize() {
     // waveform (and block a new recording) once persistence is confirmed.
     const meta = stoppedMeta.value;
     if (backend.value.id === 'local' && meta) {
-      const failedId =
-        meta.localRecordingId ?? localRecordingIdFromStart(meta.startAt ?? meta.endAt);
-      try {
-        const persisted = await local.recordingStatus(failedId);
-        if (persisted.status === 'failed') {
-          stoppedBlob.value = null;
-          stoppedMeta.value = null;
-          await closeWindow();
-          return;
+      // Failed append transcription is intentionally persisted by Rust as a
+      // fresh clip (the target stays untouched). Other failures can belong to
+      // the selected target, so probe both deterministic candidates and keep
+      // the metadata aligned with whichever record actually exists as Failed.
+      const freshId = localRecordingIdFromStart(meta.startAt ?? meta.endAt);
+      const failedCandidates = [...new Set([freshId, meta.localRecordingId].filter(
+        (id): id is string => typeof id === 'string' && id.length > 0,
+      ))];
+      for (const failedId of failedCandidates) {
+        try {
+          const persisted = await local.recordingStatus(failedId);
+          if (persisted.status === 'failed') {
+            meta.localRecordingId = failedId;
+            stoppedBlob.value = null;
+            stoppedMeta.value = null;
+            await closeWindow();
+            return;
+          }
+        } catch {
+          // Try the other possible target. If neither can be confirmed, retain
+          // the in-memory blob and recovery controls so audio is never lost.
         }
-      } catch {
-        // If persistence cannot be confirmed, retain the in-memory blob and
-        // recovery controls exactly as before so audio is never discarded.
       }
     }
     // Stay open on failure so the user can retry or dismiss.

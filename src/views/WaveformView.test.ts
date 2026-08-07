@@ -434,7 +434,7 @@ describe('WaveformView vertical pill', () => {
     await wrapper.find('.stop-btn').trigger('click');
     await flushPromises();
 
-    expect(recordingStatus).toHaveBeenCalledWith('2026-06-01T09-00-00Z');
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
     expect(closeWin).toHaveBeenCalled();
   });
 
@@ -454,8 +454,50 @@ describe('WaveformView vertical pill', () => {
     await wrapper.find('.stop-btn').trigger('click');
     await flushPromises();
 
-    expect(recordingStatus).toHaveBeenCalledWith('2026-06-08T09-30-00Z');
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
     expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('checks the selected append target when no fresh failed clip was persisted', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('finalize failed'));
+    recordingStatus
+      .mockRejectedValueOnce(new Error('fresh recording not persisted'))
+      .mockResolvedValueOnce({
+        status: 'failed',
+        hasTranscript: false,
+        hasNote: false,
+        notesStatus: 'pending',
+      });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus.mock.calls.map(([id]) => id)).toEqual([
+      '2026-06-09T10-00-00Z',
+      '2026-06-01T09-00-00Z',
+    ]);
+    expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('adopts the recording id Rust actually selects for a successful fallback', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({
+      backend: 'local',
+      id: '2026-06-09T10-00-00Z',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    const finalizedMeta = finalizeRecording.mock.calls[0][1] as { localRecordingId?: string };
+    expect(finalizedMeta.localRecordingId).toBe('2026-06-09T10-00-00Z');
   });
 
   it('never broadcasts a success phase when finalize fails', async () => {
