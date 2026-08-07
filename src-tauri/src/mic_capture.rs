@@ -76,12 +76,11 @@ mod imp {
         CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows::Win32::Media::Audio::{
-        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
         IMMEndpoint, MMDeviceEnumerator, eCapture, eConsole,
     };
-    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
     use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject};
     use windows::core::{Interface, PCSTR, PCWSTR};
 
@@ -91,6 +90,38 @@ mod imp {
     }
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
+    const STARTUP_ATTEMPTS: usize = 3;
+    const STARTUP_SIGNAL_TIMEOUT: Duration = Duration::from_secs(3);
+    const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+    fn pcm_has_signal(pcm: &[u8]) -> bool {
+        pcm.chunks_exact(2)
+            .any(|sample| sample[0] != 0 || sample[1] != 0)
+    }
+
+    fn is_transient_startup_error(error: &str) -> bool {
+        // AUDCLNT_E_DEVICE_INVALIDATED is expected while a Bluetooth endpoint
+        // switches from its stereo playback profile to hands-free capture.
+        error.contains("0x88890004")
+    }
+
+    fn capture_layout(format: &WaveFormat) -> Result<(usize, usize, u32), String> {
+        if format.get_subformat().ok() != Some(SampleType::Float)
+            || format.get_bitspersample() != 32
+        {
+            return Err("Windows microphone mix format is not 32-bit float PCM".into());
+        }
+        let source_rate = format.get_samplespersec();
+        let channels = format.get_nchannels() as usize;
+        if source_rate == 0 || channels == 0 {
+            return Err("Windows microphone reported an invalid mix format".into());
+        }
+        let bytes_per_frame = format.get_blockalign() as usize;
+        if bytes_per_frame != channels * std::mem::size_of::<f32>() {
+            return Err("Windows microphone reported an unsupported float PCM layout".into());
+        }
+        Ok((bytes_per_frame, channels, source_rate))
+    }
 
     struct ComGuard;
 
@@ -202,25 +233,36 @@ mod imp {
 
     fn initialize_client(
         device: &IMMDevice,
-    ) -> Result<(IAudioClient, EventHandle, IAudioCaptureClient, usize), String> {
+    ) -> Result<
+        (
+            IAudioClient,
+            EventHandle,
+            IAudioCaptureClient,
+            usize,
+            usize,
+            u32,
+        ),
+        String,
+    > {
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(|error| format!("open Windows microphone: {error}"))?;
-        let source_rate = 44_100_u32;
-        let channels = 1_usize;
-        let format = WaveFormat::new(
-            32,
-            32,
-            &SampleType::Float,
-            source_rate as usize,
-            channels,
-            None,
-        );
+        let raw_format = unsafe { client.GetMixFormat() }
+            .map_err(|error| format!("read Windows microphone mix format: {error}"))?;
+        let format_result = if raw_format.is_null() {
+            Err("Windows microphone returned a null mix format".to_string())
+        } else {
+            WaveFormat::parse(unsafe { &*raw_format })
+                .map_err(|error| format!("parse Windows microphone mix format: {error}"))
+        };
+        if !raw_format.is_null() {
+            unsafe { CoTaskMemFree(Some(raw_format.cast())) };
+        }
+        let format = format_result?;
+        let (bytes_per_frame, channels, source_rate) = capture_layout(&format)?;
         let mut min_period = 0_i64;
         unsafe { client.GetDevicePeriod(None, Some(&mut min_period)) }
             .map_err(|error| format!("read Windows microphone period: {error}"))?;
-        let stream_flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-            | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-            | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        let stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
         unsafe {
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -240,7 +282,14 @@ mod imp {
             .map_err(|error| format!("register Windows microphone event: {error}"))?;
         let capture: IAudioCaptureClient = unsafe { client.GetService() }
             .map_err(|error| format!("open Windows microphone capture buffer: {error}"))?;
-        Ok((client, event, capture, format.get_blockalign() as usize))
+        Ok((
+            client,
+            event,
+            capture,
+            bytes_per_frame,
+            channels,
+            source_rate,
+        ))
     }
 
     fn run_capture(
@@ -249,19 +298,16 @@ mod imp {
         ready: Sender<Result<(), String>>,
         stop: Receiver<()>,
     ) {
+        let mut ready = Some(ready);
         let result = (|| -> Result<(), String> {
             let _com = initialize_com()?;
             let device = select_device(device_id.as_deref())?;
-            let (client, event, capture, bytes_per_frame) = initialize_client(&device)?;
-            let channels = 1_usize;
-            let mut resampler = Resampler::new(44_100.0, 44_100.0);
+            let (client, event, capture, bytes_per_frame, channels, source_rate) =
+                initialize_client(&device)?;
+            let mut resampler = Resampler::new(source_rate as f64, 44_100.0);
 
             unsafe { client.Start() }
                 .map_err(|error| format!("start Windows microphone capture: {error}"))?;
-            if ready.send(Ok(())).is_err() {
-                let _ = unsafe { client.Stop() };
-                return Ok(());
-            }
 
             let capture_result = (|| -> Result<(), String> {
                 loop {
@@ -319,6 +365,15 @@ mod imp {
                         let mut pcm = Vec::with_capacity(mono.len() * 2);
                         resampler.process(&mono, &mut pcm);
                         if !pcm.is_empty() {
+                            let has_signal = pcm_has_signal(&pcm);
+                            if ready.is_some() && !has_signal {
+                                continue;
+                            }
+                            if let Some(ready_tx) = ready.take() {
+                                if ready_tx.send(Ok(())).is_err() {
+                                    return Ok(());
+                                }
+                            }
                             let _ = app.emit("mic-audio-data", base64_encode(&pcm));
                         }
                     }
@@ -332,7 +387,9 @@ mod imp {
         })();
 
         if let Err(error) = result {
-            let _ = ready.send(Err(error.clone()));
+            if let Some(ready_tx) = ready.take() {
+                let _ = ready_tx.send(Err(error.clone()));
+            }
             let _ = app.emit("microphone-capture-error", error);
         }
     }
@@ -344,31 +401,50 @@ mod imp {
             return Err("Microphone capture already running".into());
         }
 
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("oats-wasapi-microphone".into())
-            .spawn(move || run_capture(app, device_id, ready_tx, stop_rx))
-            .map_err(|error| format!("start Windows microphone thread: {error}"))?;
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {
-                *guard = Some(CaptureState {
-                    stop: stop_tx,
-                    thread,
-                });
-                Ok(())
-            }
-            Ok(Err(error)) => {
-                let _ = thread.join();
-                Err(error)
-            }
-            Err(error) => {
-                let _ = stop_tx.send(());
-                Err(format!(
-                    "Windows microphone initialization timed out: {error}"
-                ))
+        for attempt in 1..=STARTUP_ATTEMPTS {
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let capture_app = app.clone();
+            let capture_device_id = device_id.clone();
+            let thread = std::thread::Builder::new()
+                .name("oats-wasapi-microphone".into())
+                .spawn(move || run_capture(capture_app, capture_device_id, ready_tx, stop_rx))
+                .map_err(|error| format!("start Windows microphone thread: {error}"))?;
+            match ready_rx.recv_timeout(STARTUP_SIGNAL_TIMEOUT) {
+                Ok(Ok(())) => {
+                    *guard = Some(CaptureState {
+                        stop: stop_tx,
+                        thread,
+                    });
+                    return Ok(());
+                }
+                Ok(Err(error)) => {
+                    let _ = thread.join();
+                    if is_transient_startup_error(&error) {
+                        if attempt == STARTUP_ATTEMPTS {
+                            return Err("selected microphone is unavailable".into());
+                        }
+                        std::thread::sleep(TRANSIENT_RETRY_DELAY);
+                        continue;
+                    }
+                    return Err(error);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = thread.join();
+                    return Err("Windows microphone stopped during startup".into());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = stop_tx.send(());
+                    let _ = thread.join();
+                    if attempt == STARTUP_ATTEMPTS {
+                        return Err(
+                            "Windows microphone connected but delivered no audio signal".into()
+                        );
+                    }
+                }
             }
         }
+        unreachable!("Windows microphone startup attempts are nonzero")
     }
 
     pub fn stop() -> Result<(), String> {
@@ -390,7 +466,9 @@ mod imp {
         let Ok(device) = select_device(None) else {
             return false;
         };
-        let Ok((client, _event, _capture, _bytes_per_frame)) = initialize_client(&device) else {
+        let Ok((client, _event, _capture, _bytes_per_frame, _channels, _source_rate)) =
+            initialize_client(&device)
+        else {
             return false;
         };
         if unsafe { client.Start() }.is_err() {
@@ -405,6 +483,50 @@ mod imp {
 
     pub fn request_permission() -> bool {
         probe()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{capture_layout, is_transient_startup_error, pcm_has_signal};
+        use wasapi::{SampleType, WaveFormat};
+
+        #[test]
+        fn detects_nonzero_pcm_signal() {
+            assert!(!pcm_has_signal(&[]));
+            assert!(!pcm_has_signal(&[0, 0, 0, 0]));
+            assert!(pcm_has_signal(&[0, 0, 1, 0]));
+            assert!(pcm_has_signal(&[0, 0, 0, 0x80]));
+        }
+
+        #[test]
+        fn accepts_native_bluetooth_hands_free_mix_format() {
+            let format = WaveFormat::new(32, 32, &SampleType::Float, 16_000, 1, None);
+            assert_eq!(capture_layout(&format).unwrap(), (4, 1, 16_000));
+        }
+
+        #[test]
+        fn preserves_native_channel_and_sample_rate_layout() {
+            let format = WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, None);
+            assert_eq!(capture_layout(&format).unwrap(), (8, 2, 48_000));
+        }
+
+        #[test]
+        fn rejects_integer_or_invalid_native_mix_formats() {
+            let integer = WaveFormat::new(16, 16, &SampleType::Int, 16_000, 1, None);
+            assert!(capture_layout(&integer).is_err());
+            let zero_rate = WaveFormat::new(32, 32, &SampleType::Float, 0, 1, None);
+            assert!(capture_layout(&zero_rate).is_err());
+        }
+
+        #[test]
+        fn retries_only_windows_device_invalidation_errors() {
+            assert!(is_transient_startup_error(
+                "query Windows microphone packet: 0x88890004"
+            ));
+            assert!(!is_transient_startup_error(
+                "initialize Windows microphone capture: access denied"
+            ));
+        }
     }
 }
 

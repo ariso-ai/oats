@@ -37,6 +37,14 @@ describe('recordingStartErrorMessage', () => {
     ).toContain('microphone access');
   });
 
+  it('explains when a connected Windows microphone sends only silence', () => {
+    expect(
+      recordingStartErrorMessage(
+        'Windows microphone connected but delivered no audio signal',
+      ),
+    ).toContain('did not send any audio');
+  });
+
   it('recognizes native Windows system-audio failures', () => {
     expect(recordingStartErrorMessage('initialize WASAPI loopback: no render endpoint')).toContain(
       'output device',

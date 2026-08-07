@@ -45,7 +45,10 @@ choice for users who want Windows to manage Bluetooth profile and endpoint switc
 `src-tauri/src/mic_capture.rs` owns active Windows capture-endpoint enumeration and a
 shared-mode WASAPI capture worker. It emits the same base64 Int16 mono 44.1 kHz
 `mic-audio-data` event as the macOS HAL backend, so the frontend mixer remains
-platform-independent. `src/composables/useAudioInputDevices.ts` owns plugin-store
+platform-independent. WASAPI is initialized with each endpoint's native shared-mode
+mix format (including the AirPods hands-free profile's lower sample rate); Oats then
+downmixes and resamples the received PCM to its frontend contract. This avoids relying
+on driver-side conversion to a forced 44.1 kHz capture format. `src/composables/useAudioInputDevices.ts` owns plugin-store
 persistence, availability resolution, and periodic refresh subscription. The Settings
 view activates it only when native platform capabilities report Windows.
 
@@ -55,6 +58,14 @@ endpoint ID to `start_microphone_capture`; a uniquely matching label repairs a r
 ID. A missing or ambiguous explicit choice fails with an actionable unavailable-device
 error. System default passes no ID and WASAPI resolves the current default capture
 endpoint at recording start. macOS continues using its existing HAL default-input path.
+
+Windows capture does not report startup success until the endpoint delivers nonzero PCM.
+This matters for Bluetooth HFP endpoints, which can accept `IAudioClient::Start` while the
+hands-free profile is still producing digital silence. Oats restarts that startup up to
+three times. A transient WASAPI device-invalidation error is also retried because Windows
+can emit it while switching a Bluetooth endpoint into hands-free mode. If no attempt
+produces a signal, recording fails visibly instead of saving a silent MP3 and sending it
+to transcription.
 
 One read-only Tauri command lists active native microphone endpoints; the existing start
 command gains an optional, length-bounded endpoint ID. No capability permission,

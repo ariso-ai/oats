@@ -24,6 +24,9 @@ export function recordingStartErrorMessage(error: unknown): string {
   if (/windows microphone.*access denied|microphone capture: access denied/i.test(detail)) {
     return 'Microphone access is blocked. Enable microphone access for oats in Windows Settings, then try again.';
   }
+  if (/windows microphone connected but delivered no audio signal/i.test(detail)) {
+    return 'The selected microphone connected but did not send any audio. Reconnect it or choose another input in Settings, then try again.';
+  }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
     return 'No microphone was found. Connect or enable a microphone, then try again.';
   }
