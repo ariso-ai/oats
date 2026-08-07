@@ -255,6 +255,7 @@ fn main() {
             audio_capture::check_screen_capture_permission,
             mic_capture::start_microphone_capture,
             mic_capture::stop_microphone_capture,
+            mic_capture::list_microphone_input_devices,
             mic_capture::request_microphone_permission,
             mic_capture::check_microphone_permission,
             update_manager::update_check,

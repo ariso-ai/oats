@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const values = new Map<string, unknown>();
 const get = vi.fn((key: string) => Promise.resolve(values.get(key)));
@@ -12,6 +12,16 @@ vi.mock('@tauri-apps/plugin-store', () => ({
   load: vi.fn(() => Promise.resolve({ get, set })),
 }));
 
+const listMicrophoneInputDevices = vi.fn(() => Promise.resolve([] as Array<{
+  deviceId: string;
+  label: string;
+  isDefault: boolean;
+}>));
+
+vi.mock('../tauri', () => ({
+  listMicrophoneInputDevices: () => listMicrophoneInputDevices(),
+}));
+
 import {
   listAudioInputDevices,
   loadAudioInputPreference,
@@ -20,37 +30,31 @@ import {
   watchAudioInputDevices,
 } from './useAudioInputDevices';
 
-const enumerateDevices = vi.fn<() => Promise<MediaDeviceInfo[]>>();
-const addEventListener = vi.fn();
-const removeEventListener = vi.fn();
-
-function device(kind: MediaDeviceKind, deviceId: string, label: string): MediaDeviceInfo {
-  return { kind, deviceId, label, groupId: '', toJSON: () => ({}) };
+function device(deviceId: string, label: string, isDefault = false) {
+  return { deviceId, label, isDefault };
 }
 
 beforeEach(() => {
   values.clear();
   vi.clearAllMocks();
-  enumerateDevices.mockResolvedValue([]);
-  Object.defineProperty(navigator, 'mediaDevices', {
-    configurable: true,
-    value: { enumerateDevices, addEventListener, removeEventListener },
-  });
+  listMicrophoneInputDevices.mockResolvedValue([]);
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('Windows audio input preferences', () => {
-  it('lists concrete audio inputs and omits output/default pseudo-devices', async () => {
-    enumerateDevices.mockResolvedValue([
-      device('audioinput', 'default', 'Default - USB Mic'),
-      device('audiooutput', 'speaker', 'Speakers'),
-      device('audioinput', 'usb', 'USB Mic'),
-      device('audioinput', 'built-in', ''),
-      device('audioinput', 'usb', 'USB Mic duplicate'),
+  it('lists concrete native Windows capture endpoints', async () => {
+    listMicrophoneInputDevices.mockResolvedValue([
+      device('{usb}', 'USB Mic', true),
+      device('{airpods}', 'Headset (AirPods) (Bluetooth)'),
     ]);
 
     await expect(listAudioInputDevices()).resolves.toEqual([
-      { deviceId: 'usb', label: 'USB Mic' },
-      { deviceId: 'built-in', label: 'Microphone 2' },
+      { deviceId: '{usb}', label: 'USB Mic' },
+      { deviceId: '{airpods}', label: 'Headset (AirPods) (Bluetooth)' },
     ]);
   });
 
@@ -71,16 +75,19 @@ describe('Windows audio input preferences', () => {
   it('uses an available saved device', async () => {
     values.set('recordingInputDeviceId', 'usb');
     values.set('recordingInputDeviceLabel', 'USB Mic');
-    enumerateDevices.mockResolvedValue([device('audioinput', 'usb', 'USB Mic')]);
+    listMicrophoneInputDevices.mockResolvedValue([device('usb', 'USB Mic')]);
     await expect(resolveAudioInputDeviceId()).resolves.toBe('usb');
   });
 
-  it('rebinds a saved device when WebView2 rotates its ID but keeps a unique label', async () => {
+  it('migrates a legacy browser communications choice to one native endpoint', async () => {
     values.set('recordingInputDeviceId', 'old-airpods-id');
-    values.set('recordingInputDeviceLabel', 'Headset (AirPods) (Bluetooth)');
-    enumerateDevices.mockResolvedValue([
-      device('audioinput', 'new-airpods-id', 'Headset (AirPods) (Bluetooth)'),
-      device('audioinput', 'webcam', 'C920 Microphone'),
+    values.set(
+      'recordingInputDeviceLabel',
+      'Communications - Headset (AirPods) (Bluetooth)',
+    );
+    listMicrophoneInputDevices.mockResolvedValue([
+      device('new-airpods-id', 'Headset (AirPods) (Bluetooth)'),
+      device('webcam', 'C920 Microphone'),
     ]);
 
     await expect(resolveAudioInputDeviceId()).resolves.toBe('new-airpods-id');
@@ -94,7 +101,7 @@ describe('Windows audio input preferences', () => {
     values.set('recordingInputDeviceId', 'usb');
     values.set('recordingInputDeviceLabel', 'USB Mic');
 
-    enumerateDevices.mockResolvedValue([device('audioinput', 'built-in', 'Laptop Mic')]);
+    listMicrophoneInputDevices.mockResolvedValue([device('built-in', 'Laptop Mic')]);
     await expect(resolveAudioInputDeviceId()).rejects.toMatchObject({
       name: 'SelectedAudioInputUnavailableError',
     });
@@ -107,9 +114,9 @@ describe('Windows audio input preferences', () => {
   it('does not guess when multiple current devices have the saved label', async () => {
     values.set('recordingInputDeviceId', 'old-airpods-id');
     values.set('recordingInputDeviceLabel', 'Headset (AirPods) (Bluetooth)');
-    enumerateDevices.mockResolvedValue([
-      device('audioinput', 'airpods-1', 'Headset (AirPods) (Bluetooth)'),
-      device('audioinput', 'airpods-2', 'Headset (AirPods) (Bluetooth)'),
+    listMicrophoneInputDevices.mockResolvedValue([
+      device('airpods-1', 'Headset (AirPods) (Bluetooth)'),
+      device('airpods-2', 'Headset (AirPods) (Bluetooth)'),
     ]);
 
     await expect(resolveAudioInputDeviceId()).rejects.toMatchObject({
@@ -117,12 +124,15 @@ describe('Windows audio input preferences', () => {
     });
   });
 
-  it('subscribes to device changes and removes the same listener', () => {
+  it('polls for native device changes and stops polling on cleanup', () => {
     const callback = vi.fn();
     const stop = watchAudioInputDevices(callback);
-    expect(addEventListener).toHaveBeenCalledWith('devicechange', callback);
+
+    vi.advanceTimersByTime(2_000);
+    expect(callback).toHaveBeenCalledOnce();
 
     stop();
-    expect(removeEventListener).toHaveBeenCalledWith('devicechange', callback);
+    vi.advanceTimersByTime(4_000);
+    expect(callback).toHaveBeenCalledOnce();
   });
 });

@@ -23,6 +23,20 @@ describe('recordingStartErrorMessage', () => {
     );
   });
 
+  it('recognizes native Windows selected-microphone failures', () => {
+    expect(recordingStartErrorMessage('selected microphone is unavailable')).toContain(
+      'selected microphone is unavailable',
+    );
+  });
+
+  it('recognizes native Windows microphone privacy failures', () => {
+    expect(
+      recordingStartErrorMessage(
+        'initialize Windows microphone capture: access denied',
+      ),
+    ).toContain('microphone access');
+  });
+
   it('recognizes native Windows system-audio failures', () => {
     expect(recordingStartErrorMessage('initialize WASAPI loopback: no render endpoint')).toContain(
       'output device',

@@ -1,5 +1,5 @@
 /** Convert browser/native capture failures into a stable, actionable message.
- * Raw device errors vary by WebView2 and driver and should not be shown verbatim. */
+ * Raw device errors vary by platform and driver and should not be shown verbatim. */
 export function recordingStartErrorMessage(error: unknown): string {
   const name =
     typeof error === 'object' && error !== null && 'name' in error
@@ -17,6 +17,12 @@ export function recordingStartErrorMessage(error: unknown): string {
   }
   if (name === 'SelectedAudioInputUnavailableError') {
     return 'The selected microphone is unavailable. Reconnect it or choose another input in Settings, then try again.';
+  }
+  if (/selected microphone is unavailable/i.test(detail)) {
+    return 'The selected microphone is unavailable. Reconnect it or choose another input in Settings, then try again.';
+  }
+  if (/windows microphone.*access denied|microphone capture: access denied/i.test(detail)) {
+    return 'Microphone access is blocked. Enable microphone access for oats in Windows Settings, then try again.';
   }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
     return 'No microphone was found. Connect or enable a microphone, then try again.';

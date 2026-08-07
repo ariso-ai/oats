@@ -5,12 +5,10 @@
 
 ## Current behavior
 
-Windows microphone capture is owned by the WebView. Every new recording calls
-`navigator.mediaDevices.getUserMedia()` without a `deviceId`, so WebView2 asks Windows
-for the current default input. Oats does not enumerate inputs, expose the chosen input,
-persist a preference, or observe `devicechange`. A device connected after launch can
-only affect Oats indirectly if Windows makes it the default before the next recording.
-An active recording remains bound to the stream it opened.
+Windows microphone capture was originally owned by WebView2. That made explicit
+Bluetooth selection unreliable because the browser's endpoint IDs and visibility can
+change independently of Windows' native capture endpoints. The final implementation
+uses WASAPI shared-mode capture and enumerates the same native endpoints it opens.
 
 macOS uses the native HAL microphone path and is intentionally outside this change.
 
@@ -21,10 +19,14 @@ Settings → Recording:
 
 - `System default` is always the first option and preserves today's behavior.
 - Available `audioinput` devices follow by label.
-- Settings refreshes on mount, focus, and the browser `devicechange` event.
+- Settings refreshes on mount, focus, and a lightweight native-device polling watcher
+  while the Settings window is mounted.
 - A specific selection persists as its opaque device ID plus its last visible label.
-- If WebView2 rotates a saved ID after a reconnect, one unique exact-label match repairs
+- If Windows rotates a saved ID after a reconnect, one unique exact-label match repairs
   the saved ID before capture.
+- A legacy WebView2 `default`/`communications` preference may carry a synthetic label
+  prefix. Removing only that known prefix permits a one-time unique-label migration to
+  the real native endpoint; ambiguous matches remain unavailable.
 - If the saved device cannot be identified unambiguously, the select keeps
   `<label> (unavailable)` visible and asks the user to reconnect it or choose another
   input before recording.
@@ -40,28 +42,32 @@ choice for users who want Windows to manage Bluetooth profile and endpoint switc
 
 ## Implementation
 
-`src/composables/useAudioInputDevices.ts` owns enumeration normalization, plugin-store
-persistence, availability resolution, and `devicechange` subscription. The Settings
+`src-tauri/src/mic_capture.rs` owns active Windows capture-endpoint enumeration and a
+shared-mode WASAPI capture worker. It emits the same base64 Int16 mono 44.1 kHz
+`mic-audio-data` event as the macOS HAL backend, so the frontend mixer remains
+platform-independent. `src/composables/useAudioInputDevices.ts` owns plugin-store
+persistence, availability resolution, and periodic refresh subscription. The Settings
 view activates it only when native platform capabilities report Windows.
 
 At each Windows recording start, `useRecorder` resolves the saved preference against a
-fresh enumeration. An available explicit choice adds
-`deviceId: { exact: savedId }` to the existing audio constraints. A uniquely matching
-label repairs a rotated ID; a missing or ambiguous explicit choice fails with an
-actionable unavailable-device error. Only System default omits `deviceId`. macOS never
-calls this resolver.
+fresh native enumeration. An available explicit choice is passed as a bounded opaque
+endpoint ID to `start_microphone_capture`; a uniquely matching label repairs a rotated
+ID. A missing or ambiguous explicit choice fails with an actionable unavailable-device
+error. System default passes no ID and WASAPI resolves the current default capture
+endpoint at recording start. macOS continues using its existing HAL default-input path.
 
-No new Tauri command, capability, native permission, or network path is introduced.
-Device IDs are treated as opaque preferences and are neither logged nor passed across
-the invoke boundary.
+One read-only Tauri command lists active native microphone endpoints; the existing start
+command gains an optional, length-bounded endpoint ID. No capability permission,
+filesystem path, or network path is introduced. Device IDs remain local opaque
+preferences and are never logged.
 
 ## Focused verification
 
-- Unit-test filtering/default behavior, persistence, available and unavailable saved
-  choices, and device-change subscription cleanup.
+- Unit-test native enumeration/default behavior, persistence, available and unavailable
+  saved choices, and polling-subscription cleanup.
 - Settings tests cover Windows-only rendering, selection persistence, and unavailable
   messaging.
-- Recorder tests cover exact selected-device constraints, explicit unavailable-device
+- Recorder tests cover passing exact native endpoint IDs, explicit unavailable-device
   failure without fallback, and unchanged macOS native capture.
 - On Windows, smoke-test with two inputs or disconnect/reconnect while Settings is open,
   then start a new recording and confirm the selected track/device.

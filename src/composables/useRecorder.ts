@@ -4,10 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
 import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
-import {
-  resolveAudioInputDeviceId,
-  SelectedAudioInputUnavailableError,
-} from './useAudioInputDevices';
+import { resolveAudioInputDeviceId } from './useAudioInputDevices';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
@@ -168,7 +165,7 @@ export function useRecorder() {
     if (!useMic && !useSystemAudio) {
       throw new Error('No recording source is available');
     }
-    micUsesNativeCapture = useMic && caps.os === 'macos';
+    micUsesNativeCapture = useMic && (caps.os === 'macos' || caps.os === 'windows');
 
     try {
       audioContext = new AudioContext({ sampleRate: 44100 });
@@ -177,7 +174,7 @@ export function useRecorder() {
       const startMic = async (): Promise<void> => {
         if (!useMic) return;
         if (micUsesNativeCapture) {
-          // Register first so no frames from the native macOS HAL source are lost.
+          // Register first so no frames from the native HAL/WASAPI source are lost.
           micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
             if (isPaused.value) return;
             const binary = atob(event.payload);
@@ -189,36 +186,28 @@ export function useRecorder() {
             merged.set(samples, micAudioBuffer.length);
             micAudioBuffer = merged;
           });
-          // The HAL path avoids macOS Voice-Processing I/O and its device-level
-          // gain changes while a conference app is using the same microphone.
-          await startMicrophoneCapture();
-          micAudioActive = true;
-        } else {
-          // Windows keeps microphone capture in the webview; its native mic
-          // command is intentionally macOS-only.
           const selectedDeviceId = caps.os === 'windows'
             ? await resolveAudioInputDeviceId()
             : null;
+          try {
+            // macOS uses its HAL default-input path. Windows passes the native
+            // endpoint ID selected in Settings, or undefined for System default.
+            await startMicrophoneCapture(selectedDeviceId ?? undefined);
+            micAudioActive = true;
+          } catch (captureError) {
+            micAudioUnlisten?.();
+            micAudioUnlisten = null;
+            throw captureError;
+          }
+        } else {
+          // Unsupported preview targets keep the browser fallback, but both
+          // shipped desktop platforms use native microphone capture.
           const audio: MediaTrackConstraints = {
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
           };
-          if (selectedDeviceId) {
-            audio.deviceId = { exact: selectedDeviceId };
-          }
-          try {
-            micStream = await navigator.mediaDevices.getUserMedia({ audio });
-          } catch (captureError) {
-            const errorName = captureError instanceof DOMException
-              ? captureError.name
-              : (captureError as { name?: unknown } | null)?.name;
-            const selectedDeviceBecameUnavailable =
-              selectedDeviceId !== null &&
-              (errorName === 'NotFoundError' || errorName === 'OverconstrainedError');
-            if (!selectedDeviceBecameUnavailable) throw captureError;
-            throw new SelectedAudioInputUnavailableError();
-          }
+          micStream = await navigator.mediaDevices.getUserMedia({ audio });
           micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(analyserNode);
         }
