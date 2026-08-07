@@ -940,7 +940,22 @@ pub(crate) fn open_waveform_window(
         let _ = picker.close();
     }
     if let Some(existing) = app.get_webview_window("waveform") {
+        // Backfill the lifecycle claim for a registered window that still owns
+        // capture, upload, retry, or its native close transition.
+        let _ = app
+            .state::<crate::recording_state::RecordingState>()
+            .try_claim_window();
         let _ = existing.set_focus();
+        return Ok(());
+    }
+    let recording_state = app.state::<crate::recording_state::RecordingState>();
+    if !recording_state.try_claim_window() {
+        // Another launcher is between its preflight check and native window
+        // registration. Treat this request as idempotent instead of creating
+        // a second recorder pill.
+        if let Some(existing) = app.get_webview_window("waveform") {
+            let _ = existing.set_focus();
+        }
         return Ok(());
     }
     // Born hidden (painted-empty) when the meetings window already owns the
@@ -948,7 +963,7 @@ pub(crate) fn open_waveform_window(
     // created visible for getUserMedia; only its painting is suppressed.
     let pill_hidden = !crate::recorder_pill::should_show_now(app);
     let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref(), force_new);
-    let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
+    let win = match WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
@@ -970,7 +985,25 @@ pub(crate) fn open_waveform_window(
         .shadow(false)
         .skip_taskbar(true)
         .build()
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(win) => win,
+        Err(error) => {
+            recording_state.release_window_claim();
+            return Err(error.to_string());
+        }
+    };
+
+    // Capture may stop before upload/close completes. Keep the one-window
+    // claim until this native window is actually destroyed.
+    let app_for_event = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            let state = app_for_event.state::<crate::recording_state::RecordingState>();
+            state.clear();
+            state.release_window_claim();
+            let _ = app_for_event.emit("recording://state", false);
+        }
+    });
 
     // The application menu is useful on normal Windows windows, but inheriting
     // it here adds a File/Edit/View/Window strip to an otherwise frameless
@@ -998,18 +1031,6 @@ pub(crate) fn open_waveform_window(
     app.state::<crate::recording_state::RecordingState>()
         .set(source, meeting_id);
     let _ = app.emit("recording://state", true);
-
-    // If the window is destroyed without a clean stop (crash / force-close),
-    // clear the shared flag so the monitor can recover and re-arm.
-    let app_for_event = app.clone();
-    win.on_window_event(move |event| {
-        if let tauri::WindowEvent::Destroyed = event {
-            app_for_event
-                .state::<crate::recording_state::RecordingState>()
-                .clear();
-            let _ = app_for_event.emit("recording://state", false);
-        }
-    });
 
     crate::tray::set_menu(app, true, false);
 

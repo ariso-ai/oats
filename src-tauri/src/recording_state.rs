@@ -25,6 +25,9 @@ pub struct RecordingState {
     /// set via `set_tray_recording` from the recorder window. The pill
     /// visibility watcher must not hide the window before this point.
     capture: AtomicBool,
+    /// Process-wide ownership of the recorder pill window. Acquired before
+    /// native window construction and released only after destruction.
+    window_claimed: AtomicBool,
 }
 
 impl RecordingState {
@@ -58,6 +61,18 @@ impl RecordingState {
 
     pub fn capture_active(&self) -> bool {
         self.capture.load(Ordering::Relaxed)
+    }
+
+    /// Claim the one recorder-pill window slot. Unlike recording-active state,
+    /// this remains held while the window is uploading or closing.
+    pub fn try_claim_window(&self) -> bool {
+        self.window_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn release_window_claim(&self) {
+        self.window_claimed.store(false, Ordering::Release);
     }
 }
 
@@ -108,5 +123,46 @@ mod tests {
         s.set(RecordingSource::Manual, Some(7));
         s.clear();
         assert_eq!(s.active_meeting_id(), None);
+    }
+
+    #[test]
+    fn recorder_window_claim_is_exclusive_until_destroyed() {
+        let s = RecordingState::new();
+        assert!(s.try_claim_window());
+        assert!(!s.try_claim_window());
+
+        // Stopping capture does not release the window: it may still own an
+        // upload, retry, or native close transition.
+        s.clear();
+        assert!(!s.try_claim_window());
+
+        s.release_window_claim();
+        assert!(s.try_claim_window());
+    }
+
+    #[test]
+    fn concurrent_recorder_window_claim_has_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        const CONTENDERS: usize = 16;
+        let state = Arc::new(RecordingState::new());
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.try_claim_window()
+                })
+            })
+            .collect();
+
+        let winners = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
     }
 }
