@@ -58,6 +58,9 @@ vi.mock('./usePlatformCapabilities', () => ({
 }));
 vi.mock('./useAudioInputDevices', () => ({
   resolveAudioInputDeviceId: () => resolveAudioInputDeviceId(),
+  SelectedAudioInputUnavailableError: class extends Error {
+    name = 'SelectedAudioInputUnavailableError';
+  },
 }));
 
 import { useRecorder } from './useRecorder';
@@ -303,30 +306,26 @@ describe('useRecorder mic native capture', () => {
     await rec.stopRecording();
   });
 
-  it('falls back to the Windows default if the selected input disconnects during start', async () => {
+  it('does not silently fall back if the selected input disconnects during start', async () => {
     platformCapabilities.value = {
       os: 'windows',
       systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
     };
     resolveAudioInputDeviceId.mockResolvedValue('usb-mic');
     const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
-    getUserMedia
-      .mockRejectedValueOnce(Object.assign(new Error('device gone'), { name: 'NotFoundError' }))
-      .mockResolvedValueOnce({
-        getTracks: () => [{ stop: vi.fn() }],
-      } as unknown as MediaStream);
+    getUserMedia.mockRejectedValueOnce(
+      Object.assign(new Error('device gone'), { name: 'NotFoundError' }),
+    );
     const rec = useRecorder();
 
-    await rec.startRecording('mic');
+    await expect(rec.startRecording('mic')).rejects.toMatchObject({
+      name: 'SelectedAudioInputUnavailableError',
+    });
 
-    expect(getUserMedia).toHaveBeenCalledTimes(2);
+    expect(getUserMedia).toHaveBeenCalledOnce();
     expect(getUserMedia.mock.calls[0]?.[0]).toEqual({
       audio: expect.objectContaining({ deviceId: { exact: 'usb-mic' } }),
     });
-    expect(getUserMedia.mock.calls[1]?.[0]).toEqual({
-      audio: expect.not.objectContaining({ deviceId: expect.anything() }),
-    });
-    await rec.stopRecording();
   });
 
   it('does not turn microphone permission denial into a default-device fallback', async () => {

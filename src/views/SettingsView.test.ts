@@ -221,7 +221,7 @@ describe('SettingsView Windows input device selection', () => {
     });
   });
 
-  it('keeps a disconnected saved input visible and explains the fallback', async () => {
+  it('keeps a disconnected saved input visible and explains that recording is blocked', async () => {
     platformOs.value = 'windows';
     audioInputPreference.value = { deviceId: 'usb', label: 'USB Microphone' };
     listAudioInputDevices.mockResolvedValue([
@@ -234,7 +234,7 @@ describe('SettingsView Windows input device selection', () => {
       'USB Microphone (unavailable)',
     );
     expect(wrapper.get('[data-test="audio-input-unavailable"]').text()).toContain(
-      'New recordings will use System default',
+      'Reconnect this microphone or choose another input before recording',
     );
   });
 

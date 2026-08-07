@@ -4,7 +4,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
 import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
-import { resolveAudioInputDeviceId } from './useAudioInputDevices';
+import {
+  resolveAudioInputDeviceId,
+  SelectedAudioInputUnavailableError,
+} from './useAudioInputDevices';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
@@ -214,16 +217,7 @@ export function useRecorder() {
               selectedDeviceId !== null &&
               (errorName === 'NotFoundError' || errorName === 'OverconstrainedError');
             if (!selectedDeviceBecameUnavailable) throw captureError;
-
-            // The selected endpoint can disappear after the availability check
-            // but before getUserMedia opens it. Match the Settings promise and
-            // retry once with the current Windows default. Permission and other
-            // capture failures are never converted into a fallback.
-            const fallbackAudio = { ...audio };
-            delete fallbackAudio.deviceId;
-            micStream = await navigator.mediaDevices.getUserMedia({
-              audio: fallbackAudio,
-            });
+            throw new SelectedAudioInputUnavailableError();
           }
           micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(analyserNode);

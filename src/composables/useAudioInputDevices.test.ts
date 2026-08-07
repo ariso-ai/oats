@@ -68,17 +68,52 @@ describe('Windows audio input preferences', () => {
     });
   });
 
-  it('uses an available saved device and falls back without erasing a missing one', async () => {
+  it('uses an available saved device', async () => {
     values.set('recordingInputDeviceId', 'usb');
     values.set('recordingInputDeviceLabel', 'USB Mic');
     enumerateDevices.mockResolvedValue([device('audioinput', 'usb', 'USB Mic')]);
     await expect(resolveAudioInputDeviceId()).resolves.toBe('usb');
+  });
+
+  it('rebinds a saved device when WebView2 rotates its ID but keeps a unique label', async () => {
+    values.set('recordingInputDeviceId', 'old-airpods-id');
+    values.set('recordingInputDeviceLabel', 'Headset (AirPods) (Bluetooth)');
+    enumerateDevices.mockResolvedValue([
+      device('audioinput', 'new-airpods-id', 'Headset (AirPods) (Bluetooth)'),
+      device('audioinput', 'webcam', 'C920 Microphone'),
+    ]);
+
+    await expect(resolveAudioInputDeviceId()).resolves.toBe('new-airpods-id');
+    await expect(loadAudioInputPreference()).resolves.toEqual({
+      deviceId: 'new-airpods-id',
+      label: 'Headset (AirPods) (Bluetooth)',
+    });
+  });
+
+  it('does not silently substitute the default for a missing saved device', async () => {
+    values.set('recordingInputDeviceId', 'usb');
+    values.set('recordingInputDeviceLabel', 'USB Mic');
 
     enumerateDevices.mockResolvedValue([device('audioinput', 'built-in', 'Laptop Mic')]);
-    await expect(resolveAudioInputDeviceId()).resolves.toBeNull();
+    await expect(resolveAudioInputDeviceId()).rejects.toMatchObject({
+      name: 'SelectedAudioInputUnavailableError',
+    });
     await expect(loadAudioInputPreference()).resolves.toEqual({
       deviceId: 'usb',
       label: 'USB Mic',
+    });
+  });
+
+  it('does not guess when multiple current devices have the saved label', async () => {
+    values.set('recordingInputDeviceId', 'old-airpods-id');
+    values.set('recordingInputDeviceLabel', 'Headset (AirPods) (Bluetooth)');
+    enumerateDevices.mockResolvedValue([
+      device('audioinput', 'airpods-1', 'Headset (AirPods) (Bluetooth)'),
+      device('audioinput', 'airpods-2', 'Headset (AirPods) (Bluetooth)'),
+    ]);
+
+    await expect(resolveAudioInputDeviceId()).rejects.toMatchObject({
+      name: 'SelectedAudioInputUnavailableError',
     });
   });
 

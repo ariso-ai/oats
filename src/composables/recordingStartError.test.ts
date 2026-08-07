@@ -14,6 +14,15 @@ describe('recordingStartErrorMessage', () => {
     );
   });
 
+  it('does not describe a selected-device failure as a generic missing microphone', () => {
+    const error = Object.assign(new Error('selected input unavailable'), {
+      name: 'SelectedAudioInputUnavailableError',
+    });
+    expect(recordingStartErrorMessage(error)).toContain(
+      'selected microphone is unavailable',
+    );
+  });
+
   it('recognizes native Windows system-audio failures', () => {
     expect(recordingStartErrorMessage('initialize WASAPI loopback: no render endpoint')).toContain(
       'output device',

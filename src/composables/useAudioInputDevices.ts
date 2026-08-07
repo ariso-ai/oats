@@ -13,6 +13,18 @@ export interface AudioInputPreference {
   label: string | null;
 }
 
+export class SelectedAudioInputUnavailableError extends Error {
+  override name = 'SelectedAudioInputUnavailableError';
+
+  constructor(label?: string | null) {
+    super(
+      label
+        ? `The selected microphone “${label}” is unavailable.`
+        : 'The selected microphone is unavailable.',
+    );
+  }
+}
+
 async function settingsStore() {
   return load('settings.json', { autoSave: true });
 }
@@ -59,23 +71,37 @@ export async function saveAudioInputPreference(
   ]);
 }
 
-/** Resolve the device ID for the next Windows capture. A disconnected saved
- * endpoint deliberately falls back without erasing the preference, allowing a
- * later reconnect to restore it and Settings to keep showing the warning. */
+/** Resolve the device ID for the next Windows capture. WebView2 device IDs can
+ * rotate when a Bluetooth endpoint reconnects, so a unique exact-label match
+ * repairs the stored ID. An explicit selection is never silently replaced by
+ * System default: that could capture an unrelated microphone. */
 export async function resolveAudioInputDeviceId(): Promise<string | null> {
   const preference = await loadAudioInputPreference();
   if (!preference.deviceId) return null;
 
+  let devices: AudioInputDevice[];
   try {
-    const devices = await listAudioInputDevices();
-    return devices.some((device) => device.deviceId === preference.deviceId)
-      ? preference.deviceId
-      : null;
+    devices = await listAudioInputDevices();
   } catch {
     // If discovery itself is unavailable, still try the explicit saved choice;
     // getUserMedia will provide the authoritative capture error.
     return preference.deviceId;
   }
+
+  if (devices.some((device) => device.deviceId === preference.deviceId)) {
+    return preference.deviceId;
+  }
+
+  if (preference.label) {
+    const labelMatches = devices.filter((device) => device.label === preference.label);
+    if (labelMatches.length === 1) {
+      const replacement = labelMatches[0];
+      await saveAudioInputPreference(replacement);
+      return replacement.deviceId;
+    }
+  }
+
+  throw new SelectedAudioInputUnavailableError(preference.label);
 }
 
 export function watchAudioInputDevices(onChange: () => void): () => void {

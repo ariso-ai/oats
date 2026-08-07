@@ -282,7 +282,7 @@
           class="notif-status notif-status--err"
           data-test="audio-input-unavailable"
         >
-          This microphone is unavailable. New recordings will use System default until it reconnects or you choose another input.
+          This microphone is unavailable. Reconnect this microphone or choose another input before recording.
         </p>
         <p
           v-else-if="platformCapabilities.os === 'windows' && audioInputError"

@@ -23,18 +23,20 @@ Settings → Recording:
 - Available `audioinput` devices follow by label.
 - Settings refreshes on mount, focus, and the browser `devicechange` event.
 - A specific selection persists as its opaque device ID plus its last visible label.
-- If that saved ID is missing, the select keeps `<label> (unavailable)` visible and an
-  inline message explains that new recordings will temporarily use System default.
-  Reconnecting the same device restores it automatically; choosing another option
-  replaces the saved preference.
+- If WebView2 rotates a saved ID after a reconnect, one unique exact-label match repairs
+  the saved ID before capture.
+- If the saved device cannot be identified unambiguously, the select keeps
+  `<label> (unavailable)` visible and asks the user to reconnect it or choose another
+  input before recording.
 
 Teams, Zoom, Riverside, Audacity, and Windows Sound settings all converge on a named
 microphone dropdown. Input testing/meters are useful but beyond the smallest interface
 needed for #299.
 
-The temporary fallback keeps the recorder usable from tray/auto-record launchers, which
-have no pre-recording error surface. It does not silently discard the saved preference,
-so Settings still communicates the problem and reconnection restores user intent.
+An explicit choice never silently falls back to System default. Windows can route that
+default to an unrelated webcam or laptop microphone, which would make the UI claim one
+device while recording another. `System default` remains the durable, unconstrained
+choice for users who want Windows to manage Bluetooth profile and endpoint switching.
 
 ## Implementation
 
@@ -44,8 +46,10 @@ view activates it only when native platform capabilities report Windows.
 
 At each Windows recording start, `useRecorder` resolves the saved preference against a
 fresh enumeration. An available explicit choice adds
-`deviceId: { exact: savedId }` to the existing audio constraints. System default or a
-missing saved input omits `deviceId`. macOS never calls this resolver.
+`deviceId: { exact: savedId }` to the existing audio constraints. A uniquely matching
+label repairs a rotated ID; a missing or ambiguous explicit choice fails with an
+actionable unavailable-device error. Only System default omits `deviceId`. macOS never
+calls this resolver.
 
 No new Tauri command, capability, native permission, or network path is introduced.
 Device IDs are treated as opaque preferences and are neither logged nor passed across
@@ -57,7 +61,7 @@ the invoke boundary.
   choices, and device-change subscription cleanup.
 - Settings tests cover Windows-only rendering, selection persistence, and unavailable
   messaging.
-- Recorder tests cover exact selected-device constraints, default/unavailable fallback,
-  and unchanged macOS native capture.
+- Recorder tests cover exact selected-device constraints, explicit unavailable-device
+  failure without fallback, and unchanged macOS native capture.
 - On Windows, smoke-test with two inputs or disconnect/reconnect while Settings is open,
   then start a new recording and confirm the selected track/device.

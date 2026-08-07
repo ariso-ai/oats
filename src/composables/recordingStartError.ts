@@ -15,6 +15,9 @@ export function recordingStartErrorMessage(error: unknown): string {
   if (name === 'NotAllowedError' || name === 'SecurityError') {
     return 'Microphone access is blocked. Enable microphone access for oats in Windows Settings, then try again.';
   }
+  if (name === 'SelectedAudioInputUnavailableError') {
+    return 'The selected microphone is unavailable. Reconnect it or choose another input in Settings, then try again.';
+  }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
     return 'No microphone was found. Connect or enable a microphone, then try again.';
   }
