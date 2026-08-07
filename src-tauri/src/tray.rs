@@ -223,7 +223,9 @@ pub fn start_recording(app: &AppHandle) {
 pub fn open_library(app: &AppHandle) {
     let app_async = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = crate::commands::create_library_window(app_async).await;
+        if let Err(error) = crate::commands::create_library_window(app_async).await {
+            eprintln!("Failed to present Meetings window: {error}");
+        }
     });
 }
 
