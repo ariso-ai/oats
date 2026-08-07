@@ -676,17 +676,19 @@ describe('LibraryView', () => {
   });
 
   it('keeps Start locked when a window refresh finishes before recorder creation', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    // The launch command has been sent, but Rust has not created the waveform
+    // window yet. Start a newer refresh after the launch lock is in place.
+    await wrapper.find('.add-btn').trigger('click');
     let finishWindowQuery!: (windows: { label: string }[]) => void;
     getAllWebviewWindows.mockImplementationOnce(
       () => new Promise((resolve) => { finishWindowQuery = resolve; }),
     );
-    listMeetings.mockResolvedValue([]);
-    const wrapper = mount(LibraryView);
+    window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
-
-    // The launch command has been sent, but Rust has not created the waveform
-    // window yet. The older refresh must not interpret that gap as idle.
-    await wrapper.find('.add-btn').trigger('click');
     finishWindowQuery([]);
     await flushPromises();
 
