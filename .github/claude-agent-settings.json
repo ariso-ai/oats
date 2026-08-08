@@ -37,9 +37,12 @@
       "Read(**/*.key)",
       "Read(**/id_rsa*)",
       "Read(**/id_ed25519*)",
+      "Read(.git/**)",
 
       "Write(~/.claude/**)",
       "Edit(~/.claude/**)",
+      "Write(.git/**)",
+      "Edit(.git/**)",
       "Write(~/.ssh/**)",
       "Edit(~/.ssh/**)",
       "Write(~/.zshrc)",
