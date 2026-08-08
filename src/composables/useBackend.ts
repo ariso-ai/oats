@@ -224,7 +224,14 @@ function normalizeActionItems(
 }
 
 async function blobToBytes(blob: Blob): Promise<number[]> {
-  return [...new Uint8Array(await blob.arrayBuffer())];
+  // Array.from(typedArray) uses the engine's bulk indexed-copy fast path;
+  // spread (`[...typedArray]`) goes through the generic iterator protocol,
+  // which is dramatically slower for large arrays. For a long recording (tens
+  // of millions of bytes) that gap is the difference between a sub-second
+  // conversion and a synchronous stall long enough to starve the UI-timeout
+  // timer in WaveformView's runFinalize (see the 120s race there) — the pill
+  // then reads as stuck "Saving…" even though finalize eventually completes.
+  return Array.from(new Uint8Array(await blob.arrayBuffer()));
 }
 
 // The remote list/search endpoints return nearly the same meeting shape. Keep
