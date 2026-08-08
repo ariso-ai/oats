@@ -1,0 +1,195 @@
+name: Triage new issues
+
+# Triggered when anyone opens an issue. Runs Claude read-only over the issue
+# and the codebase to classify it as Bug / Feature / Task, sets the GitHub
+# issue type, and posts a first-pass analysis. Bugs get a note that shawnzhu
+# can apply `autofix:approved` (see issue-autofix.yml); features get a note
+# that shawnzhu can comment `/shape` (see feature-shaping.yml).
+#
+# SECURITY: this repo is public, so the issue body is attacker-controlled, and
+# this job PUBLISHES the model's output back to a public issue. Two things
+# bound that:
+#   - No Bash tool at all, so no issue body can talk the agent into running a
+#     command, pushing a branch, or calling the GitHub API.
+#   - .github/claude-agent-settings.json denies reads of credentials and the
+#     agent's own config, because on this persistent runner anything readable
+#     is potentially publishable through the comment this job posts.
+# Every GitHub mutation below is performed by a bash step from a validated
+# JSON file, never by the agent.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+# Per-issue grouping: distinct issues triage in parallel, one issue never
+# triages twice concurrently. Not cancel-in-progress — a half-finished triage
+# would leave the issue untyped with no comment.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: Classify and analyze
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    # Skip bot-filed issues (dependabot, release-please, our own workflows) so
+    # automation can't trigger automation, and honor an explicit opt-out.
+    if: >-
+      github.event.issue.user.type != 'Bot' &&
+      !contains(github.event.issue.labels.*.name, 'skip-ai-triage')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      # Create the labels the other workflows depend on. They are referenced in
+      # comments this job posts and in issue-autofix.yml's trigger, but a label
+      # that has never been created does not appear in the sidebar picker — so
+      # bootstrap them here, on the one workflow that runs for every issue.
+      # Idempotent and best-effort.
+      - name: Ensure automation labels exist
+        run: |
+          gh label create "autofix:approved" --repo "$REPO" --color 0E8A16 \
+            --description "shawnzhu approved an automated fix attempt" 2>/dev/null || true
+          gh label create "skip-ai-triage" --repo "$REPO" --color EDEDED \
+            --description "Opt this issue out of automated triage" 2>/dev/null || true
+          gh label create "ai-failed" --repo "$REPO" --color B60205 \
+            --description "An issue-automation workflow failed on this issue" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # No push from this job, and the agent runs in this tree:
+          # never leave a token in .git/config for it to read.
+          persist-credentials: false
+
+      # Extract the issue payload with jq straight from the event file. This is
+      # the one safe way to move attacker-controlled text into the job: it is
+      # never expanded by the shell and never interpolated into a `run:` block
+      # as a ${{ }} expression.
+      - name: Stage issue payload
+        run: |
+          set -euo pipefail
+          jq '{
+            number: .issue.number,
+            title: .issue.title,
+            body: .issue.body,
+            author: .issue.user.login,
+            template_labels: [.issue.labels[].name]
+          }' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/issue.json"
+          echo "Staged issue #$ISSUE for triage."
+
+      - name: Run Claude to classify
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/triage.json"
+          prompt="$(cat .github/issue-triage-prompt.md)
+
+          Issue file (absolute path): $RUNNER_TEMP/issue.json
+          Write your verdict to: $RUNNER_TEMP/triage.json"
+          # No Bash tool. Write is granted only so the agent can produce the
+          # verdict file; nothing this job writes is ever committed.
+          claude -p "$prompt" \
+            --output-format json \
+            --settings .github/claude-agent-settings.json \
+            --allowed-tools "Read Grep Glob Write" \
+            --permission-mode acceptEdits \
+            > "$RUNNER_TEMP/claude-output.json"
+          # The model's output is attacker-influenced, and ::workflow commands::
+          # in a log line are interpreted by the runner. Fence it so the summary
+          # below can only ever be text.
+          fence="stop-$(uuidgen)"
+          echo "Claude finished. Result:"
+          echo "::stop-commands::$fence"
+          jq -r '.result // "(no result field)"' "$RUNNER_TEMP/claude-output.json"
+          echo "::$fence::"
+
+      # Validate before acting. A malformed or missing verdict is a failed run,
+      # not a silent no-op — same contract as apply-fixes.yml.
+      - name: Validate verdict
+        id: verdict
+        run: |
+          set -euo pipefail
+          if [ ! -s "$RUNNER_TEMP/triage.json" ]; then
+            echo "::error::Claude wrote no triage.json. Cannot triage issue #$ISSUE."
+            exit 1
+          fi
+          if ! jq -e . "$RUNNER_TEMP/triage.json" >/dev/null 2>&1; then
+            echo "::error::triage.json is not valid JSON."
+            exit 1
+          fi
+          type=$(jq -r '.type // ""' "$RUNNER_TEMP/triage.json")
+          case "$type" in
+            Bug|Feature|Task) ;;
+            *)
+              echo "::error::Invalid issue type '$type' — expected Bug, Feature, or Task."
+              exit 1
+              ;;
+          esac
+          # jq -r on a JSON string yields the decoded text; write it to a file
+          # rather than a step output so the body is never shell-expanded.
+          jq -r '.comment // ""' "$RUNNER_TEMP/triage.json" > "$RUNNER_TEMP/triage-comment.md"
+          if [ -s "$RUNNER_TEMP/triage-comment.md" ]; then
+            has_comment=true
+          else
+            has_comment=false
+          fi
+          echo "type=$type" >> "$GITHUB_OUTPUT"
+          echo "has_comment=$has_comment" >> "$GITHUB_OUTPUT"
+          echo "Classified issue #$ISSUE as $type (confidence: $(jq -r '.confidence // "unknown"' "$RUNNER_TEMP/triage.json"))"
+
+      # Post before setting the type. The analysis is the expensive artifact —
+      # if the type-setting API call fails, we want the comment on the issue
+      # rather than losing a full run to a transient 5xx.
+      #
+      # The operator hint is appended here rather than asked of the model, so
+      # the trigger phrases stay in sync with the workflows implementing them.
+      - name: Post triage comment
+        if: steps.verdict.outputs.has_comment == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "---"
+            case "${{ steps.verdict.outputs.type }}" in
+              Bug)
+                echo "🤖 Automated triage. @shawnzhu can add the \`autofix:approved\` label to have an agent attempt a fix and open a PR."
+                ;;
+              Feature)
+                echo "🤖 Automated triage. Replies here help shape this. @shawnzhu can comment \`/shape\` to turn the discussion into a design spec PR."
+                ;;
+              *)
+                echo "🤖 Automated triage."
+                ;;
+            esac
+          } >> "$RUNNER_TEMP/triage-comment.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/triage-comment.md"
+          echo "Posted triage comment on issue #$ISSUE"
+
+      # Let this fail the job. Swallowing the error would report a successful
+      # triage while the issue stays untyped — and would also skip the failure
+      # handler below, so nothing would ever say so.
+      - name: Set issue type
+        run: |
+          set -euo pipefail
+          gh issue edit "$ISSUE" --repo "$REPO" --type "${{ steps.verdict.outputs.type }}"
+          echo "Set issue #$ISSUE type to ${{ steps.verdict.outputs.type }}"
+
+      # Without this a failed run is completely invisible: the issue sits
+      # untyped with no comment and nothing indicates automation ever ran.
+      - name: Flag failure on the issue
+        if: failure()
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "ai-failed" 2>/dev/null || true
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Automated triage failed on this issue. [Run log]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID) — needs manual triage." \
+            2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$RUNNER_TEMP/triage.json" "$RUNNER_TEMP/triage-comment.md" "$RUNNER_TEMP/claude-output.json"

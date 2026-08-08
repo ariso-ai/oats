@@ -1,0 +1,308 @@
+name: Shape feature request
+
+# Triggered when shawnzhu comments `/shape` on a Feature issue. Reads the issue
+# and its whole discussion, generates a superpowers design spec into
+# docs/superpowers/specs/, and opens a PR with it. Review and merge are human;
+# implementing a merged spec is not automated.
+#
+# SECURITY: the discussion is public. Only shawnzhu can trigger this (the
+# comment author check below), and within the run only shawnzhu's comments are
+# treated as requirements — everyone else's are context.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  shape:
+    name: Generate design spec
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    # `issue_comment` also fires for PR comments; `issue.pull_request` is only
+    # present on those, so its absence means this is a real issue.
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.issue.state == 'open' &&
+      github.event.comment.user.login == 'shawnzhu' &&
+      startsWith(github.event.comment.body, '/shape')
+    env:
+      # Default token for everything that posts model-authored text; the PAT
+      # (if configured) only for push and PR creation. See issue-autofix.yml —
+      # publishing model output as shawnzhu would let it satisfy this
+      # workflow's own `/shape` trigger gate.
+      GH_TOKEN: ${{ github.token }}
+      PUSH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+      ISSUE: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+      BRANCH: spec/issue-${{ github.event.issue.number }}
+    steps:
+      # Immediate feedback that the command was picked up, before the slow work.
+      - name: Acknowledge the command
+        run: |
+          gh api "repos/$REPO/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes >/dev/null 2>&1 \
+            || echo "::warning::could not react to the triggering comment"
+
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # The agent runs inside this checkout, so no credential may be left
+          # in .git/config for it to read. The push below uses an explicit
+          # authenticated URL instead.
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Shaping a Bug or a Task into a design spec is almost always a
+      # misfire — verify the type rather than trusting the trigger.
+      - name: Verify issue is a Feature
+        id: check
+        run: |
+          set -euo pipefail
+          type=$(gh issue view "$ISSUE" --repo "$REPO" --json issueType --jq '.issueType.name // ""')
+          echo "Issue #$ISSUE type: ${type:-<none>}"
+          if [ "$type" != "Feature" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Explain skip
+        if: steps.check.outputs.proceed == 'false'
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 \`/shape\` only applies to issues typed **Feature**. Set the issue type and comment \`/shape\` again."
+
+      # Always branch from the `main` just checked out, never from an existing
+      # remote branch. This job is privileged (contents: write on an
+      # issue_comment trigger) and later steps run an agent inside the checkout
+      # — which reads CLAUDE.md, .claude/, and .agents/skills/ from the working
+      # tree. Checking out branch content would let those files steer the agent.
+      # CodeQL flags the pattern as actions/untrusted-checkout/high.
+      - name: Prepare spec branch
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          git checkout -B "$BRANCH"
+          echo "Branched $BRANCH from main at $(git rev-parse --short HEAD)."
+
+      # The whole discussion is the input to shaping, partitioned by author so
+      # the prompt can treat shawnzhu's comments as requirements. The `/shape`
+      # comment itself is passed separately — it often carries the steer.
+      - name: Stage discussion
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          jq '{
+            number: .issue.number,
+            title: .issue.title,
+            body: .issue.body,
+            author: .issue.user.login,
+            shape_command: .comment.body
+          }' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/issue.json"
+
+          gh api --paginate "repos/$REPO/issues/$ISSUE/comments" \
+            | jq -s '[.[][] | {author: .user.login, body: .body}]' \
+            > "$RUNNER_TEMP/all-comments.json"
+
+          jq '{
+            trusted:   [.[] | select(.author == "shawnzhu")],
+            untrusted: [.[] | select(.author != "shawnzhu")]
+          }' "$RUNNER_TEMP/all-comments.json" > "$RUNNER_TEMP/comments.json"
+
+          echo "Trusted comments:   $(jq '.trusted   | length' "$RUNNER_TEMP/comments.json")"
+          echo "Untrusted comments: $(jq '.untrusted | length' "$RUNNER_TEMP/comments.json")"
+
+      # The workflow supplies the date so the spec filename can never drift
+      # from the run that produced it.
+      - name: Resolve spec date
+        if: steps.check.outputs.proceed == 'true'
+        id: spec
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude to write the spec
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP"/{spec-path.txt,pr-title.txt,pr-body.md,no-spec-report.md}
+          prompt="$(cat .github/feature-shaping-prompt.md)
+
+          Issue file (absolute path):    $RUNNER_TEMP/issue.json
+          Comments file (absolute path): $RUNNER_TEMP/comments.json
+          Today's date (use in the spec filename): ${{ steps.spec.outputs.date }}
+
+          Write your output files to:
+            $RUNNER_TEMP/spec-path.txt
+            $RUNNER_TEMP/pr-title.txt
+            $RUNNER_TEMP/pr-body.md
+            $RUNNER_TEMP/no-spec-report.md"
+          # Read-heavy plus Write: the spec is the only artifact. No build
+          # tools — shaping produces a document, not code. Bash(grep:*) is
+          # deliberately absent: it would read any file on the runner,
+          # bypassing the read denials in the settings file.
+          claude -p "$prompt" \
+            --output-format json \
+            --settings .github/claude-agent-settings.json \
+            --allowed-tools "Read Write Edit Grep Glob Bash(git log:*) Bash(git status:*)" \
+            --permission-mode acceptEdits \
+            > "$RUNNER_TEMP/claude-output.json"
+          fence="stop-$(uuidgen)"
+          echo "Claude finished. Result:"
+          echo "::stop-commands::$fence"
+          jq -r '.result // "(no result field)"' "$RUNNER_TEMP/claude-output.json"
+          echo "::$fence::"
+
+      - name: Detect changes
+        if: steps.check.outputs.proceed == 'true'
+        id: changes
+        run: |
+          if [ -z "$(git status --porcelain -uall)" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Claude wrote no spec."
+          else
+            echo "no_changes=false" >> "$GITHUB_OUTPUT"
+            git status --short -uall
+          fi
+
+      # Guard the blast radius: shaping may only add specs. Anything else on
+      # the branch means the run went off the rails.
+      - name: Validate spec artifacts
+        if: steps.check.outputs.proceed == 'true' && steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          for f in spec-path.txt pr-title.txt pr-body.md; do
+            if [ ! -s "$RUNNER_TEMP/$f" ]; then
+              echo "::error::Claude wrote files but no $f"
+              exit 1
+            fi
+          done
+
+          spec_path=$(head -1 "$RUNNER_TEMP/spec-path.txt")
+          if [ ! -s "$spec_path" ]; then
+            echo "::error::Spec file does not exist or is empty: $spec_path"
+            exit 1
+          fi
+
+          # -uall lists untracked files individually; plain --porcelain
+          # collapses a wholly-untracked directory to `?? docs/`, which would
+          # never match the specs-path filter below.
+          stray=$(git status --porcelain -uall \
+            | grep -v '^?? docs/superpowers/specs/' \
+            | grep -v '^ M docs/superpowers/specs/' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::Shaping may only touch docs/superpowers/specs/. Unexpected changes:"
+            echo "$stray"
+            exit 1
+          fi
+
+          title=$(head -1 "$RUNNER_TEMP/pr-title.txt")
+          if ! printf '%s' "$title" | grep -Eq '^docs(\([a-z0-9._-]+\))?: .+'; then
+            echo "::error::Spec PR title must start with 'docs:' so release-please skips it. Got: $title"
+            exit 1
+          fi
+          echo "Spec: $spec_path"
+          echo "PR title: $title"
+
+      - name: Commit and push spec
+        if: steps.check.outputs.proceed == 'true' && steps.changes.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          git add docs/superpowers/specs/
+          git commit -m "$(head -1 "$RUNNER_TEMP/pr-title.txt")
+
+          Shaped from #$ISSUE.
+
+          Refs #$ISSUE"
+          # Explicit authenticated URL because checkout ran with
+          # persist-credentials: false — the token must not sit in .git/config
+          # while the agent has read access to the tree.
+          #
+          # --force because we always branch fresh from main: a leftover branch
+          # from an earlier /shape has diverged. Re-shaping regenerates the spec
+          # from the current discussion, so discarding the old attempt is the
+          # intended semantic.
+          git push --force \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" \
+            "HEAD:$BRANCH"
+
+      # Refs, not Fixes — merging a spec does not deliver the feature, so the
+      # issue stays open to track the implementation.
+      - name: Open or update pull request
+        if: steps.check.outputs.proceed == 'true' && steps.changes.outputs.no_changes == 'false'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "---"
+            echo "🤖 Shaped from #$ISSUE by \`feature-shaping.yml\`. Merging this lands the design only — the issue stays open to track implementation."
+          } >> "$RUNNER_TEMP/pr-body.md"
+
+          existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open for $BRANCH — added a commit."
+          else
+            gh pr create --repo "$REPO" \
+              --base main \
+              --head "$BRANCH" \
+              --title "$(head -1 "$RUNNER_TEMP/pr-title.txt")" \
+              --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
+          # `// ""` matters: on the update path or under replication lag an
+          # empty array would otherwise render the literal string "null".
+          url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // ""')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # Default token, not the PAT — a comment authored as shawnzhu could
+      # satisfy this workflow's own `/shape` gate.
+      - name: Link the spec PR on the issue
+        if: steps.check.outputs.proceed == 'true' && steps.changes.outputs.no_changes == 'false'
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Design spec ready for review: ${{ steps.pr.outputs.url || 'see the branch' }}" \
+            2>/dev/null || true
+
+      - name: Report when no spec was produced
+        if: steps.check.outputs.proceed == 'true' && steps.changes.outputs.no_changes == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -s "$RUNNER_TEMP/no-spec-report.md" ]; then
+            echo "::error::Claude wrote no spec and no no-spec-report.md. Per the prompt it must explain what it needs — treating this as a failed run."
+            exit 1
+          fi
+          {
+            echo
+            echo "---"
+            echo "🤖 \`feature-shaping.yml\` needs more detail before it can write a spec. Answer the questions above and comment \`/shape\` again."
+          } >> "$RUNNER_TEMP/no-spec-report.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/no-spec-report.md"
+
+      # Without this, a crash — including a failed `gh issue view` in the
+      # type check, which skips BOTH the proceed and the skip branch — leaves
+      # `/shape` with nothing but an 👀 reaction and total silence.
+      - name: Flag failure on the issue
+        if: failure()
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Feature shaping failed on this issue. [Run log]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID) — comment \`/shape\` to retry." \
+            2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/{spec-path.txt,pr-title.txt,pr-body.md,no-spec-report.md,claude-output.json}
