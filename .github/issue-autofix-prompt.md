@@ -63,8 +63,9 @@ this prompt.
 
 Find the root cause before you change anything. Grep for the error text, UI
 strings, command names, or symbols the issue mentions. Read the surrounding
-code and the git history of the relevant file (`git log`, `git diff`) — a
-regression usually has a visible cause.
+code and the git history of the relevant file with `git log` — a regression
+usually has a visible cause. (`git diff` is not in your allowlist: it can read
+and write arbitrary paths, so it is withheld from every job in this pipeline.)
 
 State the root cause to yourself in one sentence before editing. If you cannot,
 you do not understand the bug yet; keep investigating or bail out per Step 5.
@@ -94,8 +95,9 @@ bail out per Step 5 and explain why.
 - `src-tauri/src/capabilities/` — the Tauri permission allowlist.
 - `src-tauri/tauri.conf.json`, `Info.plist`, `*.entitlements` — signing and
   notarization.
-- `package-lock.json`, `src-tauri/Cargo.lock` — dependency changes belong in
-  their own reviewed PR.
+- `package.json`, `package-lock.json`, `src-tauri/Cargo.lock` — dependency and
+  npm-script changes belong in their own reviewed PR. (`package.json` is also
+  executable: its lifecycle scripts run on the next `npm ci`.)
 
 The rest are judgment calls, not enforced. Do not:
 

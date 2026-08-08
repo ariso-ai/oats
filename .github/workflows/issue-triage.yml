@@ -63,6 +63,10 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # No push from this job, and the agent runs in this tree:
+          # never leave a token in .git/config for it to read.
+          persist-credentials: false
 
       # Extract the issue payload with jq straight from the event file. This is
       # the one safe way to move attacker-controlled text into the job: it is
@@ -167,11 +171,14 @@ jobs:
           gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/triage-comment.md"
           echo "Posted triage comment on issue #$ISSUE"
 
+      # Let this fail the job. Swallowing the error would report a successful
+      # triage while the issue stays untyped — and would also skip the failure
+      # handler below, so nothing would ever say so.
       - name: Set issue type
         run: |
-          gh issue edit "$ISSUE" --repo "$REPO" --type "${{ steps.verdict.outputs.type }}" \
-            && echo "Set issue #$ISSUE type to ${{ steps.verdict.outputs.type }}" \
-            || echo "::warning::could not set issue type — set it manually"
+          set -euo pipefail
+          gh issue edit "$ISSUE" --repo "$REPO" --type "${{ steps.verdict.outputs.type }}"
+          echo "Set issue #$ISSUE type to ${{ steps.verdict.outputs.type }}"
 
       # Without this a failed run is completely invisible: the issue sits
       # untyped with no comment and nothing indicates automation ever ran.

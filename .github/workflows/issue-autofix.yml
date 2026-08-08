@@ -84,49 +84,54 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          # Credentials persisted here are what `git push` uses below, so this
-          # must be the push token for the resulting PR to trigger CI.
-          token: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+          # The agent runs inside this checkout, so no credential may be left
+          # in .git/config for it to read. The push below uses an explicit
+          # authenticated URL instead.
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # Reuse an existing branch if the label is re-applied after a failed
-      # attempt, so a second run builds on the first instead of colliding.
-      # Distinguish "branch absent" (ls-remote exit 2) from a transport or auth
-      # failure — treating a network blip as "absent" would branch from main
-      # and then fail the non-forced push on a non-fast-forward.
-      - name: Create or reuse fix branch
+      # NEVER check out an existing remote branch here. This job is privileged
+      # — contents: write, and a token in scope — and checking out branch
+      # content means `npm ci` below runs that branch's package.json lifecycle
+      # scripts. A first attempt could commit a `postinstall` (package.json is
+      # code, and a plausible-looking fix can carry one), and a second approval
+      # would execute it. CodeQL flags exactly this as
+      # actions/untrusted-checkout/high.
+      #
+      # So: always branch from the `main` just checked out. If a PR is already
+      # open for this issue, don't start a second attempt at all — iterating on
+      # it is what CodeRabbit + apply-fixes.yml are for, and a fresh attempt
+      # would clobber the fixes they have already applied.
+      - name: Prepare fix branch
         id: branch
         run: |
           set -euo pipefail
-          set +e
-          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1
-          rc=$?
-          set -e
-          case "$rc" in
-            0)
-              echo "Branch $BRANCH exists on origin — reusing it."
-              git fetch origin "$BRANCH"
-              git checkout -B "$BRANCH" "origin/$BRANCH"
-              ;;
-            2)
-              echo "Branch $BRANCH does not exist — creating it."
-              git checkout -b "$BRANCH"
-              ;;
-            *)
-              echo "::error::git ls-remote failed (exit $rc) — refusing to guess at branch state."
-              exit 1
-              ;;
-          esac
           existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // ""')
-          echo "existing_pr=$existing" >> "$GITHUB_OUTPUT"
+          if [ -n "$existing" ]; then
+            echo "existing_pr=$existing" >> "$GITHUB_OUTPUT"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "PR #$existing is already open for $BRANCH — not starting a second attempt."
+            exit 0
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          git checkout -B "$BRANCH"
+          echo "Branched $BRANCH from main at $(git rev-parse --short HEAD)."
+
+      - name: Point at the existing PR instead
+        if: steps.branch.outputs.proceed == 'false'
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 PR #${{ steps.branch.outputs.existing_pr }} is already open for this issue — leaving it alone rather than starting a second attempt. Iterate there, or close it and re-apply \`autofix:approved\` for a fresh run." \
+            2>/dev/null || true
 
       # Untrusted text reaches the job only through this file. Comments are
       # partitioned by author so the prompt can apply different trust to each.
       - name: Stage issue context
+        if: steps.branch.outputs.proceed == 'true'
         run: |
           set -euo pipefail
           jq '{
@@ -150,6 +155,7 @@ jobs:
           echo "Untrusted comments: $(jq '.untrusted | length' "$RUNNER_TEMP/comments.json")"
 
       - name: Install dependencies
+        if: steps.branch.outputs.proceed == 'true'
         run: npm ci --prefer-offline
 
       # The sidecar is a gitignored build artifact that tauri's `externalBin`
@@ -160,10 +166,12 @@ jobs:
       # built by a different toolchain is never restored.
       - name: Fingerprint Xcode toolchain
         id: toolchain
+        if: steps.branch.outputs.proceed == 'true'
         run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
 
       - name: Cache ariso-stt sidecar artifacts
         id: sidecar-cache
+        if: steps.branch.outputs.proceed == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
@@ -172,7 +180,7 @@ jobs:
           key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved', 'src-tauri/ariso-stt/macos/Sources/**') }}
 
       - name: Build ariso-stt sidecar
-        if: steps.sidecar-cache.outputs.cache-hit != 'true'
+        if: steps.branch.outputs.proceed == 'true' && steps.sidecar-cache.outputs.cache-hit != 'true'
         working-directory: src-tauri/ariso-stt/macos
         run: |
           mkdir -p ../../binaries
@@ -183,6 +191,7 @@ jobs:
           cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 
       - name: Run Claude to investigate and fix
+        if: steps.branch.outputs.proceed == 'true'
         env:
           # Deliberately NOT inheriting GH_TOKEN/PUSH_TOKEN: the agent has no
           # business calling the GitHub API, and a token in the environment is
@@ -211,7 +220,7 @@ jobs:
           claude -p "$prompt" \
             --output-format json \
             --settings .github/claude-agent-settings.json \
-            --allowed-tools "Read Edit Write Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(npm test) Bash(npm run vite:build) Bash(cargo build --locked --manifest-path src-tauri/Cargo.toml)" \
+            --allowed-tools "Read Edit Write Grep Glob Bash(git log:*) Bash(git status:*) Bash(npm test) Bash(npm run vite:build) Bash(cargo build --locked --manifest-path src-tauri/Cargo.toml)" \
             --permission-mode acceptEdits \
             > "$RUNNER_TEMP/claude-output.json"
           fence="stop-$(uuidgen)"
@@ -222,6 +231,7 @@ jobs:
 
       - name: Detect changes
         id: changes
+        if: steps.branch.outputs.proceed == 'true'
         run: |
           if [ -z "$(git status --porcelain -uall)" ]; then
             echo "no_changes=true" >> "$GITHUB_OUTPUT"
@@ -258,6 +268,7 @@ jobs:
             -e '^src-tauri/tauri\.conf\.json$' \
             -e '(^|/)Info\.plist$' \
             -e '\.entitlements$' \
+            -e '^package\.json$' \
             -e '^package-lock\.json$' \
             -e '^src-tauri/Cargo\.lock$' \
             || true)
@@ -304,11 +315,23 @@ jobs:
           set -euo pipefail
           git add -A
           git commit -F "$RUNNER_TEMP/commit-message.txt"
-          git push origin "HEAD:$BRANCH"
+          # Explicit authenticated URL because checkout ran with
+          # persist-credentials: false — the token must not sit in .git/config
+          # while the agent has read access to the tree. Actions masks it in
+          # the log.
+          #
+          # --force is safe here: we only reach this step when no PR is open for
+          # the branch, so anything being overwritten belongs to an abandoned
+          # attempt whose PR was closed.
+          git push --force \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" \
+            "HEAD:$BRANCH"
 
       # Non-draft on purpose: it hands the branch straight to CodeRabbit, whose
       # review then triggers apply-fixes.yml. A draft would stall the loop.
-      - name: Open or update pull request
+      # Always a fresh PR: the branch-prep step bails out when one is already
+      # open, so reaching here means there is none.
+      - name: Open pull request
         if: steps.changes.outputs.no_changes == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
@@ -321,15 +344,11 @@ jobs:
             echo "This is a first attempt — review it as you would any PR."
           } >> "$RUNNER_TEMP/pr-body.md"
 
-          if [ -n "${{ steps.branch.outputs.existing_pr }}" ]; then
-            echo "PR #${{ steps.branch.outputs.existing_pr }} already open for $BRANCH — added a commit."
-          else
-            gh pr create --repo "$REPO" \
-              --base main \
-              --head "$BRANCH" \
-              --title "$(head -1 "$RUNNER_TEMP/pr-title.txt")" \
-              --body-file "$RUNNER_TEMP/pr-body.md"
-          fi
+          gh pr create --repo "$REPO" \
+            --base main \
+            --head "$BRANCH" \
+            --title "$(head -1 "$RUNNER_TEMP/pr-title.txt")" \
+            --body-file "$RUNNER_TEMP/pr-body.md"
           url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // ""')
           echo "pr_url=$url" >> "$GITHUB_ENV"
 
@@ -350,15 +369,6 @@ jobs:
         if: steps.changes.outputs.no_changes == 'true'
         run: |
           set -euo pipefail
-          # A reused branch whose fix already landed leaves a clean tree. That
-          # is "nothing further to do", not "no fix found" — don't contradict
-          # the PR sitting open on the issue.
-          if [ -n "${{ steps.branch.outputs.existing_pr }}" ]; then
-            gh issue comment "$ISSUE" --repo "$REPO" \
-              --body "🤖 Re-ran autofix and found nothing further to change. PR #${{ steps.branch.outputs.existing_pr }} still stands." \
-              2>/dev/null || true
-            exit 0
-          fi
           if [ ! -s "$RUNNER_TEMP/no-fix-report.md" ]; then
             echo "::error::Claude produced no fix and no no-fix-report.md. Per the prompt it must explain what it investigated — treating this as a failed run."
             exit 1

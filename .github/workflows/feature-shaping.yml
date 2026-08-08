@@ -40,6 +40,7 @@ jobs:
       # publishing model output as shawnzhu would let it satisfy this
       # workflow's own `/shape` trigger gate.
       GH_TOKEN: ${{ github.token }}
+      PUSH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
       ISSUE: ${{ github.event.issue.number }}
       REPO: ${{ github.repository }}
       BRANCH: spec/issue-${{ github.event.issue.number }}
@@ -56,7 +57,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+          # The agent runs inside this checkout, so no credential may be left
+          # in .git/config for it to read. The push below uses an explicit
+          # authenticated URL instead.
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
@@ -83,32 +87,18 @@ jobs:
           gh issue comment "$ISSUE" --repo "$REPO" \
             --body "🤖 \`/shape\` only applies to issues typed **Feature**. Set the issue type and comment \`/shape\` again."
 
-      # Distinguish "branch absent" (ls-remote exit 2) from a transport or auth
-      # failure — treating a network blip as "absent" would branch from main
-      # and then fail the non-forced push on a non-fast-forward.
-      - name: Create or reuse spec branch
+      # Always branch from the `main` just checked out, never from an existing
+      # remote branch. This job is privileged (contents: write on an
+      # issue_comment trigger) and later steps run an agent inside the checkout
+      # — which reads CLAUDE.md, .claude/, and .agents/skills/ from the working
+      # tree. Checking out branch content would let those files steer the agent.
+      # CodeQL flags the pattern as actions/untrusted-checkout/high.
+      - name: Prepare spec branch
         if: steps.check.outputs.proceed == 'true'
         run: |
           set -euo pipefail
-          set +e
-          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1
-          rc=$?
-          set -e
-          case "$rc" in
-            0)
-              echo "Branch $BRANCH exists on origin — reusing it."
-              git fetch origin "$BRANCH"
-              git checkout -B "$BRANCH" "origin/$BRANCH"
-              ;;
-            2)
-              echo "Branch $BRANCH does not exist — creating it."
-              git checkout -b "$BRANCH"
-              ;;
-            *)
-              echo "::error::git ls-remote failed (exit $rc) — refusing to guess at branch state."
-              exit 1
-              ;;
-          esac
+          git checkout -B "$BRANCH"
+          echo "Branched $BRANCH from main at $(git rev-parse --short HEAD)."
 
       # The whole discussion is the input to shaping, partitioned by author so
       # the prompt can treat shawnzhu's comments as requirements. The `/shape`
@@ -167,7 +157,7 @@ jobs:
           claude -p "$prompt" \
             --output-format json \
             --settings .github/claude-agent-settings.json \
-            --allowed-tools "Read Write Edit Grep Glob Bash(git log:*) Bash(git diff:*) Bash(git status:*)" \
+            --allowed-tools "Read Write Edit Grep Glob Bash(git log:*) Bash(git status:*)" \
             --permission-mode acceptEdits \
             > "$RUNNER_TEMP/claude-output.json"
           fence="stop-$(uuidgen)"
@@ -237,7 +227,17 @@ jobs:
           Shaped from #$ISSUE.
 
           Refs #$ISSUE"
-          git push origin "HEAD:$BRANCH"
+          # Explicit authenticated URL because checkout ran with
+          # persist-credentials: false — the token must not sit in .git/config
+          # while the agent has read access to the tree.
+          #
+          # --force because we always branch fresh from main: a leftover branch
+          # from an earlier /shape has diverged. Re-shaping regenerates the spec
+          # from the current discussion, so discarding the old attempt is the
+          # intended semantic.
+          git push --force \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" \
+            "HEAD:$BRANCH"
 
       # Refs, not Fixes — merging a spec does not deliver the feature, so the
       # issue stays open to track the implementation.
