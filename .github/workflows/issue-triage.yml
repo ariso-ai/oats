@@ -134,7 +134,12 @@ jobs:
           # jq -r on a JSON string yields the decoded text; write it to a file
           # rather than a step output so the body is never shell-expanded.
           jq -r '.comment // ""' "$RUNNER_TEMP/triage.json" > "$RUNNER_TEMP/triage-comment.md"
-          if [ -s "$RUNNER_TEMP/triage-comment.md" ]; then
+          # Test for non-whitespace content, not file size. `jq -r` terminates
+          # its output with a newline, so an empty comment still yields a
+          # 1-byte file and `-s` would call it non-empty — which posted a bare
+          # "🤖 Automated triage." on every Task issue, exactly the noise the
+          # empty-comment case exists to avoid.
+          if [ -n "$(tr -d '[:space:]' < "$RUNNER_TEMP/triage-comment.md")" ]; then
             has_comment=true
           else
             has_comment=false
