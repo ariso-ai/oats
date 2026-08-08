@@ -77,8 +77,9 @@ mod imp {
     };
     use windows::Win32::Media::Audio::{
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-        IMMEndpoint, MMDeviceEnumerator, eCapture, eConsole,
+        AUDCLNT_STREAMOPTIONS_NONE, AudioCategory_Communications, AudioClientProperties,
+        DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient, IAudioClient2, IMMDevice,
+        IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator, eCapture, eConsole,
     };
     use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
     use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject};
@@ -93,6 +94,8 @@ mod imp {
     const STARTUP_ATTEMPTS: usize = 3;
     const STARTUP_SIGNAL_TIMEOUT: Duration = Duration::from_secs(3);
     const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(250);
+    const SHARED_EVENT_BUFFER_DURATION_HNS: i64 = 0;
+    const SHARED_EVENT_PERIODICITY_HNS: i64 = 0;
 
     fn pcm_has_signal(pcm: &[u8]) -> bool {
         pcm.chunks_exact(2)
@@ -121,6 +124,15 @@ mod imp {
             return Err("Windows microphone reported an unsupported float PCM layout".into());
         }
         Ok((bytes_per_frame, channels, source_rate))
+    }
+
+    fn capture_client_properties() -> AudioClientProperties {
+        AudioClientProperties {
+            cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
+            bIsOffload: false.into(),
+            eCategory: AudioCategory_Communications,
+            Options: AUDCLNT_STREAMOPTIONS_NONE,
+        }
     }
 
     struct ComGuard;
@@ -246,6 +258,13 @@ mod imp {
     > {
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(|error| format!("open Windows microphone: {error}"))?;
+        let client2: IAudioClient2 = client
+            .cast()
+            .map_err(|error| format!("open Windows microphone communications client: {error}"))?;
+        let properties = capture_client_properties();
+        unsafe { client2.SetClientProperties(&properties) }.map_err(|error| {
+            format!("configure Windows microphone communications stream: {error}")
+        })?;
         let raw_format = unsafe { client.GetMixFormat() }
             .map_err(|error| format!("read Windows microphone mix format: {error}"))?;
         let format_result = if raw_format.is_null() {
@@ -259,16 +278,13 @@ mod imp {
         }
         let format = format_result?;
         let (bytes_per_frame, channels, source_rate) = capture_layout(&format)?;
-        let mut min_period = 0_i64;
-        unsafe { client.GetDevicePeriod(None, Some(&mut min_period)) }
-            .map_err(|error| format!("read Windows microphone period: {error}"))?;
         let stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
         unsafe {
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 stream_flags,
-                min_period,
-                0,
+                SHARED_EVENT_BUFFER_DURATION_HNS,
+                SHARED_EVENT_PERIODICITY_HNS,
                 ptr::addr_of!(format.wave_fmt.Format),
                 None,
             )
@@ -487,8 +503,14 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{capture_layout, is_transient_startup_error, pcm_has_signal};
+        use super::{
+            capture_client_properties, capture_layout, is_transient_startup_error, pcm_has_signal,
+            SHARED_EVENT_BUFFER_DURATION_HNS, SHARED_EVENT_PERIODICITY_HNS,
+        };
         use wasapi::{SampleType, WaveFormat};
+        use windows::Win32::Media::Audio::{
+            AUDCLNT_STREAMOPTIONS_NONE, AudioCategory_Communications,
+        };
 
         #[test]
         fn detects_nonzero_pcm_signal() {
@@ -526,6 +548,24 @@ mod imp {
             assert!(!is_transient_startup_error(
                 "initialize Windows microphone capture: access denied"
             ));
+        }
+
+        #[test]
+        fn configures_capture_as_a_communications_stream() {
+            let properties = capture_client_properties();
+            assert_eq!(
+                properties.cbSize as usize,
+                std::mem::size_of_val(&properties)
+            );
+            assert!(!properties.bIsOffload.as_bool());
+            assert_eq!(properties.eCategory, AudioCategory_Communications);
+            assert_eq!(properties.Options, AUDCLNT_STREAMOPTIONS_NONE);
+        }
+
+        #[test]
+        fn lets_windows_size_shared_event_capture_buffers() {
+            assert_eq!(SHARED_EVENT_BUFFER_DURATION_HNS, 0);
+            assert_eq!(SHARED_EVENT_PERIODICITY_HNS, 0);
         }
     }
 }

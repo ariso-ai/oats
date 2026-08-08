@@ -48,7 +48,11 @@ shared-mode WASAPI capture worker. It emits the same base64 Int16 mono 44.1 kHz
 platform-independent. WASAPI is initialized with each endpoint's native shared-mode
 mix format (including the AirPods hands-free profile's lower sample rate); Oats then
 downmixes and resamples the received PCM to its frontend contract. This avoids relying
-on driver-side conversion to a forced 44.1 kHz capture format. `src/composables/useAudioInputDevices.ts` owns plugin-store
+on driver-side conversion to a forced 44.1 kHz capture format. The WASAPI client is
+categorized as a communications stream before initialization so Windows activates the
+Bluetooth hands-free capture route in the same class of use as browser microphone
+capture. Its shared event-driven stream leaves both WASAPI timing arguments at zero
+so the Windows audio engine sizes the endpoint buffer. `src/composables/useAudioInputDevices.ts` owns plugin-store
 persistence, availability resolution, and periodic refresh subscription. The Settings
 view activates it only when native platform capabilities report Windows.
 
