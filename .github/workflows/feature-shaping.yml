@@ -73,7 +73,9 @@ jobs:
         id: check
         run: |
           set -euo pipefail
-          type=$(gh issue view "$ISSUE" --repo "$REPO" --json issueType --jq '.issueType.name // ""')
+          # REST, not `gh issue view --json issueType`: that field needs a recent
+          # gh, and the self-hosted runner lags behind.
+          type=$(gh api "repos/$REPO/issues/$ISSUE" --jq '.type.name // ""')
           echo "Issue #$ISSUE type: ${type:-<none>}"
           if [ "$type" != "Feature" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
