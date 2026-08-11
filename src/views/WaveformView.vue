@@ -49,7 +49,7 @@
             :key="i"
             class="bar"
             :class="{ paused: recorder.isPaused.value }"
-            :style="{ height: `${Math.max(12, Math.min(100, Math.sqrt(level) * 150))}%` }"
+            :style="{ height: `${barHeightPercent(level)}%` }"
           />
         </div>
 
@@ -121,7 +121,7 @@ import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
 import { isMeetingEndReminderEnabled } from '../composables/useMeetingEndReminder';
 import { deriveRecordingMode } from './recordingSettings';
-import { centerWeightedBars } from './waveformBars';
+import { barHeightPercent, centerWeightedBars } from './waveformBars';
 import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/silenceWatch';
 import {
   shouldPromptMeetingEnd,
@@ -1000,18 +1000,20 @@ html, body {
 .pill:active { cursor: grabbing; } /* closed/grabbing hand while pressed */
 
 .logo {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   object-fit: contain;
   flex-shrink: 0;
 }
 
+/* The height the bars travel through: tall enough that the difference between
+   quiet and loud reads at a glance from across the desk. */
 .bars {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 18px;
+  height: 22px;
   margin-top: 7px;
   flex-shrink: 0;
 }
