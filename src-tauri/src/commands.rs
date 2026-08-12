@@ -1038,14 +1038,27 @@ pub(crate) fn open_waveform_window(
                 let app_for_reopen = app_for_event.clone();
                 tauri::async_runtime::spawn(async move {
                     // This event and Tauri's own deregistration of the window
-                    // race. Wait for the label to actually be free, otherwise
-                    // the re-open below would rediscover the dying window and
-                    // queue a second yield that nothing is left to answer.
+                    // race. Wait for the label to actually be free before
+                    // re-opening.
+                    let mut freed = false;
                     for _ in 0..YIELD_REOPEN_POLLS {
                         if app_for_reopen.get_webview_window("waveform").is_none() {
+                            freed = true;
                             break;
                         }
                         tokio::time::sleep(YIELD_REOPEN_POLL_INTERVAL).await;
+                    }
+                    // Give up rather than re-open into a still-registered
+                    // label: that would rediscover the dying window, emit a
+                    // second yield nothing is left to answer, and leave a
+                    // queued request that only expires — or worse, gets
+                    // honored later by an unrelated close.
+                    if !freed {
+                        eprintln!(
+                            "waveform: window still registered {}ms after Destroyed; dropping the queued re-open",
+                            (YIELD_REOPEN_POLLS as u128) * YIELD_REOPEN_POLL_INTERVAL.as_millis()
+                        );
+                        return;
                     }
                     // Window creation must happen on the main thread.
                     let app_main = app_for_reopen.clone();
