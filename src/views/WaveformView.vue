@@ -393,6 +393,7 @@ async function applyPillVisibility(hidden: boolean) {
 
 let unlistenPillVisible: UnlistenFn | null = null;
 let unlistenPendingUploaded: UnlistenFn | null = null;
+let unlistenYield: UnlistenFn | null = null;
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
@@ -766,6 +767,34 @@ async function handlePendingUploadSucceeded() {
   await closeWindow();
 }
 
+// A new recording was requested while this window still holds the one recorder
+// slot (see open_waveform_window). Stand down so it can take over — the native
+// side re-opens a fresh pill once this one is destroyed.
+//
+// Only from a settled post-upload state. The stopped audio is already buffered
+// on disk (finalizeRecording persists it before attempting the upload), so the
+// Pending uploads sidebar owns the retry from here; drop the in-memory copy
+// WITHOUT discarding the buffer, exactly like handlePendingUploadSucceeded.
+//
+// Refusing while capture or a finalize is still in flight is the point. Tearing
+// the window down mid-upload can strand a buffer whose upload actually
+// succeeded — discardAudio runs here, after the request resolves — and the next
+// retry would upload it a second time. `inFlightFinalize` covers the finalize
+// that outlived its 120s UI timeout and left a 'failed' pill up while still
+// running; it clears when that work truly settles, so the block is temporary.
+// A refusal leaves the pre-existing behavior: the request expires natively and
+// this pill just took focus.
+async function handleYield() {
+  if (uploadResult.value === null || isUploading.value || inFlightFinalize) return;
+  if (closeTimer) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+  stoppedBlob.value = null;
+  stoppedMeta.value = null;
+  await closeWindow();
+}
+
 // Keep the failed recording's audio and resume capturing into a fresh buffer.
 // The next stop concatenates the held blob with the new segment (see handleStop).
 async function resumeFailed() {
@@ -815,6 +844,7 @@ onMounted(async () => {
   });
 
   unlistenPendingUploaded = await listen('pending-upload://succeeded', handlePendingUploadSucceeded);
+  unlistenYield = await listen('recorder://yield', handleYield);
 
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);
@@ -940,6 +970,7 @@ onUnmounted(() => {
   if (closeTimer) clearTimeout(closeTimer);
   unlistenPillVisible?.();
   unlistenPendingUploaded?.();
+  unlistenYield?.();
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();
