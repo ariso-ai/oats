@@ -921,12 +921,27 @@ fn waveform_url(
     url
 }
 
+/// How long a queued recording waits for the incumbent pill to stand down
+/// before the request is dropped. The recorder answers `recorder://yield` from
+/// an idle post-upload state, so this only needs to cover event delivery plus
+/// the window close; a pill that is genuinely busy never answers at all.
+const YIELD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Bound on waiting for the `"waveform"` label to be free after the incumbent
+/// pill's `Destroyed` event, before re-opening in its place.
+const YIELD_REOPEN_POLLS: u32 = 20;
+const YIELD_REOPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
 /// `RecordingState` as an auto recording. `force_new` adds `forceNew=1`,
 /// telling the recorder to skip the 5-minute auto-append window and always
 /// dock to a brand-new recording id.
+///
+/// Only one recorder pill exists at a time. When one is already up this
+/// negotiates a handoff rather than no-opping: see the `recorder://yield`
+/// exchange below.
 pub(crate) fn open_waveform_window(
     app: &tauri::AppHandle,
     meeting_id: Option<i64>,
@@ -942,10 +957,25 @@ pub(crate) fn open_waveform_window(
     if let Some(existing) = app.get_webview_window("waveform") {
         // Backfill the lifecycle claim for a registered window that still owns
         // capture, upload, retry, or its native close transition.
-        let _ = app
-            .state::<crate::recording_state::RecordingState>()
-            .try_claim_window();
+        let state = app.state::<crate::recording_state::RecordingState>();
+        let _ = state.try_claim_window();
         let _ = existing.set_focus();
+        // The pill outlives capture: it lingers through the upload and stays up
+        // indefinitely on a failed one so the user can retry. Such a stale pill
+        // must not silently swallow a new recording (#313), so ask it to stand
+        // down and re-open once it's actually gone (see the Destroyed handler
+        // below). It refuses while still capturing or uploading — then the
+        // queued request expires and the focus above is all that happens,
+        // which is the pre-existing behavior.
+        let token = state.queue_reopen(meeting_id, local_append_id, force_new, auto);
+        let _ = app.emit("recorder://yield", ());
+        let app_for_expiry = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(YIELD_TIMEOUT).await;
+            app_for_expiry
+                .state::<crate::recording_state::RecordingState>()
+                .expire_reopen(token);
+        });
         return Ok(());
     }
     let recording_state = app.state::<crate::recording_state::RecordingState>();
@@ -1002,6 +1032,36 @@ pub(crate) fn open_waveform_window(
             state.clear();
             state.release_window_claim();
             let _ = app_for_event.emit("recording://state", false);
+            // A recording was requested while this pill still held the window
+            // slot and it has now stood down, so honor that request.
+            if let Some(next) = state.take_reopen() {
+                let app_for_reopen = app_for_event.clone();
+                tauri::async_runtime::spawn(async move {
+                    // This event and Tauri's own deregistration of the window
+                    // race. Wait for the label to actually be free, otherwise
+                    // the re-open below would rediscover the dying window and
+                    // queue a second yield that nothing is left to answer.
+                    for _ in 0..YIELD_REOPEN_POLLS {
+                        if app_for_reopen.get_webview_window("waveform").is_none() {
+                            break;
+                        }
+                        tokio::time::sleep(YIELD_REOPEN_POLL_INTERVAL).await;
+                    }
+                    // Window creation must happen on the main thread.
+                    let app_main = app_for_reopen.clone();
+                    let _ = app_for_reopen.run_on_main_thread(move || {
+                        if let Err(error) = open_waveform_window(
+                            &app_main,
+                            next.meeting_id,
+                            next.local_append_id,
+                            next.force_new,
+                            next.auto,
+                        ) {
+                            eprintln!("waveform: re-open after yield failed: {error}");
+                        }
+                    });
+                });
+            }
         }
     });
 

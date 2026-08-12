@@ -893,3 +893,82 @@ describe('WaveformView vertical pill', () => {
     wrapper.unmount();
   });
 });
+
+// A pending upload used to block starting a new recording outright: the failed
+// pill kept the one recorder window alive, and every entry point no-opped into
+// focusing it (#313). The native side now asks the incumbent pill to stand down.
+describe('WaveformView recorder://yield handshake', () => {
+  it('yields the recorder window from a failed pill, leaving the buffer for the sidebar', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+
+    emitEvent.mockClear();
+    eventHandlers['recorder://yield']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(closeWin).toHaveBeenCalled();
+    const last = emitEvent.mock.calls.filter(([n]) => n === 'recorder://state').at(-1);
+    expect((last?.[1] as { phase: string }).phase).toBe('closed');
+    // The audio stays on disk so Pending uploads can still retry it — this is a
+    // handoff, not a discard.
+    expect(discardPendingAudio).not.toHaveBeenCalled();
+  });
+
+  it('yields the recorder window from the success pill without waiting out its close timer', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    eventHandlers['recorder://yield']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(closeWin).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('refuses to yield while still capturing', async () => {
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+
+    eventHandlers['recorder://yield']?.({ payload: undefined });
+    await flushPromises();
+
+    // Killing a live recording to make room for a new one would lose audio.
+    expect(closeWin).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('refuses to yield while an upload is in flight', async () => {
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    let settleUpload: (r: { backend: string }) => void = () => {};
+    finalizeRecording.mockReturnValue(
+      new Promise((resolve) => {
+        settleUpload = resolve;
+      }),
+    );
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    void wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    eventHandlers['recorder://yield']?.({ payload: undefined });
+    await flushPromises();
+
+    // Tearing the window down here can strand a buffer whose upload already
+    // succeeded (the post-upload discard runs in this window), which the next
+    // retry would then upload a second time.
+    expect(closeWin).not.toHaveBeenCalled();
+
+    settleUpload({ backend: 'local' });
+    await flushPromises();
+    wrapper.unmount();
+  });
+});
