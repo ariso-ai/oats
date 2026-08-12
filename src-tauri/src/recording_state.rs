@@ -104,8 +104,9 @@ impl RecordingState {
         force_new: bool,
         auto: bool,
     ) -> u64 {
+        let mut pending_open = self.pending_open.lock().unwrap();
         let token = self.next_open_token.fetch_add(1, Ordering::Relaxed);
-        *self.pending_open.lock().unwrap() = Some(PendingOpen {
+        *pending_open = Some(PendingOpen {
             meeting_id,
             local_append_id,
             force_new,
@@ -264,5 +265,36 @@ mod tests {
             .filter(|won| *won)
             .count();
         assert_eq!(winners, 1);
+    }
+
+    #[test]
+    fn concurrent_queue_reopen_leaves_the_highest_token_queued() {
+        use std::sync::{Arc, Barrier};
+
+        const CONTENDERS: u64 = 16;
+        let state = Arc::new(RecordingState::new());
+        let barrier = Arc::new(Barrier::new(CONTENDERS as usize));
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.queue_reopen(None, None, false, false)
+                })
+            })
+            .collect();
+
+        let max_token = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .max()
+            .unwrap();
+
+        // Token allocation and slot replacement happen under the same lock, so
+        // whichever request acquired the lock last also holds the highest
+        // token — an earlier allocation can never overwrite a later one.
+        let queued = state.take_reopen().expect("a request was queued");
+        assert_eq!(queued.token, max_token);
     }
 }
