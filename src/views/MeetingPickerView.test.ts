@@ -114,6 +114,74 @@ describe('MeetingPickerView — record a new meeting', () => {
   });
 });
 
+describe('MeetingPickerView — the recommended meeting is the primary target', () => {
+  it('features the happening-now meeting and keeps it primary after expanding', async () => {
+    const now = Date.now();
+    listScheduledMeetings.mockResolvedValue([
+      { id: 1, title: 'Standup', start_at: new Date(now).toISOString() },
+      { id: 2, title: 'Later Thing', start_at: new Date(now + 3 * 60 * 60_000).toISOString() },
+    ]);
+    const wrapper = mount(MeetingPickerView);
+    await flushPromises();
+
+    // Collapsed: just the pick, carrying the primary treatment.
+    let rows = wrapper.findAll('.meeting-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].classes()).toContain('meeting-row--featured');
+    expect(wrapper.text()).toContain('Happening now');
+
+    await byText(wrapper, 'View all ▾')!.trigger('click');
+    await flushPromises();
+
+    // Expanded: still primary, and the other rows stay quiet.
+    rows = wrapper.findAll('.meeting-row');
+    expect(rows).toHaveLength(2);
+    const standup = rows.find((r) => r.text().includes('Standup'))!;
+    const later = rows.find((r) => r.text().includes('Later Thing'))!;
+    expect(standup.classes()).toContain('meeting-row--featured');
+    expect(standup.find('.live-dot').exists()).toBe(true);
+    expect(later.classes()).not.toContain('meeting-row--featured');
+    expect(later.find('.meeting-badge').exists()).toBe(false);
+  });
+
+  it('badges the soonest meeting "Up next" when nothing is happening now', async () => {
+    const now = Date.now();
+    listScheduledMeetings.mockResolvedValue([
+      { id: 1, title: 'Later Thing', start_at: new Date(now + 3 * 60 * 60_000).toISOString() },
+      { id: 2, title: 'Soon Thing', start_at: new Date(now + 30 * 60_000).toISOString() },
+    ]);
+    const wrapper = mount(MeetingPickerView);
+    await flushPromises();
+
+    await byText(wrapper, 'View all ▾')!.trigger('click');
+    await flushPromises();
+
+    const rows = wrapper.findAll('.meeting-row');
+    const soon = rows.find((r) => r.text().includes('Soon Thing'))!;
+    expect(soon.classes()).toContain('meeting-row--featured');
+    expect(soon.find('.meeting-badge').text()).toContain('Up next');
+    // "Up next" is not live, so no pulsing dot.
+    expect(soon.find('.live-dot').exists()).toBe(false);
+  });
+
+  it('does not fade an edge the list has not scrolled past', async () => {
+    listScheduledMeetings.mockResolvedValue([
+      { id: 1, title: 'Standup', start_at: new Date().toISOString() },
+    ]);
+    const wrapper = mount(MeetingPickerView);
+    await flushPromises();
+
+    await byText(wrapper, 'View all ▾')!.trigger('click');
+    await flushPromises();
+
+    // An unconditional top fade dissolved the first meeting's title into the
+    // backdrop before the user scrolled at all.
+    const list = wrapper.find('.meeting-list');
+    expect(list.classes()).not.toContain('is-faded-top');
+    expect(list.classes()).not.toContain('is-faded-bottom');
+  });
+});
+
 describe('MeetingPickerView — Ari-join gate', () => {
   it('flagged meeting shows confirm dialog and only records on "Record anyway"', async () => {
     listScheduledMeetings.mockResolvedValue([
