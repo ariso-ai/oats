@@ -290,4 +290,32 @@ describe('MeetingPickerView — forced default from the Library', () => {
       window.location.hash = prevHash;
     }
   });
+
+  it('"View all" keeps the forced meeting when it is a past meeting outside today\'s list', async () => {
+    listScheduledMeetings.mockResolvedValue([
+      { id: 9, title: 'Other Meeting', start_at: new Date().toISOString() },
+    ]);
+    getMeetingNotes.mockResolvedValue({ id: 5, title: 'Past Sync', start_at: '2026-06-01T09:00:00Z' });
+    const prevHash = window.location.hash;
+    window.location.hash = '#/meeting-picker?defaultMeetingId=5';
+    try {
+      const wrapper = mount(MeetingPickerView);
+      await flushPromises();
+
+      await byText(wrapper, 'View all ▾')!.trigger('click');
+      await flushPromises();
+
+      // The forced "Continue" meeting (id 5) isn't in today's list, but expanding
+      // must not drop it — it should still be choosable, just as a regular row.
+      expect(wrapper.text()).toContain('Past Sync');
+      expect(wrapper.text()).toContain('Other Meeting');
+      const pastSyncRow = wrapper.findAll('.meeting-row').find((r) => r.text().includes('Past Sync'));
+      expect(pastSyncRow).toBeTruthy();
+      await pastSyncRow!.trigger('click');
+      await flushPromises();
+      expect(invoke).toHaveBeenCalledWith('start_recording_window', { meetingId: 5 });
+    } finally {
+      window.location.hash = prevHash;
+    }
+  });
 });

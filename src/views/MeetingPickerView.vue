@@ -179,10 +179,21 @@ const featuredLabel = computed(() => {
   return isHappeningNow.value ? 'Happening now' : 'Up next';
 });
 
+// forcedDefault may be a past meeting outside today's list (see the comment
+// above its declaration) — without this, expanding the list would drop the
+// "Continue" meeting instead of just demoting it to a regular row.
+const expandedMeetings = computed<ScheduledMeeting[]>(() => {
+  const forced = forcedDefault.value;
+  if (!forced || meetings.value.some((m) => m.id === forced.id)) {
+    return meetings.value;
+  }
+  return [forced, ...meetings.value];
+});
+
 // Expanded rows carry the label inline, since a section heading can't attach to
 // one row in the middle of a list the way it does in the collapsed view.
 const decoratedMeetings = computed(() =>
-  meetings.value.map((m) => {
+  expandedMeetings.value.map((m) => {
     const featured = m.id === featuredId.value;
     return {
       meeting: m,
