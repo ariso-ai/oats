@@ -341,6 +341,39 @@ fn retire_sign_in_attempt(id: u64) -> bool {
     }
 }
 
+/// Owns the slot for the stretch between `begin_sign_in_attempt` and the
+/// moment the loopback listener task takes over. Every fallible step in that
+/// prologue — bind, prepare-state, URL validation, opening the browser — would
+/// otherwise leave the attempt parked in the slot on the way out, and a later
+/// `cancel_google_sign_in` would emit a result for a flow that already died.
+/// Call `release` once the listener task exists; until then, any early return
+/// retires the attempt on drop.
+struct SignInAttemptGuard(Option<u64>);
+
+impl SignInAttemptGuard {
+    fn begin(flow: BrowserFlow) -> Self {
+        Self(Some(begin_sign_in_attempt(flow)))
+    }
+
+    fn id(&self) -> u64 {
+        self.0.expect("attempt id read after release")
+    }
+
+    /// Hand the attempt to the listener task: it now owns retiring the slot,
+    /// so dropping this guard must no longer do it.
+    fn release(mut self) -> u64 {
+        self.0.take().expect("attempt released twice")
+    }
+}
+
+impl Drop for SignInAttemptGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            retire_sign_in_attempt(id);
+        }
+    }
+}
+
 /// Constant-time-ish nonce check: comparing SHA-256 digests instead of the
 /// raw strings keeps a local process from recovering the nonce byte-by-byte
 /// through comparison timing.
@@ -542,8 +575,10 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // prepare-state is in flight still has something in the slot to cancel,
     // instead of being silently dropped because no listener task exists yet.
     // This also supersedes any still-pending attempt (e.g. the user closed
-    // the browser tab and clicked Sign in again).
-    let attempt_id = begin_sign_in_attempt(BrowserFlow::SignIn);
+    // the browser tab and clicked Sign in again). The guard retires it again
+    // if any step below fails before the listener task takes ownership.
+    let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+    let attempt_id = attempt.id();
 
     // Bind before prepare-state so the advertised port is already ours.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -617,6 +652,7 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // Step 3: Wait for the browser to hit the loopback callback. If this
     // attempt was superseded or canceled while the browser was opening,
     // `attach_sign_in_handle` aborts the task instead of letting it run.
+    let attempt_id = attempt.release();
     let handle =
         tauri::async_runtime::spawn(run_browser_sign_in(attempt_id, window, listener, nonce));
     attach_sign_in_handle(attempt_id, handle);
@@ -725,7 +761,10 @@ pub async fn connect_google_calendar(
         return Err("Not signed in".into());
     };
 
-    let attempt_id = begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+    // As in `google_sign_in`: the guard hands the slot back if any step below
+    // fails before the listener task takes ownership of the attempt.
+    let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+    let attempt_id = attempt.id();
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -777,6 +816,7 @@ pub async fn connect_google_calendar(
         .open_url(body.redirect_url, None::<&str>)
         .map_err(|e| e.to_string())?;
 
+    let attempt_id = attempt.release();
     let handle =
         tauri::async_runtime::spawn(run_calendar_connect(attempt_id, window, listener, nonce));
     attach_sign_in_handle(attempt_id, handle);
@@ -2147,6 +2187,44 @@ mod tests {
         assert!(retire_sign_in_attempt(superseded_id));
         assert!(!sign_in_attempt_active(superseded_id));
         assert!(!retire_sign_in_attempt(superseded_id));
+    }
+
+    #[test]
+    fn attempt_guard_retires_the_slot_when_the_prologue_fails() {
+        // Every fallible step between begin and the listener task's spawn —
+        // bind, prepare-state, URL validation, open_url — used to leave the
+        // attempt parked in the slot, so a later cancel emitted a result for
+        // a flow that had already failed.
+        let id = {
+            let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+            let id = attempt.id();
+            assert!(sign_in_attempt_active(id));
+            id // guard drops here, as it would on an early `?` return
+        };
+        assert!(!sign_in_attempt_active(id));
+        assert!(abort_pending_sign_in().is_none());
+    }
+
+    #[test]
+    fn released_attempt_survives_the_guard_going_out_of_scope() {
+        // Once the listener task owns the attempt, the guard must keep its
+        // hands off: retiring here would strand the frontend's waiter.
+        let id = {
+            let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+            attempt.release()
+        };
+        assert!(sign_in_attempt_active(id));
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+    }
+
+    #[test]
+    fn attempt_guard_drop_never_retires_a_newer_attempt() {
+        // A superseded prologue failing late must not clear the winner's slot.
+        let stale = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+        let winner = begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+        drop(stale);
+        assert!(sign_in_attempt_active(winner));
+        assert!(retire_sign_in_attempt(winner));
     }
 
     #[tokio::test]

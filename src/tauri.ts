@@ -81,6 +81,12 @@ export const auth = {
     if (res.status !== 200) {
       throw new Error(`calendar status: ${res.status}`);
     }
+    // api_request falls back to null when the body does not decode as JSON,
+    // keeping the real status — so a 200 can still arrive shapeless. Fail with
+    // a legible message instead of a TypeError on `.connected` downstream.
+    if (typeof res.data !== 'object' || res.data === null) {
+      throw new Error('calendar status: malformed response');
+    }
     return res.data as CalendarStatus;
   },
 

@@ -116,4 +116,15 @@ describe('auth.ensureCalendarAccess', () => {
     await expect(auth.ensureCalendarAccess()).rejects.toThrow('calendar status: 401');
     expect(invoke).not.toHaveBeenCalledWith('connect_google_calendar');
   });
+
+  it('throws a legible error when a 200 carries an undecodable body', async () => {
+    // api_request keeps the real status and falls back to null when the body
+    // is not JSON, so `.connected` would blow up with a TypeError.
+    mockBackend({ status: null, statusCode: 200 });
+
+    await expect(auth.ensureCalendarAccess()).rejects.toThrow(
+      'calendar status: malformed response'
+    );
+    expect(invoke).not.toHaveBeenCalledWith('connect_google_calendar');
+  });
 });

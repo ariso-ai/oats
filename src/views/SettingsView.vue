@@ -204,7 +204,7 @@
           </p>
           <button
             :disabled="isConnectingCalendar"
-            class="sign-out-btn"
+            class="secondary-btn"
             @click="refreshCalendarAccess"
           >
             {{ isConnectingCalendar ? 'Continue in your browser…' : 'Connect Calendar' }}
@@ -1382,7 +1382,9 @@ async function handleSignOut() {
 
 .calendar-connect-text {
   font-size: 12px;
-  color: #9ca3af;
+  /* The file's muted 12px colour (.account-email, .setting-hint): 5.0:1 on the
+     white card, where #9ca3af managed only 2.5:1 — under the WCAG AA floor. */
+  color: #6f6f6f;
   margin: 0;
 }
 
