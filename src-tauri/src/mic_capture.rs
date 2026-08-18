@@ -108,6 +108,24 @@ mod imp {
         error.contains("0x88890004")
     }
 
+    fn route_capture_error(
+        ready: &mut Option<Sender<Result<(), String>>>,
+        error: String,
+    ) -> Option<String> {
+        if let Some(ready_tx) = ready.take() {
+            // Startup owns this failure. The caller may retry a transient
+            // Bluetooth profile transition, so do not also announce it as a
+            // failure of an already-running recording.
+            let _ = ready_tx.send(Err(error));
+            None
+        } else {
+            // The ready signal was already delivered: this is a failure of a
+            // live capture and the recorder frontend must stop preserving
+            // silence as though the microphone were still healthy.
+            Some(error)
+        }
+    }
+
     fn capture_layout(format: &WaveFormat) -> Result<(usize, usize, u32), String> {
         if format.get_subformat().ok() != Some(SampleType::Float)
             || format.get_bitspersample() != 32
@@ -403,10 +421,9 @@ mod imp {
         })();
 
         if let Err(error) = result {
-            if let Some(ready_tx) = ready.take() {
-                let _ = ready_tx.send(Err(error.clone()));
+            if let Some(runtime_error) = route_capture_error(&mut ready, error) {
+                let _ = app.emit("microphone-capture-error", runtime_error);
             }
-            let _ = app.emit("microphone-capture-error", error);
         }
     }
 
@@ -504,9 +521,11 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::{
-            capture_client_properties, capture_layout, is_transient_startup_error, pcm_has_signal,
             SHARED_EVENT_BUFFER_DURATION_HNS, SHARED_EVENT_PERIODICITY_HNS,
+            capture_client_properties, capture_layout, is_transient_startup_error, pcm_has_signal,
+            route_capture_error,
         };
+        use std::sync::mpsc;
         use wasapi::{SampleType, WaveFormat};
         use windows::Win32::Media::Audio::{
             AUDCLNT_STREAMOPTIONS_NONE, AudioCategory_Communications,
@@ -548,6 +567,26 @@ mod imp {
             assert!(!is_transient_startup_error(
                 "initialize Windows microphone capture: access denied"
             ));
+        }
+
+        #[test]
+        fn reports_startup_errors_only_through_the_ready_channel() {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let mut ready = Some(ready_tx);
+
+            let runtime_error = route_capture_error(&mut ready, "device invalidated".into());
+
+            assert_eq!(runtime_error, None);
+            assert_eq!(ready_rx.recv().unwrap(), Err("device invalidated".into()));
+        }
+
+        #[test]
+        fn emits_errors_only_after_capture_has_become_ready() {
+            let mut ready = None;
+
+            let runtime_error = route_capture_error(&mut ready, "device disconnected".into());
+
+            assert_eq!(runtime_error, Some("device disconnected".into()));
         }
 
         #[test]

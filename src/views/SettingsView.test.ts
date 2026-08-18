@@ -265,6 +265,29 @@ describe('SettingsView Windows input device selection', () => {
     expect((select.element as HTMLSelectElement).value).toBe('usb');
   });
 
+  it('keeps a preference-save error visible after a successful device refresh', async () => {
+    platformOs.value = 'windows';
+    listAudioInputDevices.mockResolvedValue([
+      { deviceId: 'laptop', label: 'Laptop Microphone' },
+      { deviceId: 'usb', label: 'USB Microphone' },
+    ]);
+    saveAudioInputPreference.mockRejectedValueOnce(new Error('store unavailable'));
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await wrapper.get('#recording-input-device').setValue('usb');
+    await flushPromises();
+    expect(wrapper.get('[data-test="audio-input-error"]').text()).toContain(
+      'preference could not be saved',
+    );
+
+    audioInputChangeHandler.value!();
+    await flushPromises();
+    expect(wrapper.get('[data-test="audio-input-error"]').text()).toContain(
+      'preference could not be saved',
+    );
+  });
+
   it('removes the device listener when unmounted during enumeration', async () => {
     platformOs.value = 'windows';
     listAudioInputDevices.mockImplementationOnce(() => new Promise(() => {}));

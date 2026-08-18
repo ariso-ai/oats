@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { ref } from 'vue';
 
 const startRecording = vi.fn();
 const stopRecording = vi.fn();
@@ -42,6 +43,7 @@ const recorderIsRecording = { value: true };
 const recorderIsPaused = { value: false };
 const recorderDuration = { value: 5 };
 const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
+const recorderError = ref<string | null>(null);
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: recorderIsRecording,
@@ -50,6 +52,7 @@ vi.mock('../composables/useRecorder', () => ({
     frameLevels: { value: new Array(32).fill(0.5) },
     lastSoundAt: { value: 0 },
     startedAt: recorderStartedAt,
+    error: recorderError,
     getAnalyser,
     startRecording: (...a: unknown[]) => startRecording(...a),
     stopRecording: () => stopRecording(),
@@ -128,6 +131,7 @@ beforeEach(() => {
   recorderIsPaused.value = false;
   recorderDuration.value = 5;
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
+  recorderError.value = null;
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
   recordingStatus.mockRejectedValue(new Error('recording not persisted'));
@@ -436,6 +440,28 @@ describe('WaveformView vertical pill', () => {
 
     expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
     expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('stops and finalizes partial audio when native microphone capture fails at runtime', async () => {
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    mount(WaveformView);
+    await flushPromises();
+    stopRecording.mockClear();
+    finalizeRecording.mockClear();
+    emitEvent.mockClear();
+
+    recorderError.value = 'selected microphone disconnected';
+    await flushPromises();
+
+    expect(stopRecording).toHaveBeenCalledOnce();
+    expect(finalizeRecording).toHaveBeenCalledOnce();
+    expect(emitEvent).toHaveBeenCalledWith('recording://capture-failed', {
+      message: expect.stringContaining('stopped the recording to avoid recording silence'),
+    });
+    expect(emitEvent.mock.invocationCallOrder[0]).toBeLessThan(
+      stopRecording.mock.invocationCallOrder[0],
+    );
   });
 
   it('checks the resolved automatic append target after a persisted local finalize failure', async () => {

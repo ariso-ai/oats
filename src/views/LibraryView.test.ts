@@ -1421,6 +1421,23 @@ describe('LibraryView', () => {
     expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
+  it('warns on a runtime capture failure without unlocking Start before stop completes', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://capture-failed', {
+      message: 'The microphone stopped sending audio.',
+    });
+    await flushPromises();
+
+    expect(wrapper.get('.recording-start-error').text()).toContain(
+      'microphone stopped sending audio',
+    );
+    expect(wrapper.get('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
   it('renders the PendingUploads section inside the sidebar', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView, {

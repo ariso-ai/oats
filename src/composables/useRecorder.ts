@@ -66,6 +66,8 @@ export function useRecorder() {
   // Mic audio state (native capture, 44.1kHz mono Int16 PCM)
   let micAudioActive = false;
   let micAudioUnlisten: UnlistenFn | null = null;
+  let micCaptureErrorUnlisten: UnlistenFn | null = null;
+  let pendingMicCaptureError: string | null = null;
   let micUsesNativeCapture = false;
   // Ring buffer for incoming mic audio (already 44.1kHz — no resample needed)
   let micAudioBuffer: Int16Array = new Int16Array(0);
@@ -151,6 +153,7 @@ export function useRecorder() {
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
     micAudioBuffer = new Int16Array(0);
+    pendingMicCaptureError = null;
 
     // Recording modes come from persisted user choices, but capability support
     // comes from the current binary. Intersecting them here is the final guard
@@ -186,6 +189,19 @@ export function useRecorder() {
             merged.set(samples, micAudioBuffer.length);
             micAudioBuffer = merged;
           });
+          micCaptureErrorUnlisten = await listen<string>(
+            'microphone-capture-error',
+            (event) => {
+              const message = event.payload || 'Microphone capture stopped unexpectedly';
+              pendingMicCaptureError = message;
+              error.value = message;
+              // Preserve every encoded frame, but stop the audio clock before
+              // it can keep turning an ended native stream into zero-filled
+              // MP3 frames. WaveformView observes the error and finalizes the
+              // partial recording through the normal stop path.
+              pauseRecording();
+            },
+          );
           const selectedDeviceId = caps.os === 'windows'
             ? await resolveAudioInputDeviceId()
             : null;
@@ -197,6 +213,8 @@ export function useRecorder() {
           } catch (captureError) {
             micAudioUnlisten?.();
             micAudioUnlisten = null;
+            micCaptureErrorUnlisten?.();
+            micCaptureErrorUnlisten = null;
             throw captureError;
           }
         } else {
@@ -259,6 +277,13 @@ export function useRecorder() {
       } else {
         await startMic();
         await startSystemAudio();
+      }
+
+      // A native endpoint can become ready and then fail before a concurrent
+      // system-audio start (or this task) finishes. Never publish an active
+      // recording backed by an already-ended microphone stream.
+      if (pendingMicCaptureError) {
+        throw new Error(pendingMicCaptureError);
       }
 
       // Stereo (ch0 mic, ch1 system) only when mixing both; otherwise mono.
@@ -459,7 +484,12 @@ export function useRecorder() {
       micAudioUnlisten();
       micAudioUnlisten = null;
     }
+    if (micCaptureErrorUnlisten) {
+      micCaptureErrorUnlisten();
+      micCaptureErrorUnlisten = null;
+    }
     micAudioBuffer = new Int16Array(0);
+    pendingMicCaptureError = null;
     micUsesNativeCapture = false;
 
     if (micSource && processor) {

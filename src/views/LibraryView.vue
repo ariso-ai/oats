@@ -792,7 +792,11 @@ function onNativeRecordingState(event: { payload: unknown }): void {
 }
 
 function onRecordingStartFailed(event: { payload: unknown }): void {
-  const payload = event.payload;
+  showRecordingError(event.payload);
+  clearRecordingLaunch();
+}
+
+function showRecordingError(payload: unknown): void {
   recordingStartError.value =
     typeof payload === 'object'
     && payload !== null
@@ -801,7 +805,13 @@ function onRecordingStartFailed(event: { payload: unknown }): void {
     && payload.message.length <= 300
       ? payload.message
       : recordingStartErrorMessage(payload);
-  clearRecordingLaunch();
+}
+
+function onRecordingCaptureFailed(event: { payload: unknown }): void {
+  // Runtime capture failure is already being finalized by the recorder. Keep
+  // its launch lock/state until the normal stop lifecycle closes it, while
+  // still warning the user immediately.
+  showRecordingError(event.payload);
 }
 
 // Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
@@ -974,6 +984,7 @@ let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingState: UnlistenFn | null = null;
 let unlistenRecordingStartFailed: UnlistenFn | null = null;
+let unlistenRecordingCaptureFailed: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
@@ -1017,6 +1028,9 @@ onMounted(() => {
   });
   void listen('recording://start-failed', onRecordingStartFailed).then((un) => {
     unlistenRecordingStartFailed = un;
+  });
+  void listen('recording://capture-failed', onRecordingCaptureFailed).then((un) => {
+    unlistenRecordingCaptureFailed = un;
   });
   // The floating recorder pill asks (on click) to surface the meeting it's
   // recording — re-dock the strip even if the user had navigated away.
@@ -1066,6 +1080,7 @@ onUnmounted(() => {
   unlistenRecordingStarted?.();
   unlistenRecordingState?.();
   unlistenRecordingStartFailed?.();
+  unlistenRecordingCaptureFailed?.();
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();

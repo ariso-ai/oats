@@ -287,6 +287,7 @@
         <p
           v-else-if="platformCapabilities.os === 'windows' && audioInputError"
           class="notif-status notif-status--err"
+          data-test="audio-input-error"
         >
           {{ audioInputError }}
         </p>
@@ -563,7 +564,11 @@ const audioInputBusy = computed(
   () => audioInputRefreshing.value || audioInputSaving.value,
 );
 const audioInputsLoaded = ref(false);
-const audioInputError = ref('');
+const audioInputRefreshError = ref('');
+const audioInputSaveError = ref('');
+const audioInputError = computed(
+  () => audioInputSaveError.value || audioInputRefreshError.value,
+);
 let stopWatchingAudioInputs: (() => void) | null = null;
 let audioInputRefreshId = 0;
 let audioInputsMounted = false;
@@ -587,11 +592,11 @@ async function refreshAudioInputs() {
     if (refreshId !== audioInputRefreshId) return;
     audioInputDevices.value = devices;
     audioInputsLoaded.value = true;
-    audioInputError.value = '';
+    audioInputRefreshError.value = '';
   } catch {
     if (refreshId !== audioInputRefreshId) return;
     audioInputsLoaded.value = false;
-    audioInputError.value = 'Microphone inputs could not be refreshed.';
+    audioInputRefreshError.value = 'Microphone inputs could not be refreshed.';
   } finally {
     if (refreshId === audioInputRefreshId) {
       audioInputRefreshing.value = false;
@@ -630,10 +635,10 @@ async function onSelectAudioInput(event: Event) {
   audioInputSaving.value = true;
   try {
     await saveAudioInputPreference(selected);
-    audioInputError.value = '';
+    audioInputSaveError.value = '';
   } catch {
     audioInputPreference.value = previous;
-    audioInputError.value = 'The microphone preference could not be saved.';
+    audioInputSaveError.value = 'The microphone preference could not be saved.';
   } finally {
     audioInputSaving.value = false;
   }
@@ -1197,7 +1202,7 @@ onMounted(async () => {
     // model initialization below it behind a potentially slow IPC round trip.
     void initializeAudioInputs().catch(() => {
       if (audioInputsMounted) {
-        audioInputError.value = 'Microphone inputs could not be loaded.';
+        audioInputRefreshError.value = 'Microphone inputs could not be loaded.';
       }
     });
   }

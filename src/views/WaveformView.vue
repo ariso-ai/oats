@@ -135,6 +135,8 @@ import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
 
 const SUCCESS_CLOSE_MS = 1500;
+const RUNTIME_MIC_FAILURE_MESSAGE =
+  'The microphone stopped sending audio. Oats stopped the recording to avoid recording silence. Reconnect it or choose another input before trying again.';
 
 const recorder = useRecorder();
 const waveform = useWaveform();
@@ -183,6 +185,7 @@ const isAuto = route.query.auto === '1';
 // meetings window is minimized or closed mid-recording.
 const pillHidden = ref(route.query.pillHidden === '1');
 const isStopping = ref(false);
+let runtimeMicFailureHandled = false;
 // Auto recordings shorter than this are discarded, not uploaded (guards against
 // late mic-on / quick-off races). Manual recordings are never length-gated.
 const MIN_AUTO_DURATION_S = 15;
@@ -244,6 +247,15 @@ watch(
   [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
   () => broadcastState(),
 );
+watch(() => recorder.error.value, (message) => {
+  if (
+    !message
+    || !recorder.isRecording.value
+    || isStopping.value
+    || runtimeMicFailureHandled
+  ) return;
+  void handleRuntimeMicrophoneFailure();
+});
 // Re-resolve the scheduled end whenever the attached meeting changes.
 watch(effectiveMeetingId, () => void resolveMeetingEnd());
 // When a local recording starts, ask Rust which recording it will finalize into
@@ -438,6 +450,7 @@ async function rollbackAndClose() {
 }
 
 async function startRecording() {
+  runtimeMicFailureHandled = false;
   // Surface initialization before any settings, permission, or device work so
   // every launcher has an immediate and honest state to render.
   broadcastState('starting');
@@ -623,6 +636,25 @@ async function handleStop() {
       console.error('handleStop: backend not initialized; discarding recording');
     }
     await closeWindow();
+  }
+}
+
+async function handleRuntimeMicrophoneFailure() {
+  if (
+    runtimeMicFailureHandled
+    || isStopping.value
+    || !recorder.isRecording.value
+  ) return;
+  runtimeMicFailureHandled = true;
+  void emit('recording://capture-failed', {
+    message: RUNTIME_MIC_FAILURE_MESSAGE,
+  }).catch(() => {});
+  try {
+    // useRecorder has already paused encoding, so this normal stop path flushes
+    // and finalizes only the audio captured before the endpoint failed.
+    await handleStop();
+  } catch (error) {
+    console.error('Failed to finalize after microphone capture ended', error);
   }
 }
 

@@ -64,7 +64,7 @@ vi.mock('./useAudioInputDevices', () => ({
 }));
 
 import { useRecorder } from './useRecorder';
-import { startMicrophoneCapture } from '../tauri';
+import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
 
 type AudioProcCb = ((e: unknown) => void) | null;
 let lastProcessor: { onaudioprocess: AudioProcCb } | null = null;
@@ -263,6 +263,46 @@ describe('useRecorder mic native capture', () => {
     const blob = await rec.stopRecording();
     expect(blob.size).toBeGreaterThan(0);
     expect(resolveAudioInputDeviceId).not.toHaveBeenCalled();
+  });
+
+  it('pauses immediately and preserves captured audio after a native runtime failure', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    pushMicFrame(8000);
+    fireAudioFrame();
+    expect(encodeCalls).toHaveLength(1);
+
+    listeners['microphone-capture-error']?.({ payload: 'selected microphone disconnected' });
+
+    expect(rec.error.value).toBe('selected microphone disconnected');
+    expect(rec.isPaused.value).toBe(true);
+    expect(rec.isRecording.value).toBe(true);
+    fireAudioFrame();
+    expect(encodeCalls).toHaveLength(1);
+
+    const blob = await rec.stopRecording();
+    expect(blob.size).toBeGreaterThan(0);
+    expect(stopMicrophoneCapture).toHaveBeenCalledOnce();
+    expect(listeners['microphone-capture-error']).toBeUndefined();
+  });
+
+  it('rejects startup if native capture fails after ready but before setup completes', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: true, settingsUrl: 'ms-settings:sound' },
+    };
+    vi.mocked(startMicrophoneCapture).mockImplementationOnce(async () => {
+      listeners['microphone-capture-error']?.({ payload: 'microphone ended during setup' });
+    });
+    const rec = useRecorder();
+
+    await expect(rec.startRecording('mic_and_system')).rejects.toThrow(
+      'microphone ended during setup',
+    );
+
+    expect(rec.isRecording.value).toBe(false);
+    expect(stopMicrophoneCapture).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('stop_system_audio_capture');
   });
 
   it('uses native WASAPI microphone capture on Windows', async () => {
