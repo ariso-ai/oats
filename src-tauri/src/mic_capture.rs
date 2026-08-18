@@ -840,11 +840,14 @@ mod imp {
 /// Windows. `device_id` is a native Windows endpoint ID; `None` uses the
 /// current system default.
 #[tauri::command]
-pub fn start_microphone_capture(
+pub async fn start_microphone_capture(
     app: tauri::AppHandle,
     device_id: Option<String>,
 ) -> Result<(), String> {
-    imp::start(app, validate_device_id(device_id)?)
+    let device_id = validate_device_id(device_id)?;
+    tokio::task::spawn_blocking(move || imp::start(app, device_id))
+        .await
+        .map_err(|error| format!("microphone startup task failed: {error}"))?
 }
 
 /// List active native Windows capture endpoints. Other platforms return an

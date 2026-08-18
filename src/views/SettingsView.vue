@@ -566,6 +566,7 @@ const audioInputsLoaded = ref(false);
 const audioInputError = ref('');
 let stopWatchingAudioInputs: (() => void) | null = null;
 let audioInputRefreshId = 0;
+let audioInputsMounted = false;
 
 const selectedAudioInputId = computed(() => audioInputPreference.value.deviceId ?? '');
 const selectedAudioInputUnavailable = computed(
@@ -604,7 +605,9 @@ async function initializeAudioInputs() {
   stopWatchingAudioInputs = watchAudioInputDevices(() => {
     void refreshAudioInputs();
   });
-  audioInputPreference.value = await loadAudioInputPreference();
+  const preference = await loadAudioInputPreference();
+  if (!audioInputsMounted) return;
+  audioInputPreference.value = preference;
   await refreshAudioInputs();
 }
 
@@ -1180,6 +1183,7 @@ async function refreshSignedInAccount() {
 }
 
 onMounted(async () => {
+  audioInputsMounted = true;
   // Native capabilities are authoritative. Keep the conservative initial state
   // and report an integration failure instead of guessing support from the UA.
   try {
@@ -1189,11 +1193,13 @@ onMounted(async () => {
     errorMessage.value = 'Platform features are unavailable. Restart oats and try again.';
   }
   if (platformCapabilities.value.os === 'windows') {
-    try {
-      await initializeAudioInputs();
-    } catch {
-      audioInputError.value = 'Microphone inputs could not be loaded.';
-    }
+    // Fire-and-forget: device discovery must not block account, update, and
+    // model initialization below it behind a potentially slow IPC round trip.
+    void initializeAudioInputs().catch(() => {
+      if (audioInputsMounted) {
+        audioInputError.value = 'Microphone inputs could not be loaded.';
+      }
+    });
   }
   await refreshSignedInAccount();
 
@@ -1306,6 +1312,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   recordingGuardMounted = false;
+  audioInputsMounted = false;
   recordingStateRefreshId += 1;
   audioInputRefreshId += 1;
   unlistenSignInPrompt?.();

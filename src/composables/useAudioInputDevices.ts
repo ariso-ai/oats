@@ -1,8 +1,11 @@
 import { load } from '@tauri-apps/plugin-store';
 import { listMicrophoneInputDevices } from '../tauri';
 
-const DEVICE_ID_KEY = 'recordingInputDeviceId';
-const DEVICE_LABEL_KEY = 'recordingInputDeviceLabel';
+const PREFERENCE_KEY = 'recordingInputPreference';
+// Legacy keys written before the preference was consolidated into one
+// atomic object; read-only, kept so existing installs migrate on load.
+const LEGACY_DEVICE_ID_KEY = 'recordingInputDeviceId';
+const LEGACY_DEVICE_LABEL_KEY = 'recordingInputDeviceLabel';
 
 export interface AudioInputDevice {
   deviceId: string;
@@ -47,26 +50,44 @@ export async function listAudioInputDevices(): Promise<AudioInputDevice[]> {
   }));
 }
 
+function asAudioInputPreference(value: unknown): AudioInputPreference | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { deviceId, label } = value as Record<string, unknown>;
+  if (typeof deviceId !== 'string' && deviceId !== null) return null;
+  return {
+    deviceId: deviceId ?? null,
+    label: typeof label === 'string' ? label : null,
+  };
+}
+
 export async function loadAudioInputPreference(): Promise<AudioInputPreference> {
   const store = await settingsStore();
-  const [deviceId, label] = await Promise.all([
-    store.get<unknown>(DEVICE_ID_KEY),
-    store.get<unknown>(DEVICE_LABEL_KEY),
+  const stored = asAudioInputPreference(await store.get<unknown>(PREFERENCE_KEY));
+  if (stored) return stored;
+
+  const [legacyDeviceId, legacyLabel] = await Promise.all([
+    store.get<unknown>(LEGACY_DEVICE_ID_KEY),
+    store.get<unknown>(LEGACY_DEVICE_LABEL_KEY),
   ]);
-  return {
-    deviceId: typeof deviceId === 'string' && deviceId !== '' ? deviceId : null,
-    label: typeof label === 'string' && label !== '' ? label : null,
+  const migrated: AudioInputPreference = {
+    deviceId:
+      typeof legacyDeviceId === 'string' && legacyDeviceId !== '' ? legacyDeviceId : null,
+    label: typeof legacyLabel === 'string' && legacyLabel !== '' ? legacyLabel : null,
   };
+  if (migrated.deviceId) {
+    await store.set(PREFERENCE_KEY, migrated);
+  }
+  return migrated;
 }
 
 export async function saveAudioInputPreference(
   device: AudioInputDevice | null,
 ): Promise<void> {
   const store = await settingsStore();
-  await Promise.all([
-    store.set(DEVICE_ID_KEY, device?.deviceId ?? null),
-    store.set(DEVICE_LABEL_KEY, device?.label ?? null),
-  ]);
+  await store.set(PREFERENCE_KEY, {
+    deviceId: device?.deviceId ?? null,
+    label: device?.label ?? null,
+  });
 }
 
 /** Resolve the device ID for the next Windows capture. Native endpoint IDs can
