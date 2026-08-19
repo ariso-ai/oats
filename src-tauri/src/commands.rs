@@ -239,8 +239,37 @@ const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300)
 /// request, not just once the loopback listener task exists — so a cancel
 /// that arrives while prepare-state is in flight still has something to
 /// cancel instead of being silently dropped.
+/// Which browser flow owns the slot. Cancel must resolve the frontend promise
+/// that is actually waiting, and the two flows listen on different events.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum BrowserFlow {
+    SignIn,
+    CalendarConnect,
+}
+
+impl BrowserFlow {
+    fn result_event(self) -> &'static str {
+        match self {
+            BrowserFlow::SignIn => "oauth-result",
+            BrowserFlow::CalendarConnect => "calendar-connect-result",
+        }
+    }
+
+    /// The loopback success page for this flow. Connect runs while the user is
+    /// already signed in, so it must not claim a sign-in happened; it also
+    /// stays neutral about the grant, because the browser hop reaches this page
+    /// whether or not the user left Calendar ticked on the consent screen.
+    fn callback_ok_response(self) -> &'static str {
+        match self {
+            BrowserFlow::SignIn => CALLBACK_SIGNED_IN_RESPONSE,
+            BrowserFlow::CalendarConnect => CALLBACK_DONE_RESPONSE,
+        }
+    }
+}
+
 struct PendingSignIn {
     id: u64,
+    flow: BrowserFlow,
     handle: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
@@ -256,7 +285,7 @@ fn abort_pending_handle(handle: tauri::async_runtime::JoinHandle<()>) {
 /// Register a new attempt and take the slot, aborting whatever attempt (with
 /// or without a listener task yet) was previously in it. Returns the new
 /// attempt's id, checked at each subsequent await via `sign_in_attempt_active`.
-fn begin_sign_in_attempt() -> u64 {
+fn begin_sign_in_attempt(flow: BrowserFlow) -> u64 {
     let id = SIGN_IN_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let mut slot = PENDING_SIGN_IN.lock().unwrap();
     if let Some(prev) = slot.take() {
@@ -264,7 +293,11 @@ fn begin_sign_in_attempt() -> u64 {
             abort_pending_handle(handle);
         }
     }
-    *slot = Some(PendingSignIn { id, handle: None });
+    *slot = Some(PendingSignIn {
+        id,
+        flow,
+        handle: None,
+    });
     id
 }
 
@@ -285,17 +318,19 @@ fn attach_sign_in_handle(id: u64, handle: tauri::async_runtime::JoinHandle<()>) 
     }
 }
 
-/// Cancel whatever sign-in attempt is pending, if any. Returns true if there
-/// was one (whether or not its listener task existed yet).
-fn abort_pending_sign_in() -> bool {
+/// Cancel whatever browser attempt is pending, if any. Returns the flow that
+/// was cancelled so the caller emits on the event its waiter is listening to —
+/// cancelling a calendar connect with an `oauth-result` would leave the
+/// frontend promise hanging until the timeout.
+fn abort_pending_sign_in() -> Option<BrowserFlow> {
     match PENDING_SIGN_IN.lock().unwrap().take() {
         Some(p) => {
             if let Some(handle) = p.handle {
                 abort_pending_handle(handle);
             }
-            true
+            Some(p.flow)
         }
-        None => false,
+        None => None,
     }
 }
 
@@ -314,6 +349,39 @@ fn retire_sign_in_attempt(id: u64) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Owns the slot for the stretch between `begin_sign_in_attempt` and the
+/// moment the loopback listener task takes over. Every fallible step in that
+/// prologue — bind, prepare-state, URL validation, opening the browser — would
+/// otherwise leave the attempt parked in the slot on the way out, and a later
+/// `cancel_google_sign_in` would emit a result for a flow that already died.
+/// Call `release` once the listener task exists; until then, any early return
+/// retires the attempt on drop.
+struct SignInAttemptGuard(Option<u64>);
+
+impl SignInAttemptGuard {
+    fn begin(flow: BrowserFlow) -> Self {
+        Self(Some(begin_sign_in_attempt(flow)))
+    }
+
+    fn id(&self) -> u64 {
+        self.0.expect("attempt id read after release")
+    }
+
+    /// Hand the attempt to the listener task: it now owns retiring the slot,
+    /// so dropping this guard must no longer do it.
+    fn release(mut self) -> u64 {
+        self.0.take().expect("attempt released twice")
+    }
+}
+
+impl Drop for SignInAttemptGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            retire_sign_in_attempt(id);
+        }
     }
 }
 
@@ -354,9 +422,18 @@ fn validate_browser_auth_url(url: &Url) -> Result<(), String> {
     }
 }
 
-/// Parse an HTTP request line (`GET /callback?token=…&nonce=… HTTP/1.1`) from
-/// the loopback listener. Returns `(token, nonce)` for well-formed callbacks.
-fn parse_loopback_callback(request_line: &str) -> Option<(String, String)> {
+/// What a loopback callback delivered. Sign-in returns a magic-link token;
+/// the Workspace connect hop returns only a status marker and no secret.
+#[derive(Debug, PartialEq)]
+pub(crate) enum LoopbackDelivery {
+    Token(String),
+    Status(String),
+}
+
+/// Parse an HTTP request line (`GET /callback?token=…&nonce=… HTTP/1.1`, or
+/// `?status=…&nonce=…` for the connect hop) from the loopback listener.
+/// Returns `(delivery, nonce)` for well-formed callbacks.
+fn parse_loopback_callback(request_line: &str) -> Option<(LoopbackDelivery, String)> {
     let mut parts = request_line.split_whitespace();
     if parts.next() != Some("GET") {
         return None;
@@ -367,24 +444,55 @@ fn parse_loopback_callback(request_line: &str) -> Option<(String, String)> {
         return None;
     }
     let mut token = None;
+    let mut status = None;
     let mut nonce = None;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "token" if !value.is_empty() => token = Some(value.into_owned()),
+            "status" if !value.is_empty() => status = Some(value.into_owned()),
             "nonce" if !value.is_empty() => nonce = Some(value.into_owned()),
             _ => {}
         }
     }
-    Some((token?, nonce?))
+    // A token always wins: a callback carrying one is a sign-in delivery even
+    // if it also carries a status, so a status parameter can never downgrade
+    // sign-in into the token-less path.
+    let delivery = match (token, status) {
+        (Some(token), _) => LoopbackDelivery::Token(token),
+        (None, Some(status)) => LoopbackDelivery::Status(status),
+        (None, None) => return None,
+    };
+    Some((delivery, nonce?))
 }
 
-// Loopback responses. The success page must never echo the token.
-const CALLBACK_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
-<!doctype html><html><head><title>oats</title></head>\
-<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;\
-display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">\
-<div style=\"text-align:center\"><h2>You&rsquo;re signed in</h2>\
-<p>You can close this tab and return to oats.</p></div></body></html>";
+// Loopback responses. The success page must never echo the token, and its
+// wording must match the flow that opened the browser — see
+// `BrowserFlow::callback_ok_response`.
+macro_rules! callback_ok_response {
+    ($heading:literal, $body:literal) => {
+        concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n",
+            "<!doctype html><html><head><title>oats</title></head>",
+            "<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;",
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">",
+            "<div style=\"text-align:center\"><h2>",
+            $heading,
+            "</h2><p>",
+            $body,
+            "</p></div></body></html>"
+        )
+    };
+}
+
+const CALLBACK_SIGNED_IN_RESPONSE: &str = callback_ok_response!(
+    "You&rsquo;re signed in",
+    "You can close this tab and return to oats."
+);
+
+const CALLBACK_DONE_RESPONSE: &str = callback_ok_response!(
+    "You can close this tab",
+    "oats has the result. Return to the app to continue."
+);
 
 const CALLBACK_NOT_FOUND_RESPONSE: &str =
     "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
@@ -395,7 +503,8 @@ const CALLBACK_NOT_FOUND_RESPONSE: &str =
 async fn accept_loopback_callback(
     listener: &tokio::net::TcpListener,
     expected_nonce: &str,
-) -> Result<String, String> {
+    flow: BrowserFlow,
+) -> Result<LoopbackDelivery, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     loop {
@@ -425,10 +534,10 @@ async fn accept_loopback_callback(
 
             let matched = parse_loopback_callback(&request_line)
                 .filter(|(_, nonce)| nonce_matches(nonce, expected_nonce))
-                .map(|(token, _)| token);
+                .map(|(delivery, _)| delivery);
 
             let response = if matched.is_some() {
-                CALLBACK_OK_RESPONSE
+                flow.callback_ok_response()
             } else {
                 CALLBACK_NOT_FOUND_RESPONSE
             };
@@ -438,8 +547,8 @@ async fn accept_loopback_callback(
         })
         .await;
 
-        if let Ok(Some(token)) = handled {
-            return Ok(token);
+        if let Ok(Some(delivery)) = handled {
+            return Ok(delivery);
         }
     }
 }
@@ -457,24 +566,35 @@ async fn run_browser_sign_in(
     listener: tokio::net::TcpListener,
     nonce: String,
 ) {
-    let result =
-        match tokio::time::timeout(SIGN_IN_TIMEOUT, accept_loopback_callback(&listener, &nonce))
-            .await
-        {
-            Ok(Ok(token)) => exchange_token_for_session(window.app_handle(), &token).await,
-            Ok(Err(err)) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some(err),
-            },
-            Err(_) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some("Sign-in timed out — please try again".into()),
-            },
-        };
+    let result = match tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::SignIn),
+    )
+    .await
+    {
+        Ok(Ok(LoopbackDelivery::Token(token))) => {
+            exchange_token_for_session(window.app_handle(), &token).await
+        }
+        // Sign-in requires a magic-link token; a status-only callback on
+        // this attempt's nonce is not one.
+        Ok(Ok(LoopbackDelivery::Status(_))) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some("Sign-in callback carried no token".into()),
+        },
+        Ok(Err(err)) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some(err),
+        },
+        Err(_) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some("Sign-in timed out — please try again".into()),
+        },
+    };
     if retire_sign_in_attempt(attempt_id) {
-        let _ = window.emit("oauth-result", result);
+        let _ = window.emit(BrowserFlow::SignIn.result_event(), result);
     }
 }
 
@@ -490,8 +610,10 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // prepare-state is in flight still has something in the slot to cancel,
     // instead of being silently dropped because no listener task exists yet.
     // This also supersedes any still-pending attempt (e.g. the user closed
-    // the browser tab and clicked Sign in again).
-    let attempt_id = begin_sign_in_attempt();
+    // the browser tab and clicked Sign in again). The guard retires it again
+    // if any step below fails before the listener task takes ownership.
+    let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+    let attempt_id = attempt.id();
 
     // Bind before prepare-state so the advertised port is already ours.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -565,6 +687,7 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // Step 3: Wait for the browser to hit the loopback callback. If this
     // attempt was superseded or canceled while the browser was opening,
     // `attach_sign_in_handle` aborts the task instead of letting it run.
+    let attempt_id = attempt.release();
     let handle =
         tauri::async_runtime::spawn(run_browser_sign_in(attempt_id, window, listener, nonce));
     attach_sign_in_handle(attempt_id, handle);
@@ -581,17 +704,165 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
 /// frontend's pending `oauth-result` wait with the silent-cancel error.
 #[tauri::command]
 pub async fn cancel_google_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
-    if abort_pending_sign_in() {
-        let _ = window.emit(
-            "oauth-result",
-            SignInResult {
-                success: None,
-                session_token: None,
-                error: Some(SIGN_IN_CANCELED.into()),
-            },
-        );
+    match abort_pending_sign_in() {
+        Some(BrowserFlow::SignIn) => {
+            let _ = window.emit(
+                BrowserFlow::SignIn.result_event(),
+                SignInResult {
+                    success: None,
+                    session_token: None,
+                    error: Some(SIGN_IN_CANCELED.into()),
+                },
+            );
+        }
+        Some(BrowserFlow::CalendarConnect) => {
+            let _ = window.emit(
+                BrowserFlow::CalendarConnect.result_event(),
+                calendar_connect_error(SIGN_IN_CANCELED),
+            );
+        }
+        None => {}
     }
     Ok(())
+}
+
+/// Outcome of the Workspace connect hop. `status` mirrors the marker the API's
+/// callback put on the loopback URL: "connected", or "no_calendar_scope" when
+/// the user unticked Calendar on the granular-consent screen.
+#[derive(Clone, Serialize)]
+pub struct CalendarConnectResult {
+    pub status: Option<String>,
+    pub error: Option<String>,
+}
+
+fn calendar_connect_error(message: impl Into<String>) -> CalendarConnectResult {
+    CalendarConnectResult {
+        status: None,
+        error: Some(message.into()),
+    }
+}
+
+/// Wait for the connect callback and report via `calendar-connect-result`.
+/// Mirrors `run_browser_sign_in`, but nothing secret crosses the loopback —
+/// only the status marker — so there is no token to exchange.
+async fn run_calendar_connect(
+    attempt_id: u64,
+    window: tauri::WebviewWindow,
+    listener: tokio::net::TcpListener,
+    nonce: String,
+) {
+    let result = match tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::CalendarConnect),
+    )
+    .await
+    {
+        Ok(Ok(LoopbackDelivery::Status(status))) => CalendarConnectResult {
+            status: Some(status),
+            error: None,
+        },
+        // A token on this attempt's nonce means the sign-in callback landed
+        // here. Never exchange it — this flow already holds a session, and
+        // the token belongs to the sign-in attempt that minted the nonce.
+        Ok(Ok(LoopbackDelivery::Token(_))) => {
+            calendar_connect_error("Unexpected sign-in callback during calendar connect")
+        }
+        Ok(Err(err)) => calendar_connect_error(err),
+        Err(_) => calendar_connect_error("Connecting Calendar timed out — please try again"),
+    };
+    if retire_sign_in_attempt(attempt_id) {
+        let _ = window.emit(BrowserFlow::CalendarConnect.result_event(), result);
+    }
+}
+
+/// Second hop of desktop Google auth: acquire Calendar read access through the
+/// authenticated Workspace connect flow, which sets `include_granted_scopes`
+/// and is therefore additive — it can never narrow an existing grant the way
+/// sign-in would. Only run when `/desktop/google-calendar-status` reports
+/// Calendar missing.
+#[tauri::command]
+pub async fn connect_google_calendar(
+    window: tauri::WebviewWindow,
+) -> Result<CalendarConnectResult, String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let app = window.app_handle().clone();
+
+    // Offline mode must make no network calls at all. Calendar sync is an
+    // Ariso-cloud feature, so this is unreachable in Local by design.
+    if active_backend(&app) == "local" {
+        return Err("Calendar connect is unavailable on the Local backend".into());
+    }
+
+    let Some(session_token) = get_session_token(&app) else {
+        return Err("Not signed in".into());
+    };
+
+    // As in `google_sign_in`: the guard hands the slot back if any step below
+    // fails before the listener task takes ownership of the attempt.
+    let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+    let attempt_id = attempt.id();
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("bind loopback listener: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let nonce = random_nonce()?;
+
+    // Authenticated, unlike sign-in's prepare-state: the API resolves the
+    // caller's Google Workspace MCP server row from the session.
+    let client = http_client();
+    let response = client
+        .post(format!("{}/oauth2/prepare-state", api_base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {session_token}"))
+        .json(&serde_json::json!({
+            "integration": "googleWorkspace",
+            "scopes": ["calendar-readonly"],
+            "redirect": desktop_auth_redirect(port, &nonce),
+        }))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(calendar_connect_error(SIGN_IN_CANCELED));
+    }
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        return Ok(calendar_connect_error(format!("API returned {status}")));
+    }
+
+    let body: PrepareStateResponse = response.json().await.map_err(|e| e.to_string())?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(calendar_connect_error(SIGN_IN_CANCELED));
+    }
+
+    let auth_url = Url::parse(&body.redirect_url).map_err(|e| e.to_string())?;
+    validate_browser_auth_url(&auth_url)?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(calendar_connect_error(SIGN_IN_CANCELED));
+    }
+
+    window
+        .opener()
+        .open_url(body.redirect_url, None::<&str>)
+        .map_err(|e| e.to_string())?;
+
+    let attempt_id = attempt.release();
+    let handle =
+        tauri::async_runtime::spawn(run_calendar_connect(attempt_id, window, listener, nonce));
+    attach_sign_in_handle(attempt_id, handle);
+
+    // The frontend listens for "calendar-connect-result".
+    Ok(CalendarConnectResult {
+        status: None,
+        error: None,
+    })
 }
 
 async fn exchange_token_for_session(
@@ -1905,27 +2176,45 @@ mod tests {
 
     #[test]
     fn sign_in_attempt_cancel_during_prepare_is_not_dropped() {
-        let id = begin_sign_in_attempt();
+        let id = begin_sign_in_attempt(BrowserFlow::SignIn);
         assert!(sign_in_attempt_active(id));
 
         // Cancel arrives before the loopback listener task exists (still
         // awaiting prepare-state) — it must still find something to cancel
         // instead of silently no-oping.
-        assert!(abort_pending_sign_in());
+        assert!(abort_pending_sign_in().is_some());
         assert!(!sign_in_attempt_active(id));
 
         // A cancel with nothing pending is a no-op, not an error.
-        assert!(!abort_pending_sign_in());
+        assert!(abort_pending_sign_in().is_none());
+    }
+
+    #[test]
+    fn cancel_reports_the_flow_that_was_pending() {
+        // Cancel must resolve the promise that is actually waiting: the two
+        // flows listen on different events, so emitting an oauth-result over a
+        // pending calendar connect would hang the frontend until the timeout.
+        begin_sign_in_attempt(BrowserFlow::SignIn);
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+
+        begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::CalendarConnect));
+
+        assert_eq!(BrowserFlow::SignIn.result_event(), "oauth-result");
+        assert_eq!(
+            BrowserFlow::CalendarConnect.result_event(),
+            "calendar-connect-result"
+        );
     }
 
     #[test]
     fn retire_sign_in_attempt_only_clears_the_matching_slot() {
-        let id = begin_sign_in_attempt();
+        let id = begin_sign_in_attempt(BrowserFlow::SignIn);
 
         // A superseded attempt's retire is a no-op — its slot is already gone
         // (or belongs to a newer attempt), so it must not clear the winner's
         // state or report success.
-        let superseded_id = begin_sign_in_attempt();
+        let superseded_id = begin_sign_in_attempt(BrowserFlow::SignIn);
         assert!(!retire_sign_in_attempt(id));
         assert!(sign_in_attempt_active(superseded_id));
 
@@ -1937,13 +2226,51 @@ mod tests {
         assert!(!retire_sign_in_attempt(superseded_id));
     }
 
+    #[test]
+    fn attempt_guard_retires_the_slot_when_the_prologue_fails() {
+        // Every fallible step between begin and the listener task's spawn —
+        // bind, prepare-state, URL validation, open_url — used to leave the
+        // attempt parked in the slot, so a later cancel emitted a result for
+        // a flow that had already failed.
+        let id = {
+            let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+            let id = attempt.id();
+            assert!(sign_in_attempt_active(id));
+            id // guard drops here, as it would on an early `?` return
+        };
+        assert!(!sign_in_attempt_active(id));
+        assert!(abort_pending_sign_in().is_none());
+    }
+
+    #[test]
+    fn released_attempt_survives_the_guard_going_out_of_scope() {
+        // Once the listener task owns the attempt, the guard must keep its
+        // hands off: retiring here would strand the frontend's waiter.
+        let id = {
+            let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+            attempt.release()
+        };
+        assert!(sign_in_attempt_active(id));
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+    }
+
+    #[test]
+    fn attempt_guard_drop_never_retires_a_newer_attempt() {
+        // A superseded prologue failing late must not clear the winner's slot.
+        let stale = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+        let winner = begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+        drop(stale);
+        assert!(sign_in_attempt_active(winner));
+        assert!(retire_sign_in_attempt(winner));
+    }
+
     #[tokio::test]
     async fn sign_in_attempt_out_of_order_completion_supersedes_cleanly() {
-        let first_id = begin_sign_in_attempt();
+        let first_id = begin_sign_in_attempt(BrowserFlow::SignIn);
         // A second attempt starts (e.g. the user retried) before the first's
         // prepare-state call returned, superseding it before it ever got a
         // listener handle.
-        let second_id = begin_sign_in_attempt();
+        let second_id = begin_sign_in_attempt(BrowserFlow::SignIn);
         assert!(!sign_in_attempt_active(first_id));
         assert!(sign_in_attempt_active(second_id));
 
@@ -1962,7 +2289,7 @@ mod tests {
         attach_sign_in_handle(second_id, handle);
         assert!(sign_in_attempt_active(second_id));
 
-        assert!(abort_pending_sign_in());
+        assert!(abort_pending_sign_in().is_some());
         assert!(!sign_in_attempt_active(second_id));
     }
 
@@ -1970,12 +2297,39 @@ mod tests {
     fn parse_loopback_callback_extracts_token_and_nonce() {
         assert_eq!(
             parse_loopback_callback("GET /callback?token=tok123&nonce=n456 HTTP/1.1"),
-            Some(("tok123".into(), "n456".into()))
+            Some((LoopbackDelivery::Token("tok123".into()), "n456".into()))
         );
         // Percent-encoded values are decoded.
         assert_eq!(
             parse_loopback_callback("GET /callback?token=a%2Bb&nonce=n HTTP/1.1"),
-            Some(("a+b".into(), "n".into()))
+            Some((LoopbackDelivery::Token("a+b".into()), "n".into()))
+        );
+    }
+
+    #[test]
+    fn parse_loopback_callback_accepts_token_less_status_delivery() {
+        // The Workspace connect hop delivers no token, only a status marker.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?status=connected&nonce=n456 HTTP/1.1"),
+            Some((LoopbackDelivery::Status("connected".into()), "n456".into()))
+        );
+        // Granular consent lets the user untick Calendar and still complete.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?status=no_calendar_scope&nonce=n HTTP/1.1"),
+            Some((
+                LoopbackDelivery::Status("no_calendar_scope".into()),
+                "n".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_loopback_callback_prefers_token_over_status() {
+        // A status parameter must never downgrade a sign-in delivery into the
+        // token-less path, or a forged status could strand the exchange.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?token=tok&status=connected&nonce=n HTTP/1.1"),
+            Some((LoopbackDelivery::Token("tok".into()), "n".into()))
         );
     }
 
@@ -1987,6 +2341,10 @@ mod tests {
         assert_eq!(parse_loopback_callback("GET /callback?token=t HTTP/1.1"), None);
         assert_eq!(parse_loopback_callback("GET /callback?nonce=n HTTP/1.1"), None);
         assert_eq!(parse_loopback_callback("GET /callback?token=&nonce=n HTTP/1.1"), None);
+        // A status delivery still requires the nonce, and an empty status is
+        // no more acceptable than an empty token.
+        assert_eq!(parse_loopback_callback("GET /callback?status=connected HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback("GET /callback?status=&nonce=n HTTP/1.1"), None);
         assert_eq!(parse_loopback_callback(""), None);
     }
 
@@ -1998,7 +2356,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let accept = tokio::spawn(async move {
-            accept_loopback_callback(&listener, "goodnonce").await
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::SignIn).await
         });
 
         let send = |req: String| async move {
@@ -2018,8 +2376,44 @@ mod tests {
         assert!(real.starts_with("HTTP/1.1 200"));
         // The success page never echoes the token.
         assert!(!real.contains("tok123"));
+        // Sign-in is the one flow whose page may claim a sign-in happened.
+        assert!(real.contains("re signed in"));
 
-        assert_eq!(accept.await.unwrap().unwrap(), "tok123");
+        assert_eq!(
+            accept.await.unwrap().unwrap(),
+            LoopbackDelivery::Token("tok123".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_loopback_callback_returns_token_less_status_delivery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let accept = tokio::spawn(async move {
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::CalendarConnect).await
+        });
+
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        conn.write_all(b"GET /callback?status=connected&nonce=goodnonce HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        conn.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        // The connect hop runs while the user is already signed in, so its page
+        // must not report a sign-in, and it must stay neutral about the grant —
+        // the browser lands here even when Calendar was left unticked.
+        assert!(!resp.contains("signed in"));
+        assert!(!resp.contains("Calendar"));
+        assert!(resp.contains("You can close this tab"));
+
+        assert_eq!(
+            accept.await.unwrap().unwrap(),
+            LoopbackDelivery::Status("connected".into())
+        );
     }
 
     #[test]

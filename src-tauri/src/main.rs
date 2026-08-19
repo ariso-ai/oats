@@ -190,6 +190,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
             commands::cancel_google_sign_in,
+            commands::connect_google_calendar,
             commands::check_session,
             commands::sign_out,
             commands::api_request,
