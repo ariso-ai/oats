@@ -173,6 +173,27 @@ describe('useMeetingApi.getMeetingPrep', () => {
   });
 });
 
+describe('uploadAudio presign request', () => {
+  it('includes fileSize so the backend size validation does not reject it', async () => {
+    apiRequest
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { meetingId: 9, presignedUrl: 'https://bucket.s3.amazonaws.com/rec.mp3?sig=x' },
+      })
+      .mockResolvedValueOnce({ status: 202, data: {} });
+    const { api } = await import('../tauri');
+    (api.putPresigned as ReturnType<typeof vi.fn>).mockResolvedValue(200);
+
+    await useMeetingApi().uploadAudio(new Blob(['audio'], { type: 'audio/mpeg' }));
+
+    expect(apiRequest).toHaveBeenCalledWith(
+      'POST',
+      '/desktop/meetings/audio/presign',
+      expect.objectContaining({ fileSize: 5 })
+    );
+  });
+});
+
 describe('uploadAudio stage tagging', () => {
   // Turning a multi-MB mp3 into a number[] can throw (RangeError/OOM) before a
   // single byte reaches S3. That failure belongs to the s3-put leg, not to the
