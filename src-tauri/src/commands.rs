@@ -965,16 +965,25 @@ pub(crate) fn open_waveform_window(
         // must not silently swallow a new recording (#313), so ask it to stand
         // down and re-open once it's actually gone (see the Destroyed handler
         // below). It refuses while still capturing or uploading — then the
-        // queued request expires and the focus above is all that happens,
-        // which is the pre-existing behavior.
+        // queued request expires and the focus above is all that happens. Tell
+        // the frontend so the user sees why the new recording never started
+        // (#320) instead of a launch spinner that hangs forever.
         let token = state.queue_reopen(meeting_id, local_append_id, force_new, auto);
         let _ = app.emit("recorder://yield", ());
         let app_for_expiry = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(YIELD_TIMEOUT).await;
-            app_for_expiry
+            let expired = app_for_expiry
                 .state::<crate::recording_state::RecordingState>()
                 .expire_reopen(token);
+            if expired {
+                let _ = app_for_expiry.emit(
+                    "recording://start-failed",
+                    serde_json::json!({
+                        "message": "Can't start a new recording yet: the previous recording is still uploading. Try again once it finishes.",
+                    }),
+                );
+            }
         });
         return Ok(());
     }
