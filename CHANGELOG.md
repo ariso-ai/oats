@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.19.1](https://github.com/ariso-ai/oats/compare/v0.19.0...v0.19.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **ci:** don't post an empty triage comment on Task issues ([#309](https://github.com/ariso-ai/oats/issues/309)) ([848726d](https://github.com/ariso-ai/oats/commit/848726d202cac993acc549b62ec79dfc37008633))
+* **ci:** gate verify-published on !cancelled() rather than always() ([4a5f068](https://github.com/ariso-ai/oats/commit/4a5f0689442c20aa97a2204f3f13ca68e33b789d))
+* **ci:** publish Windows artifacts to R2 instead of silently skipping ([a4226ce](https://github.com/ariso-ai/oats/commit/a4226ceeaca67b52e06e04afb80aba788531f363))
+* **ci:** publish Windows artifacts to R2 instead of silently skipping ([5fabeec](https://github.com/ariso-ai/oats/commit/5fabeecb1456c151d6aadb53279f983f002c34b1))
+* **ci:** set and read issue type via REST, not gh-version-dependent flags ([#305](https://github.com/ariso-ai/oats/issues/305)) ([158931c](https://github.com/ariso-ai/oats/commit/158931c178cd62d93318b88e2c8df7704eed46f9))
+* **recorder:** drop the queued re-open if the waveform label never frees ([b3d0347](https://github.com/ariso-ai/oats/commit/b3d0347ffd2024ca86c30afa8c576893c15f858e))
+* **recorder:** let a pending upload hand off the recorder window ([0a035df](https://github.com/ariso-ai/oats/commit/0a035df9a9039ab1e4ccb270df9932e04840f670))
+* **recorder:** let a pending upload hand off the recorder window ([#313](https://github.com/ariso-ai/oats/issues/313)) ([334bb53](https://github.com/ariso-ai/oats/commit/334bb53c33629c7cb2edeaae1682dbb84507e59c))
+* send fileSize with the audio upload presign request ([11a8e39](https://github.com/ariso-ai/oats/commit/11a8e39502946039586e66cb83075de2f2c89f68))
+* send fileSize with the audio upload presign request ([3573452](https://github.com/ariso-ai/oats/commit/3573452d3b94c3fd9868ef8754911c40bd92bae3)), closes [#321](https://github.com/ariso-ai/oats/issues/321)
+* **ui:** make the recorder waveform actually react to audio ([598c531](https://github.com/ariso-ai/oats/commit/598c531e27ffdebbe7cd9e2ba071e35a30d20420))
+* **ui:** make the recorder waveform actually react to audio ([f731a3a](https://github.com/ariso-ai/oats/commit/f731a3aa49d41a58da4383ec03c84a3cb207c6ab))
+* **windows:** enforce a single recorder pill ([a77cca7](https://github.com/ariso-ai/oats/commit/a77cca71ca2c4c08a48de859e25d655090e387c0))
+* **windows:** guarantee a single recorder pill ([91ad7e6](https://github.com/ariso-ai/oats/commit/91ad7e62da3c59d32638a9eb7bdacd195a6fe049))
+* **windows:** guard recorder pill dev assets ([0eb460f](https://github.com/ariso-ai/oats/commit/0eb460f7bc7477bb9d1b127f1beabd18149f8d7e))
+* **windows:** recover recording startup ([c30ef17](https://github.com/ariso-ai/oats/commit/c30ef17c10b38ea9da835615b164d4ddf209debe))
+* **windows:** recover recording startup ([08aaf9b](https://github.com/ariso-ai/oats/commit/08aaf9bcd2422e03414286a7d5efce4d6975f42e))
+* **windows:** reliably raise meetings from tray ([e0b6fba](https://github.com/ariso-ai/oats/commit/e0b6fbad1137dde44fa335a1e4fbcd852b4ff54e))
+* **windows:** serialize meetings window presentation ([d98e7ef](https://github.com/ariso-ai/oats/commit/d98e7efe191ad3faadbab637108164dd1e3d0b46))
+
 ## [0.19.0](https://github.com/ariso-ai/oats/compare/v0.18.2...v0.19.0) (2026-08-02)
 
 
