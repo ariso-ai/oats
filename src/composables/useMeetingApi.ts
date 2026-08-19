@@ -562,6 +562,7 @@ export function useMeetingApi() {
     const presignRes = await withStage('presign', () =>
       api.request('POST', presignPath, {
         filename: 'recording.mp3',
+        fileSize: audioBlob.size,
         title: options?.title?.trim() || undefined,
         metadata,
       })
