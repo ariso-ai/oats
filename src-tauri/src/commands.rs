@@ -254,6 +254,17 @@ impl BrowserFlow {
             BrowserFlow::CalendarConnect => "calendar-connect-result",
         }
     }
+
+    /// The loopback success page for this flow. Connect runs while the user is
+    /// already signed in, so it must not claim a sign-in happened; it also
+    /// stays neutral about the grant, because the browser hop reaches this page
+    /// whether or not the user left Calendar ticked on the consent screen.
+    fn callback_ok_response(self) -> &'static str {
+        match self {
+            BrowserFlow::SignIn => CALLBACK_SIGNED_IN_RESPONSE,
+            BrowserFlow::CalendarConnect => CALLBACK_DONE_RESPONSE,
+        }
+    }
 }
 
 struct PendingSignIn {
@@ -454,13 +465,34 @@ fn parse_loopback_callback(request_line: &str) -> Option<(LoopbackDelivery, Stri
     Some((delivery, nonce?))
 }
 
-// Loopback responses. The success page must never echo the token.
-const CALLBACK_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
-<!doctype html><html><head><title>oats</title></head>\
-<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;\
-display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">\
-<div style=\"text-align:center\"><h2>You&rsquo;re signed in</h2>\
-<p>You can close this tab and return to oats.</p></div></body></html>";
+// Loopback responses. The success page must never echo the token, and its
+// wording must match the flow that opened the browser — see
+// `BrowserFlow::callback_ok_response`.
+macro_rules! callback_ok_response {
+    ($heading:literal, $body:literal) => {
+        concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n",
+            "<!doctype html><html><head><title>oats</title></head>",
+            "<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;",
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">",
+            "<div style=\"text-align:center\"><h2>",
+            $heading,
+            "</h2><p>",
+            $body,
+            "</p></div></body></html>"
+        )
+    };
+}
+
+const CALLBACK_SIGNED_IN_RESPONSE: &str = callback_ok_response!(
+    "You&rsquo;re signed in",
+    "You can close this tab and return to oats."
+);
+
+const CALLBACK_DONE_RESPONSE: &str = callback_ok_response!(
+    "You can close this tab",
+    "oats has the result. Return to the app to continue."
+);
 
 const CALLBACK_NOT_FOUND_RESPONSE: &str =
     "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
@@ -471,6 +503,7 @@ const CALLBACK_NOT_FOUND_RESPONSE: &str =
 async fn accept_loopback_callback(
     listener: &tokio::net::TcpListener,
     expected_nonce: &str,
+    flow: BrowserFlow,
 ) -> Result<LoopbackDelivery, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -504,7 +537,7 @@ async fn accept_loopback_callback(
                 .map(|(delivery, _)| delivery);
 
             let response = if matched.is_some() {
-                CALLBACK_OK_RESPONSE
+                flow.callback_ok_response()
             } else {
                 CALLBACK_NOT_FOUND_RESPONSE
             };
@@ -533,31 +566,33 @@ async fn run_browser_sign_in(
     listener: tokio::net::TcpListener,
     nonce: String,
 ) {
-    let result =
-        match tokio::time::timeout(SIGN_IN_TIMEOUT, accept_loopback_callback(&listener, &nonce))
-            .await
-        {
-            Ok(Ok(LoopbackDelivery::Token(token))) => {
-                exchange_token_for_session(window.app_handle(), &token).await
-            }
-            // Sign-in requires a magic-link token; a status-only callback on
-            // this attempt's nonce is not one.
-            Ok(Ok(LoopbackDelivery::Status(_))) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some("Sign-in callback carried no token".into()),
-            },
-            Ok(Err(err)) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some(err),
-            },
-            Err(_) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some("Sign-in timed out — please try again".into()),
-            },
-        };
+    let result = match tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::SignIn),
+    )
+    .await
+    {
+        Ok(Ok(LoopbackDelivery::Token(token))) => {
+            exchange_token_for_session(window.app_handle(), &token).await
+        }
+        // Sign-in requires a magic-link token; a status-only callback on
+        // this attempt's nonce is not one.
+        Ok(Ok(LoopbackDelivery::Status(_))) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some("Sign-in callback carried no token".into()),
+        },
+        Ok(Err(err)) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some(err),
+        },
+        Err(_) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some("Sign-in timed out — please try again".into()),
+        },
+    };
     if retire_sign_in_attempt(attempt_id) {
         let _ = window.emit(BrowserFlow::SignIn.result_event(), result);
     }
@@ -716,23 +751,25 @@ async fn run_calendar_connect(
     listener: tokio::net::TcpListener,
     nonce: String,
 ) {
-    let result =
-        match tokio::time::timeout(SIGN_IN_TIMEOUT, accept_loopback_callback(&listener, &nonce))
-            .await
-        {
-            Ok(Ok(LoopbackDelivery::Status(status))) => CalendarConnectResult {
-                status: Some(status),
-                error: None,
-            },
-            // A token on this attempt's nonce means the sign-in callback landed
-            // here. Never exchange it — this flow already holds a session, and
-            // the token belongs to the sign-in attempt that minted the nonce.
-            Ok(Ok(LoopbackDelivery::Token(_))) => {
-                calendar_connect_error("Unexpected sign-in callback during calendar connect")
-            }
-            Ok(Err(err)) => calendar_connect_error(err),
-            Err(_) => calendar_connect_error("Connecting Calendar timed out — please try again"),
-        };
+    let result = match tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::CalendarConnect),
+    )
+    .await
+    {
+        Ok(Ok(LoopbackDelivery::Status(status))) => CalendarConnectResult {
+            status: Some(status),
+            error: None,
+        },
+        // A token on this attempt's nonce means the sign-in callback landed
+        // here. Never exchange it — this flow already holds a session, and
+        // the token belongs to the sign-in attempt that minted the nonce.
+        Ok(Ok(LoopbackDelivery::Token(_))) => {
+            calendar_connect_error("Unexpected sign-in callback during calendar connect")
+        }
+        Ok(Err(err)) => calendar_connect_error(err),
+        Err(_) => calendar_connect_error("Connecting Calendar timed out — please try again"),
+    };
     if retire_sign_in_attempt(attempt_id) {
         let _ = window.emit(BrowserFlow::CalendarConnect.result_event(), result);
     }
@@ -2319,7 +2356,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let accept = tokio::spawn(async move {
-            accept_loopback_callback(&listener, "goodnonce").await
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::SignIn).await
         });
 
         let send = |req: String| async move {
@@ -2339,6 +2376,8 @@ mod tests {
         assert!(real.starts_with("HTTP/1.1 200"));
         // The success page never echoes the token.
         assert!(!real.contains("tok123"));
+        // Sign-in is the one flow whose page may claim a sign-in happened.
+        assert!(real.contains("re signed in"));
 
         assert_eq!(
             accept.await.unwrap().unwrap(),
@@ -2354,7 +2393,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let accept = tokio::spawn(async move {
-            accept_loopback_callback(&listener, "goodnonce").await
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::CalendarConnect).await
         });
 
         let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -2364,6 +2403,12 @@ mod tests {
         let mut resp = String::new();
         conn.read_to_string(&mut resp).await.unwrap();
         assert!(resp.starts_with("HTTP/1.1 200"));
+        // The connect hop runs while the user is already signed in, so its page
+        // must not report a sign-in, and it must stay neutral about the grant —
+        // the browser lands here even when Calendar was left unticked.
+        assert!(!resp.contains("signed in"));
+        assert!(!resp.contains("Calendar"));
+        assert!(resp.contains("You can close this tab"));
 
         assert_eq!(
             accept.await.unwrap().unwrap(),
