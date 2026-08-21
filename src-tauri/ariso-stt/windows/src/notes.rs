@@ -32,6 +32,8 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const DEFAULT_MAX_TOKENS: u32 = 512;
 const DEFAULT_CONTEXT_SIZE: u32 = 4096;
+const COMPLETION_CONTEXT_SIZE: u32 = 12_288;
+const MAX_COMPLETION_PROMPT_CHARS: usize = 20_000;
 const TITLE_MAX_TOKENS: u32 = 32;
 const CHUNK_MAX_TOKENS: u32 = 256;
 const PROMPT_RESERVE_TOKENS: u32 = 768;
@@ -72,6 +74,50 @@ pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Runs one bounded prompt through the packaged local model. The Tauri host
+/// owns reducer semantics; this adapter only handles Windows model transport.
+pub(crate) fn run_completion(
+    prompt_path: &Path,
+    models: &Path,
+    max_tokens: u32,
+    temperature: f32,
+    repetition_penalty: f32,
+) -> Result<()> {
+    if !(1..=4096).contains(&max_tokens) {
+        bail!("completion max tokens must be between 1 and 4096");
+    }
+    if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
+        bail!("completion temperature must be between 0 and 2");
+    }
+    if !repetition_penalty.is_finite() || !(0.5..=2.0).contains(&repetition_penalty) {
+        bail!("completion repetition penalty must be between 0.5 and 2");
+    }
+    let prompt = fs::read_to_string(prompt_path)
+        .with_context(|| format!("read completion prompt {}", prompt_path.display()))?;
+    if prompt.trim().is_empty() {
+        bail!("completion prompt is empty");
+    }
+    let prompt_chars = prompt.chars().count();
+    if prompt_chars > MAX_COMPLETION_PROMPT_CHARS {
+        bail!(
+            "completion prompt has {prompt_chars} characters; maximum is {MAX_COMPLETION_PROMPT_CHARS}"
+        );
+    }
+
+    let gemma = discover_gemma(models)?;
+    let llama_server = discover_notes_runtime()?;
+    let mut runtime =
+        LlamaServer::start_with_context(&llama_server, &gemma, COMPLETION_CONTEXT_SIZE)?;
+    let text = runtime.complete_configured(
+        &gemma_completion_prompt(&prompt),
+        max_tokens,
+        temperature,
+        repetition_penalty,
+    )?;
+    print!("{}", serialize_completion_result(&text)?);
+    Ok(())
+}
+
 /// Mirrors the macOS sidecar's stdout payload so the Tauri host can apply a
 /// generated title without knowing which native model adapter produced it.
 #[derive(Serialize)]
@@ -80,8 +126,17 @@ struct NotesResult<'a> {
     notes: &'a str,
 }
 
+#[derive(Serialize)]
+struct CompletionResult<'a> {
+    text: &'a str,
+}
+
 fn serialize_notes_result(title: &str, notes: &str) -> Result<String> {
     serde_json::to_string(&NotesResult { title, notes }).context("serialize notes result")
+}
+
+fn serialize_completion_result(text: &str) -> Result<String> {
+    serde_json::to_string(&CompletionResult { text }).context("serialize completion result")
 }
 
 /// Captures the bounded inference shape before a model process exists. The
@@ -342,6 +397,10 @@ struct LlamaServer {
 
 impl LlamaServer {
     fn start(server: &Path, gemma: &Path) -> Result<Self> {
+        Self::start_with_context(server, gemma, DEFAULT_CONTEXT_SIZE)
+    }
+
+    fn start_with_context(server: &Path, gemma: &Path, context_size: u32) -> Result<Self> {
         let deadline = Instant::now()
             .checked_add(NOTES_RUNTIME_BUDGET)
             .ok_or_else(|| anyhow!("notes runtime deadline overflow"))?;
@@ -352,7 +411,7 @@ impl LlamaServer {
             .arg("-m")
             .arg(gemma)
             .arg("-c")
-            .arg(DEFAULT_CONTEXT_SIZE.to_string())
+            .arg(context_size.to_string())
             .arg("--host")
             .arg(Ipv4Addr::LOCALHOST.to_string())
             .arg("--port")
@@ -497,10 +556,14 @@ impl LlamaServer {
                 )
             })
     }
-}
 
-impl PromptRunner for LlamaServer {
-    fn complete(&mut self, prompt: &str, max_tokens: u32) -> Result<String> {
+    fn complete_configured(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        temperature: f32,
+        repetition_penalty: f32,
+    ) -> Result<String> {
         if self.model_calls >= MAX_MODEL_CALLS {
             bail!("local notes exceeded its {MAX_MODEL_CALLS}-request model budget");
         }
@@ -521,8 +584,8 @@ impl PromptRunner for LlamaServer {
             .send_json(CompletionRequest {
                 prompt,
                 n_predict: max_tokens,
-                temperature: 0.3,
-                repeat_penalty: 1.15,
+                temperature,
+                repeat_penalty: repetition_penalty,
                 stream: false,
             })
             .map_err(|error| anyhow!("llama.cpp notes request failed: {error}"))?;
@@ -534,6 +597,12 @@ impl PromptRunner for LlamaServer {
             bail!("llama.cpp Gemma notes runtime returned empty content");
         }
         Ok(content)
+    }
+}
+
+impl PromptRunner for LlamaServer {
+    fn complete(&mut self, prompt: &str, max_tokens: u32) -> Result<String> {
+        self.complete_configured(prompt, max_tokens, 0.3, 1.15)
     }
 }
 
@@ -743,6 +812,10 @@ Rules:\n\
     )
 }
 
+fn gemma_completion_prompt(prompt: &str) -> String {
+    format!("<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n")
+}
+
 /// Applies the same defensive title boundary as macOS: unwrap common model
 /// formatting, reject generic leading labels, and cap user-visible filenames
 /// without splitting a Unicode scalar or an ordinary word.
@@ -942,6 +1015,24 @@ mod tests {
 
         assert_eq!(json["title"], "Budget Planning");
         assert_eq!(json["notes"], "## Summary\n- Approved");
+    }
+
+    #[test]
+    fn completion_result_serializes_the_shared_contract() {
+        assert_eq!(
+            serialize_completion_result("# Meeting Notes").unwrap(),
+            r##"{"text":"# Meeting Notes"}"##
+        );
+    }
+
+    #[test]
+    fn completion_prompt_only_adds_gemma_turn_markers() {
+        let source = "Return the requested Markdown only.";
+        let prompt = gemma_completion_prompt(source);
+        assert!(prompt.starts_with("<bos><start_of_turn>user\n"));
+        assert!(prompt.contains(source));
+        assert!(prompt.ends_with("<end_of_turn>\n<start_of_turn>model\n"));
+        assert!(!prompt.contains("meeting-notes assistant"));
     }
 
     #[test]

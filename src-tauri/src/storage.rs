@@ -24,18 +24,25 @@ pub enum RecordingStatus {
 #[serde(rename_all = "lowercase")]
 pub enum NotesStatus {
     Pending,
+    Updating,
     Ready,
     Failed,
 }
 
-/// Classify AI-notes generation from the note file's presence and any recorded
-/// `notes_error`. A present `ari-note.md` always means success (a stale error
-/// from a prior attempt is ignored).
-pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
-    if has_note {
-        NotesStatus::Ready
+/// Classify AI-notes generation from the last good note, active background job,
+/// and latest error. A failed update remains visible even when an older note is
+/// still readable; an active job is `Updating` only when such a note exists.
+pub fn derive_notes_status(
+    has_note: bool,
+    notes_error: Option<&str>,
+    notes_job_id: Option<&str>,
+) -> NotesStatus {
+    if notes_job_id.is_some() {
+        if has_note { NotesStatus::Updating } else { NotesStatus::Pending }
     } else if notes_error.is_some() {
         NotesStatus::Failed
+    } else if has_note {
+        NotesStatus::Ready
     } else {
         NotesStatus::Pending
     }
@@ -98,11 +105,23 @@ pub struct RecordingMeta {
     /// audio still lives at `~/.ariso/recordings/<id>/recording.mp3`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_file: Option<String>,
-    /// RFC3339 time oats last wrote this recording's note into the vault. `None`
-    /// means never generated. Recorded for future use (status refinement / an
-    /// auto-regeneration guard); v1 does not branch on it.
+    /// RFC3339 time oats last completed this recording's note. `None` means the
+    /// timestamp predates this metadata or no note has completed. The detail UI
+    /// uses it to label and reload successful background updates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_written: Option<String>,
+    /// Number of transcript segments reflected in the latest successful note.
+    /// `None` denotes a pre-reducer note or a recording that has never produced
+    /// notes; both safely fall back to first-note generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_cursor: Option<usize>,
+    /// SHA-256 of the source inputs used by the latest successful notes job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_source_hash: Option<String>,
+    /// Opaque id of the notes job currently allowed to commit. A newer job
+    /// supersedes older work before it can write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_job_id: Option<String>,
     /// True while `title` is still the auto-generated default (the frontend
     /// timestamp label). Set when a fresh recording is created; cleared when the
     /// user renames it or when AI notes regenerate the title. Absent on
@@ -151,6 +170,8 @@ pub struct RecordingStatusView {
     pub has_transcript: bool,
     pub has_note: bool,
     pub notes_status: NotesStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_written: Option<String>,
 }
 
 /// Metadata persisted next to a buffered pending upload (`<id>.json`), so a
@@ -429,6 +450,20 @@ pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
     out.push_str(&format!("participants: [{participants_yaml}]\n"));
     out.push_str("---\n\n");
 
+    out.push_str(&render_transcript_fragment(&meta.participants, segments));
+    out
+}
+
+/// Render a transcript slice without front-matter for bounded reducer inputs.
+pub fn render_transcript_fragment(participants: &[Participant], segments: &[Segment]) -> String {
+    let label_for = |speaker: u32| -> String {
+        participants
+            .iter()
+            .find(|p| p.id == speaker)
+            .map(|p| p.label.clone())
+            .unwrap_or_else(|| format!("Speaker {}", speaker + 1))
+    };
+    let mut out = String::new();
     for seg in segments {
         out.push_str(&format!(
             "**{}** [{}]\n{}\n\n",
@@ -662,6 +697,9 @@ mod tests {
         let json = r#"{"id":"x","title":"Old Title","createdAt":"2026-06-02T14:30:05.000Z","durationSeconds":12,"status":"done"}"#;
         let meta: RecordingMeta = serde_json::from_str(json).unwrap();
         assert!(!meta.title_is_default);
+        assert_eq!(meta.notes_cursor, None);
+        assert_eq!(meta.notes_source_hash, None);
+        assert_eq!(meta.notes_job_id, None);
     }
 
     fn meta_with(id: &str, created: &str) -> RecordingMeta {
@@ -670,6 +708,7 @@ mod tests {
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            notes_cursor: None, notes_source_hash: None, notes_job_id: None,
             title_is_default: false,
         }
     }
@@ -846,6 +885,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_cursor: None,
+            notes_source_hash: None,
+            notes_job_id: None,
             title_is_default: false,
         };
         let segments = vec![
@@ -868,11 +910,29 @@ mod tests {
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
+            notes_cursor: None, notes_source_hash: None, notes_job_id: None,
             title_is_default: false,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
         assert!(md.contains("**Speaker 6** [00:00:00]\nhi"));
+    }
+
+    #[test]
+    fn renders_transcript_fragment_without_frontmatter() {
+        let participants = vec![Participant { id: 4, label: "Alex".into() }];
+        let segments = vec![
+            Segment { speaker: 4, text: "  First point  ".into(), start: 65.0, end: 67.0 },
+            Segment { speaker: 5, text: "Second point".into(), start: 68.0, end: 70.0 },
+        ];
+
+        let md = render_transcript_fragment(&participants, &segments);
+
+        assert!(!md.starts_with("---"));
+        assert_eq!(
+            md,
+            "**Alex** [00:01:05]\nFirst point\n\n**Speaker 6** [00:01:08]\nSecond point\n\n"
+        );
     }
 
     #[test]
@@ -997,19 +1057,24 @@ mod tests {
 
     #[test]
     fn derive_notes_status_ready_when_note_present() {
-        assert_eq!(derive_notes_status(true, None), NotesStatus::Ready);
-        // A present note wins even if a stale error lingers.
-        assert_eq!(derive_notes_status(true, Some("boom")), NotesStatus::Ready);
+        assert_eq!(derive_notes_status(true, None, None), NotesStatus::Ready);
     }
 
     #[test]
-    fn derive_notes_status_failed_when_error_and_no_note() {
-        assert_eq!(derive_notes_status(false, Some("boom")), NotesStatus::Failed);
+    fn derive_notes_status_failed_even_when_old_note_is_present() {
+        assert_eq!(derive_notes_status(false, Some("boom"), None), NotesStatus::Failed);
+        assert_eq!(derive_notes_status(true, Some("boom"), None), NotesStatus::Failed);
     }
 
     #[test]
     fn derive_notes_status_pending_when_no_note_no_error() {
-        assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+        assert_eq!(derive_notes_status(false, None, None), NotesStatus::Pending);
+    }
+
+    #[test]
+    fn derive_notes_status_distinguishes_pending_from_updating() {
+        assert_eq!(derive_notes_status(false, None, Some("job")), NotesStatus::Pending);
+        assert_eq!(derive_notes_status(true, None, Some("job")), NotesStatus::Updating);
     }
 
     #[test]
@@ -1049,6 +1114,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_cursor: None,
+            notes_source_hash: None,
+            notes_job_id: None,
             title_is_default: false,
         };
         write_meta(&dir, &meta).unwrap();

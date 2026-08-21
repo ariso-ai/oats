@@ -37,6 +37,14 @@ describe('deriveStage', () => {
   it('maps done+notes failed to notes-failed', () => {
     expect(deriveStage(view({ status: 'done', hasTranscript: true, notesStatus: 'failed' }))).toBe('notes-failed');
   });
+  it('keeps existing-note update states distinct', () => {
+    expect(
+      deriveStage(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'updating' }))
+    ).toBe('notes-updating');
+    expect(
+      deriveStage(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'failed' }))
+    ).toBe('notes-update-failed');
+  });
   it('maps done+note ready to ready', () => {
     expect(deriveStage(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready' }))).toBe('ready');
   });
@@ -108,6 +116,25 @@ describe('useLocalRecordingProgress polling', () => {
 
     void p.retryNotes();
     expect(p.stage.value).toBe('notes-pending');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retryNotes).toHaveBeenCalledWith('rec-1');
+  });
+
+  it('retryNotes preserves an existing note while showing notes-updating', async () => {
+    retryNotes.mockResolvedValue(undefined);
+    const p = useLocalRecordingProgress(() => 'rec-1');
+    p.status.value = view({
+      status: 'done',
+      hasTranscript: true,
+      hasNote: true,
+      notesStatus: 'failed',
+      notesWritten: '2026-06-02T10:00:00Z',
+    });
+
+    void p.retryNotes();
+    expect(p.stage.value).toBe('notes-updating');
+    expect(p.hasNote.value).toBe(true);
+    expect(p.status.value?.notesWritten).toBe('2026-06-02T10:00:00Z');
     await vi.advanceTimersByTimeAsync(0);
     expect(retryNotes).toHaveBeenCalledWith('rec-1');
   });
