@@ -1571,13 +1571,22 @@ pub fn local_recording_status(
     })
 }
 
+/// Non-binary arguments of [`buffer_pending_audio`], carried in the
+/// `x-oats-meta` header because the audio itself occupies the request body.
+#[derive(serde::Deserialize)]
+pub struct BufferPendingAudioArgs {
+    pub meta: crate::storage::PendingUploadMeta,
+}
+
 /// Buffer a stopped Ariso recording's mp3 + metadata on disk before the upload
 /// attempt, keyed by its ISO `created_at`. Returns the sanitized id.
+///
+/// Takes the mp3 as a raw IPC body for the same reason as
+/// `local_finalize_recording` — see `raw_ipc` for the measurements.
 #[tauri::command]
-pub fn buffer_pending_audio(
-    audio: Vec<u8>,
-    meta: crate::storage::PendingUploadMeta,
-) -> Result<String, String> {
+pub fn buffer_pending_audio(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let audio = crate::raw_ipc::body_bytes(&request)?;
+    let BufferPendingAudioArgs { meta } = crate::raw_ipc::meta(&request)?;
     let root = crate::storage::ariso_root()?;
     crate::storage::write_pending_audio(&root, &meta, &audio)
 }

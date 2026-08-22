@@ -223,8 +223,12 @@ function normalizeActionItems(
     .filter((it) => it.item.trim().length > 0);
 }
 
-async function blobToBytes(blob: Blob): Promise<number[]> {
-  return [...new Uint8Array(await blob.arrayBuffer())];
+// Stays a Uint8Array all the way to `invoke`. Materializing the bytes as a
+// `number[]` cost ~2 s of main-thread conversion plus ~30 s of IPC
+// serialization for a 50-minute recording; as a raw body the same 48 MB crosses
+// in ~44 ms. See `rawMetaOptions` in tauri.ts and `raw_ipc.rs`.
+async function blobToBytes(blob: Blob): Promise<Uint8Array> {
+  return new Uint8Array(await blob.arrayBuffer());
 }
 
 // The remote list/search endpoints return nearly the same meeting shape. Keep

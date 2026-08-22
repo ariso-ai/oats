@@ -704,15 +704,34 @@ pub async fn local_recording_id_for_start(
     storage::resolve_local_recording_id(&root, &created_at)
 }
 
+/// Non-binary arguments of [`local_finalize_recording`], carried in the
+/// `x-oats-meta` header because the audio itself occupies the request body.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizeArgs {
+    pub title: String,
+    pub created_at: String,
+    pub duration_seconds: u64,
+    pub append_to: Option<String>,
+    pub force_new: Option<bool>,
+}
+
+/// Takes the mp3 as a raw IPC body rather than a JSON `number[]`: a 50-minute
+/// recording is ~48 MB, which costs ~30 s to serialize as numbers versus ~44 ms
+/// as a raw body (see `raw_ipc`). That serialization ran on the webview's main
+/// thread, freezing the recorder pill while it worked.
 #[tauri::command]
 pub async fn local_finalize_recording(
-    audio: Vec<u8>,
-    title: String,
-    created_at: String,
-    duration_seconds: u64,
-    append_to: Option<String>,
-    force_new: Option<bool>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<FinalizeResult, String> {
+    let audio = crate::raw_ipc::body_bytes(&request)?;
+    let FinalizeArgs {
+        title,
+        created_at,
+        duration_seconds,
+        append_to,
+        force_new,
+    } = crate::raw_ipc::meta(&request)?;
     let root = crate::vault::meta_root()?;
     // Drop the notes JoinHandle: notes are best-effort and continue running
     // in the background, writing their outcome to meta.json directly.
