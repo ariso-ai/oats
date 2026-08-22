@@ -1303,6 +1303,11 @@ pub(crate) fn open_waveform_window(
             state.clear();
             state.release_window_claim();
             let _ = app_for_event.emit("recording://state", false);
+            // Same path also restores the idle tray menu and icon; otherwise a
+            // force-closed recorder leaves the menu bar claiming we are still
+            // recording. A queued re-open re-arms the recording menu itself
+            // once the new pill is up.
+            crate::tray::set_menu(&app_for_event, false, false);
             // A recording was requested while this pill still held the window
             // slot and it has now stood down, so honor that request.
             if let Some(next) = state.take_reopen() {

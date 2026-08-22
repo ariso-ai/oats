@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -5,8 +6,9 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
-// The menu-bar icon is a macOS template image: AppKit uses the PNG alpha mask
-// and tints it for the current menu-bar material, matching system status items.
+// The idle menu-bar icon is unchanged from before issue #249: a macOS template
+// image whose alpha mask AppKit tints for the current menu-bar material, so it
+// matches the other system status items.
 #[cfg(not(target_os = "windows"))]
 const TRAY_ICON_TEMPLATE: &[u8] = include_bytes!("../../src/assets/oats-tray.png");
 // Windows does not reliably template-tint tray icons, so use concrete color
@@ -20,10 +22,44 @@ const TRAY_ICON_WINDOWS_LIGHT: &[u8] = include_bytes!("../../src/assets/oats-tra
 /// runtime image manipulation and preserves predictable alpha rendering.
 const TRAY_ICON_WINDOWS_DARK: &[u8] = include_bytes!("../../src/assets/oats-tray-dark.png");
 
-/// Resolves the platform-appropriate icon bytes behind one tray construction
-/// path. macOS keeps template semantics, while Windows receives already-colored
-/// pixels because its notification area does not honor AppKit-style masks.
-fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
+// Recording is the *only* state that swaps the icon (issue #249): the full
+// color logo makes an active capture obvious at a glance. These are concrete
+// color assets on every platform — templating them would flatten the brand
+// colors to the same silhouette as idle and erase the difference they exist to
+// convey — so each appearance gets the artwork drawn for it.
+//
+// They are `oats-dark.png` / `oats-light.png` re-laid-out onto the same
+// 128x128 full-bleed canvas as `oats-tray.png`. The tray sizes an icon to an
+// 18pt height and derives its width from the aspect ratio, so the app-sized
+// logos (1332x1160, with wide transparent margins) would have rendered a
+// visibly smaller mark inside a wider status item. Matching the idle canvas
+// keeps the menu-bar icon exactly the same size in both states.
+const TRAY_ICON_RECORDING_DARK: &[u8] =
+    include_bytes!("../../src/assets/oats-tray-recording-dark.png");
+const TRAY_ICON_RECORDING_LIGHT: &[u8] =
+    include_bytes!("../../src/assets/oats-tray-recording-light.png");
+
+/// Last appearance the shell reported. Recording starts and stops long after
+/// the theme event, so the icon swap needs the theme cached here rather than
+/// re-querying a window that may be hidden or already gone.
+static TRAY_THEME_IS_DARK: AtomicBool = AtomicBool::new(false);
+/// Whether the tray is currently showing a recording. Cached for the mirror
+/// case: a theme change mid-recording must redraw the *recording* icon.
+static TRAY_IS_RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// Resolves the icon bytes for one (recording, appearance) combination behind a
+/// single tray construction path. Recording picks the appearance-specific color
+/// logo; idle keeps the platform behavior it has always had — one template mask
+/// on macOS, a concrete per-theme asset on Windows.
+fn tray_icon(theme: tauri::Theme, is_recording: bool) -> tauri::Result<Image<'static>> {
+    if is_recording {
+        let bytes = match theme {
+            tauri::Theme::Dark => TRAY_ICON_RECORDING_DARK,
+            _ => TRAY_ICON_RECORDING_LIGHT,
+        };
+        return Image::from_bytes(bytes);
+    }
+
     #[cfg(target_os = "windows")]
     {
         let bytes = match theme {
@@ -35,22 +71,50 @@ fn tray_icon(theme: tauri::Theme) -> tauri::Result<Image<'static>> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = theme;
         Image::from_bytes(TRAY_ICON_TEMPLATE)
     }
 }
 
-/// Re-applies the platform icon after startup and theme notifications. macOS
-/// reuses one template mask and delegates tinting to AppKit; Windows swaps the
-/// concrete asset selected above. Menu state is intentionally untouched.
-pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+fn cached_theme() -> tauri::Theme {
+    if TRAY_THEME_IS_DARK.load(Ordering::Relaxed) {
+        tauri::Theme::Dark
+    } else {
+        tauri::Theme::Light
+    }
+}
+
+/// Push the icon for the given state onto the live tray. On macOS the idle mark
+/// stays a template so AppKit tints it like every other status item; only the
+/// recording logo turns templating off, because it carries its own color.
+fn set_icon(app: &AppHandle, theme: tauri::Theme, is_recording: bool) {
     let Some(tray) = app.tray_by_id("main") else { return };
-    if let Ok(icon) = tray_icon(theme) {
+    if let Ok(icon) = tray_icon(theme, is_recording) {
         #[cfg(target_os = "macos")]
-        let _ = tray.set_icon_with_as_template(Some(icon), true);
+        let _ = tray.set_icon_with_as_template(Some(icon), !is_recording);
         #[cfg(not(target_os = "macos"))]
         let _ = tray.set_icon(Some(icon));
     }
+}
+
+/// Re-applies the platform icon after startup and theme notifications, keeping
+/// whichever recording state the tray is already in. Menu state is
+/// intentionally untouched.
+pub fn apply_theme(app: &AppHandle, theme: tauri::Theme) {
+    TRAY_THEME_IS_DARK.store(matches!(theme, tauri::Theme::Dark), Ordering::Relaxed);
+    set_icon(app, theme, TRAY_IS_RECORDING.load(Ordering::Relaxed));
+}
+
+/// Swap between the idle mark and the recording logo. Driven by `set_menu`,
+/// which is the single place recording state reaches the tray, so the icon
+/// tracks the same flag the menu is rebuilt from.
+///
+/// Deliberately unconditional: if the menu fails to build we still move the
+/// icon, because a stale menu is a wrong list of actions while a stale icon
+/// claims we are not recording when we are — exactly what this icon exists to
+/// signal. Truthful indicator beats matching indicators.
+fn apply_recording(app: &AppHandle, is_recording: bool) {
+    TRAY_IS_RECORDING.store(is_recording, Ordering::Relaxed);
+    set_icon(app, cached_theme(), is_recording);
 }
 
 /// Rebuild the tray menu in-place. Called from tray events (main thread)
@@ -76,6 +140,7 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
     if let Ok(menu) = menu {
         let _ = tray.set_menu(Some(menu));
     }
+    apply_recording(app, is_recording);
     refresh_tray_title(app);
 }
 
@@ -116,7 +181,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_idle_menu(app, None)?;
 
     let builder = TrayIconBuilder::with_id("main")
-        .icon(tray_icon(tauri::Theme::Light)?)
+        .icon(tray_icon(tauri::Theme::Light, false)?)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
@@ -188,10 +253,10 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         });
     #[cfg(target_os = "macos")]
-    let builder = builder
-        // Mark it as a template so AppKit tints it alongside the other menu-bar
-        // status icons instead of preserving the brand colors.
-        .icon_as_template(true);
+    // The tray is built idle, so start as a template and let AppKit tint it
+    // alongside the other menu-bar status icons; `set_icon` turns templating
+    // off only for the recording logo.
+    let builder = builder.icon_as_template(true);
     #[cfg(not(target_os = "macos"))]
     let builder = builder.icon_as_template(false);
     builder.build(app)?;
@@ -295,4 +360,66 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
         .item(&library)
         .item(&check_updates)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixels(theme: tauri::Theme, is_recording: bool) -> Vec<u8> {
+        tray_icon(theme, is_recording)
+            .expect("tray icon should decode")
+            .rgba()
+            .to_vec()
+    }
+
+    #[test]
+    fn every_tray_icon_variant_decodes() {
+        for is_recording in [false, true] {
+            for theme in [tauri::Theme::Light, tauri::Theme::Dark] {
+                assert!(!pixels(theme, is_recording).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn recording_uses_a_different_icon_than_idle() {
+        for theme in [tauri::Theme::Light, tauri::Theme::Dark] {
+            assert_ne!(pixels(theme, false), pixels(theme, true));
+        }
+    }
+
+    /// The menu bar scales a tray icon to a fixed height and takes its width
+    /// from the aspect ratio, so any variant with different dimensions would
+    /// visibly resize the status item when a recording starts or stops.
+    #[test]
+    fn every_variant_shares_the_idle_icon_dimensions() {
+        let idle = tray_icon(tauri::Theme::Light, false).expect("idle icon should decode");
+        let expected = (idle.width(), idle.height());
+        for is_recording in [false, true] {
+            for theme in [tauri::Theme::Light, tauri::Theme::Dark] {
+                let icon = tray_icon(theme, is_recording).expect("tray icon should decode");
+                assert_eq!((icon.width(), icon.height()), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn recording_has_its_own_light_and_dark_icon() {
+        assert_ne!(
+            pixels(tauri::Theme::Light, true),
+            pixels(tauri::Theme::Dark, true)
+        );
+    }
+
+    /// The idle mark is deliberately appearance-independent on macOS: one
+    /// template mask that AppKit tints. Only recording swaps per appearance.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn idle_icon_does_not_change_with_appearance() {
+        assert_eq!(
+            pixels(tauri::Theme::Light, false),
+            pixels(tauri::Theme::Dark, false)
+        );
+    }
 }
