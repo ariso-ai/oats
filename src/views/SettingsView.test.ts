@@ -125,6 +125,12 @@ vi.mock('../composables/useMeetingEndReminder', () => ({
   isMeetingEndReminderEnabled: () => Promise.resolve(true),
   setMeetingEndReminderEnabled: (...a: unknown[]) => setMeetingEndReminderEnabled(...a),
 }));
+const isDiagnosticsEnabled = vi.fn(() => Promise.resolve(false));
+const setDiagnosticsEnabled = vi.fn((_v: unknown) => Promise.resolve());
+vi.mock('../composables/useDiagnostics', () => ({
+  isDiagnosticsEnabled: () => isDiagnosticsEnabled(),
+  setDiagnosticsEnabled: (v: unknown) => setDiagnosticsEnabled(v),
+}));
 
 import SettingsView from './SettingsView.vue';
 
@@ -141,6 +147,7 @@ beforeEach(() => {
     Promise.resolve({ status: 200, data: {} })
   );
   getBackendSetting.mockResolvedValue('ariso');
+  isDiagnosticsEnabled.mockResolvedValue(false);
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
@@ -360,6 +367,28 @@ describe('SettingsView account avatar', () => {
     expect(wrapper.find('div.avatar').exists()).toBe(false);
   });
 
+  it('hides the sign-in button once signed in', async () => {
+    // Regression: the Connect Calendar block was inserted between the
+    // signed-in v-if and the sign-in v-else, which silently re-paired the
+    // v-else to it — so the sign-in button rendered next to Sign Out.
+    mockSignedIn(null);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find('.sign-in-container').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Sign in with Google');
+    expect(wrapper.text()).toContain('Sign Out');
+  });
+
+  it('shows the sign-in button when signed out', async () => {
+    checkSession.mockResolvedValue(null);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find('.sign-in-container').exists()).toBe(true);
+    expect(wrapper.text()).toContain('Sign in with Google');
+  });
+
   it('falls back to the initials circle when there is no Google avatar', async () => {
     mockSignedIn(null);
     const wrapper = mount(SettingsView);
@@ -437,6 +466,73 @@ describe('SettingsView silence detection toggle', () => {
     await input.trigger('change');
     await flushPromises();
     expect(setSilenceDetectionEnabled).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('SettingsView diagnostics toggle', () => {
+  function toggleFor(wrapper: ReturnType<typeof mount>, label: string) {
+    const row = wrapper
+      .findAll('.setting-row')
+      .find((r) => r.find('.setting-label').text() === label);
+    expect(row, `setting-row for "${label}"`).toBeDefined();
+    return row!.find('input.toggle-input');
+  }
+
+  it('renders unchecked by default', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Collect diagnostic data');
+    expect(input.exists()).toBe(true);
+    expect((input.element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('reflects a stored opt-in', async () => {
+    isDiagnosticsEnabled.mockResolvedValue(true);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(
+      (toggleFor(wrapper, 'Collect diagnostic data').element as HTMLInputElement).checked
+    ).toBe(true);
+  });
+
+  it('persists the opt-in when switched on', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Collect diagnostic data');
+    (input.element as HTMLInputElement).checked = true;
+    await input.trigger('change');
+    await flushPromises();
+    expect(setDiagnosticsEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it('reverts the toggle when persistence fails', async () => {
+    setDiagnosticsEnabled.mockRejectedValueOnce(new Error('store locked'));
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const input = toggleFor(wrapper, 'Collect diagnostic data');
+    (input.element as HTMLInputElement).checked = true;
+    await input.trigger('change');
+    await flushPromises();
+    expect((input.element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('explains that reporting is paused in offline mode', async () => {
+    isDiagnosticsEnabled.mockResolvedValue(true);
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Paused while oats is running on-device');
+    // Windows ships the local backend too (cpp-sidecar), so the promise this
+    // notice makes has to hold on both platforms.
+    expect(wrapper.text()).toContain('nothing leaves your device');
+    expect(wrapper.text()).not.toContain('your Mac');
+  });
+
+  it('shows no offline notice while opted out', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Paused while oats is running on-device');
   });
 });
 

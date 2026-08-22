@@ -18,10 +18,24 @@ const emitNotificationsSync = vi.fn(() => Promise.resolve());
 const getMeetingPrep = vi.fn();
 const openPrepTab = vi.fn();
 const listPendingUploads = vi.fn(() => Promise.resolve([]));
+const minimizeWindow = vi.fn(() => Promise.resolve());
+const toggleMaximizeWindow = vi.fn(() => Promise.resolve());
+const closeWindow = vi.fn(() => Promise.resolve());
+const isWindowMaximized = vi.fn(() => Promise.resolve(false));
+const onWindowResized = vi.fn(() => Promise.resolve(() => undefined));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getAllWebviewWindows: () => getAllWebviewWindows(),
+}));
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    minimize: () => minimizeWindow(),
+    toggleMaximize: () => toggleMaximizeWindow(),
+    close: () => closeWindow(),
+    isMaximized: () => isWindowMaximized(),
+    onResized: (handler: () => void) => onWindowResized(handler),
+  }),
 }));
 
 // In-test event bus standing in for Tauri's app-wide events: `listen` records
@@ -136,6 +150,8 @@ beforeEach(() => {
   invoke.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
   listPendingUploads.mockResolvedValue([]);
+  isWindowMaximized.mockResolvedValue(false);
+  onWindowResized.mockResolvedValue(() => undefined);
   readRecordingNote.mockResolvedValue('');
   writeRecordingNote.mockResolvedValue(undefined);
   backendId.mockReturnValue('local');
@@ -152,6 +168,62 @@ afterEach(() => {
 });
 
 describe('LibraryView', () => {
+  it('integrates the sidebar toggle and native-equivalent controls into Windows title chrome', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    listMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    const titlebar = wrapper.get('.titlebar--windows');
+    expect(titlebar.text()).toContain('Meetings');
+    expect(titlebar.find('.panel-toggle').exists()).toBe(true);
+    expect(titlebar.findAll('.window-control')).toHaveLength(3);
+
+    await titlebar.get('.panel-toggle').trigger('click');
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+  });
+
+  it('wires the Windows titlebar controls to the current Tauri window', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    listMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Minimize window"]').trigger('click');
+    await wrapper.get('[aria-label="Maximize window"]').trigger('click');
+    await wrapper.get('[aria-label="Close window"]').trigger('click');
+
+    expect(minimizeWindow).toHaveBeenCalledOnce();
+    expect(toggleMaximizeWindow).toHaveBeenCalledOnce();
+    expect(closeWindow).toHaveBeenCalledOnce();
+  });
+
+  it('shows a restore control when the Windows library is maximized', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    isWindowMaximized.mockResolvedValue(true);
+    listMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    expect(wrapper.find('[aria-label="Restore window"]').exists()).toBe(true);
+    expect(wrapper.find('[aria-label="Maximize window"]').exists()).toBe(false);
+  });
+
+  it('keeps custom Windows controls out of the macOS overlay titlebar', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)');
+    listMeetings.mockResolvedValue([]);
+
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    expect(wrapper.find('.titlebar--windows').exists()).toBe(false);
+    expect(wrapper.find('.window-controls').exists()).toBe(false);
+    expect(wrapper.find('.panel-toggle').exists()).toBe(true);
+  });
+
   it('shows an empty state when there are no meetings', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
@@ -1275,6 +1347,22 @@ describe('LibraryView', () => {
     await wrapper.get('.add-btn').trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', { forceNew: true });
+  });
+
+  it('shows an actionable recorder startup failure and unlocks Start', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://start-failed', {
+      message: 'No microphone was found. Connect or enable a microphone, then try again.',
+    });
+    await flushPromises();
+
+    expect(wrapper.get('.recording-start-error').attributes('role')).toBe('alert');
+    expect(wrapper.get('.recording-start-error').text()).toContain('Connect or enable a microphone');
+    expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
   it('renders the PendingUploads section inside the sidebar', async () => {

@@ -8,6 +8,7 @@ import {
   type MeetingPrep,
 } from './useMeetingApi';
 import { arisoTruthy } from './autoJoin';
+import { reportUploadFailure } from './useDiagnostics';
 import { isCanceledMeetingStatus } from './meetingStatus';
 
 export type BackendId = 'ariso' | 'local';
@@ -318,11 +319,24 @@ export class ArisoBackend implements Backend {
       console.error('Failed to buffer audio locally; uploading anyway', e);
     }
     const { uploadAudio } = useMeetingApi();
-    const { meetingId } = await uploadAudio(blob, {
-      startAt: meta.startAt,
-      endAt: meta.endAt,
-      meetingId: meta.meetingId,
-    });
+    let meetingId: number;
+    try {
+      ({ meetingId } = await uploadAudio(blob, {
+        startAt: meta.startAt,
+        endAt: meta.endAt,
+        meetingId: meta.meetingId,
+      }));
+    } catch (e) {
+      // Report, then rethrow unchanged — the caller still shows "Upload
+      // failed" and the buffered mp3 above stays on disk for the retry path.
+      await reportUploadFailure(e, {
+        attempt: 'initial',
+        bytes: blob.size,
+        durationSeconds: meta.durationSeconds,
+        hasMeetingId: meta.meetingId != null,
+      });
+      throw e;
+    }
     try {
       await pending.discardAudio(createdAt);
     } catch (e) {

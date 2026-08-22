@@ -3,10 +3,11 @@ gate — your job is to apply the major/critical findings that CodeRabbit
 and shawnzhu have raised on this PR, so the next CodeRabbit re-review
 can clear them.
 
-This repo is a Tauri app: React + TypeScript in `src/`, Rust backend in
-`src-tauri/`. There is no test suite. Build verification is:
+This repo is a Tauri app: Vue 3 + TypeScript in `src/`, Rust backend in
+`src-tauri/`. The frontend has a Vitest suite. Verification is:
 
 ```bash
+npm test
 npm run vite:build
 ( cd src-tauri && cargo build --locked )
 ```
@@ -67,7 +68,7 @@ edits together. Use the `Edit` tool — no shell-based file rewriting.
   `catch`, Tauri command error returns).
 - Change public API signatures without confirming callers via `grep`:
   - Tauri commands (`#[command]` in `src-tauri/src/commands.rs`) —
-    callers are in the React frontend via `invoke()`.
+    callers are in the Vue frontend via `invoke()`.
   - Exported TypeScript symbols.
   - Public Rust items (`pub fn`, `pub struct`) that cross modules.
 - Touch concurrency primitives (`tokio::spawn`, `Arc<Mutex>`, channels,
@@ -81,18 +82,19 @@ If a suggestion conflicts with one of these rules, classify it as
 
 ## Step 3 — Build verification
 
-Run both builds. Do not suppress warnings.
+Run all three. Do not suppress warnings.
 
 ```bash
+npm test
 npm run vite:build
 ( cd src-tauri && cargo build --locked )
 ```
 
-If either fails, isolate the failure to a specific finding's edit, back
+If any fails, isolate the failure to a specific finding's edit, back
 it out, and reclassify that finding as `false-positive` with the build
-error as the reason. Re-run the builds until they pass cleanly.
+error as the reason. Re-run until they pass cleanly.
 
-If you cannot make the builds pass, stop. Do not commit. Write a clear
+If you cannot make them pass, stop. Do not commit. Write a clear
 summary of what failed.
 
 ## Step 4 — Commit & reply

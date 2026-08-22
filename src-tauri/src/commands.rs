@@ -11,6 +11,12 @@ const APP_USER_AGENT: &str = "ArisoDesktop/0.2.1";
 // tray, and webview requests arrive together.
 static SETTINGS_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LIBRARY_WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Serializes each temporary Windows z-order presentation with its deferred
+// cleanup. The generation lets a cleanup detect that a newer presentation
+// superseded it, while the mutex prevents either side from changing the
+// topmost state between that validation and the corresponding window calls.
+#[cfg(target_os = "windows")]
+static LIBRARY_PRESENTATION_GENERATION: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -37,6 +43,36 @@ pub(crate) const PUSHER_KEY: &str = "ec77b8bc7dc9ff463c13";
 pub(crate) const PUSHER_KEY: &str = "39d990870841a6b478cc";
 
 pub(crate) const PUSHER_CLUSTER: &str = "us2";
+
+// Public Sentry DSN for opt-in diagnostics (`diagnosticsEnabled` in
+// settings.json). A DSN is not a secret — it only grants event ingestion.
+// Only prod-api builds ship one so dev/local runs never pollute the project;
+// see `sentry_dsn()` for the development escape hatch.
+// The DSN belongs to the `oats` project (platform: JavaScript → Vue); both the
+// macOS and Windows builds report to it and are told apart by the `os` tag.
+#[cfg(feature = "prod-api")]
+const DEFAULT_SENTRY_DSN: &str = "https://ee14ea66d04a590f3b4375c1ef651e36@o4510868247216128.ingest.us.sentry.io/4511831828856832";
+// Dev builds stay silent unless ARISO_DESKTOP_SENTRY_DSN points somewhere.
+#[cfg(not(feature = "prod-api"))]
+const DEFAULT_SENTRY_DSN: &str = "";
+
+/// Production builds report to the baked DSN only. Like `api_base_url`, the
+/// endpoint is fixed inside the signed app so it cannot be redirected.
+#[cfg(feature = "prod-api")]
+pub(crate) fn sentry_dsn() -> String {
+    DEFAULT_SENTRY_DSN.to_string()
+}
+
+/// Development builds default to an empty DSN (diagnostics stay a no-op) but
+/// allow pointing at a scratch Sentry project while working on instrumentation.
+#[cfg(not(feature = "prod-api"))]
+pub(crate) fn sentry_dsn() -> String {
+    std::env::var("ARISO_DESKTOP_SENTRY_DSN")
+        .ok()
+        .filter(|dsn| !dsn.trim().is_empty())
+        .map(|dsn| dsn.trim().to_string())
+        .unwrap_or_else(|| DEFAULT_SENTRY_DSN.to_string())
+}
 
 #[cfg(feature = "prod-api")]
 const DEFAULT_WEB_APP_BASE_URL: &str = "https://web.ari.ariso.ai";
@@ -203,8 +239,37 @@ const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300)
 /// request, not just once the loopback listener task exists — so a cancel
 /// that arrives while prepare-state is in flight still has something to
 /// cancel instead of being silently dropped.
+/// Which browser flow owns the slot. Cancel must resolve the frontend promise
+/// that is actually waiting, and the two flows listen on different events.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum BrowserFlow {
+    SignIn,
+    CalendarConnect,
+}
+
+impl BrowserFlow {
+    fn result_event(self) -> &'static str {
+        match self {
+            BrowserFlow::SignIn => "oauth-result",
+            BrowserFlow::CalendarConnect => "calendar-connect-result",
+        }
+    }
+
+    /// The loopback success page for this flow. Connect runs while the user is
+    /// already signed in, so it must not claim a sign-in happened; it also
+    /// stays neutral about the grant, because the browser hop reaches this page
+    /// whether or not the user left Calendar ticked on the consent screen.
+    fn callback_ok_response(self) -> &'static str {
+        match self {
+            BrowserFlow::SignIn => CALLBACK_SIGNED_IN_RESPONSE,
+            BrowserFlow::CalendarConnect => CALLBACK_DONE_RESPONSE,
+        }
+    }
+}
+
 struct PendingSignIn {
     id: u64,
+    flow: BrowserFlow,
     handle: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
@@ -220,7 +285,7 @@ fn abort_pending_handle(handle: tauri::async_runtime::JoinHandle<()>) {
 /// Register a new attempt and take the slot, aborting whatever attempt (with
 /// or without a listener task yet) was previously in it. Returns the new
 /// attempt's id, checked at each subsequent await via `sign_in_attempt_active`.
-fn begin_sign_in_attempt() -> u64 {
+fn begin_sign_in_attempt(flow: BrowserFlow) -> u64 {
     let id = SIGN_IN_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let mut slot = PENDING_SIGN_IN.lock().unwrap();
     if let Some(prev) = slot.take() {
@@ -228,7 +293,11 @@ fn begin_sign_in_attempt() -> u64 {
             abort_pending_handle(handle);
         }
     }
-    *slot = Some(PendingSignIn { id, handle: None });
+    *slot = Some(PendingSignIn {
+        id,
+        flow,
+        handle: None,
+    });
     id
 }
 
@@ -249,17 +318,19 @@ fn attach_sign_in_handle(id: u64, handle: tauri::async_runtime::JoinHandle<()>) 
     }
 }
 
-/// Cancel whatever sign-in attempt is pending, if any. Returns true if there
-/// was one (whether or not its listener task existed yet).
-fn abort_pending_sign_in() -> bool {
+/// Cancel whatever browser attempt is pending, if any. Returns the flow that
+/// was cancelled so the caller emits on the event its waiter is listening to —
+/// cancelling a calendar connect with an `oauth-result` would leave the
+/// frontend promise hanging until the timeout.
+fn abort_pending_sign_in() -> Option<BrowserFlow> {
     match PENDING_SIGN_IN.lock().unwrap().take() {
         Some(p) => {
             if let Some(handle) = p.handle {
                 abort_pending_handle(handle);
             }
-            true
+            Some(p.flow)
         }
-        None => false,
+        None => None,
     }
 }
 
@@ -278,6 +349,39 @@ fn retire_sign_in_attempt(id: u64) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Owns the slot for the stretch between `begin_sign_in_attempt` and the
+/// moment the loopback listener task takes over. Every fallible step in that
+/// prologue — bind, prepare-state, URL validation, opening the browser — would
+/// otherwise leave the attempt parked in the slot on the way out, and a later
+/// `cancel_google_sign_in` would emit a result for a flow that already died.
+/// Call `release` once the listener task exists; until then, any early return
+/// retires the attempt on drop.
+struct SignInAttemptGuard(Option<u64>);
+
+impl SignInAttemptGuard {
+    fn begin(flow: BrowserFlow) -> Self {
+        Self(Some(begin_sign_in_attempt(flow)))
+    }
+
+    fn id(&self) -> u64 {
+        self.0.expect("attempt id read after release")
+    }
+
+    /// Hand the attempt to the listener task: it now owns retiring the slot,
+    /// so dropping this guard must no longer do it.
+    fn release(mut self) -> u64 {
+        self.0.take().expect("attempt released twice")
+    }
+}
+
+impl Drop for SignInAttemptGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            retire_sign_in_attempt(id);
+        }
     }
 }
 
@@ -318,9 +422,18 @@ fn validate_browser_auth_url(url: &Url) -> Result<(), String> {
     }
 }
 
-/// Parse an HTTP request line (`GET /callback?token=…&nonce=… HTTP/1.1`) from
-/// the loopback listener. Returns `(token, nonce)` for well-formed callbacks.
-fn parse_loopback_callback(request_line: &str) -> Option<(String, String)> {
+/// What a loopback callback delivered. Sign-in returns a magic-link token;
+/// the Workspace connect hop returns only a status marker and no secret.
+#[derive(Debug, PartialEq)]
+pub(crate) enum LoopbackDelivery {
+    Token(String),
+    Status(String),
+}
+
+/// Parse an HTTP request line (`GET /callback?token=…&nonce=… HTTP/1.1`, or
+/// `?status=…&nonce=…` for the connect hop) from the loopback listener.
+/// Returns `(delivery, nonce)` for well-formed callbacks.
+fn parse_loopback_callback(request_line: &str) -> Option<(LoopbackDelivery, String)> {
     let mut parts = request_line.split_whitespace();
     if parts.next() != Some("GET") {
         return None;
@@ -331,24 +444,55 @@ fn parse_loopback_callback(request_line: &str) -> Option<(String, String)> {
         return None;
     }
     let mut token = None;
+    let mut status = None;
     let mut nonce = None;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "token" if !value.is_empty() => token = Some(value.into_owned()),
+            "status" if !value.is_empty() => status = Some(value.into_owned()),
             "nonce" if !value.is_empty() => nonce = Some(value.into_owned()),
             _ => {}
         }
     }
-    Some((token?, nonce?))
+    // A token always wins: a callback carrying one is a sign-in delivery even
+    // if it also carries a status, so a status parameter can never downgrade
+    // sign-in into the token-less path.
+    let delivery = match (token, status) {
+        (Some(token), _) => LoopbackDelivery::Token(token),
+        (None, Some(status)) => LoopbackDelivery::Status(status),
+        (None, None) => return None,
+    };
+    Some((delivery, nonce?))
 }
 
-// Loopback responses. The success page must never echo the token.
-const CALLBACK_OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
-<!doctype html><html><head><title>oats</title></head>\
-<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;\
-display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">\
-<div style=\"text-align:center\"><h2>You&rsquo;re signed in</h2>\
-<p>You can close this tab and return to oats.</p></div></body></html>";
+// Loopback responses. The success page must never echo the token, and its
+// wording must match the flow that opened the browser — see
+// `BrowserFlow::callback_ok_response`.
+macro_rules! callback_ok_response {
+    ($heading:literal, $body:literal) => {
+        concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n",
+            "<!doctype html><html><head><title>oats</title></head>",
+            "<body style=\"font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;",
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">",
+            "<div style=\"text-align:center\"><h2>",
+            $heading,
+            "</h2><p>",
+            $body,
+            "</p></div></body></html>"
+        )
+    };
+}
+
+const CALLBACK_SIGNED_IN_RESPONSE: &str = callback_ok_response!(
+    "You&rsquo;re signed in",
+    "You can close this tab and return to oats."
+);
+
+const CALLBACK_DONE_RESPONSE: &str = callback_ok_response!(
+    "You can close this tab",
+    "oats has the result. Return to the app to continue."
+);
 
 const CALLBACK_NOT_FOUND_RESPONSE: &str =
     "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
@@ -359,7 +503,8 @@ const CALLBACK_NOT_FOUND_RESPONSE: &str =
 async fn accept_loopback_callback(
     listener: &tokio::net::TcpListener,
     expected_nonce: &str,
-) -> Result<String, String> {
+    flow: BrowserFlow,
+) -> Result<LoopbackDelivery, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     loop {
@@ -389,10 +534,10 @@ async fn accept_loopback_callback(
 
             let matched = parse_loopback_callback(&request_line)
                 .filter(|(_, nonce)| nonce_matches(nonce, expected_nonce))
-                .map(|(token, _)| token);
+                .map(|(delivery, _)| delivery);
 
             let response = if matched.is_some() {
-                CALLBACK_OK_RESPONSE
+                flow.callback_ok_response()
             } else {
                 CALLBACK_NOT_FOUND_RESPONSE
             };
@@ -402,8 +547,8 @@ async fn accept_loopback_callback(
         })
         .await;
 
-        if let Ok(Some(token)) = handled {
-            return Ok(token);
+        if let Ok(Some(delivery)) = handled {
+            return Ok(delivery);
         }
     }
 }
@@ -421,24 +566,35 @@ async fn run_browser_sign_in(
     listener: tokio::net::TcpListener,
     nonce: String,
 ) {
-    let result =
-        match tokio::time::timeout(SIGN_IN_TIMEOUT, accept_loopback_callback(&listener, &nonce))
-            .await
-        {
-            Ok(Ok(token)) => exchange_token_for_session(window.app_handle(), &token).await,
-            Ok(Err(err)) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some(err),
-            },
-            Err(_) => SignInResult {
-                success: None,
-                session_token: None,
-                error: Some("Sign-in timed out — please try again".into()),
-            },
-        };
+    let result = match tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::SignIn),
+    )
+    .await
+    {
+        Ok(Ok(LoopbackDelivery::Token(token))) => {
+            exchange_token_for_session(window.app_handle(), &token).await
+        }
+        // Sign-in requires a magic-link token; a status-only callback on
+        // this attempt's nonce is not one.
+        Ok(Ok(LoopbackDelivery::Status(_))) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some("Sign-in callback carried no token".into()),
+        },
+        Ok(Err(err)) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some(err),
+        },
+        Err(_) => SignInResult {
+            success: None,
+            session_token: None,
+            error: Some("Sign-in timed out — please try again".into()),
+        },
+    };
     if retire_sign_in_attempt(attempt_id) {
-        let _ = window.emit("oauth-result", result);
+        let _ = window.emit(BrowserFlow::SignIn.result_event(), result);
     }
 }
 
@@ -454,8 +610,10 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // prepare-state is in flight still has something in the slot to cancel,
     // instead of being silently dropped because no listener task exists yet.
     // This also supersedes any still-pending attempt (e.g. the user closed
-    // the browser tab and clicked Sign in again).
-    let attempt_id = begin_sign_in_attempt();
+    // the browser tab and clicked Sign in again). The guard retires it again
+    // if any step below fails before the listener task takes ownership.
+    let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+    let attempt_id = attempt.id();
 
     // Bind before prepare-state so the advertised port is already ours.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -529,6 +687,7 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // Step 3: Wait for the browser to hit the loopback callback. If this
     // attempt was superseded or canceled while the browser was opening,
     // `attach_sign_in_handle` aborts the task instead of letting it run.
+    let attempt_id = attempt.release();
     let handle =
         tauri::async_runtime::spawn(run_browser_sign_in(attempt_id, window, listener, nonce));
     attach_sign_in_handle(attempt_id, handle);
@@ -545,17 +704,165 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
 /// frontend's pending `oauth-result` wait with the silent-cancel error.
 #[tauri::command]
 pub async fn cancel_google_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
-    if abort_pending_sign_in() {
-        let _ = window.emit(
-            "oauth-result",
-            SignInResult {
-                success: None,
-                session_token: None,
-                error: Some(SIGN_IN_CANCELED.into()),
-            },
-        );
+    match abort_pending_sign_in() {
+        Some(BrowserFlow::SignIn) => {
+            let _ = window.emit(
+                BrowserFlow::SignIn.result_event(),
+                SignInResult {
+                    success: None,
+                    session_token: None,
+                    error: Some(SIGN_IN_CANCELED.into()),
+                },
+            );
+        }
+        Some(BrowserFlow::CalendarConnect) => {
+            let _ = window.emit(
+                BrowserFlow::CalendarConnect.result_event(),
+                calendar_connect_error(SIGN_IN_CANCELED),
+            );
+        }
+        None => {}
     }
     Ok(())
+}
+
+/// Outcome of the Workspace connect hop. `status` mirrors the marker the API's
+/// callback put on the loopback URL: "connected", or "no_calendar_scope" when
+/// the user unticked Calendar on the granular-consent screen.
+#[derive(Clone, Serialize)]
+pub struct CalendarConnectResult {
+    pub status: Option<String>,
+    pub error: Option<String>,
+}
+
+fn calendar_connect_error(message: impl Into<String>) -> CalendarConnectResult {
+    CalendarConnectResult {
+        status: None,
+        error: Some(message.into()),
+    }
+}
+
+/// Wait for the connect callback and report via `calendar-connect-result`.
+/// Mirrors `run_browser_sign_in`, but nothing secret crosses the loopback —
+/// only the status marker — so there is no token to exchange.
+async fn run_calendar_connect(
+    attempt_id: u64,
+    window: tauri::WebviewWindow,
+    listener: tokio::net::TcpListener,
+    nonce: String,
+) {
+    let result = match tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::CalendarConnect),
+    )
+    .await
+    {
+        Ok(Ok(LoopbackDelivery::Status(status))) => CalendarConnectResult {
+            status: Some(status),
+            error: None,
+        },
+        // A token on this attempt's nonce means the sign-in callback landed
+        // here. Never exchange it — this flow already holds a session, and
+        // the token belongs to the sign-in attempt that minted the nonce.
+        Ok(Ok(LoopbackDelivery::Token(_))) => {
+            calendar_connect_error("Unexpected sign-in callback during calendar connect")
+        }
+        Ok(Err(err)) => calendar_connect_error(err),
+        Err(_) => calendar_connect_error("Connecting Calendar timed out — please try again"),
+    };
+    if retire_sign_in_attempt(attempt_id) {
+        let _ = window.emit(BrowserFlow::CalendarConnect.result_event(), result);
+    }
+}
+
+/// Second hop of desktop Google auth: acquire Calendar read access through the
+/// authenticated Workspace connect flow, which sets `include_granted_scopes`
+/// and is therefore additive — it can never narrow an existing grant the way
+/// sign-in would. Only run when `/desktop/google-calendar-status` reports
+/// Calendar missing.
+#[tauri::command]
+pub async fn connect_google_calendar(
+    window: tauri::WebviewWindow,
+) -> Result<CalendarConnectResult, String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let app = window.app_handle().clone();
+
+    // Offline mode must make no network calls at all. Calendar sync is an
+    // Ariso-cloud feature, so this is unreachable in Local by design.
+    if active_backend(&app) == "local" {
+        return Err("Calendar connect is unavailable on the Local backend".into());
+    }
+
+    let Some(session_token) = get_session_token(&app) else {
+        return Err("Not signed in".into());
+    };
+
+    // As in `google_sign_in`: the guard hands the slot back if any step below
+    // fails before the listener task takes ownership of the attempt.
+    let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+    let attempt_id = attempt.id();
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("bind loopback listener: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let nonce = random_nonce()?;
+
+    // Authenticated, unlike sign-in's prepare-state: the API resolves the
+    // caller's Google Workspace MCP server row from the session.
+    let client = http_client();
+    let response = client
+        .post(format!("{}/oauth2/prepare-state", api_base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {session_token}"))
+        .json(&serde_json::json!({
+            "integration": "googleWorkspace",
+            "scopes": ["calendar-readonly"],
+            "redirect": desktop_auth_redirect(port, &nonce),
+        }))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(calendar_connect_error(SIGN_IN_CANCELED));
+    }
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        return Ok(calendar_connect_error(format!("API returned {status}")));
+    }
+
+    let body: PrepareStateResponse = response.json().await.map_err(|e| e.to_string())?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(calendar_connect_error(SIGN_IN_CANCELED));
+    }
+
+    let auth_url = Url::parse(&body.redirect_url).map_err(|e| e.to_string())?;
+    validate_browser_auth_url(&auth_url)?;
+
+    if !sign_in_attempt_active(attempt_id) {
+        return Ok(calendar_connect_error(SIGN_IN_CANCELED));
+    }
+
+    window
+        .opener()
+        .open_url(body.redirect_url, None::<&str>)
+        .map_err(|e| e.to_string())?;
+
+    let attempt_id = attempt.release();
+    let handle =
+        tauri::async_runtime::spawn(run_calendar_connect(attempt_id, window, listener, nonce));
+    attach_sign_in_handle(attempt_id, handle);
+
+    // The frontend listens for "calendar-connect-result".
+    Ok(CalendarConnectResult {
+        status: None,
+        error: None,
+    })
 }
 
 async fn exchange_token_for_session(
@@ -885,12 +1192,27 @@ fn waveform_url(
     url
 }
 
+/// How long a queued recording waits for the incumbent pill to stand down
+/// before the request is dropped. The recorder answers `recorder://yield` from
+/// an idle post-upload state, so this only needs to cover event delivery plus
+/// the window close; a pill that is genuinely busy never answers at all.
+const YIELD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Bound on waiting for the `"waveform"` label to be free after the incumbent
+/// pill's `Destroyed` event, before re-opening in its place.
+const YIELD_REOPEN_POLLS: u32 = 20;
+const YIELD_REOPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
 /// `RecordingState` as an auto recording. `force_new` adds `forceNew=1`,
 /// telling the recorder to skip the 5-minute auto-append window and always
 /// dock to a brand-new recording id.
+///
+/// Only one recorder pill exists at a time. When one is already up this
+/// negotiates a handoff rather than no-opping: see the `recorder://yield`
+/// exchange below.
 pub(crate) fn open_waveform_window(
     app: &tauri::AppHandle,
     meeting_id: Option<i64>,
@@ -904,7 +1226,37 @@ pub(crate) fn open_waveform_window(
         let _ = picker.close();
     }
     if let Some(existing) = app.get_webview_window("waveform") {
+        // Backfill the lifecycle claim for a registered window that still owns
+        // capture, upload, retry, or its native close transition.
+        let state = app.state::<crate::recording_state::RecordingState>();
+        let _ = state.try_claim_window();
         let _ = existing.set_focus();
+        // The pill outlives capture: it lingers through the upload and stays up
+        // indefinitely on a failed one so the user can retry. Such a stale pill
+        // must not silently swallow a new recording (#313), so ask it to stand
+        // down and re-open once it's actually gone (see the Destroyed handler
+        // below). It refuses while still capturing or uploading — then the
+        // queued request expires and the focus above is all that happens,
+        // which is the pre-existing behavior.
+        let token = state.queue_reopen(meeting_id, local_append_id, force_new, auto);
+        let _ = app.emit("recorder://yield", ());
+        let app_for_expiry = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(YIELD_TIMEOUT).await;
+            app_for_expiry
+                .state::<crate::recording_state::RecordingState>()
+                .expire_reopen(token);
+        });
+        return Ok(());
+    }
+    let recording_state = app.state::<crate::recording_state::RecordingState>();
+    if !recording_state.try_claim_window() {
+        // Another launcher is between its preflight check and native window
+        // registration. Treat this request as idempotent instead of creating
+        // a second recorder pill.
+        if let Some(existing) = app.get_webview_window("waveform") {
+            let _ = existing.set_focus();
+        }
         return Ok(());
     }
     // Born hidden (painted-empty) when the meetings window already owns the
@@ -912,7 +1264,7 @@ pub(crate) fn open_waveform_window(
     // created visible for getUserMedia; only its painting is suppressed.
     let pill_hidden = !crate::recorder_pill::should_show_now(app);
     let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref(), force_new);
-    let win = WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
+    let win = match WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
         // Fixed size: room for the expanded pill plus its CSS shadow. The pill
         // itself is anchored to the bottom and grows upward within this window.
@@ -934,7 +1286,68 @@ pub(crate) fn open_waveform_window(
         .shadow(false)
         .skip_taskbar(true)
         .build()
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(win) => win,
+        Err(error) => {
+            recording_state.release_window_claim();
+            return Err(error.to_string());
+        }
+    };
+
+    // Capture may stop before upload/close completes. Keep the one-window
+    // claim until this native window is actually destroyed.
+    let app_for_event = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            let state = app_for_event.state::<crate::recording_state::RecordingState>();
+            state.clear();
+            state.release_window_claim();
+            let _ = app_for_event.emit("recording://state", false);
+            // A recording was requested while this pill still held the window
+            // slot and it has now stood down, so honor that request.
+            if let Some(next) = state.take_reopen() {
+                let app_for_reopen = app_for_event.clone();
+                tauri::async_runtime::spawn(async move {
+                    // This event and Tauri's own deregistration of the window
+                    // race. Wait for the label to actually be free before
+                    // re-opening.
+                    let mut freed = false;
+                    for _ in 0..YIELD_REOPEN_POLLS {
+                        if app_for_reopen.get_webview_window("waveform").is_none() {
+                            freed = true;
+                            break;
+                        }
+                        tokio::time::sleep(YIELD_REOPEN_POLL_INTERVAL).await;
+                    }
+                    // Give up rather than re-open into a still-registered
+                    // label: that would rediscover the dying window, emit a
+                    // second yield nothing is left to answer, and leave a
+                    // queued request that only expires — or worse, gets
+                    // honored later by an unrelated close.
+                    if !freed {
+                        eprintln!(
+                            "waveform: window still registered {}ms after Destroyed; dropping the queued re-open",
+                            (YIELD_REOPEN_POLLS as u128) * YIELD_REOPEN_POLL_INTERVAL.as_millis()
+                        );
+                        return;
+                    }
+                    // Window creation must happen on the main thread.
+                    let app_main = app_for_reopen.clone();
+                    let _ = app_for_reopen.run_on_main_thread(move || {
+                        if let Err(error) = open_waveform_window(
+                            &app_main,
+                            next.meeting_id,
+                            next.local_append_id,
+                            next.force_new,
+                            next.auto,
+                        ) {
+                            eprintln!("waveform: re-open after yield failed: {error}");
+                        }
+                    });
+                });
+            }
+        }
+    });
 
     // The application menu is useful on normal Windows windows, but inheriting
     // it here adds a File/Edit/View/Window strip to an otherwise frameless
@@ -962,18 +1375,6 @@ pub(crate) fn open_waveform_window(
     app.state::<crate::recording_state::RecordingState>()
         .set(source, meeting_id);
     let _ = app.emit("recording://state", true);
-
-    // If the window is destroyed without a clean stop (crash / force-close),
-    // clear the shared flag so the monitor can recover and re-arm.
-    let app_for_event = app.clone();
-    win.on_window_event(move |event| {
-        if let tauri::WindowEvent::Destroyed = event {
-            app_for_event
-                .state::<crate::recording_state::RecordingState>()
-                .clear();
-            let _ = app_for_event.emit("recording://state", false);
-        }
-    });
 
     crate::tray::set_menu(app, true, false);
 
@@ -1103,15 +1504,21 @@ pub struct DesktopConfig {
     pub pusher_cluster: String,
     #[serde(rename = "webAppBaseUrl")]
     pub web_app_base_url: String,
+    /// Empty when this build has no diagnostics endpoint; the frontend treats
+    /// that as "diagnostics unavailable" and never initializes Sentry.
+    #[serde(rename = "sentryDsn")]
+    pub sentry_dsn: String,
 }
 
-/// Returns build-baked client config (Pusher key/cluster, web app base URL).
+/// Returns build-baked client config (Pusher key/cluster, web app base URL,
+/// Sentry DSN).
 #[tauri::command]
 pub fn get_desktop_config() -> DesktopConfig {
     DesktopConfig {
         pusher_key: PUSHER_KEY.to_string(),
         pusher_cluster: PUSHER_CLUSTER.to_string(),
         web_app_base_url: web_app_base_url(),
+        sentry_dsn: sentry_dsn(),
     }
 }
 
@@ -1217,6 +1624,18 @@ pub fn reveal_pending_upload(app: tauri::AppHandle, created_at: String) -> Resul
     app.opener()
         .open_path(dir.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// The buffer folder as actually resolved: `$HOME/.ariso` on macOS,
+/// `%USERPROFILE%\.ariso` on Windows, or whatever `ARISO_ROOT` overrides it to.
+/// The upload-failure recovery copy names this instead of guessing a POSIX
+/// `~/...` path that is wrong on Windows and under the override.
+#[tauri::command]
+pub fn pending_uploads_path() -> Result<String, String> {
+    let root = crate::storage::ariso_root()?;
+    Ok(crate::storage::pending_uploads_dir(&root)
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Resolve a recording's directory under `<vault>/.oats/recordings/<id>`,
@@ -1549,6 +1968,59 @@ pub async fn create_library_window(app: tauri::AppHandle) -> Result<(), String> 
     open_library_window(&app)
 }
 
+/// Make the Meetings window visible and put it at the front of the user's
+/// current workspace. Windows can reject foreground activation while a native
+/// tray menu is still dismissing, so briefly enter the topmost band and retry
+/// focus after the menu has had time to close. The window is then returned to
+/// normal z-order; this is a raise operation, not permanent always-on-top.
+fn present_library_window(win: &tauri::WebviewWindow) -> Result<(), String> {
+    win.unminimize().map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut presentation_generation = LIBRARY_PRESENTATION_GENERATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        win.set_always_on_top(true).map_err(|e| e.to_string())?;
+        if let Err(error) = win.set_focus() {
+            eprintln!("Initial Meetings window focus was deferred: {error}");
+        }
+
+        *presentation_generation = presentation_generation.wrapping_add(1);
+        let generation = *presentation_generation;
+        drop(presentation_generation);
+
+        let win = win.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let presentation_generation = LIBRARY_PRESENTATION_GENERATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *presentation_generation != generation {
+                // Superseded by a newer presentation call; let its own
+                // deferred task own the cleanup instead.
+                return;
+            }
+            if let Err(error) = win.set_focus() {
+                eprintln!("Failed to focus Meetings window after tray dismissal: {error}");
+            }
+            if let Err(error) = win.set_always_on_top(false) {
+                eprintln!("Failed to restore normal Meetings window z-order: {error}, retrying");
+                if let Err(retry_error) = win.set_always_on_top(false) {
+                    eprintln!(
+                        "Failed to restore normal Meetings window z-order after retry: {retry_error}"
+                    );
+                }
+            }
+        });
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    win.set_focus().map_err(|e| e.to_string())
+}
+
 /// Open (or focus) the meetings library window. Shared by the
 /// `create_library_window` command and the macOS dock-icon Reopen handler.
 pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -1560,35 +2032,38 @@ pub(crate) fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> 
     // close and recreated (with fresh data) on the next open. This branch only
     // fires if it is opened again while still visible — just focus it.
     if let Some(win) = app.get_webview_window("library") {
-        // Restore the window if it was minimized/hidden before focusing it.
-        let _ = win.unminimize();
-        let _ = win.show();
-        win.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
+        return present_library_window(&win);
     }
     // Overlay title bar (with the native title hidden) lets the web content
     // extend under the traffic lights, so the in-app panel toggle can sit on
-    // the same row, just to the right of them. Other platforms keep native
-    // window chrome because this AppKit-specific composition has no equivalent
-    // role in the library UI.
+    // the same row, just to the right of them.
     #[cfg(target_os = "macos")]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings")
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
-    #[cfg(not(target_os = "macos"))]
+    // Tauri's overlay title-bar style is macOS-only. Its supported Windows
+    // custom-titlebar path is an undecorated window plus webview controls;
+    // shadow(true) restores the Windows 11 border, rounded corners and shadow.
+    #[cfg(target_os = "windows")]
+    let builder =
+        WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
+            .title("Meetings")
+            .decorations(false)
+            .shadow(true);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let builder =
         WebviewWindowBuilder::new(app, "library", WebviewUrl::App("/#/library".into()))
             .title("Meetings");
-    builder
+    let win = builder
         .inner_size(900.0, 600.0)
         .resizable(true)
         .center()
         .skip_taskbar(true)
         .build()
         .map_err(|e| e.to_string())?;
-    Ok(())
+    present_library_window(&win)
 }
 
 #[derive(serde::Deserialize)]
@@ -1701,27 +2176,45 @@ mod tests {
 
     #[test]
     fn sign_in_attempt_cancel_during_prepare_is_not_dropped() {
-        let id = begin_sign_in_attempt();
+        let id = begin_sign_in_attempt(BrowserFlow::SignIn);
         assert!(sign_in_attempt_active(id));
 
         // Cancel arrives before the loopback listener task exists (still
         // awaiting prepare-state) — it must still find something to cancel
         // instead of silently no-oping.
-        assert!(abort_pending_sign_in());
+        assert!(abort_pending_sign_in().is_some());
         assert!(!sign_in_attempt_active(id));
 
         // A cancel with nothing pending is a no-op, not an error.
-        assert!(!abort_pending_sign_in());
+        assert!(abort_pending_sign_in().is_none());
+    }
+
+    #[test]
+    fn cancel_reports_the_flow_that_was_pending() {
+        // Cancel must resolve the promise that is actually waiting: the two
+        // flows listen on different events, so emitting an oauth-result over a
+        // pending calendar connect would hang the frontend until the timeout.
+        begin_sign_in_attempt(BrowserFlow::SignIn);
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+
+        begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::CalendarConnect));
+
+        assert_eq!(BrowserFlow::SignIn.result_event(), "oauth-result");
+        assert_eq!(
+            BrowserFlow::CalendarConnect.result_event(),
+            "calendar-connect-result"
+        );
     }
 
     #[test]
     fn retire_sign_in_attempt_only_clears_the_matching_slot() {
-        let id = begin_sign_in_attempt();
+        let id = begin_sign_in_attempt(BrowserFlow::SignIn);
 
         // A superseded attempt's retire is a no-op — its slot is already gone
         // (or belongs to a newer attempt), so it must not clear the winner's
         // state or report success.
-        let superseded_id = begin_sign_in_attempt();
+        let superseded_id = begin_sign_in_attempt(BrowserFlow::SignIn);
         assert!(!retire_sign_in_attempt(id));
         assert!(sign_in_attempt_active(superseded_id));
 
@@ -1733,13 +2226,51 @@ mod tests {
         assert!(!retire_sign_in_attempt(superseded_id));
     }
 
+    #[test]
+    fn attempt_guard_retires_the_slot_when_the_prologue_fails() {
+        // Every fallible step between begin and the listener task's spawn —
+        // bind, prepare-state, URL validation, open_url — used to leave the
+        // attempt parked in the slot, so a later cancel emitted a result for
+        // a flow that had already failed.
+        let id = {
+            let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+            let id = attempt.id();
+            assert!(sign_in_attempt_active(id));
+            id // guard drops here, as it would on an early `?` return
+        };
+        assert!(!sign_in_attempt_active(id));
+        assert!(abort_pending_sign_in().is_none());
+    }
+
+    #[test]
+    fn released_attempt_survives_the_guard_going_out_of_scope() {
+        // Once the listener task owns the attempt, the guard must keep its
+        // hands off: retiring here would strand the frontend's waiter.
+        let id = {
+            let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+            attempt.release()
+        };
+        assert!(sign_in_attempt_active(id));
+        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+    }
+
+    #[test]
+    fn attempt_guard_drop_never_retires_a_newer_attempt() {
+        // A superseded prologue failing late must not clear the winner's slot.
+        let stale = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+        let winner = begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+        drop(stale);
+        assert!(sign_in_attempt_active(winner));
+        assert!(retire_sign_in_attempt(winner));
+    }
+
     #[tokio::test]
     async fn sign_in_attempt_out_of_order_completion_supersedes_cleanly() {
-        let first_id = begin_sign_in_attempt();
+        let first_id = begin_sign_in_attempt(BrowserFlow::SignIn);
         // A second attempt starts (e.g. the user retried) before the first's
         // prepare-state call returned, superseding it before it ever got a
         // listener handle.
-        let second_id = begin_sign_in_attempt();
+        let second_id = begin_sign_in_attempt(BrowserFlow::SignIn);
         assert!(!sign_in_attempt_active(first_id));
         assert!(sign_in_attempt_active(second_id));
 
@@ -1758,7 +2289,7 @@ mod tests {
         attach_sign_in_handle(second_id, handle);
         assert!(sign_in_attempt_active(second_id));
 
-        assert!(abort_pending_sign_in());
+        assert!(abort_pending_sign_in().is_some());
         assert!(!sign_in_attempt_active(second_id));
     }
 
@@ -1766,12 +2297,39 @@ mod tests {
     fn parse_loopback_callback_extracts_token_and_nonce() {
         assert_eq!(
             parse_loopback_callback("GET /callback?token=tok123&nonce=n456 HTTP/1.1"),
-            Some(("tok123".into(), "n456".into()))
+            Some((LoopbackDelivery::Token("tok123".into()), "n456".into()))
         );
         // Percent-encoded values are decoded.
         assert_eq!(
             parse_loopback_callback("GET /callback?token=a%2Bb&nonce=n HTTP/1.1"),
-            Some(("a+b".into(), "n".into()))
+            Some((LoopbackDelivery::Token("a+b".into()), "n".into()))
+        );
+    }
+
+    #[test]
+    fn parse_loopback_callback_accepts_token_less_status_delivery() {
+        // The Workspace connect hop delivers no token, only a status marker.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?status=connected&nonce=n456 HTTP/1.1"),
+            Some((LoopbackDelivery::Status("connected".into()), "n456".into()))
+        );
+        // Granular consent lets the user untick Calendar and still complete.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?status=no_calendar_scope&nonce=n HTTP/1.1"),
+            Some((
+                LoopbackDelivery::Status("no_calendar_scope".into()),
+                "n".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_loopback_callback_prefers_token_over_status() {
+        // A status parameter must never downgrade a sign-in delivery into the
+        // token-less path, or a forged status could strand the exchange.
+        assert_eq!(
+            parse_loopback_callback("GET /callback?token=tok&status=connected&nonce=n HTTP/1.1"),
+            Some((LoopbackDelivery::Token("tok".into()), "n".into()))
         );
     }
 
@@ -1783,6 +2341,10 @@ mod tests {
         assert_eq!(parse_loopback_callback("GET /callback?token=t HTTP/1.1"), None);
         assert_eq!(parse_loopback_callback("GET /callback?nonce=n HTTP/1.1"), None);
         assert_eq!(parse_loopback_callback("GET /callback?token=&nonce=n HTTP/1.1"), None);
+        // A status delivery still requires the nonce, and an empty status is
+        // no more acceptable than an empty token.
+        assert_eq!(parse_loopback_callback("GET /callback?status=connected HTTP/1.1"), None);
+        assert_eq!(parse_loopback_callback("GET /callback?status=&nonce=n HTTP/1.1"), None);
         assert_eq!(parse_loopback_callback(""), None);
     }
 
@@ -1794,7 +2356,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let accept = tokio::spawn(async move {
-            accept_loopback_callback(&listener, "goodnonce").await
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::SignIn).await
         });
 
         let send = |req: String| async move {
@@ -1814,8 +2376,44 @@ mod tests {
         assert!(real.starts_with("HTTP/1.1 200"));
         // The success page never echoes the token.
         assert!(!real.contains("tok123"));
+        // Sign-in is the one flow whose page may claim a sign-in happened.
+        assert!(real.contains("re signed in"));
 
-        assert_eq!(accept.await.unwrap().unwrap(), "tok123");
+        assert_eq!(
+            accept.await.unwrap().unwrap(),
+            LoopbackDelivery::Token("tok123".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_loopback_callback_returns_token_less_status_delivery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let accept = tokio::spawn(async move {
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::CalendarConnect).await
+        });
+
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        conn.write_all(b"GET /callback?status=connected&nonce=goodnonce HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        conn.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        // The connect hop runs while the user is already signed in, so its page
+        // must not report a sign-in, and it must stay neutral about the grant —
+        // the browser lands here even when Calendar was left unticked.
+        assert!(!resp.contains("signed in"));
+        assert!(!resp.contains("Calendar"));
+        assert!(resp.contains("You can close this tab"));
+
+        assert_eq!(
+            accept.await.unwrap().unwrap(),
+            LoopbackDelivery::Status("connected".into())
+        );
     }
 
     #[test]
@@ -1997,6 +2595,25 @@ mod tests {
         // Neither a vault note nor a legacy file exists yet.
 
         assert_eq!(read_recording_file(id.into(), "note".into()).unwrap(), None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The recovery copy in PendingUploads.vue renders this verbatim, so it has
+    /// to be the real resolved folder rather than a POSIX-shaped `~/...` guess
+    /// that is wrong on Windows and under the override.
+    #[test]
+    fn pending_uploads_path_reports_the_resolved_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let path = pending_uploads_path().unwrap();
+
+        assert_eq!(
+            std::path::PathBuf::from(&path),
+            tmp.path().join("pending-uploads")
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

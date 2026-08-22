@@ -172,3 +172,50 @@ describe('useMeetingApi.getMeetingPrep', () => {
     await expect(useMeetingApi().getMeetingPrep(4339)).rejects.toThrow('boom');
   });
 });
+
+describe('uploadAudio presign request', () => {
+  it('includes fileSize so the backend size validation does not reject it', async () => {
+    apiRequest
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { meetingId: 9, presignedUrl: 'https://bucket.s3.amazonaws.com/rec.mp3?sig=x' },
+      })
+      .mockResolvedValueOnce({ status: 202, data: {} });
+    const { api } = await import('../tauri');
+    (api.putPresigned as ReturnType<typeof vi.fn>).mockResolvedValue(200);
+
+    await useMeetingApi().uploadAudio(new Blob(['audio'], { type: 'audio/mpeg' }));
+
+    expect(apiRequest).toHaveBeenCalledWith(
+      'POST',
+      '/desktop/meetings/audio/presign',
+      expect.objectContaining({ fileSize: 5 })
+    );
+  });
+});
+
+describe('uploadAudio stage tagging', () => {
+  // Turning a multi-MB mp3 into a number[] can throw (RangeError/OOM) before a
+  // single byte reaches S3. That failure belongs to the s3-put leg, not to the
+  // presign leg it would otherwise fall back to in reportUploadFailure.
+  it('tags a failed audio-byte conversion as the s3-put stage', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { meetingId: 9, presignedUrl: 'https://bucket.s3.amazonaws.com/rec.mp3?sig=x' },
+    });
+    const realResponse = globalThis.Response;
+    globalThis.Response = class {
+      constructor() {
+        throw new RangeError('Array buffer allocation failed');
+      }
+    } as unknown as typeof Response;
+
+    try {
+      await expect(
+        useMeetingApi().uploadAudio(new Blob(['audio'], { type: 'audio/mpeg' }))
+      ).rejects.toMatchObject({ name: 'UploadStageError', stage: 's3-put' });
+    } finally {
+      globalThis.Response = realResponse;
+    }
+  });
+});

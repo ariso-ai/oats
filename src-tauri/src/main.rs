@@ -190,6 +190,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
             commands::cancel_google_sign_in,
+            commands::connect_google_calendar,
             commands::check_session,
             commands::sign_out,
             commands::api_request,
@@ -220,6 +221,7 @@ fn main() {
             commands::list_pending_uploads,
             commands::combine_pending_audio,
             commands::reveal_pending_upload,
+            commands::pending_uploads_path,
             commands::fetch_meeting_audio,
             commands::share_text_native,
             transcribe::local_recording_id_for_start,

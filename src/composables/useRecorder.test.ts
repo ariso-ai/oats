@@ -267,6 +267,14 @@ describe('useRecorder mic native capture', () => {
     await rec.startRecording('mic');
 
     expect(getUserMedia).toHaveBeenCalledOnce();
+    const constraints = getUserMedia.mock.calls[0][0];
+    expect(constraints.audio).toMatchObject({
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    });
+    expect(constraints.audio).not.toHaveProperty('sampleRate');
+    expect(constraints.audio).not.toHaveProperty('channelCount');
     expect(startMicrophoneCapture).not.toHaveBeenCalled();
     await rec.stopRecording();
   });

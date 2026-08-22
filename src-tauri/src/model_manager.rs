@@ -280,9 +280,9 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Public base host for all app CDN assets (Cloudflare R2, r2.dev managed
-/// domain). The desktop updater endpoint in `tauri.conf.json` is served from
-/// this same host (`/desktop/latest.json`); keep them on one host. A macro
-/// (not a `const`) so it can feed `concat!` below at compile time.
+/// domain). The desktop updater endpoints in `tauri.conf.json` are served from
+/// this same host (`/desktop/latest-{target}-{arch}.json`); keep them on one
+/// host. A macro (not a `const`) so it can feed `concat!` below at compile time.
 macro_rules! r2_base {
     () => {
         "https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev"

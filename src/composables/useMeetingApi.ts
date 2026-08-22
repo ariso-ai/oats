@@ -1,4 +1,5 @@
 import { api } from '../tauri';
+import { UploadStageError, type UploadStage } from './useDiagnostics';
 
 interface TranscriptSegment {
   speaker: number;
@@ -134,6 +135,18 @@ function assertOk(res: { status: number; data: unknown }, expected: number, acti
   if (res.status !== expected) {
     const data = res.data as { error?: string } | null;
     throw new Error(data?.error || `Failed to ${action} (${res.status})`);
+  }
+}
+
+// Tag whatever an upload leg throws — including invoke rejections carrying
+// reqwest's transport error text — with the leg it came from. Errors already
+// tagged pass through so an inner stage isn't relabelled by an outer one.
+async function withStage<T>(stage: UploadStage, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    if (e instanceof UploadStageError) throw e;
+    throw new UploadStageError(stage, e instanceof Error ? e.message : String(e ?? ''));
   }
 }
 
@@ -542,31 +555,53 @@ export function useMeetingApi() {
         ? `/desktop/meetings/${options.meetingId}/audio/presign`
         : '/desktop/meetings/audio/presign';
 
-    const presignRes = await api.request('POST', presignPath, {
-      filename: 'recording.mp3',
-      title: options?.title?.trim() || undefined,
-      metadata,
-    });
-    assertOk(presignRes, 200, 'get presigned upload URL');
+    // Each leg is tagged with its stage so a failure can be reported (and
+    // grouped in Sentry) by *where* the upload broke rather than by the
+    // message text, which varies with the server's error copy. See
+    // useDiagnostics.reportUploadFailure.
+    const presignRes = await withStage('presign', () =>
+      api.request('POST', presignPath, {
+        filename: 'recording.mp3',
+        fileSize: audioBlob.size,
+        title: options?.title?.trim() || undefined,
+        metadata,
+      })
+    );
+    if (presignRes.status !== 200) {
+      const data = presignRes.data as { error?: string } | null;
+      throw new UploadStageError(
+        'presign',
+        data?.error || `Failed to get presigned upload URL (${presignRes.status})`,
+        presignRes.status
+      );
+    }
     const { meetingId, presignedUrl } = presignRes.data as {
       meetingId: number;
       presignedUrl: string;
     };
 
-    const putStatus = await api.putPresigned(
-      presignedUrl,
-      [...new Uint8Array(await new Response(audioBlob).arrayBuffer())],
-      'audio/mpeg'
-    );
+    // The byte conversion is inside the stage on purpose: turning a long
+    // recording into a number[] can blow up (RangeError/OOM) before anything
+    // reaches S3, and that failure belongs to this leg.
+    const putStatus = await withStage('s3-put', async () => {
+      const audioBytes = [...new Uint8Array(await new Response(audioBlob).arrayBuffer())];
+      return api.putPresigned(presignedUrl, audioBytes, 'audio/mpeg');
+    });
     if (putStatus < 200 || putStatus >= 300) {
-      throw new Error(`S3 upload failed (${putStatus})`);
+      throw new UploadStageError('s3-put', `S3 upload failed (${putStatus})`, putStatus);
     }
 
-    const confirmRes = await api.request(
-      'POST',
-      `/desktop/meetings/${meetingId}/audio/confirm`
+    const confirmRes = await withStage('confirm', () =>
+      api.request('POST', `/desktop/meetings/${meetingId}/audio/confirm`)
     );
-    assertOk(confirmRes, 202, 'confirm audio upload');
+    if (confirmRes.status !== 202) {
+      const data = confirmRes.data as { error?: string } | null;
+      throw new UploadStageError(
+        'confirm',
+        data?.error || `Failed to confirm audio upload (${confirmRes.status})`,
+        confirmRes.status
+      );
+    }
     return { meetingId };
   }
 
