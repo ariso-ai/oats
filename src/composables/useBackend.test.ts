@@ -99,7 +99,10 @@ describe('LocalBackend', () => {
     });
     expect(res.backend).toBe('local');
     const [audioArg, titleArg, createdAtArg, durationArg] = localFinalize.mock.calls[0];
-    expect(audioArg).toEqual([1, 2, 3]);
+    // A Uint8Array, not a number[]: the raw-body IPC path is what keeps a long
+    // recording's finalize from freezing the recorder pill for ~30 s.
+    expect(audioArg).toEqual(new Uint8Array([1, 2, 3]));
+    expect(ArrayBuffer.isView(audioArg)).toBe(true);
     expect(createdAtArg).toBe('2026-06-02T14:30:05.000Z');
     expect(durationArg).toBe(2400);
     // Title is a friendly local "Ddd Mmm D @ h[:mm]A" label (assert format, not
@@ -235,7 +238,7 @@ describe('ArisoBackend', () => {
       endAt: '2026-06-02T15:10:00.000Z',
       durationSeconds: 2400,
     });
-    expect(bufferPendingAudio).toHaveBeenCalledWith([9], {
+    expect(bufferPendingAudio).toHaveBeenCalledWith(new Uint8Array([9]), {
       createdAt: '2026-06-02T14:30:05.000Z',
       startAt: '2026-06-02T14:30:05.000Z',
       endAt: '2026-06-02T15:10:00.000Z',

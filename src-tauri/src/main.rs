@@ -9,6 +9,7 @@ mod commands;
 mod meeting_notifications;
 mod mic_monitor;
 mod platform;
+mod raw_ipc;
 mod recorder_pill;
 mod storage;
 mod transcribe;
