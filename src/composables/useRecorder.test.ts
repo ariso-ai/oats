@@ -17,6 +17,7 @@ const platformCapabilities = vi.hoisted((): {
   },
 }));
 const invoke = vi.hoisted(() => vi.fn(async () => undefined));
+const resolveAudioInputDeviceId = vi.hoisted(() => vi.fn<() => Promise<string | null>>());
 
 // lamejs does real MP3 work we don't need here; stub the encoder.
 // encodeBuffer records its argument and returns a non-empty buffer so that
@@ -55,9 +56,15 @@ vi.mock('../tauri', () => ({
 vi.mock('./usePlatformCapabilities', () => ({
   loadPlatformCapabilities: () => Promise.resolve(platformCapabilities.value),
 }));
+vi.mock('./useAudioInputDevices', () => ({
+  resolveAudioInputDeviceId: () => resolveAudioInputDeviceId(),
+  SelectedAudioInputUnavailableError: class extends Error {
+    name = 'SelectedAudioInputUnavailableError';
+  },
+}));
 
 import { useRecorder } from './useRecorder';
-import { startMicrophoneCapture } from '../tauri';
+import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
 
 type AudioProcCb = ((e: unknown) => void) | null;
 let lastProcessor: { onaudioprocess: AudioProcCb } | null = null;
@@ -119,6 +126,7 @@ beforeEach(() => {
   for (const k in listeners) delete listeners[k];
   encodeCalls.length = 0;
   vi.clearAllMocks();
+  resolveAudioInputDeviceId.mockResolvedValue(null);
   platformCapabilities.value = {
     os: 'macos',
     systemAudio: { supported: false, settingsUrl: null },
@@ -254,29 +262,112 @@ describe('useRecorder mic native capture', () => {
     // Blob is also non-empty (encoder returned a byte).
     const blob = await rec.stopRecording();
     expect(blob.size).toBeGreaterThan(0);
+    expect(resolveAudioInputDeviceId).not.toHaveBeenCalled();
   });
 
-  it('uses webview microphone capture on Windows', async () => {
+  it('pauses immediately and preserves captured audio after a native runtime failure', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    pushMicFrame(8000);
+    fireAudioFrame();
+    expect(encodeCalls).toHaveLength(1);
+
+    listeners['microphone-capture-error']?.({ payload: 'selected microphone disconnected' });
+
+    expect(rec.error.value).toBe('selected microphone disconnected');
+    expect(rec.isPaused.value).toBe(true);
+    expect(rec.isRecording.value).toBe(true);
+    fireAudioFrame();
+    expect(encodeCalls).toHaveLength(1);
+
+    const blob = await rec.stopRecording();
+    expect(blob.size).toBeGreaterThan(0);
+    expect(stopMicrophoneCapture).toHaveBeenCalledOnce();
+    expect(listeners['microphone-capture-error']).toBeUndefined();
+  });
+
+  it('rejects startup if native capture fails after ready but before setup completes', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: true, settingsUrl: 'ms-settings:sound' },
+    };
+    vi.mocked(startMicrophoneCapture).mockImplementationOnce(async () => {
+      listeners['microphone-capture-error']?.({ payload: 'microphone ended during setup' });
+    });
+    const rec = useRecorder();
+
+    await expect(rec.startRecording('mic_and_system')).rejects.toThrow(
+      'microphone ended during setup',
+    );
+
+    expect(rec.isRecording.value).toBe(false);
+    expect(stopMicrophoneCapture).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('stop_system_audio_capture');
+  });
+
+  it('uses native WASAPI microphone capture on Windows', async () => {
     platformCapabilities.value = {
       os: 'windows',
       systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
     };
-    const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
     const rec = useRecorder();
 
     await rec.startRecording('mic');
 
-    expect(getUserMedia).toHaveBeenCalledOnce();
-    const constraints = getUserMedia.mock.calls[0][0];
-    expect(constraints.audio).toMatchObject({
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-    });
-    expect(constraints.audio).not.toHaveProperty('sampleRate');
-    expect(constraints.audio).not.toHaveProperty('channelCount');
-    expect(startMicrophoneCapture).not.toHaveBeenCalled();
+    expect(startMicrophoneCapture).toHaveBeenCalledWith(undefined);
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
     await rec.stopRecording();
+  });
+
+  it('uses the selected Windows input for a new recording', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
+    };
+    resolveAudioInputDeviceId.mockResolvedValue('usb-mic');
+    const rec = useRecorder();
+
+    await rec.startRecording('mic');
+
+    expect(startMicrophoneCapture).toHaveBeenCalledWith('usb-mic');
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    await rec.stopRecording();
+  });
+
+  it('does not silently fall back if the selected input disconnects during start', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
+    };
+    resolveAudioInputDeviceId.mockResolvedValue('usb-mic');
+    vi.mocked(startMicrophoneCapture).mockRejectedValueOnce(
+      'selected microphone is unavailable',
+    );
+    const rec = useRecorder();
+
+    await expect(rec.startRecording('mic')).rejects.toBe(
+      'selected microphone is unavailable',
+    );
+
+    expect(startMicrophoneCapture).toHaveBeenCalledOnce();
+    expect(startMicrophoneCapture).toHaveBeenCalledWith('usb-mic');
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('does not turn microphone permission denial into a default-device fallback', async () => {
+    platformCapabilities.value = {
+      os: 'windows',
+      systemAudio: { supported: false, settingsUrl: 'ms-settings:sound' },
+    };
+    resolveAudioInputDeviceId.mockResolvedValue('usb-mic');
+    vi.mocked(startMicrophoneCapture).mockRejectedValueOnce(
+      'initialize Windows microphone capture: access denied',
+    );
+    const rec = useRecorder();
+
+    await expect(rec.startRecording('mic')).rejects.toContain('access denied');
+    expect(startMicrophoneCapture).toHaveBeenCalledOnce();
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
   });
 
   it('initializes Windows microphone and system audio concurrently', async () => {
@@ -284,24 +375,19 @@ describe('useRecorder mic native capture', () => {
       os: 'windows',
       systemAudio: { supported: true, settingsUrl: 'ms-settings:sound' },
     };
-    let resolveMic!: (stream: MediaStream) => void;
-    const getUserMedia = vi.fn(
-      () => new Promise<MediaStream>((resolve) => { resolveMic = resolve; }),
+    let resolveMic!: () => void;
+    vi.mocked(startMicrophoneCapture).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveMic = resolve; }),
     );
-    Object.defineProperty(navigator, 'mediaDevices', {
-      configurable: true,
-      value: { getUserMedia },
-    });
     const rec = useRecorder();
 
     const starting = rec.startRecording('mic_and_system');
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(startMicrophoneCapture).toHaveBeenCalledOnce();
+      expect(invoke).toHaveBeenCalledWith('start_system_audio_capture');
+    });
 
-    expect(getUserMedia).toHaveBeenCalledOnce();
-    expect(invoke).toHaveBeenCalledWith('start_system_audio_capture');
-
-    resolveMic({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    resolveMic();
     await starting;
     await rec.stopRecording();
   });

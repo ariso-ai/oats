@@ -52,26 +52,15 @@ describe('microphone permissions', () => {
     expect(mocks.checkMicrophonePermission).toHaveBeenCalledOnce();
   });
 
-  it('uses browser-owned permission APIs on Windows', async () => {
+  it('uses native permission probes on Windows', async () => {
     mocks.loadPlatformCapabilities.mockResolvedValue({ os: 'windows' });
-    const stop = vi.fn();
-    const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop }] }));
-    const query = vi.fn(async () => ({ state: 'granted' }));
-    Object.defineProperty(navigator, 'mediaDevices', {
-      configurable: true,
-      value: { getUserMedia },
-    });
-    Object.defineProperty(navigator, 'permissions', {
-      configurable: true,
-      value: { query },
-    });
+    mocks.requestMicrophonePermission.mockResolvedValue(true);
+    mocks.checkMicrophonePermission.mockResolvedValue(true);
 
     await expect(ensureMicPermission()).resolves.toBe(true);
     await expect(checkMicPermission()).resolves.toBe(true);
-    expect(getUserMedia).toHaveBeenCalledOnce();
-    expect(stop).toHaveBeenCalledOnce();
-    expect(query).toHaveBeenCalledWith({ name: 'microphone' });
-    expect(mocks.requestMicrophonePermission).not.toHaveBeenCalled();
+    expect(mocks.requestMicrophonePermission).toHaveBeenCalledOnce();
+    expect(mocks.checkMicrophonePermission).toHaveBeenCalledOnce();
   });
 });
 

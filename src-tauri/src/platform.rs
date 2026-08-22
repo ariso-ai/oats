@@ -25,7 +25,7 @@ pub struct PlatformCapabilities {
     pub native_share: SupportedCapability,
     /// Deep links may exist even when permission has already been denied.
     pub notification_settings_url: Option<&'static str>,
-    /// The webview owns microphone capture, while native code supplies the OS link.
+    /// Native capture owns microphone access; this is the nearest OS privacy pane.
     pub microphone_settings_url: Option<&'static str>,
 }
 

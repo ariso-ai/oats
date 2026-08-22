@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
 import { startMicrophoneCapture, stopMicrophoneCapture } from '../tauri';
+import { resolveAudioInputDeviceId } from './useAudioInputDevices';
 
 export type { RecordingMode } from '../views/recordingSettings';
 import type { RecordingMode } from '../views/recordingSettings';
@@ -65,6 +66,8 @@ export function useRecorder() {
   // Mic audio state (native capture, 44.1kHz mono Int16 PCM)
   let micAudioActive = false;
   let micAudioUnlisten: UnlistenFn | null = null;
+  let micCaptureErrorUnlisten: UnlistenFn | null = null;
+  let pendingMicCaptureError: string | null = null;
   let micUsesNativeCapture = false;
   // Ring buffer for incoming mic audio (already 44.1kHz — no resample needed)
   let micAudioBuffer: Int16Array = new Int16Array(0);
@@ -150,6 +153,7 @@ export function useRecorder() {
     mp3Chunks = [];
     systemAudioBuffer = new Int16Array(0);
     micAudioBuffer = new Int16Array(0);
+    pendingMicCaptureError = null;
 
     // Recording modes come from persisted user choices, but capability support
     // comes from the current binary. Intersecting them here is the final guard
@@ -164,7 +168,7 @@ export function useRecorder() {
     if (!useMic && !useSystemAudio) {
       throw new Error('No recording source is available');
     }
-    micUsesNativeCapture = useMic && caps.os === 'macos';
+    micUsesNativeCapture = useMic && (caps.os === 'macos' || caps.os === 'windows');
 
     try {
       audioContext = new AudioContext({ sampleRate: 44100 });
@@ -173,7 +177,7 @@ export function useRecorder() {
       const startMic = async (): Promise<void> => {
         if (!useMic) return;
         if (micUsesNativeCapture) {
-          // Register first so no frames from the native macOS HAL source are lost.
+          // Register first so no frames from the native HAL/WASAPI source are lost.
           micAudioUnlisten = await listen<string>('mic-audio-data', (event) => {
             if (isPaused.value) return;
             const binary = atob(event.payload);
@@ -185,20 +189,43 @@ export function useRecorder() {
             merged.set(samples, micAudioBuffer.length);
             micAudioBuffer = merged;
           });
-          // The HAL path avoids macOS Voice-Processing I/O and its device-level
-          // gain changes while a conference app is using the same microphone.
-          await startMicrophoneCapture();
-          micAudioActive = true;
-        } else {
-          // Windows keeps microphone capture in the webview; its native mic
-          // command is intentionally macOS-only.
-          micStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
+          micCaptureErrorUnlisten = await listen<string>(
+            'microphone-capture-error',
+            (event) => {
+              const message = event.payload || 'Microphone capture stopped unexpectedly';
+              pendingMicCaptureError = message;
+              error.value = message;
+              // Preserve every encoded frame, but stop the audio clock before
+              // it can keep turning an ended native stream into zero-filled
+              // MP3 frames. WaveformView observes the error and finalizes the
+              // partial recording through the normal stop path.
+              pauseRecording();
             },
-          });
+          );
+          const selectedDeviceId = caps.os === 'windows'
+            ? await resolveAudioInputDeviceId()
+            : null;
+          try {
+            // macOS uses its HAL default-input path. Windows passes the native
+            // endpoint ID selected in Settings, or undefined for System default.
+            await startMicrophoneCapture(selectedDeviceId ?? undefined);
+            micAudioActive = true;
+          } catch (captureError) {
+            micAudioUnlisten?.();
+            micAudioUnlisten = null;
+            micCaptureErrorUnlisten?.();
+            micCaptureErrorUnlisten = null;
+            throw captureError;
+          }
+        } else {
+          // Unsupported preview targets keep the browser fallback, but both
+          // shipped desktop platforms use native microphone capture.
+          const audio: MediaTrackConstraints = {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          };
+          micStream = await navigator.mediaDevices.getUserMedia({ audio });
           micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(analyserNode);
         }
@@ -250,6 +277,13 @@ export function useRecorder() {
       } else {
         await startMic();
         await startSystemAudio();
+      }
+
+      // A native endpoint can become ready and then fail before a concurrent
+      // system-audio start (or this task) finishes. Never publish an active
+      // recording backed by an already-ended microphone stream.
+      if (pendingMicCaptureError) {
+        throw new Error(pendingMicCaptureError);
       }
 
       // Stereo (ch0 mic, ch1 system) only when mixing both; otherwise mono.
@@ -450,7 +484,12 @@ export function useRecorder() {
       micAudioUnlisten();
       micAudioUnlisten = null;
     }
+    if (micCaptureErrorUnlisten) {
+      micCaptureErrorUnlisten();
+      micCaptureErrorUnlisten = null;
+    }
     micAudioBuffer = new Int16Array(0);
+    pendingMicCaptureError = null;
     micUsesNativeCapture = false;
 
     if (micSource && processor) {
