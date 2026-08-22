@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.20.0](https://github.com/ariso-ai/oats/compare/v0.19.1...v0.20.0) (2026-08-22)
+
+
+### Features
+
+* acquire Google Calendar via an additive second OAuth hop ([6311459](https://github.com/ariso-ai/oats/commit/6311459ca6ea0884b9eb70f6aff9098dc48ccb95))
+* adjusts tray icon ([03b75d1](https://github.com/ariso-ai/oats/commit/03b75d127f24314f8e47c1b88a951abc2a9b6c8a))
+
+
+### Bug Fixes
+
+* give the calendar hop its own loopback success page ([e1eb077](https://github.com/ariso-ai/oats/commit/e1eb077536980a9c7697ffdf845a985bda6319fd))
+* **tray:** show the color logo in the menu bar while recording ([5ff83b0](https://github.com/ariso-ai/oats/commit/5ff83b030e5a7875bb55ee7813fafeea77b925a4))
+
 ## [0.19.1](https://github.com/ariso-ai/oats/compare/v0.19.0...v0.19.1) (2026-08-19)
 
 
