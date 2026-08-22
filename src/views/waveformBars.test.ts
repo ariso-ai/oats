@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { bucketLevels, centerWeightedBars } from './waveformBars';
+import { barHeightPercent, bucketLevels, centerWeightedBars } from './waveformBars';
 
 describe('bucketLevels', () => {
   it('returns the requested number of bars', () => {
@@ -43,5 +43,39 @@ describe('centerWeightedBars', () => {
 
   it('returns zeros for empty input', () => {
     expect(centerWeightedBars([], 3)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('barHeightPercent', () => {
+  it('rests at the floor for silence and room tone', () => {
+    expect(barHeightPercent(0)).toBe(8);
+    expect(barHeightPercent(0.25)).toBe(8);
+  });
+
+  it('fills the bar once the level is loud, and clamps beyond it', () => {
+    expect(barHeightPercent(0.7)).toBe(100);
+    expect(barHeightPercent(1)).toBe(100);
+  });
+
+  it('spends most of its travel on ordinary speech levels', () => {
+    // The failure this guards against: a curve so hot that everyday speech
+    // pins the bars at the ceiling, leaving nothing visibly moving.
+    const quiet = barHeightPercent(0.35);
+    const talking = barHeightPercent(0.45);
+    const loud = barHeightPercent(0.6);
+    expect(quiet).toBeGreaterThan(8);
+    expect(quiet).toBeLessThan(talking);
+    expect(talking).toBeLessThan(loud);
+    expect(loud).toBeLessThan(100);
+    // Each step is a change you can actually see, not a few percent.
+    expect(talking - quiet).toBeGreaterThan(10);
+    expect(loud - talking).toBeGreaterThan(10);
+  });
+
+  it('rises monotonically across the whole level range', () => {
+    const heights = Array.from({ length: 21 }, (_, i) => barHeightPercent(i / 20));
+    for (let i = 1; i < heights.length; i++) {
+      expect(heights[i]).toBeGreaterThanOrEqual(heights[i - 1]);
+    }
   });
 });

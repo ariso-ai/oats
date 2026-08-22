@@ -45,3 +45,26 @@ export function centerWeightedBars(levels: number[], buckets: number): number[] 
   }
   return out;
 }
+
+/** Bar height as a percentage of the waveform's box. The floor keeps a silent
+ *  recorder legible as a row of dots rather than nothing at all. */
+const MIN_HEIGHT_PCT = 8;
+const MAX_HEIGHT_PCT = 100;
+
+/** Levels are `getByteFrequencyData` bytes / 255 — a dB scale where 0 is
+ *  −100 dB and 1 is −30 dB — so the band speech actually occupies is narrow
+ *  and sits well up the scale. Mapping it to the full bar height is what makes
+ *  the waveform react: a curve with real gain below `FULL_LEVEL` (the old
+ *  `sqrt(level) * 150` reached 100% at 0.44) left the bars pinned at the
+ *  ceiling, twitching. Anything at or under `SILENCE_LEVEL` is room tone. */
+const SILENCE_LEVEL = 0.25;
+const FULL_LEVEL = 0.7;
+/** Exponent < 1 lifts quiet speech so ordinary talking spends most of the
+ *  bar's travel instead of hugging the floor. */
+const CURVE = 0.65;
+
+export function barHeightPercent(level: number): number {
+  const normalized = (level - SILENCE_LEVEL) / (FULL_LEVEL - SILENCE_LEVEL);
+  const shaped = Math.min(1, Math.max(0, normalized)) ** CURVE;
+  return MIN_HEIGHT_PCT + shaped * (MAX_HEIGHT_PCT - MIN_HEIGHT_PCT);
+}

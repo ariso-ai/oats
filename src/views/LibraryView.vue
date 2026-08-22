@@ -1,8 +1,18 @@
 <template>
-  <div class="library">
-    <!-- Transparent drag region across the top, holding the panel toggle next
-         to the native traffic lights. -->
-    <div class="titlebar" data-tauri-drag-region>
+  <div class="library" :class="{ 'library--windows': isWindows }">
+    <!-- macOS overlays this row beside the native traffic lights. Windows uses
+         it as the complete titlebar, including native-equivalent controls. -->
+    <div
+      class="titlebar"
+      :class="{ 'titlebar--windows': isWindows }"
+      data-tauri-drag-region
+      @dblclick.self="toggleLibraryWindowMaximize"
+    >
+      <div v-if="isWindows" class="titlebar-brand" data-tauri-drag-region>
+        <img class="titlebar-logo" :src="oatsLogo" alt="" data-tauri-drag-region />
+        <span class="titlebar-title" data-tauri-drag-region>Meetings</span>
+      </div>
+      <span v-if="isWindows" class="titlebar-divider" aria-hidden="true" />
       <button
         class="panel-toggle"
         :aria-pressed="leftPanelVisible"
@@ -57,6 +67,45 @@
           {{ recordingStarting ? 'Starting recording…' : 'Start recording' }}
         </span>
       </button>
+      <div v-if="isWindows" class="window-controls">
+        <button
+          class="window-control"
+          type="button"
+          aria-label="Minimize window"
+          title="Minimize"
+          @click="minimizeLibraryWindow"
+        >
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6.5h9" /></svg>
+        </button>
+        <button
+          class="window-control"
+          type="button"
+          :aria-label="libraryWindowMaximized ? 'Restore window' : 'Maximize window'"
+          :title="libraryWindowMaximized ? 'Restore' : 'Maximize'"
+          @click="toggleLibraryWindowMaximize"
+        >
+          <svg v-if="libraryWindowMaximized" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3.5 3.5v-2h7v7h-2M1.5 3.5h7v7h-7z" />
+          </svg>
+          <svg v-else viewBox="0 0 12 12" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="9" height="9" />
+          </svg>
+        </button>
+        <button
+          class="window-control window-control--close"
+          type="button"
+          aria-label="Close window"
+          title="Close"
+          @click="closeLibraryWindow"
+        >
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m2 2 8 8M10 2 2 10" /></svg>
+        </button>
+      </div>
+    </div>
+
+    <div v-if="recordingStartError" class="recording-start-error" role="alert">
+      <span>{{ recordingStartError }}</span>
+      <button type="button" aria-label="Dismiss recording error" @click="recordingStartError = null">×</button>
     </div>
 
     <aside v-if="leftPanelVisible" class="sidebar">
@@ -182,6 +231,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { getActiveBackend, timestampTitle, BACKEND_CHANGED_EVENT, type Backend, type MeetingListItem } from '../composables/useBackend';
 import { timestampFromLocalRecordingId } from '../composables/localRecordingId';
@@ -204,10 +254,13 @@ import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
 import { decideStartRecording } from '../composables/decideStartRecording';
 import { useRecordingStartChoice } from '../composables/useRecordingStartChoice';
 import RecordingStartChoiceDialog from './RecordingStartChoiceDialog.vue';
+import { recordingStartErrorMessage } from '../composables/recordingStartError';
+import oatsLogo from '../assets/oats-dark.svg';
 
 const meetings = ref<MeetingListItem[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const recordingStartError = ref<string | null>(null);
 const recording = ref(false);
 type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 const recordingPhase = ref<RecorderPhase | null>(null);
@@ -216,6 +269,7 @@ const recordingPhase = ref<RecorderPhase | null>(null);
 // capture and must not unlock a second recorder underneath it.
 const recorderOwnsLifecycle = ref(false);
 const leftPanelVisible = ref(true);
+const libraryWindowMaximized = ref(false);
 const selectedItem = ref<MeetingListItem | null>(null);
 // Tracks the row the user intentionally selected; auto-load and recorder-driven
 // selections must not override Today's "record the live meeting" behavior.
@@ -276,7 +330,26 @@ const activeView = ref<'today' | 'meetings'>('meetings');
 const isMac = computed(() =>
   typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 );
+const isWindows = computed(() =>
+  typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
+);
 const searchShortcutLabel = computed(() => (isMac.value ? '⌘K' : 'Ctrl K'));
+
+const libraryWindow = getCurrentWindow();
+async function syncLibraryWindowMaximized(): Promise<void> {
+  libraryWindowMaximized.value = await libraryWindow.isMaximized();
+}
+async function minimizeLibraryWindow(): Promise<void> {
+  await libraryWindow.minimize();
+}
+async function toggleLibraryWindowMaximize(): Promise<void> {
+  if (!isWindows.value) return;
+  await libraryWindow.toggleMaximize();
+  await syncLibraryWindowMaximized();
+}
+async function closeLibraryWindow(): Promise<void> {
+  await libraryWindow.close();
+}
 
 // An in-progress local recording has no list row yet (the entry is created on
 // finalize). Synthesize one under the id the finalized recording will use, so
@@ -559,6 +632,7 @@ function numericMeetingId(item: MeetingListItem | null): number | undefined {
 // Open the floating recorder pill (its own always-on-top window) for a specific
 // meeting — the featured meeting behind "Start Meeting Early" on the Up Next card.
 async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
+  recordingStartError.value = null;
   try {
     const backend = await getActiveBackend();
     if (
@@ -585,6 +659,7 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
     await invoke('start_recording_window', {});
   } catch (e) {
     clearRecordingLaunch();
+    recordingStartError.value = recordingStartErrorMessage(e);
     console.error('Failed to start recording', e);
   }
 }
@@ -595,6 +670,7 @@ async function startRecordingFor(item: MeetingListItem | null): Promise<void> {
 // falling back to the picker when neither applies. Non-picker (local) backends
 // just open the recorder with no meeting attached.
 async function startRecording(): Promise<void> {
+  recordingStartError.value = null;
   try {
     const backend = await getActiveBackend();
     const usesPicker = backend.usesMeetingPicker;
@@ -630,6 +706,7 @@ async function startRecording(): Promise<void> {
     await invoke('start_recording_window', {});
   } catch (e) {
     clearRecordingLaunch();
+    recordingStartError.value = recordingStartErrorMessage(e);
     console.error('Failed to start recording', e);
   }
 }
@@ -694,6 +771,19 @@ function onNativeRecordingState(event: { payload: unknown }): void {
   } else if (!recorderOwnsLifecycle.value) {
     clearRecordingLaunch();
   }
+}
+
+function onRecordingStartFailed(event: { payload: unknown }): void {
+  const payload = event.payload;
+  recordingStartError.value =
+    typeof payload === 'object'
+    && payload !== null
+    && 'message' in payload
+    && typeof payload.message === 'string'
+    && payload.message.length <= 300
+      ? payload.message
+      : recordingStartErrorMessage(payload);
+  clearRecordingLaunch();
 }
 
 // Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
@@ -865,10 +955,12 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingState: UnlistenFn | null = null;
+let unlistenRecordingStartFailed: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
 let unlistenPrepOpen: UnlistenFn | null = null;
+let unlistenWindowResized: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -885,6 +977,14 @@ async function recoverActiveRecording(): Promise<void> {
 }
 
 onMounted(() => {
+  if (isWindows.value) {
+    void syncLibraryWindowMaximized();
+    void libraryWindow.onResized(() => {
+      void syncLibraryWindowMaximized();
+    }).then((un) => {
+      unlistenWindowResized = un;
+    });
+  }
   void loadMeetings(true)
     .then(() => recoverActiveRecording())
     // A prep notification click that opened this window queued its prep before
@@ -896,6 +996,9 @@ onMounted(() => {
   });
   void listen('recording://state', onNativeRecordingState).then((un) => {
     unlistenRecordingState = un;
+  });
+  void listen('recording://start-failed', onRecordingStartFailed).then((un) => {
+    unlistenRecordingStartFailed = un;
   });
   // The floating recorder pill asks (on click) to surface the meeting it's
   // recording — re-dock the strip even if the user had navigated away.
@@ -944,10 +1047,12 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   unlistenRecordingStarted?.();
   unlistenRecordingState?.();
+  unlistenRecordingStartFailed?.();
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();
   unlistenPrepOpen?.();
+  unlistenWindowResized?.();
 });
 </script>
 
@@ -962,7 +1067,7 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
-/* Transparent title-bar overlay (panel toggle by the traffic lights). */
+/* macOS transparent overlay; Windows promotes this row to full custom chrome. */
 .titlebar {
   position: absolute;
   top: 0;
@@ -975,6 +1080,70 @@ onUnmounted(() => {
   align-items: center;
   padding: 3px 5px 0 78px;
   background: transparent;
+}
+.recording-start-error {
+  position: absolute;
+  top: 34px;
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(520px, calc(100% - 32px));
+  padding: 10px 12px;
+  transform: translateX(-50%);
+  border: 1px solid #e4aaa6;
+  border-radius: 10px;
+  background: #fff4f3;
+  box-shadow: 0 6px 20px rgba(80, 20, 16, 0.12);
+  color: #8f2722;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.recording-start-error button {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  cursor: pointer;
+}
+.library--windows .recording-start-error {
+  top: 46px;
+}
+.titlebar--windows {
+  height: 40px;
+  padding: 0;
+  background: rgba(247, 246, 244, 0.98);
+  border-bottom: 1px solid #e4e2de;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.72) inset;
+  user-select: none;
+}
+.titlebar-brand {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-left: 12px;
+  color: #363431;
+}
+.titlebar-logo {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+.titlebar-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.titlebar-divider {
+  width: 1px;
+  height: 18px;
+  margin-left: 11px;
+  background: #d8d5d0;
 }
 .panel-toggle {
   display: flex;
@@ -992,6 +1161,50 @@ onUnmounted(() => {
 }
 .panel-toggle:hover { background: #ecebe8; color: #1c1c1c; }
 .panel-toggle[aria-pressed='true'] { color: #1c1c1c; }
+.titlebar--windows .panel-toggle {
+  width: 34px;
+  height: 30px;
+  margin-left: 5px;
+  border-radius: 7px;
+}
+.titlebar--windows .add-btn {
+  height: 26px;
+  margin-right: 9px;
+  border-radius: 13px;
+}
+.window-controls {
+  align-self: stretch;
+  display: flex;
+}
+.window-control {
+  width: 46px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #3d3b38;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  transition: background 80ms ease, color 80ms ease;
+}
+.window-control:hover { background: #e6e3df; }
+.window-control--close:hover { background: #c42b1c; color: #ffffff; }
+.titlebar--windows .panel-toggle:focus-visible,
+.titlebar--windows .add-btn:focus-visible,
+.window-control:focus-visible {
+  outline: 2px solid #3b6fc4;
+  outline-offset: -3px;
+}
+.window-control svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
 
 /* Sidebar */
 .sidebar {
@@ -1003,6 +1216,7 @@ onUnmounted(() => {
   flex-direction: column;
   min-height: 0;
 }
+.library--windows .sidebar { padding-top: 52px; }
 .sidebar-head {
   display: flex;
   align-items: center;
@@ -1272,6 +1486,7 @@ onUnmounted(() => {
   flex-direction: column;
   min-height: 0;
 }
+.library--windows .detail-wrap { padding-top: 52px; }
 .detail-card {
   flex: 1;
   min-height: 0;

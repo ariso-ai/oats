@@ -194,11 +194,9 @@ export function useRecorder() {
           // command is intentionally macOS-only.
           micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              channelCount: 1,
               echoCancellation: false,
               noiseSuppression: false,
               autoGainControl: false,
-              sampleRate: 44100,
             },
           });
           micSource = audioContext.createMediaStreamSource(micStream);

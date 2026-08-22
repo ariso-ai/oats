@@ -367,6 +367,28 @@ describe('SettingsView account avatar', () => {
     expect(wrapper.find('div.avatar').exists()).toBe(false);
   });
 
+  it('hides the sign-in button once signed in', async () => {
+    // Regression: the Connect Calendar block was inserted between the
+    // signed-in v-if and the sign-in v-else, which silently re-paired the
+    // v-else to it — so the sign-in button rendered next to Sign Out.
+    mockSignedIn(null);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find('.sign-in-container').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Sign in with Google');
+    expect(wrapper.text()).toContain('Sign Out');
+  });
+
+  it('shows the sign-in button when signed out', async () => {
+    checkSession.mockResolvedValue(null);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find('.sign-in-container').exists()).toBe(true);
+    expect(wrapper.text()).toContain('Sign in with Google');
+  });
+
   it('falls back to the initials circle when there is no Google avatar', async () => {
     mockSignedIn(null);
     const wrapper = mount(SettingsView);

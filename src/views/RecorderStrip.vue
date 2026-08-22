@@ -23,7 +23,7 @@
           :key="i"
           class="bar"
           :class="{ paused: state.isPaused }"
-          :style="{ height: `${Math.max(12, Math.min(100, Math.sqrt(level) * 150))}%` }"
+          :style="{ height: `${barHeightPercent(level)}%` }"
         />
       </div>
       <span class="timer">{{ formattedDuration }}</span>
@@ -54,6 +54,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { barHeightPercent } from './waveformBars';
 
 /** Mirror of the recording running in the (hidden) waveform window. This
  *  component renders `recorder://state` broadcasts and sends the same tray
@@ -175,7 +176,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 18px;
+  height: 20px;
 }
 
 .bar {
