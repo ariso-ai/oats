@@ -7,6 +7,22 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 // can mount before onboarding signs in, so it needs a cross-window refresh cue.
 export const AUTH_SIGNED_IN_EVENT = 'auth://signed-in';
 
+/** Header carrying the non-binary arguments of a raw-body command. */
+const RAW_META_HEADER = 'x-oats-meta';
+
+// Tauri only takes the raw-body fast path when the bytes ARE the whole args
+// payload — nesting a Uint8Array inside an object drops back to JSON, which for
+// a 48 MB recording costs ~15 s (and `number[]` costs ~30 s) of main-thread
+// serialization versus ~44 ms raw. So audio commands send the bytes alone and
+// pass everything else through this header, hex-encoded so that a title with
+// non-ASCII characters stays a legal header value. Mirrors `raw_ipc.rs`.
+function rawMetaOptions(meta: unknown): { headers: Record<string, string> } {
+  const json = new TextEncoder().encode(JSON.stringify(meta));
+  let hex = '';
+  for (const byte of json) hex += byte.toString(16).padStart(2, '0');
+  return { headers: { [RAW_META_HEADER]: hex } };
+}
+
 interface SignInResult {
   success?: boolean;
   sessionToken?: string;
@@ -333,21 +349,18 @@ export interface ModelStatus {
 
 export const local = {
   finalizeRecording(
-    audio: number[],
+    audio: Uint8Array,
     title: string,
     createdAt: string,
     durationSeconds: number,
     appendTo?: string,
     forceNew?: boolean
   ): Promise<LocalFinalizeResult> {
-    return invoke<LocalFinalizeResult>('local_finalize_recording', {
+    return invoke<LocalFinalizeResult>(
+      'local_finalize_recording',
       audio,
-      title,
-      createdAt,
-      durationSeconds,
-      appendTo,
-      forceNew,
-    });
+      rawMetaOptions({ title, createdAt, durationSeconds, appendTo, forceNew })
+    );
   },
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
@@ -428,8 +441,8 @@ export interface PendingUploadMeta {
  *  upload attempt and removed once the server confirms (or the user
  *  dismisses). Keyed by the recording's ISO `createdAt`; Rust derives the id. */
 export const pending = {
-  bufferAudio(audio: number[], meta: PendingUploadMeta): Promise<string> {
-    return invoke<string>('buffer_pending_audio', { audio, meta });
+  bufferAudio(audio: Uint8Array, meta: PendingUploadMeta): Promise<string> {
+    return invoke<string>('buffer_pending_audio', audio, rawMetaOptions({ meta }));
   },
   /** Idempotent — missing buffer files are not an error. */
   discardAudio(createdAt: string): Promise<void> {
