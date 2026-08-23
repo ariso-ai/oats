@@ -1163,6 +1163,35 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
   });
 
+  // Regression (#318): a recording that hasn't attached to a meeting id yet
+  // (both meetingId and localRecordingId null) used to dock in the detail
+  // pane for whatever meeting happened to be selected, rather than only the
+  // meeting shown when the recording began.
+  it('floats a homeless recording away from an unrelated meeting and re-docks on the one it started on', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' }), item({ id: 'b', title: 'Planning' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    // Auto-select lands on Standup (the earliest row) — that's the recording's home.
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('a');
+
+    emitEvent('recorder://state', localRecorderState({ localRecordingId: null }));
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    // Navigate to the unrelated meeting — the strip must not follow it there.
+    await wrapper.findAll('.meeting-item')[1].trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('b');
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
+
+    // The floating indicator brings the user back to the recording's home meeting.
+    await wrapper.find('.add-btn--recording').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('a');
+    expect(wrapper.find('.strip').exists()).toBe(true);
+  });
+
   // Clicking the floating recorder pill emits `recording://reveal`; the open
   // library must jump back to the recording meeting (re-docking the strip).
   it('re-selects the recording meeting on a reveal event (recording pill clicked)', async () => {

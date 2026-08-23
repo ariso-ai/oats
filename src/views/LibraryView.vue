@@ -287,6 +287,12 @@ const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
 // Meeting the recording session belongs to (reported by the strip). Persists
 // through the upload/failed phases so the row stays selected/pinned.
 const recordingMeetingId = ref<string | null>(null);
+// The meeting shown when the current session's first heartbeat arrived. A
+// fresh session reports no meeting id for a beat (local: resolving its id) or
+// indefinitely (Ariso: auto-recording awaiting confirmation) — this session's
+// docking home for that gap, so navigating to some other meeting during it
+// doesn't wrongly keep the strip docked there. Set below alongside recordingPhase.
+const recordingHomeMeetingId = ref<string | null>(null);
 // True only while audio is actively being captured — gates the red dot so it
 // stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
 const recordingActive = ref(false);
@@ -298,17 +304,26 @@ const recordingStarting = computed(
 );
 
 // The recorder strip is docked in the detail pane when an active recording's
-// meeting is the one on-screen (a recording with no home row shows anywhere).
-// Mirrors RecorderStrip's own visibility rule.
+// meeting is the one on-screen; while the session has no meeting id yet, its
+// docking home takes over instead. Mirrors RecorderStrip's own visibility rule.
 const recorderStripVisible = computed(
   () =>
     recordingActive.value &&
-    (recordingMeetingId.value == null || recordingMeetingId.value === selectedItem.value?.id)
+    (recordingMeetingId.value != null
+      ? recordingMeetingId.value === selectedItem.value?.id
+      : recordingHomeMeetingId.value === selectedItem.value?.id)
 );
 // A recording is running but its meeting isn't on-screen (the user closed the
 // detail or navigated to another meeting). The titlebar then shows a
 // "Recording" indicator instead of the Start button.
 const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
+// Capture the on-screen meeting the instant a new session's first heartbeat
+// arrives (recordingPhase flips from null), and release it once the session
+// ends (recordingPhase returns to null) — see recordingHomeMeetingId above.
+watch(recordingPhase, (phase, prevPhase) => {
+  if (phase != null && prevPhase == null) recordingHomeMeetingId.value = selectedItem.value?.id ?? null;
+  else if (phase == null) recordingHomeMeetingId.value = null;
+});
 // A single waveform window owns capture, upload, and failed-upload recovery.
 // Keep every launcher disabled for that window's full lifetime so a second
 // click cannot race native creation or replace a recoverable failed session.
@@ -458,7 +473,7 @@ async function clearSelection(): Promise<void> {
 // Re-dock the recorder strip: pull the in-progress recording's meeting back
 // into the detail pane (the titlebar "Recording" indicator's action).
 async function showRecordingMeeting(): Promise<void> {
-  const id = recordingMeetingId.value;
+  const id = recordingMeetingId.value ?? recordingHomeMeetingId.value;
   if (!id) return;
   const m = displayMeetings.value.find((x) => x.id === id);
   if (m) await selectMeeting(m, { userSelected: false });
