@@ -28,15 +28,20 @@ pub const META_HEADER: &str = "x-oats-meta";
 /// no longer throttles a runaway caller the way JSON serialization did.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024 * 1024;
 
-/// The raw payload bytes. Rejects a JSON body so a frontend that regresses to
-/// `number[]` fails loudly here instead of silently costing 30 seconds.
-pub fn body_bytes(request: &Request<'_>) -> Result<Vec<u8>, String> {
+/// The raw payload bytes, borrowed from the request. Rejects a JSON body so a
+/// frontend that regresses to `number[]` fails loudly here instead of silently
+/// costing 30 seconds.
+///
+/// Returns a slice rather than a `Vec` so that copying a 48 MB payload is an
+/// explicit `.to_vec()` at the call site that needs ownership, not a hidden
+/// cost paid by every caller.
+pub fn body_bytes<'a>(request: &'a Request<'_>) -> Result<&'a [u8], String> {
     match request.body() {
         InvokeBody::Raw(bytes) if bytes.len() > MAX_BODY_BYTES => Err(format!(
             "payload of {} bytes exceeds the {MAX_BODY_BYTES}-byte limit",
             bytes.len()
         )),
-        InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        InvokeBody::Raw(bytes) => Ok(bytes),
         InvokeBody::Json(_) => {
             Err("expected a raw binary body; got JSON (see raw_ipc)".to_string())
         }

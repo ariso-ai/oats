@@ -1588,7 +1588,8 @@ pub fn buffer_pending_audio(request: tauri::ipc::Request<'_>) -> Result<String, 
     let audio = crate::raw_ipc::body_bytes(&request)?;
     let BufferPendingAudioArgs { meta } = crate::raw_ipc::meta(&request)?;
     let root = crate::storage::ariso_root()?;
-    crate::storage::write_pending_audio(&root, &meta, &audio)
+    // Borrowed straight through to the write — no copy of the mp3.
+    crate::storage::write_pending_audio(&root, &meta, audio)
 }
 
 /// Remove the buffered mp3 for `created_at` (idempotent). Called after a

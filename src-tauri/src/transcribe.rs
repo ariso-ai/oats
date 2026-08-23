@@ -724,7 +724,8 @@ pub struct FinalizeArgs {
 pub async fn local_finalize_recording(
     request: tauri::ipc::Request<'_>,
 ) -> Result<FinalizeResult, String> {
-    let audio = crate::raw_ipc::body_bytes(&request)?;
+    // Owned: the finalize chain persists the audio and outlives the request.
+    let audio = crate::raw_ipc::body_bytes(&request)?.to_vec();
     let FinalizeArgs {
         title,
         created_at,
