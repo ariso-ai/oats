@@ -86,10 +86,19 @@ export function useSpeakerAssignment(deps: {
   // natural completion, so without this every start/stop cycle would retain the
   // audio blob for the window's lifetime.
   let voiceSampleUrl: string | null = null;
+  // Identifies the sample the user is currently waiting on. A fetch is not
+  // instant, so a second Play can land while the first is still in flight —
+  // during which nothing is playing yet and `stopVoiceSample` has nothing to
+  // stop. Without this, both samples would end up playing at once and the
+  // first blob URL would never be revoked.
+  let voiceSampleRequest = 0;
 
   let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
   const stopVoiceSample = (): void => {
+    // Abandons an in-flight fetch too: a sample must not start playing after
+    // the user has stopped it, or after the card moved to another meeting.
+    voiceSampleRequest++;
     voiceSampleAudio?.pause();
     voiceSampleAudio = null;
     playingSpeakerIndex.value = null;
@@ -258,18 +267,23 @@ export function useSpeakerAssignment(deps: {
     // strand its blob URL.
     stopVoiceSample();
 
-    let blobUrl: string | null = null;
+    const my = ++voiceSampleRequest;
     try {
       const bytes = await api.fetchSpeakerAudio(meetingId.value, speakerIndex);
-      blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+      // Superseded while the bytes were on the wire — drop them rather than
+      // talking over the sample the user actually asked for last.
+      if (my !== voiceSampleRequest) {
+        URL.revokeObjectURL(blobUrl);
+        return;
+      }
       voiceSampleUrl = blobUrl;
       const audio = new Audio(blobUrl);
-      const url = blobUrl;
       const cleanup = () => {
         playingSpeakerIndex.value = null;
         voiceSampleAudio = null;
-        if (voiceSampleUrl === url) voiceSampleUrl = null;
-        URL.revokeObjectURL(url);
+        if (voiceSampleUrl === blobUrl) voiceSampleUrl = null;
+        URL.revokeObjectURL(blobUrl);
       };
       audio.onended = cleanup;
       audio.onerror = cleanup;
@@ -277,9 +291,12 @@ export function useSpeakerAssignment(deps: {
       playingSpeakerIndex.value = speakerIndex;
       await audio.play();
     } catch (e) {
-      // Covers the fetch failing and play() rejecting alike. A missing sample
-      // is ordinary (404) and says nothing worth interrupting the host over.
+      // Covers the fetch failing and play() rejecting alike. A superseded
+      // request must not tear down the one that replaced it.
+      if (my !== voiceSampleRequest) return;
       stopVoiceSample();
+      // A missing sample is ordinary (404) and says nothing worth
+      // interrupting the host over.
       if (!String(e).startsWith('404')) {
         console.error('Failed to play voice sample', e);
       }

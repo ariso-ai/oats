@@ -365,12 +365,23 @@ describe('member search', () => {
     }
   });
 
-  it('collapses a search failure to no results', async () => {
+  it('clears the previous results when a later search fails', async () => {
+    // Stale members left on screen are worse than none: clicking one assigns
+    // the speaker to whoever the *earlier* query matched.
     vi.useFakeTimers();
     try {
-      request.mockRejectedValue(new Error('offline'));
+      request.mockResolvedValue({
+        status: 200,
+        data: { members: [{ id: 1, email: 'a@b.co', name: 'Ada' }] },
+      });
       const { speakers } = setup();
       speakers.searchQuery.value = 'ada';
+      speakers.debouncedSearch();
+      await vi.runAllTimersAsync();
+      expect(speakers.searchResults.value).toHaveLength(1);
+
+      request.mockRejectedValue(new Error('offline'));
+      speakers.searchQuery.value = 'adam';
       speakers.debouncedSearch();
       await vi.runAllTimersAsync();
       expect(speakers.searchResults.value).toEqual([]);
@@ -444,6 +455,61 @@ describe('voice samples', () => {
     await speakers.toggleVoiceSample(1);
     expect(revoked).toEqual([created[0]]);
     expect(speakers.playingSpeakerIndex.value).toBe(1);
+  });
+
+  it('a second Play mid-fetch wins, and the first neither plays nor leaks', async () => {
+    // Both fetches are in flight before either resolves, so nothing is playing
+    // yet and there is nothing for stopVoiceSample to tear down.
+    const resolvers: Array<(bytes: ArrayBuffer) => void> = [];
+    fetchSpeakerAudio.mockImplementation(
+      () => new Promise<ArrayBuffer>((resolve) => resolvers.push(resolve))
+    );
+    const { speakers } = setup();
+
+    const first = speakers.toggleVoiceSample(0);
+    const second = speakers.toggleVoiceSample(1);
+    resolvers[0](new ArrayBuffer(8));
+    resolvers[1](new ArrayBuffer(8));
+    await Promise.all([first, second]);
+
+    expect(speakers.playingSpeakerIndex.value).toBe(1);
+    // One Audio for the winner; the loser's blob is revoked, never played.
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(created).toHaveLength(2);
+    expect(revoked).toEqual([created[0]]);
+  });
+
+  it('a superseded fetch that fails does not stop the sample that replaced it', async () => {
+    let failFirst: ((reason: unknown) => void) | undefined;
+    fetchSpeakerAudio
+      .mockImplementationOnce(() => new Promise((_, reject) => (failFirst = reject)))
+      .mockResolvedValue(new ArrayBuffer(8));
+    const { speakers } = setup();
+
+    const first = speakers.toggleVoiceSample(0);
+    await speakers.toggleVoiceSample(1);
+    expect(speakers.playingSpeakerIndex.value).toBe(1);
+
+    failFirst!('500: voice sample fetch failed');
+    await first;
+    expect(speakers.playingSpeakerIndex.value).toBe(1);
+  });
+
+  it('stopping mid-fetch keeps the sample from playing once it lands', async () => {
+    let resolveBytes: ((bytes: ArrayBuffer) => void) | undefined;
+    fetchSpeakerAudio.mockImplementation(
+      () => new Promise<ArrayBuffer>((resolve) => (resolveBytes = resolve))
+    );
+    const { speakers } = setup();
+
+    const pending = speakers.toggleVoiceSample(0);
+    speakers.reset();
+    resolveBytes!(new ArrayBuffer(8));
+    await pending;
+
+    expect(speakers.playingSpeakerIndex.value).toBeNull();
+    expect(play).not.toHaveBeenCalled();
+    expect(revoked).toEqual(created);
   });
 
   it('stays silent about a meeting with no stored sample', async () => {
