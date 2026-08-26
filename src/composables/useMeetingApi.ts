@@ -81,13 +81,57 @@ interface MeetingSearchResult extends ScheduledMeeting {
 }
 
 interface MeetingNotesParticipant {
-  id?: number;
+  /** The participant's org-user mapping id, absent for external attendees.
+   *  Numeric in shape but not consistently JSON-typed across the endpoints
+   *  that carry it, so it is compared as a string wherever identity matters. */
+  id?: number | string;
   name?: string;
   email?: string;
   role?: string;
   self?: boolean;
   avatar_url?: string | null;
+  /** Display label set when a speaker was assigned by name rather than to an
+   *  org member. Preferred over `name` when present. */
+  display_name?: string;
+  /** Diarization index this participant was confirmed as ("Speaker N" is
+   *  `participant_id` N-1). Null for calendar attendees who never spoke. */
+  participant_id?: number | null;
+  /** Whether a human confirmed this speaker↔person link (as opposed to it
+   *  coming from an unreviewed auto-match). */
+  manual_confirm?: boolean;
 }
+
+/** A diarized voice in a recording, before anyone has said who it belongs to.
+ *  The server's voice-matching fills the `auto_match_*` fields when it
+ *  recognizes the voice; they are a suggestion, never an assignment. */
+export interface AudioSpeaker {
+  speaker_index: number;
+  auto_matched_profile_id: number | null;
+  auto_match_confidence: number | null;
+  auto_match_name: string | null;
+  /** Strong identity of the matched voice profile, so accepting a suggestion
+   *  binds the speaker to its org user (or email) instead of degrading to a
+   *  bare display name and duplicating that person's existing row. */
+  auto_match_org_user_mapping_id: string | null;
+  auto_match_email: string | null;
+}
+
+/** An org member the host can assign a speaker to, as returned by the
+ *  speaker-search endpoint. */
+export interface SpeakerSearchMember {
+  /** Org-user mapping id — the same id space as a participant's `id`. */
+  id: number | string;
+  email: string;
+  name: string;
+}
+
+/** Who a speaker is being assigned to. The server resolves these strongest-
+ *  first: an org user is an identity, an email is an identity, a bare display
+ *  name is only a label. */
+export type SpeakerIdentity =
+  | { orgUserMappingId: number | string }
+  | { email: string }
+  | { displayName: string };
 
 // The `/meeting-notes/:id` payload. `summary` is either a JSON string or an
 // already-parsed object holding digest/summary/actionItems/score/coaching.
@@ -104,6 +148,12 @@ interface MeetingNotes {
   shareMeetingNotesToPublic?: 'attendee_and_host' | 'host_only' | 'off';
   summary?: string | Record<string, unknown> | null;
   participants?: MeetingNotesParticipant[];
+  /** Diarized speakers for the recording. Only served on the authenticated
+   *  path — a public share never exposes them. */
+  speakers?: AudioSpeaker[];
+  /** Whether the meeting has recorded audio at all; gates the speaker surface,
+   *  which is meaningless for an imported or bot-captured transcript. */
+  hasAudioRecording?: boolean;
   hasTranscript?: boolean;
   // Requester's personal note (authenticated view); null when none written.
   individual_note?: { content?: string | null; title?: string | null } | null;
@@ -406,6 +456,47 @@ export function useMeetingApi() {
     };
   }
 
+  // Search org members to assign a diarized speaker to. Scoped to the
+  // meeting's org by the endpoint. Errors collapse to [] — this is a passive
+  // type-ahead lookup, and an empty result already has a rendered state
+  // ("no team members found", offering the query as a plain label instead).
+  async function searchSpeakerMembers(
+    meetingId: number | string,
+    query: string
+  ): Promise<SpeakerSearchMember[]> {
+    const encoded = encodeURIComponent(String(meetingId));
+    const params = new URLSearchParams({ q: query });
+    try {
+      const res = await api.request(
+        'GET',
+        `/meeting-notes/${encoded}/speakers/search?${params.toString()}`
+      );
+      if (res.status !== 200) return [];
+      const data = res.data as { members?: SpeakerSearchMember[] } | null;
+      return data?.members ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  // Confirm that a diarized speaker is a particular person. The server holds
+  // one person to at most one speaker index per meeting, so this also unlinks
+  // them from any other speaker in the same meeting — which is why the caller
+  // has to reconcile its local participant list afterwards.
+  async function assignSpeaker(
+    meetingId: number | string,
+    speakerIndex: number,
+    identity: SpeakerIdentity
+  ): Promise<void> {
+    const encoded = encodeURIComponent(String(meetingId));
+    const res = await api.request(
+      'POST',
+      `/meeting-notes/${encoded}/speakers/${speakerIndex}/assign`,
+      identity
+    );
+    assertOk2xx(res, 'assign speaker');
+  }
+
   async function updateMeeting(
     meetingId: number,
     updates: { status?: string; title?: string }
@@ -620,6 +711,8 @@ export function useMeetingApi() {
     getMeetingTranscript,
     getMeetingIndividualNote,
     getMeetingPrep,
+    searchSpeakerMembers,
+    assignSpeaker,
     updateMeeting,
     endMeeting,
     saveTranscript,

@@ -1,6 +1,7 @@
 import { local, auth, pending, api, getBackendSetting, type RecordingSummary } from '../tauri';
 import {
   useMeetingApi,
+  type AudioSpeaker,
   type ScheduledMeeting,
   type MeetingSearchResult,
   type TranscriptChunk,
@@ -84,12 +85,23 @@ export interface MeetingCoaching {
 }
 
 export interface MeetingParticipantInfo {
-  id?: number;
+  /** Org-user mapping id; absent for external attendees. See the note on
+   *  `MeetingNotesParticipant.id` — compare it as a string, not by `===`. */
+  id?: number | string;
   name?: string;
   email?: string;
   role?: string;
   self?: boolean;
   avatarUrl?: string | null;
+  /** Ariso: label set when a speaker was assigned by name rather than to an
+   *  org member. Preferred over `name` when present. */
+  displayName?: string;
+  /** Ariso: the diarization index this participant was confirmed as ("Speaker
+   *  N" is index N-1). Null/absent for calendar attendees who never spoke. */
+  participantId?: number | null;
+  /** Ariso: whether a human confirmed this speaker↔person link, as opposed to
+   *  it coming from an unreviewed auto-match. */
+  manualConfirm?: boolean;
 }
 
 /** Normalized meeting detail rendered by the library's right-hand panel.
@@ -106,6 +118,13 @@ export interface MeetingDetail {
   publicShareExpiresAt?: string | null;
   shareMeetingNotesToPublic?: 'attendee_and_host' | 'host_only' | 'off';
   participants: MeetingParticipantInfo[];
+  /** Ariso: every diarized voice in the recording, assigned or not. Drives the
+   *  speaker-assignment surface; empty for local recordings and for meetings
+   *  whose transcript was imported rather than recorded. */
+  audioSpeakers: AudioSpeaker[];
+  /** Ariso: whether the meeting has recorded audio at all. Speaker assignment
+   *  is meaningless without it, so it gates the chip. */
+  hasAudioRecording?: boolean;
   // Ariso rich fields (markdown where noted)
   digest?: string;
   summary?: string;
@@ -383,7 +402,14 @@ export class ArisoBackend implements Backend {
         role: p.role,
         self: p.self,
         avatarUrl: p.avatar_url ?? null,
+        displayName: p.display_name,
+        participantId: p.participant_id ?? null,
+        manualConfirm: p.manual_confirm ?? false,
       })),
+      // Absent on any response that predates diarized speakers, and always
+      // absent on the shared/public view — which never exposes them.
+      audioSpeakers: Array.isArray(data.speakers) ? data.speakers : [],
+      hasAudioRecording: !!data.hasAudioRecording,
       digest: s.digest,
       summary: typeof s.summary === 'string' ? s.summary : undefined,
       actionItems: normalizeActionItems(s.actionItems),
@@ -509,6 +535,10 @@ export class LocalBackend implements Backend {
       title: item.title,
       startAt: item.timestamp,
       participants: [],
+      // Speaker assignment is an Ariso surface: it needs the server's voice
+      // matching and its org directory, neither of which exists offline.
+      audioSpeakers: [],
+      hasAudioRecording: !!item.files?.hasAudio,
       actionItems: [],
       isLocal: true,
       durationSeconds: item.durationSeconds,

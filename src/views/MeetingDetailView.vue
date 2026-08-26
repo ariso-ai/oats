@@ -121,6 +121,27 @@
             </div>
           </template>
         </div>
+
+        <!-- Speakers (host only). Sits with the attendee list because that is
+             what it edits, and reads as its pair: both open onto a list of
+             people. Microphone glyph for the diarized-voice list, the way the
+             clock stands in for duration. -->
+        <div v-if="canAssignSpeakers" class="meta-item speakers">
+          <button
+            ref="speakersBtn"
+            type="button"
+            class="speakers-trigger"
+            aria-haspopup="true"
+            :aria-expanded="speakers.open.value"
+            title="Assign speakers"
+            @click="onSpeakersClick"
+          >
+            <svg viewBox="0 0 24 24" class="ic"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><path d="M12 19v4" /></svg>
+            <span class="speakers-label">{{ speakersLabel }}</span>
+            <svg viewBox="0 0 24 24" class="ic attendees-caret" :class="{ open: speakers.open.value }" aria-hidden="true"><path d="M19 9l-7 7-7-7" /></svg>
+          </button>
+        </div>
+
         <span v-if="detail.meetingType" class="chip">
           <span class="chip-hash">#</span>{{ formatType(detail.meetingType) }}
         </span>
@@ -131,6 +152,13 @@
       </div>
 
       <div v-else class="divider" />
+
+      <SpeakerAssignPopover
+        v-if="speakers.open.value"
+        :assignment="speakers"
+        :anchor="speakersAnchor"
+        @close="closeSpeakers"
+      />
 
       <!-- Tabs + generation status -->
       <div v-if="availableTabs.length" class="card-tabs">
@@ -374,6 +402,8 @@ import MeetingNotesEditor from './MeetingNotesEditor.vue';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
+import SpeakerAssignPopover from './SpeakerAssignPopover.vue';
+import { useSpeakerAssignment } from '../composables/useSpeakerAssignment';
 import { composeLocalShareText } from './meetingShareText';
 import { shareTextNative, local } from '../tauri';
 import { ariJoinChip } from '../composables/meetingStatus';
@@ -438,6 +468,9 @@ const attendeesBtn = ref<HTMLButtonElement | null>(null);
 const attendeesAnchor = ref<{ bottom: number; left: number } | null>(null);
 
 function onAttendeesClick(): void {
+  // The speaker panel anchors under the same band; two stacked panels would
+  // just fight for the space.
+  closeSpeakers();
   const rect = attendeesBtn.value?.getBoundingClientRect();
   attendeesAnchor.value = rect ? { bottom: rect.bottom, left: rect.left } : null;
   showAttendees.value = !showAttendees.value;
@@ -525,6 +558,86 @@ async function shareLocal(d: MeetingDetail): Promise<void> {
 const transcript = ref<string | TranscriptChunk[] | null>(null);
 const transcriptLoaded = ref(false);
 const loadingTranscript = ref(false);
+
+// Speaker assignment (Ariso audio meetings only). The chip lives in the meta
+// band, so the state is owned here rather than inside the popover — the
+// unassigned count has to be right while the popover is closed, which is most
+// of the time.
+const speakersBtn = ref<HTMLButtonElement | null>(null);
+const speakersAnchor = ref<{ bottom: number; left: number } | null>(null);
+const speakers = useSpeakerAssignment({
+  meetingId: computed(() => (detail.value && !detail.value.isLocal ? detail.value.id : null)),
+  // A writable computed over the loaded detail: assigning a speaker edits the
+  // meeting's attendee list, which the avatars and the share popover render off.
+  participants: computed({
+    get: () => detail.value?.participants ?? [],
+    set: (v) => {
+      if (detail.value) detail.value.participants = v;
+    },
+  }),
+  audioSpeakers: computed(() => detail.value?.audioSpeakers ?? []),
+  // Empty until the Transcript tab has been opened. `assignable` falls back to
+  // the diarized indices, so the surface works before that — which is why the
+  // chip doesn't have to wait on a transcript fetch.
+  lines: computed(() =>
+    Array.isArray(transcript.value) ? transcript.value.map((c) => c.content) : []
+  ),
+});
+
+// Host-only, and only for a cloud meeting that actually has recorded audio —
+// there is nothing to diarize otherwise. Deliberately stays visible once every
+// speaker is resolved: an assignment is as often a correction as a first draft,
+// and auto-match guesses in particular need reviewing.
+const canAssignSpeakers = computed(
+  () =>
+    !!detail.value &&
+    !detail.value.isLocal &&
+    !!detail.value.hasAudioRecording &&
+    isHost.value &&
+    speakers.assignable.value.length > 0
+);
+
+// Reads like the "N Attendees" label beside it. While any speaker is
+// outstanding, that count replaces the total — it is the only number worth
+// acting on.
+const speakersLabel = computed(() => {
+  const unresolved = speakers.unresolved.value.length;
+  if (unresolved > 0) return `${unresolved} unassigned`;
+  const total = speakers.assignable.value.length;
+  return `${total} ${total === 1 ? 'Speaker' : 'Speakers'}`;
+});
+
+// Both dropdowns anchor under the same band, so opening one closes the other
+// rather than stacking two panels over each other.
+function onSpeakersClick(): void {
+  showAttendees.value = false;
+  const rect = speakersBtn.value?.getBoundingClientRect();
+  speakersAnchor.value = rect ? { bottom: rect.bottom, left: rect.left } : null;
+  speakers.open.value = !speakers.open.value;
+}
+
+function closeSpeakers(): void {
+  speakers.open.value = false;
+  speakers.closeAssignment();
+  speakers.stopVoiceSample();
+}
+
+// Escape backs out one level: the inline assign field first, then the panel.
+function onSpeakersKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return;
+  if (speakers.assigningSpeaker.value) speakers.closeAssignment();
+  else closeSpeakers();
+}
+watch(speakers.open, (open) => {
+  if (open) window.addEventListener('keydown', onSpeakersKeydown);
+  else window.removeEventListener('keydown', onSpeakersKeydown);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onSpeakersKeydown);
+  // Both outlive the component otherwise: the <audio> element is not in the
+  // DOM, and a queued search would fire ~300ms after the card closed.
+  speakers.reset();
+});
 
 // Individual ("My note") — lazily loaded from /meeting-notes/{id}/individual-note.
 const individualNote = ref<{ content: string; title: string } | null>(null);
@@ -805,6 +918,7 @@ async function refreshAfterClipDelete(): Promise<void> {
   const d = await backend.getMeetingDetail(item);
   if (my !== reqId) return;
   detail.value = d;
+  speakers.seedFromParticipants();
   // Keep the currently active clip selected if it survived the delete;
   // otherwise fall back to the first remaining clip (or none).
   activeClipId.value = d.audioClips.some((c) => c.transcript_id === activeClipId.value)
@@ -834,6 +948,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showShare.value = false;
   showAttendees.value = false;
   attendeesAnchor.value = null;
+  speakers.reset();
+  speakersAnchor.value = null;
   transcript.value = null;
   transcriptLoaded.value = false;
   loadingTranscript.value = false;
@@ -872,6 +988,9 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (my !== reqId) return;
     detail.value = d;
     detailBackend = backend;
+    // The payload is authoritative about which speakers a human has already
+    // confirmed; seed from it so the chip's count is right on first paint.
+    speakers.seedFromParticipants();
     activeClipId.value = d.audioClips[0]?.transcript_id ?? null;
     // A prep-ready notification for this meeting wins over the content-driven
     // default — on this load and on any reload until the user picks a tab.
@@ -1212,13 +1331,15 @@ const hasCoaching = computed(() => {
   return !!(c && (c.strengths?.length || c.improvements?.length || c.patterns));
 });
 
-// The meta band (duration · attendees · category) renders only when at least
-// one of its fields is present; otherwise a plain divider separates header and tabs.
+// The meta band (duration · attendees · speakers · category) renders only when
+// at least one of its fields is present; otherwise a plain divider separates
+// header and tabs.
 const hasMeta = computed(
   () =>
     !!(
       durationLabel.value ||
       detail.value?.participants.length ||
+      canAssignSpeakers.value ||
       detail.value?.meetingType ||
       detail.value?.autoJoinScheduled ||
       detail.value?.canceled
@@ -1432,6 +1553,13 @@ const durationLabel = computed<string | null>(() => {
 .avatar--more { width: 24px; height: 24px; background: #ecebe8; border: 1px solid #d6d6d6; color: #6f6f6f; font-size: 10px; font-weight: 400; }
 .avatar--sm { width: 22px; height: 22px; border: none; margin: 0; font-size: 9px; }
 .attendees-label { color: #6f6f6f; font-size: 12px; padding-left: 8px; }
+
+/* Styled like the attendees trigger rather than like the chips after it —
+   both open a dropdown onto a list of people, so they read as a pair. */
+.speakers { position: relative; }
+.speakers-trigger { display: flex; align-items: center; gap: 6px; background: none; border: none; padding: 0; margin: 0; font: inherit; color: #6f6f6f; cursor: pointer; white-space: nowrap; }
+.speakers-trigger:hover { opacity: 0.85; }
+.speakers-label { font-size: 12px; }
 .chip {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 8px; background: #ecebe8; border: 1px solid #d2d2d2; border-radius: 12px;
