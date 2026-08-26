@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, type VueWrapper, type DOMWrapper } from '@vue/test-utils';
 import { nextTick } from 'vue';
 import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
@@ -20,6 +20,8 @@ const recordingStatus = vi.fn();
 const readRecordingFile = vi.fn();
 const retryTranscription = vi.fn();
 const retryNotes = vi.fn();
+const apiRequest = vi.fn();
+const fetchSpeakerAudio = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -37,6 +39,10 @@ vi.mock('../composables/usePlatformCapabilities', () => ({
   loadPlatformCapabilities: () => loadPlatformCapabilities(),
 }));
 vi.mock('../tauri', () => ({
+  api: {
+    request: (...a: unknown[]) => apiRequest(...a),
+    fetchSpeakerAudio: (...a: unknown[]) => fetchSpeakerAudio(...a),
+  },
   shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
   getDesktopConfig: () =>
     Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
@@ -58,6 +64,7 @@ function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
     title: 'Old title',
     startAt: '2026-06-02T10:00:00Z',
     participants: [],
+    audioSpeakers: [],
     actionItems: [],
     isLocal: false,
     audioClips: [],
@@ -112,6 +119,10 @@ beforeEach(() => {
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
+  apiRequest.mockReset();
+  apiRequest.mockResolvedValue({ status: 200, data: {} });
+  fetchSpeakerAudio.mockReset();
+  fetchSpeakerAudio.mockRejectedValue('404: voice sample fetch failed');
 });
 
 describe('MeetingDetailView inline title editing', () => {
@@ -1388,5 +1399,218 @@ describe('MeetingDetailView Ari chip', () => {
   it('drops the chip once the meeting is done', async () => {
     const wrapper = await mountAt(detail({ ...running, arisoStatus: 'done' }));
     expect(wrapper.find('.ari-tag').exists()).toBe(false);
+  });
+});
+
+describe('MeetingDetailView speaker assignment', () => {
+  const audioSpeaker = (over: Record<string, unknown> = {}) => ({
+    speaker_index: 0,
+    auto_matched_profile_id: null,
+    auto_match_confidence: null,
+    auto_match_name: null,
+    auto_match_org_user_mapping_id: null,
+    auto_match_email: null,
+    ...over,
+  });
+
+  const speakerDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
+    detail({
+      participants: [{ role: 'host', self: true }],
+      hasAudioRecording: true,
+      audioSpeakers: [audioSpeaker({ speaker_index: 0 }), audioSpeaker({ speaker_index: 1 })],
+      ...over,
+    });
+
+  // The panel teleports into <body>, so wrapper.find() cannot see it.
+  const q = (selector: string) => document.querySelector(selector) as HTMLElement | null;
+  const qAll = (selector: string) =>
+    Array.from(document.querySelectorAll(selector)) as HTMLElement[];
+
+  let wrapper: VueWrapper | null = null;
+
+  async function openPanel(d: MeetingDetail) {
+    getMeetingDetail.mockResolvedValue(d);
+    wrapper = mount(MeetingDetailView, { props: { item }, attachTo: document.body });
+    await flushPromises();
+    await wrapper.find('.speakers-trigger').trigger('click');
+    await flushPromises();
+    return wrapper;
+  }
+
+  afterEach(() => {
+    wrapper?.unmount();
+    wrapper = null;
+    document.body.innerHTML = '';
+  });
+
+  it('shows the chip for a host on a cloud meeting with recorded audio', async () => {
+    const w = await mountWith(speakerDetail());
+    expect(w.find('.speakers-trigger').exists()).toBe(true);
+    expect(w.find('.speakers-label').text()).toBe('2 unassigned');
+  });
+
+  it('counts down as speakers get resolved, then reads as a total', async () => {
+    const w = await mountWith(
+      speakerDetail({
+        participants: [
+          { role: 'host', self: true },
+          { participantId: 0, name: 'Ada Lovelace', manualConfirm: true },
+        ],
+      })
+    );
+    expect(w.find('.speakers-label').text()).toBe('1 unassigned');
+  });
+
+  it('stays visible once every speaker is resolved — a confirm can be wrong', async () => {
+    const w = await mountWith(
+      speakerDetail({
+        audioSpeakers: [audioSpeaker({ speaker_index: 0 })],
+        participants: [
+          { role: 'host', self: true },
+          { participantId: 0, name: 'Ada Lovelace', manualConfirm: true },
+        ],
+      })
+    );
+    expect(w.find('.speakers-label').text()).toBe('1 Speaker');
+  });
+
+  it('hides the chip from a non-host', async () => {
+    const w = await mountWith(speakerDetail({ participants: [{ role: 'attendee', self: true }] }));
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('hides the chip when the meeting has no recorded audio', async () => {
+    const w = await mountWith(speakerDetail({ hasAudioRecording: false }));
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('hides the chip when nothing was diarized', async () => {
+    const w = await mountWith(speakerDetail({ audioSpeakers: [] }));
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('hides the chip for a local recording', async () => {
+    const w = await mountWith(
+      speakerDetail({ isLocal: true, participants: [{ role: 'host', self: true }] })
+    );
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('opens a row per diarized speaker without waiting on the transcript', async () => {
+    await openPanel(speakerDetail());
+    expect(getMeetingTranscript).not.toHaveBeenCalled();
+    expect(qAll('.sp-row')).toHaveLength(2);
+    expect(qAll('.sp-speaker').map((el) => el.textContent)).toEqual(['Speaker 1', 'Speaker 2']);
+  });
+
+  it('assigns a speaker to a teammate found by search', async () => {
+    vi.useFakeTimers();
+    try {
+      await openPanel(speakerDetail());
+      qAll('.sp-btn').find((b) => b.textContent?.trim() === 'Assign')!.click();
+      await nextTick();
+
+      const input = q('.sp-input') as HTMLInputElement;
+      apiRequest.mockResolvedValue({
+        status: 200,
+        data: { members: [{ id: 42, email: 'ada@x.com', name: 'Ada Lovelace' }] },
+      });
+      input.value = 'ada';
+      input.dispatchEvent(new Event('input'));
+      await vi.runAllTimersAsync();
+      await nextTick();
+
+      expect(q('.sp-result-name')?.textContent).toContain('Ada Lovelace');
+      apiRequest.mockResolvedValue({ status: 200, data: {} });
+      q('.sp-result')!.click();
+      await flushPromises();
+
+      expect(apiRequest).toHaveBeenCalledWith('POST', '/meeting-notes/7/speakers/0/assign', {
+        orgUserMappingId: 42,
+      });
+      expect(q('.sp-name')?.textContent).toBe('Ada Lovelace');
+      expect(wrapper!.find('.speakers-label').text()).toBe('1 unassigned');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('offers a one-click confirm on the strongest match only', async () => {
+    const ada = {
+      auto_matched_profile_id: 5,
+      auto_match_name: 'Ada Lovelace',
+      auto_match_org_user_mapping_id: 'oum-1',
+      auto_match_email: 'ada@x.com',
+    };
+    await openPanel(
+      speakerDetail({
+        audioSpeakers: [
+          audioSpeaker({ speaker_index: 0, ...ada, auto_match_confidence: 0.97 }),
+          audioSpeaker({ speaker_index: 1, ...ada, auto_match_confidence: 0.8 }),
+        ],
+      })
+    );
+
+    const rows = qAll('.sp-row');
+    expect(rows[0].textContent).toContain('97% match');
+    expect(rows[0].querySelector('.sp-btn--confirm')).not.toBeNull();
+    // The weaker one keeps its row and its score, but not the shortcut.
+    expect(rows[1].textContent).toContain('80% match');
+    expect(rows[1].querySelector('.sp-btn--confirm')).toBeNull();
+    expect(rows[1].textContent).toContain('Speaker 1 is a stronger match');
+
+    rows[0].querySelector<HTMLElement>('.sp-btn--confirm')!.click();
+    await flushPromises();
+    expect(apiRequest).toHaveBeenCalledWith('POST', '/meeting-notes/7/speakers/0/assign', {
+      orgUserMappingId: 'oum-1',
+    });
+  });
+
+  it('plays a voice sample by diarization index', async () => {
+    fetchSpeakerAudio.mockResolvedValue(new ArrayBuffer(8));
+    URL.createObjectURL = vi.fn(() => 'blob:sample');
+    URL.revokeObjectURL = vi.fn();
+    vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(window.HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+
+    await openPanel(speakerDetail());
+    qAll('.sp-play')[1].click();
+    await flushPromises();
+
+    expect(fetchSpeakerAudio).toHaveBeenCalledWith('7', 1);
+    expect(qAll('.sp-play')[1].textContent?.trim()).toBe('Stop');
+  });
+
+  it('opening the attendees dropdown closes the speaker panel', async () => {
+    const w = await openPanel(speakerDetail());
+    expect(q('.sp-pop')).not.toBeNull();
+    await w.find('.attendees-trigger').trigger('click');
+    await nextTick();
+    expect(q('.sp-pop')).toBeNull();
+  });
+
+  it('clicking the click-catcher closes the panel', async () => {
+    await openPanel(speakerDetail());
+    q('.sp-overlay')!.click();
+    await nextTick();
+    expect(q('.sp-pop')).toBeNull();
+  });
+
+  it('surfaces a failed assignment instead of showing a name that was never saved', async () => {
+    await openPanel(speakerDetail());
+    qAll('.sp-btn').find((b) => b.textContent?.trim() === 'Assign')!.click();
+    await nextTick();
+
+    const input = q('.sp-input') as HTMLInputElement;
+    input.value = 'Ada Lovelace';
+    input.dispatchEvent(new Event('input'));
+    await nextTick();
+    apiRequest.mockResolvedValue({ status: 403, data: { error: 'Only the host can do that' } });
+    q('.sp-result')!.click();
+    await flushPromises();
+
+    expect(q('.sp-err')?.textContent).toContain('Only the host can do that');
+    expect(q('.sp-name')).toBeNull();
+    expect(wrapper!.find('.speakers-label').text()).toBe('2 unassigned');
   });
 });

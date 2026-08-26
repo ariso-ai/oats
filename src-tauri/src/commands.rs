@@ -1799,6 +1799,72 @@ pub async fn fetch_meeting_audio(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Upper bound on a diarized speaker's voice sample. These are a few seconds of
+/// one voice, cut server-side — orders of magnitude below a whole recording, so
+/// this cap is deliberately much tighter than `MAX_AUDIO_BYTES`.
+const MAX_VOICE_SAMPLE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Build the voice-sample URL, validating the meeting id first. `speaker_index`
+/// is a `u32` rather than a string precisely so it cannot carry a path segment
+/// or a query string into the URL.
+fn speaker_audio_url(
+    base: &str,
+    meeting_id: &str,
+    speaker_index: u32,
+) -> Result<String, String> {
+    validate_meeting_id(meeting_id)?;
+    Ok(format!(
+        "{base}/meeting-notes/{meeting_id}/speakers/{speaker_index}/audio"
+    ))
+}
+
+/// Fetch one diarized speaker's voice sample from the Ariso API as raw bytes.
+/// Samples are stored per meeting and addressed by diarization index, so they
+/// are playable before the speaker has been assigned to anyone.
+///
+/// Non-200 responses become an error prefixed with the HTTP status, so the
+/// frontend can treat 404 ("no sample stored for this speaker") as an ordinary
+/// empty state rather than a failure worth reporting.
+#[tauri::command]
+pub async fn fetch_speaker_audio(
+    app: tauri::AppHandle,
+    meeting_id: String,
+    speaker_index: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let url = speaker_audio_url(&api_base_url(), &meeting_id, speaker_index)?;
+    let token = get_session_token(&app).unwrap_or_default();
+    let client = http_client();
+
+    let mut response = client
+        .get(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(format!("{status}: voice sample fetch failed"));
+    }
+    if let Some(len) = response.content_length() {
+        if len > MAX_VOICE_SAMPLE_BYTES {
+            return Err(format!("voice sample too large to play: {len} bytes"));
+        }
+    }
+    // Enforce the cap while streaming too: `content_length` is absent for a
+    // chunked response and is not something we want to trust regardless.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_VOICE_SAMPLE_BYTES {
+            return Err(format!("voice sample too large to play: {next_len} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Upper bound on a note/transcript markdown file we'll read into memory for
 /// in-app rendering. These are plain text; 16 MB is far above any real note or
 /// transcript and just guards against a pathological/corrupt file.
@@ -2806,6 +2872,27 @@ mod tests {
             meeting_audio_url(base, "42", Some("3f8c1e2a-0000-4aaa-8bbb-1234567890ab")).unwrap(),
             "https://api.example.com/meeting-notes/42/audio/3f8c1e2a-0000-4aaa-8bbb-1234567890ab"
         );
+    }
+
+    #[test]
+    fn speaker_audio_url_addresses_a_diarization_index() {
+        let base = "https://api.example.com";
+        assert_eq!(
+            speaker_audio_url(base, "42", 0).unwrap(),
+            "https://api.example.com/meeting-notes/42/speakers/0/audio"
+        );
+        assert_eq!(
+            speaker_audio_url(base, "42", 7).unwrap(),
+            "https://api.example.com/meeting-notes/42/speakers/7/audio"
+        );
+    }
+
+    #[test]
+    fn speaker_audio_url_rejects_a_non_numeric_meeting_id() {
+        let base = "https://api.example.com";
+        assert!(speaker_audio_url(base, "../secret", 0).is_err());
+        assert!(speaker_audio_url(base, "42/audio", 0).is_err());
+        assert!(speaker_audio_url(base, "", 0).is_err());
     }
 
     #[test]

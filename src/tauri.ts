@@ -204,6 +204,20 @@ export const api = {
       transcriptId: transcriptId ?? null,
     });
   },
+
+  /** A diarized speaker's voice sample, addressed by diarization index (the
+   *  `Speaker N` → N-1 convention). Samples live per meeting, so one is
+   *  playable before the speaker has been assigned to anyone. Rejects with a
+   *  status-prefixed message ("404: …") when no sample is stored. */
+  async fetchSpeakerAudio(
+    meetingId: string | number,
+    speakerIndex: number
+  ): Promise<ArrayBuffer> {
+    return invoke<ArrayBuffer>('fetch_speaker_audio', {
+      meetingId: String(meetingId),
+      speakerIndex,
+    });
+  },
 };
 
 export interface DesktopConfig {
