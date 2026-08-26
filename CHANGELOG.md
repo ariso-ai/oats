@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.20.0](https://github.com/ariso-ai/oats/compare/v0.19.1...v0.20.0) (2026-08-26)
+
+
+### Features
+
+* acquire Google Calendar via an additive second OAuth hop ([6311459](https://github.com/ariso-ai/oats/commit/6311459ca6ea0884b9eb70f6aff9098dc48ccb95))
+* adjusts tray icon ([03b75d1](https://github.com/ariso-ai/oats/commit/03b75d127f24314f8e47c1b88a951abc2a9b6c8a))
+* assign speakers to people on cloud audio meetings ([7bbd55d](https://github.com/ariso-ai/oats/commit/7bbd55d3eda135e43ed30a8ffc96a370eaa09714))
+* assign speakers to people on cloud audio meetings ([f27aaf6](https://github.com/ariso-ai/oats/commit/f27aaf6024f087ec26661b15b2fd1ce3dc5c87b8))
+
+
+### Bug Fixes
+
+* don't let two voice samples play over each other ([7624314](https://github.com/ariso-ai/oats/commit/7624314d25fa1d7cd1289fc2513f9f1e8c0e7c54))
+* give the calendar hop its own loopback success page ([e1eb077](https://github.com/ariso-ai/oats/commit/e1eb077536980a9c7697ffdf845a985bda6319fd))
+* send recording audio over the raw IPC body instead of a JSON number[] ([ba13203](https://github.com/ariso-ai/oats/commit/ba1320303e38d1204222e6bca852c561c3e19ba9))
+* send recording audio over the raw IPC body instead of a JSON number[] ([439e2f4](https://github.com/ariso-ai/oats/commit/439e2f4f3846e5b7c4f3422a89a1b2a77d3791a4))
+* **tray:** show the color logo in the menu bar while recording ([5ff83b0](https://github.com/ariso-ai/oats/commit/5ff83b030e5a7875bb55ee7813fafeea77b925a4))
+* **ui:** make the meeting picker's meetings look clickable ([835dec1](https://github.com/ariso-ai/oats/commit/835dec1fb62881f2599bf746ed27f6b4e4c2d7c6))
+
 ## [0.19.1](https://github.com/ariso-ai/oats/compare/v0.19.0...v0.19.1) (2026-08-19)
 
 
