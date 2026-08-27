@@ -64,7 +64,7 @@ block2 = "0.6"
 [target.'cfg(target_os = "windows")'.dependencies]
 # Safe wrappers for shared-mode WASAPI loopback and audio-session inspection.
 # Pin the API used by both capture and auto-record detection for reproducible installers.
-wasapi = "=0.23.0"
+wasapi = "=0.24.0"
 # Use the native capture interface directly so silent loopback packets can be
 # released without dereferencing the null data pointer permitted by WASAPI.
 windows = { version = "=0.62.2", features = [
