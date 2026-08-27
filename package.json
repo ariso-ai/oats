@@ -23,13 +23,13 @@
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@tauri-apps/plugin-store": "^2.4.4",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "@tiptap/extension-placeholder": "^3.30.1",
-    "@tiptap/extension-task-item": "^3.30.1",
-    "@tiptap/extension-task-list": "^3.30.1",
-    "@tiptap/extension-typography": "^3.30.1",
-    "@tiptap/markdown": "^3.30.1",
-    "@tiptap/starter-kit": "^3.30.1",
-    "@tiptap/vue-3": "^3.30.1",
+    "@tiptap/extension-placeholder": "^3.30.2",
+    "@tiptap/extension-task-item": "^3.30.2",
+    "@tiptap/extension-task-list": "^3.30.2",
+    "@tiptap/extension-typography": "^3.30.2",
+    "@tiptap/markdown": "^3.30.2",
+    "@tiptap/starter-kit": "^3.30.2",
+    "@tiptap/vue-3": "^3.30.2",
     "vue": "^3.5.41",
     "vue-router": "^5.2.0"
   },
@@ -42,8 +42,8 @@
     "tailwindcss": "^4.1.8",
     "tauri-plugin-mcp": "^0.3.1",
     "tauri-plugin-mcp-server": "^0.3.1",
-    "vite": "^8.2.1",
-    "vitest": "^4.1.10"
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   },
   "optionalDependencies": {
     "appdmg": "^0.6.6"
