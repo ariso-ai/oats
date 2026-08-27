@@ -1203,6 +1203,22 @@ const YIELD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const YIELD_REOPEN_POLLS: u32 = 20;
 const YIELD_REOPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
+/// Payload for the `recording://start-failed` event emitted when a queued
+/// recording's yield request expires (#320).
+///
+/// The incumbent pill refuses to stand down in two states the user must not
+/// have confused: `capture_active()` is set while audio is actually being
+/// recorded and cleared on stop, before the upload runs — so telling someone
+/// mid-recording to "wait for the upload to finish" describes a wait that never
+/// ends. The frontend turns `reason` into user-facing copy and names the meeting
+/// when it can resolve `meeting_id`; only it has meeting titles.
+fn yield_expired_payload(capturing: bool, meeting_id: Option<i64>) -> serde_json::Value {
+    serde_json::json!({
+        "reason": if capturing { "capturing" } else { "uploading" },
+        "meetingId": meeting_id,
+    })
+}
+
 /// Shared helper to open the waveform recording window. Used by the
 /// `start_recording_window` command, the tray (Local backend path), and the
 /// auto mic monitor. `auto` adds `auto=1` to the URL and tags the shared
@@ -1237,23 +1253,22 @@ pub(crate) fn open_waveform_window(
         // down and re-open once it's actually gone (see the Destroyed handler
         // below). It refuses while still capturing or uploading — then the
         // queued request expires and the focus above is all that happens. Tell
-        // the frontend so the user sees why the new recording never started
-        // (#320) instead of a launch spinner that hangs forever.
+        // the frontend which recording is in the way, and in which state, so the
+        // user gets an accurate explanation (#320) instead of a launch spinner
+        // that hangs forever.
         let token = state.queue_reopen(meeting_id, local_append_id, force_new, auto);
         let _ = app.emit("recorder://yield", ());
         let app_for_expiry = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(YIELD_TIMEOUT).await;
-            let expired = app_for_expiry
-                .state::<crate::recording_state::RecordingState>()
-                .expire_reopen(token);
-            if expired {
-                let _ = app_for_expiry.emit(
-                    "recording://start-failed",
-                    serde_json::json!({
-                        "message": "Can't start a new recording yet: the previous recording is still uploading. Try again once it finishes.",
-                    }),
-                );
+            let state = app_for_expiry.state::<crate::recording_state::RecordingState>();
+            if state.expire_reopen(token) {
+                // Read the blocking state only after the request is confirmed
+                // dropped, so the reason describes the pill that outlasted the
+                // handshake rather than whatever it was doing 3s ago.
+                let payload =
+                    yield_expired_payload(state.capture_active(), state.active_meeting_id());
+                let _ = app_for_expiry.emit("recording://start-failed", payload);
             }
         });
         return Ok(());
@@ -2236,6 +2251,27 @@ pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A recording requested while the pill still holds the window slot is
+    // dropped after the yield timeout. What the user is told about it must match
+    // the state the pill is actually in (#320).
+    #[test]
+    fn yield_expiry_distinguishes_a_recording_pill_from_an_uploading_one() {
+        assert_eq!(yield_expired_payload(true, Some(42))["reason"], "capturing");
+        assert_eq!(yield_expired_payload(false, Some(42))["reason"], "uploading");
+    }
+
+    #[test]
+    fn yield_expiry_names_the_meeting_holding_the_recorder() {
+        assert_eq!(yield_expired_payload(false, Some(42))["meetingId"], 42);
+    }
+
+    #[test]
+    fn yield_expiry_reports_an_ad_hoc_recording_with_no_meeting() {
+        // Local ad-hoc recordings carry no meeting id; the frontend falls back
+        // to unnamed copy rather than inventing one.
+        assert!(yield_expired_payload(true, None)["meetingId"].is_null());
+    }
 
     #[test]
     fn desktop_auth_redirect_encodes_port_and_nonce() {

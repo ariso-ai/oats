@@ -254,7 +254,11 @@ import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
 import { decideStartRecording } from '../composables/decideStartRecording';
 import { useRecordingStartChoice } from '../composables/useRecordingStartChoice';
 import RecordingStartChoiceDialog from './RecordingStartChoiceDialog.vue';
-import { recordingStartErrorMessage } from '../composables/recordingStartError';
+import {
+  recordingBlockedMessage,
+  recordingBlockedPayload,
+  recordingStartErrorMessage,
+} from '../composables/recordingStartError';
 import oatsLogo from '../assets/oats-dark.svg';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -773,16 +777,37 @@ function onNativeRecordingState(event: { payload: unknown }): void {
   }
 }
 
+// The title of the meeting holding the recorder, for a blocked start. Only this
+// window can resolve it: the backend knows the id but has no meeting titles.
+function blockingMeetingTitle(id: string | null): string | null {
+  if (id === null) return null;
+  // displayMeetings already layers pinned ad-hoc meetings over the loaded list,
+  // so a meeting recorded moments ago is findable here.
+  const title = displayMeetings.value.find((m) => m.id === id)?.title?.trim();
+  return title ? title : null;
+}
+
 function onRecordingStartFailed(event: { payload: unknown }): void {
   const payload = event.payload;
-  recordingStartError.value =
-    typeof payload === 'object'
-    && payload !== null
-    && 'message' in payload
-    && typeof payload.message === 'string'
-    && payload.message.length <= 300
-      ? payload.message
-      : recordingStartErrorMessage(payload);
+  // A start blocked by the incumbent recorder pill names which recording is in
+  // the way and what clears it (#320); every other failure arrives with a
+  // ready-made message.
+  const blocked = recordingBlockedPayload(payload);
+  if (blocked) {
+    recordingStartError.value = recordingBlockedMessage(
+      blocked.reason,
+      blockingMeetingTitle(blocked.meetingId),
+    );
+  } else {
+    recordingStartError.value =
+      typeof payload === 'object'
+      && payload !== null
+      && 'message' in payload
+      && typeof payload.message === 'string'
+      && payload.message.length <= 300
+        ? payload.message
+        : recordingStartErrorMessage(payload);
+  }
   clearRecordingLaunch();
 }
 
