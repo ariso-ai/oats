@@ -361,6 +361,12 @@ export interface ModelStatus {
   llmReady?: boolean;
 }
 
+/** Whether a recording is starting or actively capturing. Finalization and a
+ * terminal waveform window do not count as active recording. */
+export function isRecordingActive(): Promise<boolean> {
+  return invoke<boolean>('is_recording_active');
+}
+
 export const local = {
   finalizeRecording(
     audio: Uint8Array,
@@ -523,9 +529,21 @@ export async function openSettingsWindow(): Promise<void> {
   await invoke('create_settings_window');
 }
 
-/** Start native microphone capture. */
-export async function startMicrophoneCapture(): Promise<void> {
-  await invoke('start_microphone_capture');
+export interface MicrophoneInputDevice {
+  deviceId: string;
+  label: string;
+  isDefault: boolean;
+}
+
+/** List active native Windows microphone endpoints. */
+export async function listMicrophoneInputDevices(): Promise<MicrophoneInputDevice[]> {
+  return invoke<MicrophoneInputDevice[]>('list_microphone_input_devices');
+}
+
+/** Start native microphone capture. Windows accepts an opaque endpoint ID;
+ * omitting it follows the system default. macOS ignores the optional ID. */
+export async function startMicrophoneCapture(deviceId?: string): Promise<void> {
+  await invoke('start_microphone_capture', { deviceId: deviceId ?? null });
 }
 
 /** Stop native microphone capture. */

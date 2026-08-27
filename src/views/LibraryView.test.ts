@@ -675,6 +675,27 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
   });
 
+  it('keeps Start locked when a window refresh finishes before recorder creation', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    // The launch command has been sent, but Rust has not created the waveform
+    // window yet. Start a newer refresh after the launch lock is in place.
+    await wrapper.find('.add-btn').trigger('click');
+    let finishWindowQuery!: (windows: { label: string }[]) => void;
+    getAllWebviewWindows.mockImplementationOnce(
+      () => new Promise((resolve) => { finishWindowQuery = resolve; }),
+    );
+    window.dispatchEvent(new Event('focus'));
+    await Promise.resolve();
+    finishWindowQuery([]);
+    await flushPromises();
+
+    expect(wrapper.find('.add-btn').text()).toContain('Starting recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+  });
+
   it('shows initializing feedback for a recording started from the native menu', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView);
@@ -719,12 +740,12 @@ describe('LibraryView', () => {
       bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'uploading',
     });
     await flushPromises();
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.add-btn--recording').text()).toContain('Saving recording');
 
     // Native capture has stopped, but the waveform still owns upload/retry.
     emitEvent('recording://state', false);
     await flushPromises();
-    expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.add-btn--recording').text()).toContain('Saving recording');
 
     emitEvent('recorder://state', {
       bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'closed',
@@ -757,6 +778,25 @@ describe('LibraryView', () => {
     await btn.trigger('click');
     await flushPromises();
     expect(invoke).toHaveBeenCalledWith('start_recording_window', {});
+  });
+
+  it('does not let a stale waveform-window query re-lock Start after close', async () => {
+    let finishWindowQuery!: (windows: { label: string }[]) => void;
+    getAllWebviewWindows.mockImplementationOnce(
+      () => new Promise((resolve) => { finishWindowQuery = resolve; }),
+    );
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await Promise.resolve();
+
+    emitEvent('recorder://state', {
+      bars: [], durationSeconds: 3, isPaused: false, meetingId: null, phase: 'closed',
+    });
+    finishWindowQuery([{ label: 'waveform' }]);
+    await flushPromises();
+
+    expect(wrapper.find('.add-btn').text()).toContain('Start recording');
+    expect(wrapper.find('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
   it('reloads meetings when the window regains focus (recorder finished)', async () => {
@@ -1143,6 +1183,22 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').text()).not.toContain('Start recording');
   });
 
+  it('keeps a failed recorder session discoverable when its meeting is off-screen', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recording://state', true);
+    emitEvent('recorder://state', localRecorderState({ phase: 'failed' }));
+    await flushPromises();
+
+    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    await flushPromises();
+
+    const indicator = wrapper.find('.add-btn--recording');
+    expect(indicator.exists()).toBe(true);
+    expect(indicator.text()).toContain('Needs attention');
+  });
+
   // Req 2: clicking the indicator re-docks the strip on the recording meeting.
   it('clicking the "Recording" indicator re-docks the strip on the recording meeting', async () => {
     listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
@@ -1363,6 +1419,23 @@ describe('LibraryView', () => {
     expect(wrapper.get('.recording-start-error').attributes('role')).toBe('alert');
     expect(wrapper.get('.recording-start-error').text()).toContain('Connect or enable a microphone');
     expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
+  });
+
+  it('warns on a runtime capture failure without unlocking Start before stop completes', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://capture-failed', {
+      message: 'The microphone stopped sending audio.',
+    });
+    await flushPromises();
+
+    expect(wrapper.get('.recording-start-error').text()).toContain(
+      'microphone stopped sending audio',
+    );
+    expect(wrapper.get('.add-btn').attributes('disabled')).toBeDefined();
   });
 
   it('renders the PendingUploads section inside the sidebar', async () => {

@@ -74,12 +74,10 @@ export async function setSystemAudioEnabled(enabled: boolean): Promise<void> {
 export async function ensureMicPermission(): Promise<boolean> {
   try {
     const capabilities = await loadPlatformCapabilities();
-    if (capabilities.os === 'macos') {
+    if (capabilities.os === 'macos' || capabilities.os === 'windows') {
       return await requestMicrophonePermission();
     }
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach((track) => track.stop());
-    return true;
+    return false;
   } catch {
     return false;
   }
@@ -89,12 +87,10 @@ export async function ensureMicPermission(): Promise<boolean> {
 export async function checkMicPermission(): Promise<boolean> {
   try {
     const capabilities = await loadPlatformCapabilities();
-    if (capabilities.os === 'macos') {
+    if (capabilities.os === 'macos' || capabilities.os === 'windows') {
       return await checkMicrophonePermission();
     }
-    if (!navigator.permissions) return false;
-    const status = await navigator.permissions.query({ name: 'microphone' as PermissionName });
-    return status.state === 'granted';
+    return false;
   } catch {
     return false;
   }

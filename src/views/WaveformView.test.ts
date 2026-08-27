@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { ref } from 'vue';
 
 const startRecording = vi.fn();
 const stopRecording = vi.fn();
@@ -42,6 +43,7 @@ const recorderIsRecording = { value: true };
 const recorderIsPaused = { value: false };
 const recorderDuration = { value: 5 };
 const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
+const recorderError = ref<string | null>(null);
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: recorderIsRecording,
@@ -50,6 +52,7 @@ vi.mock('../composables/useRecorder', () => ({
     frameLevels: { value: new Array(32).fill(0.5) },
     lastSoundAt: { value: 0 },
     startedAt: recorderStartedAt,
+    error: recorderError,
     getAnalyser,
     startRecording: (...a: unknown[]) => startRecording(...a),
     stopRecording: () => stopRecording(),
@@ -83,17 +86,21 @@ vi.mock('../composables/useMeetingApi', () => ({
 
 // vi.mock is hoisted before top-level consts, so shared mock handles that the
 // factory closes over must live in vi.hoisted() to avoid TDZ errors.
-const { discardPendingAudio, recordingIdForStart } = vi.hoisted(() => ({
+const { discardPendingAudio, recordingIdForStart, recordingStatus } = vi.hoisted(() => ({
   discardPendingAudio: vi.fn(() => Promise.resolve()),
   // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
   // i.e. a fresh recording. Tests that exercise the append case override this.
   recordingIdForStart: vi.fn((createdAt: string) =>
     Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
   ),
+  recordingStatus: vi.fn(() => Promise.reject(new Error('recording not persisted'))),
 }));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
-  local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
+  local: {
+    recordingIdForStart: (...a: [string]) => recordingIdForStart(...a),
+    recordingStatus: (...a: [string]) => recordingStatus(...a),
+  },
 }));
 
 import WaveformView from './WaveformView.vue';
@@ -124,8 +131,10 @@ beforeEach(() => {
   recorderIsPaused.value = false;
   recorderDuration.value = 5;
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
+  recorderError.value = null;
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
+  recordingStatus.mockRejectedValue(new Error('recording not persisted'));
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -391,6 +400,130 @@ describe('WaveformView vertical pill', () => {
     await flushPromises();
     expect(wrapper.find('.status-icon.err').exists()).toBe(true);
     expect(closeWin).not.toHaveBeenCalled();
+  });
+
+  it('closes a local failed finalize once its audio is persisted for library retry', async () => {
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('transcription failed'));
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
+    expect(closeWin).toHaveBeenCalled();
+    expect(wrapper.find('.status-icon.err').exists()).toBe(false);
+  });
+
+  it('checks the explicit append target after a persisted local finalize failure', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('transcription failed'));
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
+    expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('stops and finalizes partial audio when native microphone capture fails at runtime', async () => {
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    mount(WaveformView);
+    await flushPromises();
+    stopRecording.mockClear();
+    finalizeRecording.mockClear();
+    emitEvent.mockClear();
+
+    recorderError.value = 'selected microphone disconnected';
+    await flushPromises();
+
+    expect(stopRecording).toHaveBeenCalledOnce();
+    expect(finalizeRecording).toHaveBeenCalledOnce();
+    expect(emitEvent).toHaveBeenCalledWith('recording://capture-failed', {
+      message: expect.stringContaining('stopped the recording to avoid recording silence'),
+    });
+    expect(emitEvent.mock.invocationCallOrder[0]).toBeLessThan(
+      stopRecording.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('checks the resolved automatic append target after a persisted local finalize failure', async () => {
+    recordingIdForStart.mockResolvedValueOnce('2026-06-08T09-30-00Z');
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('transcription failed'));
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus).toHaveBeenCalledWith('2026-06-09T10-00-00Z');
+    expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('checks the selected append target when no fresh failed clip was persisted', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('finalize failed'));
+    recordingStatus
+      .mockRejectedValueOnce(new Error('fresh recording not persisted'))
+      .mockResolvedValueOnce({
+        status: 'failed',
+        hasTranscript: false,
+        hasNote: false,
+        notesStatus: 'pending',
+      });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    expect(recordingStatus.mock.calls.map(([id]) => id)).toEqual([
+      '2026-06-09T10-00-00Z',
+      '2026-06-01T09-00-00Z',
+    ]);
+    expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('adopts the recording id Rust actually selects for a successful fallback', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
+    finalizeRecording.mockResolvedValue({
+      backend: 'local',
+      id: '2026-06-09T10-00-00Z',
+    });
+
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await wrapper.find('.stop-btn').trigger('click');
+    await flushPromises();
+
+    const finalizedMeta = finalizeRecording.mock.calls[0][1] as { localRecordingId?: string };
+    expect(finalizedMeta.localRecordingId).toBe('2026-06-09T10-00-00Z');
   });
 
   it('never broadcasts a success phase when finalize fails', async () => {

@@ -37,8 +37,8 @@
         v-if="recordingOffscreen"
         class="add-btn add-btn--recording"
         type="button"
-        aria-label="Show current recording"
-        title="Show current recording"
+        :aria-label="offscreenRecordingLabel"
+        :title="offscreenRecordingLabel"
         @click="showRecordingMeeting"
       >
         <span class="rec-wave" aria-hidden="true">
@@ -47,7 +47,7 @@
           <span class="rec-wave-bar" />
           <span class="rec-wave-bar" />
         </span>
-        <span class="add-btn-label">In recording</span>
+        <span class="add-btn-label">{{ offscreenRecordingLabel }}</span>
       </button>
       <button
         v-else
@@ -308,7 +308,16 @@ const recorderStripVisible = computed(
 // A recording is running but its meeting isn't on-screen (the user closed the
 // detail or navigated to another meeting). The titlebar then shows a
 // "Recording" indicator instead of the Start button.
-const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
+const recordingOffscreen = computed(
+  () =>
+    !recorderStripVisible.value &&
+    (recordingActive.value || recordingPhase.value === 'uploading' || recordingPhase.value === 'failed'),
+);
+const offscreenRecordingLabel = computed(() => {
+  if (recordingPhase.value === 'failed') return 'Needs attention';
+  if (recordingPhase.value === 'uploading') return 'Saving recording';
+  return 'In recording';
+});
 // A single waveform window owns capture, upload, and failed-upload recovery.
 // Keep every launcher disabled for that window's full lifetime so a second
 // click cannot race native creation or replace a recoverable failed session.
@@ -524,12 +533,16 @@ function setRecording(next: boolean): void {
   recording.value = next;
 }
 
+let recordingStateRefreshId = 0;
+
 function markRecordingStarting(): void {
+  recordingStateRefreshId += 1;
   recordingPhase.value = 'starting';
   setRecording(true);
 }
 
 function clearRecordingLaunch(): void {
+  recordingStateRefreshId += 1;
   recorderOwnsLifecycle.value = false;
   recordingActive.value = false;
   recordingPhase.value = null;
@@ -605,15 +618,20 @@ async function onPendingUploaded(): Promise<void> {
 
 // Recording runs in the separate "waveform" window; its presence is our signal.
 async function refreshRecordingState(): Promise<void> {
+  const requestId = ++recordingStateRefreshId;
   try {
     const wins = await getAllWebviewWindows();
+    if (requestId !== recordingStateRefreshId) return;
     const hasRecorder = wins.some((w) => w.label === 'waveform');
     if (hasRecorder) {
       if (!recordingActive.value && recordingPhase.value === null) {
         recordingPhase.value = 'starting';
       }
       setRecording(true);
-    } else {
+    } else if (recordingPhase.value !== 'starting') {
+      // A launch marks the phase before Rust creates the waveform window.
+      // Preserve that lock across the short pre-window gap; the command's
+      // error path or recorder lifecycle event owns clearing it.
       clearRecordingLaunch();
     }
   } catch (e) {
@@ -774,7 +792,11 @@ function onNativeRecordingState(event: { payload: unknown }): void {
 }
 
 function onRecordingStartFailed(event: { payload: unknown }): void {
-  const payload = event.payload;
+  showRecordingError(event.payload);
+  clearRecordingLaunch();
+}
+
+function showRecordingError(payload: unknown): void {
   recordingStartError.value =
     typeof payload === 'object'
     && payload !== null
@@ -783,7 +805,13 @@ function onRecordingStartFailed(event: { payload: unknown }): void {
     && payload.message.length <= 300
       ? payload.message
       : recordingStartErrorMessage(payload);
-  clearRecordingLaunch();
+}
+
+function onRecordingCaptureFailed(event: { payload: unknown }): void {
+  // Runtime capture failure is already being finalized by the recorder. Keep
+  // its launch lock/state until the normal stop lifecycle closes it, while
+  // still warning the user immediately.
+  showRecordingError(event.payload);
 }
 
 // Fetch an ad-hoc Ariso meeting's metadata and keep it in the sidebar until a
@@ -956,6 +984,7 @@ let clockTimer: number | undefined;
 let unlistenRecordingStarted: UnlistenFn | null = null;
 let unlistenRecordingState: UnlistenFn | null = null;
 let unlistenRecordingStartFailed: UnlistenFn | null = null;
+let unlistenRecordingCaptureFailed: UnlistenFn | null = null;
 let unlistenRecordingReveal: UnlistenFn | null = null;
 let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
@@ -999,6 +1028,9 @@ onMounted(() => {
   });
   void listen('recording://start-failed', onRecordingStartFailed).then((un) => {
     unlistenRecordingStartFailed = un;
+  });
+  void listen('recording://capture-failed', onRecordingCaptureFailed).then((un) => {
+    unlistenRecordingCaptureFailed = un;
   });
   // The floating recorder pill asks (on click) to surface the meeting it's
   // recording — re-dock the strip even if the user had navigated away.
@@ -1048,6 +1080,7 @@ onUnmounted(() => {
   unlistenRecordingStarted?.();
   unlistenRecordingState?.();
   unlistenRecordingStartFailed?.();
+  unlistenRecordingCaptureFailed?.();
   unlistenRecordingReveal?.();
   unlistenVaultChanged?.();
   unlistenBackendChanged?.();

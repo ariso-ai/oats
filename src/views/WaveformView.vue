@@ -135,6 +135,8 @@ import { resolveAssociation } from '../composables/useAutoTrigger';
 import { useMeetingApi } from '../composables/useMeetingApi';
 
 const SUCCESS_CLOSE_MS = 1500;
+const RUNTIME_MIC_FAILURE_MESSAGE =
+  'The microphone stopped sending audio. Oats stopped the recording to avoid recording silence. Reconnect it or choose another input before trying again.';
 
 const recorder = useRecorder();
 const waveform = useWaveform();
@@ -183,6 +185,7 @@ const isAuto = route.query.auto === '1';
 // meetings window is minimized or closed mid-recording.
 const pillHidden = ref(route.query.pillHidden === '1');
 const isStopping = ref(false);
+let runtimeMicFailureHandled = false;
 // Auto recordings shorter than this are discarded, not uploaded (guards against
 // late mic-on / quick-off races). Manual recordings are never length-gated.
 const MIN_AUTO_DURATION_S = 15;
@@ -244,6 +247,15 @@ watch(
   [() => recorder.durationSeconds.value, () => recorder.isPaused.value, isUploading, uploadResult],
   () => broadcastState(),
 );
+watch(() => recorder.error.value, (message) => {
+  if (
+    !message
+    || !recorder.isRecording.value
+    || isStopping.value
+    || runtimeMicFailureHandled
+  ) return;
+  void handleRuntimeMicrophoneFailure();
+});
 // Re-resolve the scheduled end whenever the attached meeting changes.
 watch(effectiveMeetingId, () => void resolveMeetingEnd());
 // When a local recording starts, ask Rust which recording it will finalize into
@@ -439,6 +451,7 @@ async function rollbackAndClose() {
 }
 
 async function startRecording() {
+  runtimeMicFailureHandled = false;
   // Surface initialization before any settings, permission, or device work so
   // every launcher has an immediate and honest state to render.
   broadcastState('starting');
@@ -542,6 +555,24 @@ async function discardRecording() {
   await closeWindow();
 }
 
+async function localFinalizationId(startAt: string | null): Promise<string | undefined> {
+  if (backend.value?.id !== 'local' || !startAt) return undefined;
+  if (effectiveLocalRecordingId.value) return effectiveLocalRecordingId.value;
+  if (localAppendId) return localAppendId;
+
+  // A very short recording can stop before the startedAt watcher finishes its
+  // lookup. Resolve the same target here so failure recovery never falls back
+  // to a fresh timestamp id when Rust actually appended to an older recording.
+  try {
+    const id = await local.recordingIdForStart(startAt, forceNew);
+    effectiveLocalRecordingId.value = id;
+    return id;
+  } catch (e) {
+    console.error('Failed to resolve local finalization id at stop', e);
+    return localRecordingIdFromStart(startAt);
+  }
+}
+
 async function handleStop() {
   if (isStopping.value) return;
   // Auto recordings that stop almost immediately (late mic-on / quick-off
@@ -587,6 +618,8 @@ async function handleStop() {
     : newBlob;
 
   if (combinedBlob.size > 0 && backend.value) {
+    const finalizedLocalId =
+      prevMeta?.localRecordingId ?? await localFinalizationId(prevMeta?.startAt ?? startAt);
     stoppedBlob.value = combinedBlob;
     stoppedMeta.value = {
       startAt: prevMeta?.startAt ?? startAt,
@@ -595,6 +628,7 @@ async function handleStop() {
         (prevMeta?.durationSeconds ?? 0) + recorder.durationSeconds.value,
       meetingId: prevMeta?.meetingId ?? effectiveMeetingId.value ?? undefined,
       localAppendId: prevMeta?.localAppendId ?? localAppendId ?? undefined,
+      localRecordingId: finalizedLocalId,
       forceNew: prevMeta?.forceNew ?? forceNew ?? undefined,
     };
     await runFinalize();
@@ -603,6 +637,25 @@ async function handleStop() {
       console.error('handleStop: backend not initialized; discarding recording');
     }
     await closeWindow();
+  }
+}
+
+async function handleRuntimeMicrophoneFailure() {
+  if (
+    runtimeMicFailureHandled
+    || isStopping.value
+    || !recorder.isRecording.value
+  ) return;
+  runtimeMicFailureHandled = true;
+  void emit('recording://capture-failed', {
+    message: RUNTIME_MIC_FAILURE_MESSAGE,
+  }).catch(() => {});
+  try {
+    // useRecorder has already paused encoding, so this normal stop path flushes
+    // and finalizes only the audio captured before the endpoint failed.
+    await handleStop();
+  } catch (error) {
+    console.error('Failed to finalize after microphone capture ended', error);
   }
 }
 
@@ -723,6 +776,15 @@ async function runFinalize() {
     ) {
       effectiveMeetingId.value = result.meetingId;
     }
+    if (
+      result.backend === 'local' &&
+      typeof result.id === 'string' &&
+      stoppedMeta.value
+    ) {
+      // Rust is authoritative: a requested append can fall back to a fresh
+      // recording if the target is no longer appendable.
+      stoppedMeta.value.localRecordingId = result.id;
+    }
     uploadResult.value = 'success';
     stoppedBlob.value = null;
     stoppedMeta.value = null;
@@ -730,6 +792,36 @@ async function runFinalize() {
     closeTimer = setTimeout(() => { closeTimer = null; void closeWindow(); }, SUCCESS_CLOSE_MS);
   } catch (err) {
     console.error('Finalize failed:', err);
+    // Local transcription failures are terminal but recoverable: Rust writes
+    // the audio + Failed metadata before returning the error, and Meeting
+    // detail owns retry from that persisted audio. Do not retain the hidden
+    // waveform (and block a new recording) once persistence is confirmed.
+    const meta = stoppedMeta.value;
+    if (backend.value.id === 'local' && meta) {
+      // Failed append transcription is intentionally persisted by Rust as a
+      // fresh clip (the target stays untouched). Other failures can belong to
+      // the selected target, so probe both deterministic candidates and keep
+      // the metadata aligned with whichever record actually exists as Failed.
+      const freshId = localRecordingIdFromStart(meta.startAt ?? meta.endAt);
+      const failedCandidates = [...new Set([freshId, meta.localRecordingId].filter(
+        (id): id is string => typeof id === 'string' && id.length > 0,
+      ))];
+      for (const failedId of failedCandidates) {
+        try {
+          const persisted = await local.recordingStatus(failedId);
+          if (persisted.status === 'failed') {
+            meta.localRecordingId = failedId;
+            stoppedBlob.value = null;
+            stoppedMeta.value = null;
+            await closeWindow();
+            return;
+          }
+        } catch {
+          // Try the other possible target. If neither can be confirmed, retain
+          // the in-memory blob and recovery controls so audio is never lost.
+        }
+      }
+    }
     // Stay open on failure so the user can retry or dismiss.
     uploadResult.value = 'failed';
   } finally {
