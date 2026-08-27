@@ -1365,6 +1365,52 @@ describe('LibraryView', () => {
     expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
+  // Starting a second recording while the first still holds the recorder pill:
+  // the backend drops the queued request and reports which recording blocked it
+  // and in what state, rather than leaving Start stuck forever (#320).
+  it('names the meeting still uploading when a second recording is blocked', async () => {
+    listMeetings.mockResolvedValue([item({ id: '42', title: 'Weekly Standup' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://start-failed', { reason: 'uploading', meetingId: 42 });
+    await flushPromises();
+
+    const error = wrapper.get('.recording-start-error').text();
+    expect(error).toContain('Weekly Standup');
+    expect(error).toContain('still uploading');
+    expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
+  });
+
+  it('says the blocking meeting is still recording rather than uploading', async () => {
+    listMeetings.mockResolvedValue([item({ id: '42', title: 'Weekly Standup' })]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://start-failed', { reason: 'capturing', meetingId: 42 });
+    await flushPromises();
+
+    const error = wrapper.get('.recording-start-error').text();
+    expect(error).toContain('Weekly Standup');
+    expect(error).toContain('still recording');
+    expect(error).not.toContain('uploading');
+  });
+
+  it('still explains a blocked start when the meeting is not in the list', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+
+    emitEvent('recording://state', true);
+    emitEvent('recording://start-failed', { reason: 'uploading', meetingId: null });
+    await flushPromises();
+
+    expect(wrapper.get('.recording-start-error').text()).toContain('previous recording');
+    expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
+  });
+
   it('renders the PendingUploads section inside the sidebar', async () => {
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView, {

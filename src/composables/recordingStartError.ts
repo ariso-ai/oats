@@ -36,3 +36,51 @@ export function recordingStartErrorMessage(error: unknown): string {
   }
   return 'Oats could not start recording. Check that your audio devices are connected and available, then try again.';
 }
+
+/** Why a queued recording never started: the recorder pill already up refused to
+ * give up the one window slot. Mirrors the `reason` values the backend emits
+ * from `open_waveform_window`'s yield-expiry branch. */
+export type RecordingBlockedReason = 'capturing' | 'uploading';
+
+export interface RecordingBlocked {
+  reason: RecordingBlockedReason;
+  /** The meeting holding the recorder, as a `MeetingListItem` id. Null when the
+   * incumbent has no meeting attached (an ad-hoc local recording). */
+  meetingId: string | null;
+}
+
+/** Read a `recording://start-failed` payload emitted by the yield-expiry branch.
+ * Returns null for every other start failure — those carry a ready-made
+ * `message` and are handled by `recordingStartErrorMessage`. */
+export function recordingBlockedPayload(payload: unknown): RecordingBlocked | null {
+  if (typeof payload !== 'object' || payload === null || !('reason' in payload)) return null;
+  const { reason } = payload as { reason: unknown };
+  if (reason !== 'capturing' && reason !== 'uploading') return null;
+  const raw = 'meetingId' in payload ? (payload as { meetingId: unknown }).meetingId : null;
+  const meetingId =
+    typeof raw === 'number' && Number.isFinite(raw)
+      ? String(raw)
+      : typeof raw === 'string' && raw.length > 0
+        ? raw
+        : null;
+  return { reason, meetingId };
+}
+
+/** Explain which recording is holding the recorder and what clears it, naming
+ * the meeting when the caller could resolve a title. The two states are not
+ * interchangeable — a pill mid-capture is not uploading, and telling the user to
+ * wait for an upload that never runs leaves them stuck (#320). */
+export function recordingBlockedMessage(
+  reason: RecordingBlockedReason,
+  title: string | null,
+): string {
+  const named = title !== null && title.trim().length > 0;
+  if (reason === 'capturing') {
+    return named
+      ? `“${title!.trim()}” is still recording. Stop it before starting a new one.`
+      : 'Another recording is still in progress. Stop it before starting a new one.';
+  }
+  return named
+    ? `“${title!.trim()}” is still uploading. Try again once it finishes.`
+    : 'The previous recording is still uploading. Try again once it finishes.';
+}
