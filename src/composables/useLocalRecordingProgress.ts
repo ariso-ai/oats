@@ -7,18 +7,22 @@ export type LocalProgressStage =
   | 'transcribing'
   | 'transcript-failed'
   | 'notes-pending'
+  | 'notes-updating'
   | 'notes-failed'
+  | 'notes-update-failed'
   | 'ready';
 
-/** Derive the UI stage from a recording's status view. A present note ('ready')
- *  always wins; a `failed` recording status means transcription failed. */
+/** Derive the UI stage from a recording's status view. Existing note content
+ *  stays readable while an update runs or fails, so those states remain
+ *  distinct from first-note generation/failure. */
 export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (!s) return 'idle';
   if (s.status === 'failed') return 'transcript-failed';
   if (s.status === 'recording' || s.status === 'transcribing') return 'transcribing';
   // status === 'done'
-  if (s.hasNote || s.notesStatus === 'ready') return 'ready';
-  if (s.notesStatus === 'failed') return 'notes-failed';
+  if (s.notesStatus === 'updating') return 'notes-updating';
+  if (s.notesStatus === 'failed') return s.hasNote ? 'notes-update-failed' : 'notes-failed';
+  if (s.hasNote) return 'ready';
   return 'notes-pending';
 }
 
@@ -71,7 +75,10 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
       const s = await local.recordingStatus(id);
       if (my !== token) return;
       status.value = s;
-      shouldContinue = stage.value === 'transcribing' || stage.value === 'notes-pending';
+      shouldContinue =
+        stage.value === 'transcribing' ||
+        stage.value === 'notes-pending' ||
+        stage.value === 'notes-updating';
     } catch (e) {
       if (my !== token) return;
       console.error('local recording status poll failed', e);
@@ -80,7 +87,8 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
       shouldContinue =
         status.value == null ||
         stage.value === 'transcribing' ||
-        stage.value === 'notes-pending';
+        stage.value === 'notes-pending' ||
+        stage.value === 'notes-updating';
     }
     if (my !== token) return;
     // Keep polling only while there is still work in flight.
@@ -113,7 +121,12 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     // Optimistic: show "Generating Transcript" immediately. Poll only AFTER the
     // retry RPC resolves — until then the backend still reports the prior
     // terminal state, and a poll would clobber the optimistic stage and stop.
-    status.value = { status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending' };
+    status.value = {
+      status: 'transcribing',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    };
     try {
       await local.retryTranscription(id);
     } catch (e) {
@@ -128,10 +141,17 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     const id = getId();
     if (!id || retrying.value) return;
     retrying.value = true;
-    // Optimistic: show "Generating AI Notes" immediately. Poll only AFTER the
-    // retry RPC resolves (it clears notes_error), so the first poll reflects the
-    // regenerating state instead of the prior failure.
-    status.value = { status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending' };
+    // Preserve a readable prior note while the retry/update runs. Poll only
+    // after the RPC resolves so a stale failed snapshot cannot overwrite this
+    // optimistic state before the backend records the active job.
+    const hasExistingNote = !!status.value?.hasNote;
+    status.value = {
+      status: 'done',
+      hasTranscript: status.value?.hasTranscript ?? true,
+      hasNote: hasExistingNote,
+      notesStatus: hasExistingNote ? 'updating' : 'pending',
+      notesWritten: status.value?.notesWritten,
+    };
     try {
       await local.retryNotes(id);
     } catch (e) {

@@ -35,6 +35,22 @@ func argValue(_ name: String) -> String? {
     return a[i + 1]
 }
 
+func boundedIntArg(_ name: String, default defaultValue: Int, range: ClosedRange<Int>) -> Int {
+    guard let raw = argValue(name) else { return defaultValue }
+    guard let value = Int(raw), range.contains(value) else { fail("invalid \(name)") }
+    return value
+}
+
+func boundedFloatArg(
+    _ name: String, default defaultValue: Float, range: ClosedRange<Float>
+) -> Float {
+    guard let raw = argValue(name) else { return defaultValue }
+    guard let value = Float(raw), value.isFinite, range.contains(value) else {
+        fail("invalid \(name)")
+    }
+    return value
+}
+
 func stderrLine(_ msg: String) {
     FileHandle.standardError.write(Data((msg + "\n").utf8))
 }
@@ -185,6 +201,31 @@ struct NotesResult: Codable {
     let notes: String
 }
 
+struct CompletionResult: Codable {
+    let text: String
+}
+
+/// Run one bounded local-model prompt. Reducer policy and prompt construction
+/// stay in the Rust host; this command is only a platform model adapter.
+func generateCompletion(
+    container: ModelContainer,
+    prompt: String,
+    maxTokens: Int,
+    temperature: Float,
+    repetitionPenalty: Float
+) async throws -> String {
+    let session = ChatSession(
+        container,
+        instructions: "Follow the user's prompt exactly and return only the requested output.",
+        generateParameters: GenerateParameters(
+            maxTokens: maxTokens,
+            temperature: temperature,
+            repetitionPenalty: repetitionPenalty,
+            repetitionContextSize: 64))
+    let raw = try await session.respond(to: prompt)
+    return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 /// Generate a short, plain-text title from already-generated notes, reusing the
 /// loaded model container. Returns "" if nothing usable comes back.
 func generateTitle(container: ModelContainer, notes: String) async throws -> String {
@@ -296,7 +337,38 @@ let modelsURL = URL(fileURLWithPath: modelsPath)
 let asrDir = modelsURL.appendingPathComponent("parakeet-tdt-0.6b-v3")
 let diarizerDir = modelsURL.appendingPathComponent("speaker-diarization")
 
-let isNotes = arguments.count > 1 && arguments[1] == "notes"
+let command = arguments.count > 1 ? arguments[1] : "transcribe"
+let isNotes = command == "notes"
+let isCompletion = command == "llm-complete"
+
+if isCompletion {
+    guard let promptPath = argValue("--prompt") else { fail("missing --prompt") }
+    let maxTokens = boundedIntArg("--max-tokens", default: 2048, range: 1...4096)
+    let temperature = boundedFloatArg("--temperature", default: 0.3, range: 0...2)
+    let repetitionPenalty = boundedFloatArg(
+        "--repetition-penalty", default: 1.15, range: 0.5...2)
+    let prompt: String
+    do {
+        prompt = try String(contentsOf: URL(fileURLWithPath: promptPath), encoding: .utf8)
+    } catch {
+        fail("completion prompt read error")
+    }
+    runToCompletion {
+        do {
+            let container = try await loadNotesModel(modelsURL: modelsURL)
+            let text = try await generateCompletion(
+                container: container,
+                prompt: prompt,
+                maxTokens: maxTokens,
+                temperature: temperature,
+                repetitionPenalty: repetitionPenalty)
+            let data = try JSONEncoder().encode(CompletionResult(text: text))
+            FileHandle.standardOutput.write(data)
+        } catch {
+            fail("completion error: \(error)")
+        }
+    }
+}
 
 if isNotes {
     guard let transcriptPath = argValue("--transcript") else { fail("missing --transcript") }

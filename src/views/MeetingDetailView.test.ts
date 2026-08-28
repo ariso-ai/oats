@@ -934,61 +934,97 @@ describe('MeetingDetailView local generation progress', () => {
     expect(retryTranscription).toHaveBeenCalledWith('7');
   });
 
-  it('hides the chip and enables both tabs once notes are ready', async () => {
+  it('shows ready status and enables both tabs once notes are ready', async () => {
     recordingStatus.mockResolvedValue({
-      status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+      status: 'done',
+      hasTranscript: true,
+      hasNote: true,
+      notesStatus: 'ready',
+      notesWritten: '2026-06-02T10:00:00Z',
     });
     readRecordingFile.mockResolvedValue('AI body');
     const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
     await flushPromises();
 
-    expect(wrapper.find('.tab-status').exists()).toBe(false);
+    expect(wrapper.find('.tab-status-label').text()).toBe('AI Notes ready');
+    expect(wrapper.find('.tab-status .spinner').exists()).toBe(false);
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
     const aiNotes = wrapper.findAll('.seg-btn').find((b) => b.text() === 'AI Notes')!;
     expect(aiNotes.attributes('disabled')).toBeUndefined();
+    expect(wrapper.find('.note-updated').text()).toContain('Last updated');
   });
 
-  it('shows a Regenerate notes button when local AI Notes are ready and clicking it calls retryNotes', async () => {
+  it('keeps the current note readable while an update is running', async () => {
     recordingStatus.mockResolvedValue({
-      status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+      status: 'done',
+      hasTranscript: true,
+      hasNote: true,
+      notesStatus: 'updating',
+      notesWritten: '2026-06-02T10:00:00Z',
     });
-    readRecordingFile.mockResolvedValue('AI body');
-    const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
+    readRecordingFile.mockResolvedValue('Old body');
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'Old body', hasTranscript: true }));
     await flushPromises();
 
-    // AI Notes is the default active tab (note present), so the button shows.
-    const regen = wrapper.find('.tab-regen');
-    expect(regen.exists()).toBe(true);
-    expect(regen.text()).toContain('Regenerate notes');
+    expect(wrapper.find('.tab-status-label').text()).toBe('Updating AI Notes');
+    expect(wrapper.find('.tab-status .spinner').exists()).toBe(true);
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+    const aiNotes = wrapper.findAll('.seg-btn').find((button) => button.text() === 'AI Notes')!;
+    expect(aiNotes.attributes('disabled')).toBeUndefined();
+    expect(wrapper.find('.md').text()).toContain('Old body');
+    expect(wrapper.find('.note-updated').text()).toContain('Last updated');
+  });
 
-    await regen.trigger('click');
+  it('shows an update failure with Retry while preserving the current note', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'failed',
+    });
+    readRecordingFile.mockResolvedValue('Old body');
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'Old body', hasTranscript: true }));
+    await flushPromises();
+
+    expect(wrapper.find('.tab-status-label').text()).toBe('AI Notes update failed');
+    expect(wrapper.find('.md').text()).toContain('Old body');
+    await wrapper.find('.tab-retry').trigger('click');
     await flushPromises();
     expect(retryNotes).toHaveBeenCalledWith('7');
   });
 
-  it('does not show the Regenerate notes button when no AI note exists yet', async () => {
-    recordingStatus.mockResolvedValue({
-      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',
-    });
-    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
-    await flushPromises();
-    expect(wrapper.find('.tab-regen').exists()).toBe(false);
-  });
+  it('reloads the note when the successful-write timestamp advances', async () => {
+    vi.useFakeTimers();
+    try {
+      recordingStatus
+        .mockResolvedValueOnce({
+          status: 'done',
+          hasTranscript: true,
+          hasNote: true,
+          notesStatus: 'updating',
+        })
+        .mockResolvedValueOnce({
+          status: 'done',
+          hasTranscript: true,
+          hasNote: true,
+          notesStatus: 'ready',
+          notesWritten: '2026-06-02T10:02:00Z',
+        });
+      let noteReads = 0;
+      readRecordingFile.mockImplementation((_id: string, kind: string) => {
+        if (kind === 'transcript') return Promise.resolve('# Transcript\nFixture');
+        noteReads += 1;
+        return Promise.resolve(noteReads === 1 ? 'Old body' : 'New body');
+      });
+      const wrapper = await mountLocal(
+        detail({ isLocal: true, note: 'Old body', hasTranscript: true })
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2000);
+      await flushPromises();
 
-  it('does not show the Regenerate notes button for an Ariso meeting', async () => {
-    const wrapper = await mountLocal(detail({ isLocal: false, digest: 'A digest' }));
-    await flushPromises();
-    expect(wrapper.find('.tab-regen').exists()).toBe(false);
-  });
-
-  it('hides the Regenerate notes button while notes are regenerating, showing the chip instead', async () => {
-    recordingStatus.mockResolvedValue({
-      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',
-    });
-    const wrapper = await mountLocal(detail({ isLocal: true, note: 'Old body', hasTranscript: true }));
-    await flushPromises();
-    // A note exists (old body) but notes are generating -> chip owns the row.
-    expect(wrapper.find('.tab-status-label').text()).toBe('Generating AI Notes');
-    expect(wrapper.find('.tab-regen').exists()).toBe(false);
+      expect(wrapper.find('.md').text()).toContain('New body');
+      expect(readRecordingFile).toHaveBeenCalledWith('7', 'note');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -16,6 +16,7 @@ const bufferPendingAudio = vi.fn();
 const discardPendingAudio = vi.fn();
 const fetchMeetingAudio = vi.fn();
 const readRecordingAudio = vi.fn();
+const readRecordingFile = vi.fn();
 const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
 const getMeetingPrepApi = vi.fn();
@@ -32,6 +33,7 @@ vi.mock('../tauri', () => ({
     listRecordings: () => listRecordings(),
     renameRecording: (...a: unknown[]) => renameRecording(...a),
     readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
+    readRecordingFile: (...a: unknown[]) => readRecordingFile(...a),
   },
   auth: { checkSession: () => checkSession() },
   api: {
@@ -464,6 +466,26 @@ describe('ArisoBackend clips', () => {
 });
 
 describe('LocalBackend clips', () => {
+  it('getMeetingDetail reads local note and transcript fixtures', async () => {
+    readRecordingFile.mockImplementation((_id: string, kind: string) =>
+      Promise.resolve(kind === 'note' ? '# Meeting Notes\n\n## Summary\nFixture note' : '# Transcript\nFixture transcript')
+    );
+    const item = {
+      id: 'a',
+      title: 'T',
+      timestamp: '2026-06-01T10:00:00Z',
+      files: { hasAudio: true, hasNote: true, hasTranscript: true },
+    };
+
+    const detail = await new LocalBackend().getMeetingDetail(item);
+
+    expect(detail.note).toContain('Fixture note');
+    expect(detail.transcript).toContain('Fixture transcript');
+    expect(detail.hasTranscript).toBe(true);
+    expect(readRecordingFile).toHaveBeenCalledWith('a', 'note');
+    expect(readRecordingFile).toHaveBeenCalledWith('a', 'transcript');
+  });
+
   it('getMeetingDetail returns empty audioClips', async () => {
     const item = { id: 'a', title: 'T', timestamp: 't' };
     const detail = await new LocalBackend().getMeetingDetail(item);
