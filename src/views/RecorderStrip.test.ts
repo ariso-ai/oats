@@ -43,37 +43,40 @@ describe('RecorderStrip', () => {
   });
 
   it('shows 3 bars and the timer while recording', async () => {
-    const wrapper = mount(RecorderStrip);
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
     await flushPromises();
-    sendState(recording());
+    sendState(recording({ meetingId: 42 }));
     await flushPromises();
     expect(wrapper.findAll('.bar')).toHaveLength(3);
     expect(wrapper.find('.timer').text()).toBe('01:05');
   });
 
   it('pause button emits the tray pause event; resume when paused', async () => {
-    const wrapper = mount(RecorderStrip);
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
     await flushPromises();
-    sendState(recording());
+    sendState(recording({ meetingId: 42 }));
     await flushPromises();
     await wrapper.find('.pause-btn').trigger('click');
     expect(emitEvent).toHaveBeenCalledWith('tray://pause-recording');
 
-    sendState(recording({ isPaused: true }));
+    sendState(recording({ meetingId: 42, isPaused: true }));
     await flushPromises();
     await wrapper.find('.pause-btn').trigger('click');
     expect(emitEvent).toHaveBeenCalledWith('tray://resume-recording');
   });
 
   it('stop button emits the tray stop event', async () => {
-    const wrapper = mount(RecorderStrip);
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
     await flushPromises();
-    sendState(recording());
+    sendState(recording({ meetingId: 42 }));
     await flushPromises();
     await wrapper.find('.stop-btn').trigger('click');
     expect(emitEvent).toHaveBeenCalledWith('tray://stop-recording');
   });
 
+  // An unattached session's upload outcome has no row to dock on and no other
+  // place in the library to surface, so it shows wherever the user is — unlike
+  // its live phases, which never dock (see the #318 tests below).
   it('shows the uploading spinner, then the success check', async () => {
     const wrapper = mount(RecorderStrip);
     await flushPromises();
@@ -87,10 +90,10 @@ describe('RecorderStrip', () => {
   });
 
   it('shows an initializing state before capture becomes active', async () => {
-    const wrapper = mount(RecorderStrip);
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
     await flushPromises();
 
-    sendState(recording({ phase: 'starting', bars: [], durationSeconds: 0 }));
+    sendState(recording({ meetingId: 42, phase: 'starting', bars: [], durationSeconds: 0 }));
     await flushPromises();
 
     expect(wrapper.find('.spinner').exists()).toBe(true);
@@ -100,13 +103,13 @@ describe('RecorderStrip', () => {
   });
 
   it('hides after a closed phase', async () => {
-    const wrapper = mount(RecorderStrip);
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
     await flushPromises();
-    sendState(recording());
+    sendState(recording({ meetingId: 42 }));
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
 
-    sendState(recording({ phase: 'closed' }));
+    sendState(recording({ meetingId: 42, phase: 'closed' }));
     await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(false);
   });
@@ -125,19 +128,36 @@ describe('RecorderStrip', () => {
     expect(wrapper.find('.strip').exists()).toBe(false);
   });
 
-  it('docks on the meeting shown when a homeless recording started, not wherever the user later navigates', async () => {
+  // #318: a recording that belongs to no meeting (an Ariso auto-recording that
+  // matched no calendar event) must never dock — docking it above whichever
+  // meeting is on screen reads as "this meeting is being recorded".
+  it('never docks a recording with no meeting id at all', async () => {
     const wrapper = mount(RecorderStrip, { props: { meetingId: '7' } });
     await flushPromises();
     sendState(recording({ meetingId: null, localRecordingId: null }));
     await flushPromises();
-    expect(wrapper.find('.strip').exists()).toBe(true);
+    expect(wrapper.find('.strip').exists()).toBe(false);
 
-    // Navigating to a different, non-recording meeting floats it away.
+    // Not on any other meeting either, nor on the empty detail pane.
     await wrapper.setProps({ meetingId: '9' });
     expect(wrapper.find('.strip').exists()).toBe(false);
 
-    // Navigating back to the recorded meeting re-docks it.
-    await wrapper.setProps({ meetingId: '7' });
+    await wrapper.setProps({ meetingId: null });
+    expect(wrapper.find('.strip').exists()).toBe(false);
+  });
+
+  // The same unattached state resolves into a real id mid-session (a local
+  // recording finishing its append/new decision) — the strip must dock then.
+  it('docks as soon as an unattached recording resolves its id', async () => {
+    const id = '2026-06-02T14-30-05Z';
+    const wrapper = mount(RecorderStrip, { props: { meetingId: id } });
+    await flushPromises();
+    sendState(recording({ meetingId: null, localRecordingId: null }));
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(false);
+
+    sendState(recording({ meetingId: null, localRecordingId: id }));
+    await flushPromises();
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
 
@@ -199,14 +219,14 @@ describe('RecorderStrip', () => {
 
   it('clears itself when state broadcasts stop (recorder died without closing)', async () => {
     vi.useFakeTimers();
-    const wrapper = mount(RecorderStrip, { props: { meetingId: null } });
+    const wrapper = mount(RecorderStrip, { props: { meetingId: '42' } });
     await flushPromises();
-    sendState(recording({ meetingId: null }));
+    sendState(recording({ meetingId: 42 }));
     await vi.advanceTimersByTimeAsync(2000);
     expect(wrapper.find('.strip').exists()).toBe(true);
 
     // Heartbeats keep it alive…
-    sendState(recording({ meetingId: null }));
+    sendState(recording({ meetingId: 42 }));
     await vi.advanceTimersByTimeAsync(2000);
     expect(wrapper.find('.strip').exists()).toBe(true);
 
