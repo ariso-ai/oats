@@ -125,11 +125,19 @@ describe('RecorderStrip', () => {
     expect(wrapper.find('.strip').exists()).toBe(false);
   });
 
-  it('shows regardless of selection when the recording has no id at all', async () => {
+  it('docks on the meeting shown when a homeless recording started, not wherever the user later navigates', async () => {
     const wrapper = mount(RecorderStrip, { props: { meetingId: '7' } });
     await flushPromises();
     sendState(recording({ meetingId: null, localRecordingId: null }));
     await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(true);
+
+    // Navigating to a different, non-recording meeting floats it away.
+    await wrapper.setProps({ meetingId: '9' });
+    expect(wrapper.find('.strip').exists()).toBe(false);
+
+    // Navigating back to the recorded meeting re-docks it.
+    await wrapper.setProps({ meetingId: '7' });
     expect(wrapper.find('.strip').exists()).toBe(true);
   });
 

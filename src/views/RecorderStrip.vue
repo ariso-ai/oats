@@ -98,18 +98,26 @@ function recordedMeetingId(s: RecorderState): string | null {
   return s.localRecordingId ?? null;
 }
 
+// The meeting shown when this recording session's first heartbeat arrived.
+// Recordings with no id at all yet (e.g. an Ariso auto-recording awaiting
+// confirmation, or a local recording still resolving its id) have no home
+// row to compare against, so this stands in as their home until a real id
+// shows up — otherwise the strip would dock onto whatever meeting the user
+// has since navigated to instead of the one it actually belongs to.
+const homeMeetingId = ref<string | null>(null);
+
 // The strip belongs to the recorded meeting: render it only while the detail
-// panel shows that meeting. Recordings with no id at all (e.g. an Ariso
-// auto-recording awaiting confirmation) have no home row, so they show
-// wherever the user is.
+// panel shows that meeting (or, before an id exists, its docking home).
 const visible = computed(() => {
   if (!state.value) return false;
   const id = recordedMeetingId(state.value);
-  if (id == null) return true;
+  if (id == null) return homeMeetingId.value === props.meetingId;
   return id === props.meetingId;
 });
 
-watch(state, (s) => {
+watch(state, (s, prev) => {
+  if (s && !prev) homeMeetingId.value = props.meetingId;
+  else if (!s) homeMeetingId.value = null;
   emitToParent('recording-change', s ? recordedMeetingId(s) : null);
   emitToParent('recording-active', s?.phase === 'recording');
   emitToParent('recording-phase', s?.phase ?? null);
