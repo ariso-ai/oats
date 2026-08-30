@@ -1687,6 +1687,17 @@ const durationLabel = computed<string | null>(() => {
 .tab-download:disabled { opacity: 0.6; cursor: default; }
 .tab-download .ic { width: 15px; height: 15px; }
 .tab-audio { margin-left: auto; display: inline-flex; align-items: center; min-width: 0; }
+/* Play sits next to Download in the tab row, so it wears the same pill rather than the
+   pane-row styling RecordingAudioPlayer ships with. Scoped to `.tab-audio` via :deep so the
+   per-clip players in the pane below keep their own look. */
+.tab-audio :deep(.play-btn) {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-audio :deep(.play-btn:hover:not(:disabled)) { background: #fbfbfb; }
+.tab-audio :deep(.play-btn:disabled) { opacity: 0.6; cursor: default; }
 /* Once Play is pressed the child swaps to a native <audio controls>, which is designed to
    fill a pane row (`flex: 1 1 auto`). In this toolbar it must stay a fixed, row-height
    control instead of stretching and shoving the tabs around. */
