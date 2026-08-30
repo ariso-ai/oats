@@ -18,8 +18,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Documentation-only changes can't affect a build or a test, so the ~30-min
+  # matrix below is pure waste on them. This must be a *job-level* skip rather
+  # than a `paths-ignore:` on the workflow: "Validate (frontend + cargo build)"
+  # is a required status check in the main-branch ruleset, and a workflow
+  # skipped by path filtering never reports it (the PR blocks on a check that
+  # is pending forever). A job skipped by an `if:` condition still reports its
+  # check run, with a `skipped` conclusion that satisfies the requirement.
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # Ask the API which files changed instead of checking out full history —
+      # this job exists to be fast, and a clone would dominate its runtime.
+      - name: Detect non-documentation changes
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Renames report only the new path in `filename`, so pull
+          # `previous_filename` too — moving a source file into docs/ still
+          # changes the build.
+          jq_paths='.[] | .filename, (.previous_filename // empty)'
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq "$jq_paths")
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            files=$(gh api "repos/$REPO/compare/$BEFORE_SHA...$AFTER_SHA" --jq ".files | $jq_paths")
+          else
+            # A first push to a branch (or anything else we can't diff): fail
+            # safe and validate.
+            files=""
+          fi
+
+          echo "Changed files:"
+          echo "${files:-<unknown>}"
+
+          # Every path under docs/, plus README.md, is documentation. Any other
+          # changed path — or an empty/unknown list — means run the full matrix.
+          if [ -z "$files" ] || printf '%s\n' "$files" | grep -qvE '^(docs/|README\.md$)'; then
+            echo 'code=true' >> "$GITHUB_OUTPUT"
+            echo 'Non-documentation changes found: running validation.'
+          else
+            echo 'code=false' >> "$GITHUB_OUTPUT"
+            echo 'Documentation-only change: skipping validation.'
+          fi
+
   validate:
     name: ${{ matrix.job_name }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # Keep frontend and host validation under one cross-platform contract. The
     # matrix proves each native implementation builds; release signing and
     # installer publication deliberately remain outside pull-request CI.
