@@ -1969,6 +1969,8 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
 /// is always a file inside the vault, named by a validated recording id.
 #[tauri::command]
 pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
     crate::storage::validate_recording_id(&id)?;
     if !std::path::Path::new(&dest).is_absolute() {
         return Err("Destination path must be absolute.".to_string());
@@ -1991,12 +1993,15 @@ pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(),
 
     // `fs::copy(p, p)` opens the destination with truncate(true) on the same inode, so it
     // zeroes the file and still returns Ok(0) — saving onto the vault's own transcript.md
-    // would destroy the only copy and report success. `canonicalize` resolves symlinks and
-    // hardlinks; it fails harmlessly on `dest` in the normal case where the file is new.
-    if let (Ok(src_real), Ok(dest_real)) =
-        (src.canonicalize(), std::path::Path::new(&dest).canonicalize())
+    // would destroy the only copy and report success. Comparing `(dev, ino)` (not paths)
+    // catches this whenever `src` and `dest` name the same inode — symlinks, hardlinks, and
+    // case-variant paths on case-insensitive APFS included — since `fs::metadata` follows
+    // symlinks to the underlying file. It fails harmlessly on `dest` in the normal case
+    // where the file is new, and the guard simply doesn't fire.
+    if let (Ok(src_meta), Ok(dest_meta)) =
+        (std::fs::metadata(&src), std::fs::metadata(&dest))
     {
-        if src_real == dest_real {
+        if src_meta.dev() == dest_meta.dev() && src_meta.ino() == dest_meta.ino() {
             return Err(
                 "Pick a destination outside the vault — that path is the transcript itself."
                     .to_string(),
@@ -3239,6 +3244,38 @@ mod tests {
 
         assert!(err.contains("outside the vault"), "unexpected error: {err}");
         // The guard must fire BEFORE the copy — otherwise the file is already zeroed.
+        assert_eq!(std::fs::read(&src).unwrap(), body.as_bytes());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_file_refuses_to_copy_onto_a_hardlink_of_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-08-30T13-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let body = "---\ntitle: \"T\"\n---\n\n**Speaker 1** [0:00]\nHello\n";
+        let src = dir.join("transcript.md");
+        std::fs::write(&src, body).unwrap();
+
+        // A hardlink is a distinct path to the same inode, so `src.canonicalize() !=
+        // dest.canonicalize()` — the old path-based guard would miss this and let
+        // `fs::copy` truncate the shared inode. The `(dev, ino)` comparison catches it.
+        let hardlink = tmp.path().join("elsewhere.md");
+        std::fs::hard_link(&src, &hardlink).unwrap();
+
+        let err = copy_recording_file(
+            id.into(),
+            "transcript".into(),
+            hardlink.to_string_lossy().into_owned(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("outside the vault"), "unexpected error: {err}");
+        // The guard must fire BEFORE the copy — otherwise the shared inode is zeroed.
         assert_eq!(std::fs::read(&src).unwrap(), body.as_bytes());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }

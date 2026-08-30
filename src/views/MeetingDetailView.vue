@@ -1675,6 +1675,9 @@ const durationLabel = computed<string | null>(() => {
 .tab-download:hover:not(:disabled) { background: #fbfbfb; }
 .tab-download:disabled { opacity: 0.6; cursor: default; }
 .tab-download .ic { width: 15px; height: 15px; }
+/* When the generation chip is also present it owns the row's free space; the
+   button then sits directly beside it instead of splitting the gap. */
+.tab-status ~ .tab-download { margin-left: 0; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }

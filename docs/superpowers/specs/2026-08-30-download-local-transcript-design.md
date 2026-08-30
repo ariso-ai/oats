@@ -132,7 +132,8 @@ would be overhead the feature doesn't need.
 `onDownloadTranscriptClick()`:
 
 1. Guard: return if `!detail.value?.isLocal || !detail.value.hasTranscript`
-   (defensive; the disabled button should make this unreachable).
+   (defensive against the button being absent or not yet re-gated — the button
+   itself is hidden, not disabled, whenever this condition is true).
 2. Build a suggested filename:
    `sanitizeFilename(detail.title || 'Meeting') + ' transcript - ' + isoDateStamp(detail.startAt) + '.md'`
    — small local helpers (strip `/ \ : * ? " < > |` and trim; format the date
@@ -258,9 +259,10 @@ privacy guarantee by construction.
 
 ## Testing
 
-- **`MeetingDetailView.test.ts`**: Download button rendered only when
-  `detail.isLocal`; disabled with the "not ready" tooltip when
-  `!detail.hasTranscript`; click calls `pickMarkdownSavePath` then
+- **`MeetingDetailView.test.ts`**: the button is not rendered for an Ariso
+  meeting, not rendered until `detail.hasTranscript` is true, and (for a local
+  meeting with a transcript) shown only on the Transcript tab — not on the tab
+  the view opens on by default; click calls `pickMarkdownSavePath` then
   `copyRecordingFile` with the recording id, `'transcript'`, and the picked
   path; a canceled dialog (`null` path) means `copyRecordingFile` is never
   called; a rejected `copyRecordingFile` surfaces `transcriptDownloadError`
@@ -276,17 +278,19 @@ privacy guarantee by construction.
 - **Manual**: record locally, wait for transcription, download to Desktop,
   confirm the `.md` file matches
   `<vault>/.oats/recordings/<id>/transcript.md` (`diff` them) and opens
-  cleanly in Obsidian with its metadata intact. Also confirm the disabled state
-  and tooltip while a recording is still transcribing.
+  cleanly in Obsidian with its metadata intact. Also confirm no Download
+  button appears, and the Transcript tab itself can't be selected, while the
+  recording is still transcribing.
 
 ## Open questions
 
 - **Front-matter.** This spec keeps it, which makes the feature a plain file
   copy; see [What the copied file contains](#what-the-copied-file-contains).
   Confirm — this is the one answer that changes the design's shape.
-- **Button placement.** This spec puts Download inside the Transcript tab
-  itself (only relevant there) rather than the header next to Share, where it
-  would be visible but disabled on three of four tabs. Confirm.
+- **Button placement.** Resolved: the button lives in the `.card-tabs` row
+  beside Regenerate notes, gated by `showDownloadTranscript`, rather than the
+  header next to Share (where it would need to be visible but disabled on
+  three of four tabs). This was the user's explicit request during review.
 - **Filename convention.** Proposed `{title} transcript - {YYYY-MM-DD}.md`.
   Low-stakes (the save dialog lets the user rename before saving), but worth
   settling since #306 will want a consistent default.
