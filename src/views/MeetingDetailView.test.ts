@@ -22,6 +22,8 @@ const retryTranscription = vi.fn();
 const retryNotes = vi.fn();
 const apiRequest = vi.fn();
 const fetchSpeakerAudio = vi.fn();
+const pickMarkdownSavePath = vi.fn();
+const copyRecordingFile = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -44,6 +46,7 @@ vi.mock('../tauri', () => ({
     fetchSpeakerAudio: (...a: unknown[]) => fetchSpeakerAudio(...a),
   },
   shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
+  pickMarkdownSavePath: (name: string) => pickMarkdownSavePath(name),
   getDesktopConfig: () =>
     Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
   local: {
@@ -51,6 +54,8 @@ vi.mock('../tauri', () => ({
     readRecordingFile: (id: string, kind: string) => readRecordingFile(id, kind),
     retryTranscription: (id: string) => retryTranscription(id),
     retryNotes: (id: string) => retryNotes(id),
+    copyRecordingFile: (id: string, kind: string, dest: string) =>
+      copyRecordingFile(id, kind, dest),
   },
 }));
 
@@ -116,6 +121,8 @@ beforeEach(() => {
     notesStatus: 'ready',
   });
   readRecordingFile.mockResolvedValue(null);
+  pickMarkdownSavePath.mockResolvedValue('/Users/me/Desktop/export.md');
+  copyRecordingFile.mockResolvedValue(undefined);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
@@ -634,19 +641,19 @@ describe('MeetingDetailView audio player', () => {
   it('shows the audio player in the Transcript tab for an Ariso meeting', async () => {
     // Transcript is the only content, so it is the active tab on mount.
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio .play-btn').exists()).toBe(true);
   });
 
   it('renders the audio player only once the Transcript tab is opened', async () => {
     // Digest makes AI Notes the default tab; the player lives behind Transcript.
     const wrapper = await mountWith(detail({ digest: 'A quick digest', hasTranscript: true }));
-    expect(wrapper.find('.card-audio').exists()).toBe(false);
+    expect(wrapper.find('.tab-audio').exists()).toBe(false);
 
     const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
     await transcriptTab!.trigger('click');
     await flushPromises();
 
-    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio .play-btn').exists()).toBe(true);
   });
 
   it('shows the audio player for a local recording in the Transcript tab, like Ariso', async () => {
@@ -655,31 +662,31 @@ describe('MeetingDetailView audio player', () => {
     const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
     await transcriptTab!.trigger('click');
     await flushPromises();
-    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio .play-btn').exists()).toBe(true);
 
     // Play routes through the same backend.getMeetingAudio path as Ariso (local
     // reads read_recording_audio off disk).
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
     expect(getMeetingAudio).toHaveBeenCalledWith(item);
-    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio audio').exists()).toBe(true);
   });
 
   it('clicking Play fetches audio through the backend that loaded the detail', async () => {
     getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
     expect(getMeetingAudio).toHaveBeenCalledWith(item);
-    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio audio').exists()).toBe(true);
   });
 
   it('shows No audio when the meeting has no recording', async () => {
     getMeetingAudio.mockResolvedValue(null);
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
-    expect(wrapper.find('.card-audio .play-btn').text()).toContain('No audio');
+    expect(wrapper.find('.tab-audio .play-btn').text()).toContain('No audio');
   });
 
   it('renders one player per clip and filters transcript to the active clip', async () => {
@@ -797,7 +804,7 @@ describe('MeetingDetailView audio player', () => {
     expect(wrapper.find('.clip-row').exists()).toBe(false);
     expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(1);
 
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
 
     expect(getMeetingAudio).toHaveBeenCalledWith(item);
@@ -1612,5 +1619,221 @@ describe('MeetingDetailView speaker assignment', () => {
     expect(q('.sp-err')?.textContent).toContain('Only the host can do that');
     expect(q('.sp-name')).toBeNull();
     expect(wrapper!.find('.speakers-label').text()).toBe('2 unassigned');
+  });
+});
+
+describe('MeetingDetailView transcript download', () => {
+  it('does not offer download for an Ariso meeting', async () => {
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    expect(wrapper.find('.tab-download').exists()).toBe(false);
+  });
+
+  it('does not render the button until the transcript exists', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: false }));
+    expect(wrapper.find('.tab-download').exists()).toBe(false);
+  });
+
+  it('shows the button only on the Transcript tab', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: true, hasTranscript: true, note: 'AI notes body' })
+    );
+    // A local recording with notes opens on the AI Notes tab.
+    expect(wrapper.find('.tab-download').exists()).toBe(false);
+
+    const transcriptTab = wrapper
+      .findAll('.seg-btn')
+      .find((b) => b.text() === 'Transcript');
+    await transcriptTab!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.tab-download').exists()).toBe(true);
+  });
+
+  it('labels the button Download with the longer tooltip', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+    const btn = wrapper.find('.tab-download');
+    expect(btn.text()).toBe('Download');
+    expect(btn.attributes('title')).toBe('Download transcript');
+  });
+
+  it('copies the transcript to the picked path', async () => {
+    const wrapper = await mountWith(
+      detail({ id: 'rec-1', isLocal: true, hasTranscript: true, title: 'Weekly sync' })
+    );
+    const btn = wrapper.find('.tab-download');
+    expect(btn.attributes('disabled')).toBeUndefined();
+
+    await btn.trigger('click');
+    await flushPromises();
+
+    expect(pickMarkdownSavePath).toHaveBeenCalledWith('Weekly sync transcript - 2026-06-02.md');
+    expect(copyRecordingFile).toHaveBeenCalledWith('rec-1', 'transcript', '/Users/me/Desktop/export.md');
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it('does nothing when the user cancels the save dialog', async () => {
+    pickMarkdownSavePath.mockResolvedValue(null);
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+
+    expect(copyRecordingFile).not.toHaveBeenCalled();
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it('shows an inline error when the copy fails', async () => {
+    copyRecordingFile.mockRejectedValue(new Error('Permission denied'));
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.transcript-download-error').text()).toContain(
+      "Couldn't save the transcript: Permission denied"
+    );
+    // The failure is inline; the tab stays usable and the button re-enables.
+    expect(wrapper.find('.tab-download').attributes('disabled')).toBeUndefined();
+  });
+
+  it('shows an inline error when the copy rejects with a bare string', async () => {
+    // Tauri's `invoke` rejects with a plain string (e.g. the Rust command's
+    // `Err(String)`), not an `Error` instance — cover the `String(e)` branch.
+    copyRecordingFile.mockRejectedValue('copy export file: permission denied');
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+
+    const text = wrapper.find('.transcript-download-error').text();
+    expect(text).toContain("Couldn't save the transcript: copy export file: permission denied");
+    expect(text).not.toContain('[object Object]');
+    expect(text).not.toContain('undefined');
+  });
+
+  it('clears a stale download error when switching to a different meeting', async () => {
+    copyRecordingFile.mockRejectedValue(new Error('Permission denied'));
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        detail({ id: meeting.id, title: meeting.title, isLocal: true, hasTranscript: true })
+      )
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(true);
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it('ignores an export that fails after the user switched meetings', async () => {
+    // Unlike the test above, this rejection lands *after* the switch, so the
+    // reset in `load()` has already run and can't clean up behind it.
+    let rejectCopy!: (e: Error) => void;
+    copyRecordingFile.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectCopy = reject;
+      })
+    );
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        detail({ id: meeting.id, title: meeting.title, isLocal: true, hasTranscript: true })
+      )
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises(); // save dialog resolved; the copy is still in flight
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    rejectCopy(new Error('Permission denied'));
+    await flushPromises();
+
+    // The banner belongs to a meeting the user is no longer looking at.
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it("does not let a stale export re-enable the new meeting's button", async () => {
+    // The `finally` runs unconditionally, so a late rejection from meeting A
+    // would clear the flag guarding B's own in-flight export.
+    const rejecters: Array<(e: Error) => void> = [];
+    copyRecordingFile.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejecters.push(reject);
+        })
+    );
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        detail({ id: meeting.id, title: meeting.title, isLocal: true, hasTranscript: true })
+      )
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    // B starts its own export, which is still running.
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.tab-download').attributes('disabled')).toBeDefined();
+
+    rejecters[0](new Error('Permission denied')); // A's, arriving late
+    await flushPromises();
+
+    expect(wrapper.find('.tab-download').attributes('disabled')).toBeDefined();
   });
 });

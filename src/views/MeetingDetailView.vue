@@ -196,6 +196,27 @@
           <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
           Regenerate notes
         </button>
+        <!-- The single-recording play control rides in the tab row ahead of Download.
+             Multi-clip recordings keep their per-clip players in the pane below, since
+             that is a list rather than one button. -->
+        <div v-if="showTabAudio" class="tab-audio">
+          <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+        </div>
+        <!-- Download = copy the recording's existing transcript.md to a path the user
+             picks. Sits in the tab row beside Regenerate notes, and like it is shown only
+             when usable rather than rendered-and-disabled. Local only: an Ariso transcript
+             is structured chunks fetched lazily, not a file on disk. -->
+        <button
+          v-if="showDownloadTranscript"
+          class="tab-download"
+          type="button"
+          :disabled="downloadingTranscript"
+          title="Download transcript"
+          @click="onDownloadTranscriptClick"
+        >
+          <svg viewBox="0 0 24 24" class="ic"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+          Download
+        </button>
       </div>
 
       <!-- Content -->
@@ -285,6 +306,9 @@
         </div>
 
         <div v-show="activeTab === 'transcript'" class="tab-pane">
+          <p v-if="transcriptDownloadError" class="transcript-download-error" role="alert">
+            ⚠ {{ transcriptDownloadError }}
+          </p>
           <!-- Audio playback sits right under the tabs, surfaced only while the
                Transcript tab is active; keyed by meeting id so switching selection
                remounts the player instead of leaking the previous blob URL. Both
@@ -292,35 +316,32 @@
                getMeetingAudio (Ariso fetches /meeting-notes/{id}/audio, local reads
                read_recording_audio off disk), and the player shows "No audio" when
                that resolves to null. -->
-          <div v-if="activeTab === 'transcript'" class="card-audio">
-            <template v-if="audioClips.length > 1">
-              <div
-                v-for="(clip, i) in audioClips"
-                :key="clip.transcript_id"
-                class="clip-row"
-                :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
-                role="button"
-                tabindex="0"
-                :aria-pressed="clip.transcript_id === activeClipId"
-                @click="activeClipId = clip.transcript_id"
-                @keydown.enter="activeClipId = clip.transcript_id"
-                @keydown.space.prevent="activeClipId = clip.transcript_id"
+          <div v-if="activeTab === 'transcript' && audioClips.length > 1" class="card-audio">
+            <div
+              v-for="(clip, i) in audioClips"
+              :key="clip.transcript_id"
+              class="clip-row"
+              :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
+              role="button"
+              tabindex="0"
+              :aria-pressed="clip.transcript_id === activeClipId"
+              @click="activeClipId = clip.transcript_id"
+              @keydown.enter="activeClipId = clip.transcript_id"
+              @keydown.space.prevent="activeClipId = clip.transcript_id"
+            >
+              <span class="clip-label">{{ clipLabel(clip, i) }}</span>
+              <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
+              <button
+                v-if="showPerClipDelete"
+                class="clip-del-btn"
+                type="button"
+                :disabled="deletingClip"
+                title="Delete this recording"
+                @click.stop="askDeleteClip(clip)"
               >
-                <span class="clip-label">{{ clipLabel(clip, i) }}</span>
-                <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
-                <button
-                  v-if="showPerClipDelete"
-                  class="clip-del-btn"
-                  type="button"
-                  :disabled="deletingClip"
-                  title="Delete this recording"
-                  @click.stop="askDeleteClip(clip)"
-                >
-                  Delete
-                </button>
-              </div>
-            </template>
-            <RecordingAudioPlayer v-else :key="detail.id" :load="loadAudio" />
+                Delete
+              </button>
+            </div>
             <p v-if="clipDeleteError" class="clip-delete-error" role="alert">⚠ {{ clipDeleteError }}</p>
           </div>
 
@@ -405,7 +426,8 @@ import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import SpeakerAssignPopover from './SpeakerAssignPopover.vue';
 import { useSpeakerAssignment } from '../composables/useSpeakerAssignment';
 import { composeLocalShareText } from './meetingShareText';
-import { shareTextNative, local } from '../tauri';
+import { transcriptFilename } from './transcriptDownloadName';
+import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
 import { ariJoinChip } from '../composables/meetingStatus';
 import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
 import { loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
@@ -717,6 +739,26 @@ function onRegenerate(): void {
   void progress.retryNotes();
 }
 
+// The transcript's download action, shown in the tab row's right slot like
+// Regenerate notes: only on its own tab, and only once there is a transcript to
+// copy. Deliberately NOT gated on `showStatusChip` the way `showRegenerate` is —
+// a finished transcript stays downloadable while AI notes are still generating,
+// which is the most common state right after a recording ends.
+const showDownloadTranscript = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    activeTab.value === 'transcript' &&
+    !!detail.value?.hasTranscript
+);
+
+// The lone play control moves up into the tab row; a multi-clip recording keeps its
+// per-clip players in the pane instead. Gated on the Transcript tab like the audio block
+// it replaces, so it is created only when that tab is open (and torn down with it, which
+// is what revokes the blob URL).
+const showTabAudio = computed(
+  () => !!detail.value && activeTab.value === 'transcript' && audioClips.value.length <= 1
+);
+
 // Meeting prep (Ariso only): the Prep tab renders it, fetched on demand the
 // first time that tab opens and then cached for the lifetime of the loaded
 // meeting.
@@ -876,6 +918,39 @@ const deletingClip = ref(false);
 // the clip they were told "can't be undone" actually still exists.
 const clipDeleteError = ref<string | null>(null);
 
+const transcriptDownloadError = ref<string | null>(null);
+// Guards against a second dialog while one is already open (the click handler
+// is async), mirroring how `deletingClip` gates the per-clip delete button.
+const downloadingTranscript = ref(false);
+
+// Copy the recording's transcript.md to a user-picked path. Nothing is
+// composed here: the vault file is already a complete markdown document
+// (front-matter + speaker-attributed body), so the export is a byte-for-byte
+// copy and no transcript text crosses the IPC boundary.
+async function onDownloadTranscriptClick(): Promise<void> {
+  const d = detail.value;
+  if (!d?.isLocal || !d.hasTranscript || downloadingTranscript.value) return;
+  // Guarded by reqId (same pattern as loadPrep/loadTranscript). Both the save
+  // dialog and the copy outlive a meeting switch, and `load()` has already
+  // reset this state for the new selection by the time a stale export settles
+  // — so an unguarded write would blame the wrong meeting for the failure and
+  // its `finally` would clear the flag guarding the new meeting's own export.
+  const my = reqId;
+  transcriptDownloadError.value = null;
+  downloadingTranscript.value = true;
+  try {
+    const dest = await pickMarkdownSavePath(transcriptFilename(d.title, d.startAt));
+    if (!dest) return; // canceled — silent no-op
+    await local.copyRecordingFile(d.id, 'transcript', dest);
+  } catch (e) {
+    if (my !== reqId) return;
+    transcriptDownloadError.value =
+      `Couldn't save the transcript: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    if (my === reqId) downloadingTranscript.value = false;
+  }
+}
+
 function askDeleteClip(clip: MeetingAudioClip): void {
   clipDeleteError.value = null;
   clipPendingDelete.value = clip;
@@ -933,6 +1008,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showClipDeleteConfirm.value = false;
   clipPendingDelete.value = null;
   clipDeleteError.value = null;
+  transcriptDownloadError.value = null;
+  downloadingTranscript.value = false;
   await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
@@ -1527,6 +1604,7 @@ const durationLabel = computed<string | null>(() => {
 .clip-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
 .clip-del-btn:disabled { opacity: 0.6; cursor: default; }
 .clip-delete-error { margin: 4px 8px 0; font-size: 12px; color: #dc2626; }
+.transcript-download-error { margin: 0 0 8px; font-size: 12px; color: #dc2626; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
@@ -1606,6 +1684,50 @@ const durationLabel = computed<string | null>(() => {
 }
 .tab-regen:hover { background: #fbfbfb; }
 .tab-regen .ic { width: 15px; height: 15px; }
+.tab-download {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-download:hover:not(:disabled) { background: #fbfbfb; }
+.tab-download:disabled { opacity: 0.6; cursor: default; }
+.tab-download .ic { width: 15px; height: 15px; }
+/* `overflow: hidden` is the hard guarantee that the player can never paint over Download:
+   the row is `flex-wrap: nowrap`, so in a narrow window this box shrinks, and without it a
+   fixed-width child would spill out of the shrunken box and across its neighbour.
+   The padding buys back the 2px the clip would otherwise take off the child's
+   `box-shadow: 2px 2px 0` — right for the shadow, top and bottom in a symmetric pair so the
+   control stays vertically centred against Download. */
+.tab-audio {
+  margin-left: auto; display: inline-flex; align-items: center;
+  flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 2px 2px 2px 0;
+}
+/* Play sits next to Download in the tab row, so it wears the same pill rather than the
+   pane-row styling RecordingAudioPlayer ships with. Scoped to `.tab-audio` via :deep so the
+   per-clip players in the pane below keep their own look. */
+.tab-audio :deep(.play-btn) {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-audio :deep(.play-btn:hover:not(:disabled)) { background: #fbfbfb; }
+.tab-audio :deep(.play-btn:disabled) { opacity: 0.6; cursor: default; }
+/* Once Play is pressed the child swaps to a native <audio controls>, which is designed to
+   fill a pane row (`flex: 1 1 auto`). In this toolbar it takes a fixed 210px at row height
+   instead of stretching — but it stays shrinkable (`max-width: 100%`, `min-width: 0`) so a
+   narrow window narrows the player rather than pushing it into Download. */
+.tab-audio :deep(.audio-el) {
+  flex: 1 1 auto; height: 28px; width: 210px; max-width: 100%; min-width: 0;
+}
+/* The tabs and Download hold their size; the player is the one that gives. Without this the
+   browser would shrink whichever flex item it liked, including Download. */
+.segment, .tab-download { flex-shrink: 0; }
+/* When the generation chip is also present it owns the row's free space; the
+   button then sits directly beside it instead of splitting the gap. */
+.tab-status ~ .tab-download { margin-left: 0; }
+.tab-status ~ .tab-audio, .tab-audio ~ .tab-download { margin-left: 0; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }

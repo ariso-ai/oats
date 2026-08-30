@@ -10,6 +10,11 @@ export default mergeConfig(
     test: {
       environment: 'node',
       include: ['src/**/*.test.ts'],
+      // Pin the zone so date assertions don't depend on the machine running
+      // them. `isoDateStamp` formats in *local* time on purpose, so without
+      // this a midday-UTC fixture rolls to the next day at UTC+12 and up
+      // (New Zealand, Fiji) and the filename tests fail there but not here.
+      env: { TZ: 'UTC' },
     },
   })
 );
