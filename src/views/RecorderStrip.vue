@@ -98,26 +98,22 @@ function recordedMeetingId(s: RecorderState): string | null {
   return s.localRecordingId ?? null;
 }
 
-// The meeting shown when this recording session's first heartbeat arrived.
-// Recordings with no id at all yet (e.g. an Ariso auto-recording awaiting
-// confirmation, or a local recording still resolving its id) have no home
-// row to compare against, so this stands in as their home until a real id
-// shows up — otherwise the strip would dock onto whatever meeting the user
-// has since navigated to instead of the one it actually belongs to.
-const homeMeetingId = ref<string | null>(null);
-
 // The strip belongs to the recorded meeting: render it only while the detail
-// panel shows that meeting (or, before an id exists, its docking home).
+// panel shows that meeting. A recording with no id at all belongs to no row —
+// an Ariso auto-recording that matched no calendar event stays that way for
+// the whole session, a local one only until it resolves its id — so while it
+// is capturing it never docks (#318): a live strip above a meeting reads as
+// "this meeting is being recorded". The library shows its titlebar "In
+// recording" badge instead. Its upload outcome still shows wherever the user
+// is, because a homeless "Upload failed" has nowhere else to surface.
 const visible = computed(() => {
   if (!state.value) return false;
   const id = recordedMeetingId(state.value);
-  if (id == null) return homeMeetingId.value === props.meetingId;
-  return id === props.meetingId;
+  if (id != null) return id === props.meetingId;
+  return state.value.phase !== 'starting' && state.value.phase !== 'recording';
 });
 
-watch(state, (s, prev) => {
-  if (s && !prev) homeMeetingId.value = props.meetingId;
-  else if (!s) homeMeetingId.value = null;
+watch(state, (s) => {
   emitToParent('recording-change', s ? recordedMeetingId(s) : null);
   emitToParent('recording-active', s?.phase === 'recording');
   emitToParent('recording-phase', s?.phase ?? null);

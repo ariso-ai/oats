@@ -1163,33 +1163,70 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn').attributes('disabled')).toBeDefined();
   });
 
-  // Regression (#318): a recording that hasn't attached to a meeting id yet
-  // (both meetingId and localRecordingId null) used to dock in the detail
-  // pane for whatever meeting happened to be selected, rather than only the
-  // meeting shown when the recording began.
-  it('floats a homeless recording away from an unrelated meeting and re-docks on the one it started on', async () => {
+  // Regression (#318): a recording attached to no meeting at all (an Ariso
+  // auto-recording that matched no calendar event stays that way for the whole
+  // session) must never dock — the pill above a meeting reads as "this meeting
+  // is being recorded", whichever meeting happens to be on screen.
+  it('never docks an unattached recording, whichever meeting is on screen', async () => {
     listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' }), item({ id: 'b', title: 'Planning' })]);
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    // Auto-select lands on Standup (the earliest row) — that's the recording's home.
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('a');
 
     emitEvent('recorder://state', localRecorderState({ localRecordingId: null }));
     await flushPromises();
-    expect(wrapper.find('.strip').exists()).toBe(true);
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
 
-    // Navigate to the unrelated meeting — the strip must not follow it there.
     await wrapper.findAll('.meeting-item')[1].trigger('click');
     await flushPromises();
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('b');
     expect(wrapper.find('.strip').exists()).toBe(false);
     expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
+  });
 
-    // The floating indicator brings the user back to the recording's home meeting.
-    await wrapper.find('.add-btn--recording').trigger('click');
+  // An unattached recording has no meeting to navigate back to, so the titlebar
+  // indicator is a plain badge there — a button that silently does nothing on
+  // click is worse than one that never invites the click.
+  it('renders the "In recording" indicator as a badge when there is no meeting to return to', async () => {
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    emitEvent('recorder://state', localRecorderState({ localRecordingId: null }));
+    await flushPromises();
+    const badge = wrapper.find('.add-btn--recording');
+    expect(badge.exists()).toBe(true);
+    expect(badge.text()).toContain('In recording');
+    expect(badge.element.tagName).toBe('SPAN');
+
+    // Once the recording resolves its id it has a meeting to return to, so the
+    // indicator becomes a clickable button again. The resolved id synthesizes a
+    // recording row and selects it, so step off it deliberately (by id, not by
+    // row order) — on the recording's own row the strip docks and there is no
+    // indicator to assert on.
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    const standup = wrapper.findAll('.meeting-item').find((row) => row.text().includes('Standup'));
+    await standup?.trigger('click');
     await flushPromises();
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('a');
-    expect(wrapper.find('.strip').exists()).toBe(true);
+    expect(wrapper.find('.add-btn--recording').element.tagName).toBe('BUTTON');
+  });
+
+  // The docked strip and the titlebar indicator are two renderings of one rule
+  // (LibraryView mirrors RecorderStrip's own visibility) — they must never both
+  // show. An empty detail pane is where the two used to disagree.
+  it('never shows the docked strip and the titlebar indicator at the same time', async () => {
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(wrapper.find('.detail-stub').exists()).toBe(false);
+
+    emitEvent('recorder://state', localRecorderState({ localRecordingId: null }));
+    await flushPromises();
+    expect(wrapper.find('.strip').exists()).toBe(false);
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
   });
 
   // Clicking the floating recorder pill emits `recording://reveal`; the open

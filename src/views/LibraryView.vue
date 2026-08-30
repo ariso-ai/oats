@@ -31,14 +31,20 @@
       </button>
       <!-- While a recording runs off-screen (its meeting isn't shown), the
            Start button becomes a "Recording" indicator that re-docks the strip
-           when clicked. Otherwise it starts a recording, disabled while the
-           strip is already on-screen so a second recording can't begin. -->
-      <button
+           when clicked. A recording attached to no meeting has nowhere to
+           re-dock, so it renders as a plain badge rather than a button whose
+           click would silently do nothing. Otherwise it starts a recording,
+           disabled while the strip is already on-screen so a second recording
+           can't begin. -->
+      <component
+        :is="recordingMeetingId ? 'button' : 'span'"
         v-if="recordingOffscreen"
         class="add-btn add-btn--recording"
-        type="button"
-        aria-label="Show current recording"
-        title="Show current recording"
+        :class="{ 'add-btn--static': !recordingMeetingId }"
+        :type="recordingMeetingId ? 'button' : undefined"
+        :role="recordingMeetingId ? undefined : 'status'"
+        :aria-label="recordingMeetingId ? 'Show current recording' : undefined"
+        :title="recordingMeetingId ? 'Show current recording' : 'Recording in progress'"
         @click="showRecordingMeeting"
       >
         <span class="rec-wave" aria-hidden="true">
@@ -48,7 +54,7 @@
           <span class="rec-wave-bar" />
         </span>
         <span class="add-btn-label">In recording</span>
-      </button>
+      </component>
       <button
         v-else
         class="add-btn"
@@ -291,12 +297,6 @@ const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
 // Meeting the recording session belongs to (reported by the strip). Persists
 // through the upload/failed phases so the row stays selected/pinned.
 const recordingMeetingId = ref<string | null>(null);
-// The meeting shown when the current session's first heartbeat arrived. A
-// fresh session reports no meeting id for a beat (local: resolving its id) or
-// indefinitely (Ariso: auto-recording awaiting confirmation) — this session's
-// docking home for that gap, so navigating to some other meeting during it
-// doesn't wrongly keep the strip docked there. Set below alongside recordingPhase.
-const recordingHomeMeetingId = ref<string | null>(null);
 // True only while audio is actively being captured — gates the red dot so it
 // stops pulsing the moment recording ends (e.g. a lingering failed-upload pill).
 const recordingActive = ref(false);
@@ -308,26 +308,22 @@ const recordingStarting = computed(
 );
 
 // The recorder strip is docked in the detail pane when an active recording's
-// meeting is the one on-screen; while the session has no meeting id yet, its
-// docking home takes over instead. Mirrors RecorderStrip's own visibility rule.
+// meeting is the one on-screen. A recording attached to no meeting (an Ariso
+// auto-recording that matched no calendar event; a local one still resolving
+// its id) belongs to no row, so it never docks — a pill above a meeting reads
+// as "this meeting is being recorded" (#318). Mirrors RecorderStrip's own
+// visibility rule; the two must agree, or the docked strip and the titlebar
+// indicator both show (or neither does).
 const recorderStripVisible = computed(
   () =>
     recordingActive.value &&
-    (recordingMeetingId.value != null
-      ? recordingMeetingId.value === selectedItem.value?.id
-      : recordingHomeMeetingId.value === selectedItem.value?.id)
+    recordingMeetingId.value != null &&
+    recordingMeetingId.value === selectedItem.value?.id
 );
 // A recording is running but its meeting isn't on-screen (the user closed the
 // detail or navigated to another meeting). The titlebar then shows a
 // "Recording" indicator instead of the Start button.
 const recordingOffscreen = computed(() => recordingActive.value && !recorderStripVisible.value);
-// Capture the on-screen meeting the instant a new session's first heartbeat
-// arrives (recordingPhase flips from null), and release it once the session
-// ends (recordingPhase returns to null) — see recordingHomeMeetingId above.
-watch(recordingPhase, (phase, prevPhase) => {
-  if (phase != null && prevPhase == null) recordingHomeMeetingId.value = selectedItem.value?.id ?? null;
-  else if (phase == null) recordingHomeMeetingId.value = null;
-});
 // A single waveform window owns capture, upload, and failed-upload recovery.
 // Keep every launcher disabled for that window's full lifetime so a second
 // click cannot race native creation or replace a recoverable failed session.
@@ -477,7 +473,7 @@ async function clearSelection(): Promise<void> {
 // Re-dock the recorder strip: pull the in-progress recording's meeting back
 // into the detail pane (the titlebar "Recording" indicator's action).
 async function showRecordingMeeting(): Promise<void> {
-  const id = recordingMeetingId.value ?? recordingHomeMeetingId.value;
+  const id = recordingMeetingId.value;
   if (!id) return;
   const m = displayMeetings.value.find((x) => x.id === id);
   if (m) await selectMeeting(m, { userSelected: false });
@@ -1315,6 +1311,10 @@ onUnmounted(() => {
   background: #fdf3f2;
 }
 .add-btn--recording .add-btn-label { color: #c5352f; }
+/* Same pill as a non-interactive badge (an unattached recording has no meeting
+   to re-dock on), so it must not invite a click it can't honor. */
+.add-btn--static { cursor: default; }
+.add-btn--static:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: none; }
 /* Mini live waveform: four bars pulsing on a staggered cycle. */
 .rec-wave {
   display: inline-flex;
