@@ -31,6 +31,20 @@ describe('isoDateStamp', () => {
     expect(isoDateStamp(undefined)).toBe('');
     expect(isoDateStamp('not a date')).toBe('');
   });
+
+  it('formats in local time, not UTC', () => {
+    // The suite is pinned to UTC (vitest.config.ts), which makes the two
+    // indistinguishable everywhere else in this file. A meeting at 20:00 in
+    // Auckland is 08:00 UTC the *same* day, so only a UTC-based
+    // implementation would answer 2026-08-30 here.
+    const original = process.env.TZ;
+    try {
+      process.env.TZ = 'Pacific/Auckland';
+      expect(isoDateStamp('2026-08-30T20:00:00Z')).toBe('2026-08-31');
+    } finally {
+      process.env.TZ = original;
+    }
+  });
 });
 
 describe('transcriptFilename', () => {

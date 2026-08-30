@@ -930,6 +930,12 @@ const downloadingTranscript = ref(false);
 async function onDownloadTranscriptClick(): Promise<void> {
   const d = detail.value;
   if (!d?.isLocal || !d.hasTranscript || downloadingTranscript.value) return;
+  // Guarded by reqId (same pattern as loadPrep/loadTranscript). Both the save
+  // dialog and the copy outlive a meeting switch, and `load()` has already
+  // reset this state for the new selection by the time a stale export settles
+  // — so an unguarded write would blame the wrong meeting for the failure and
+  // its `finally` would clear the flag guarding the new meeting's own export.
+  const my = reqId;
   transcriptDownloadError.value = null;
   downloadingTranscript.value = true;
   try {
@@ -937,10 +943,11 @@ async function onDownloadTranscriptClick(): Promise<void> {
     if (!dest) return; // canceled — silent no-op
     await local.copyRecordingFile(d.id, 'transcript', dest);
   } catch (e) {
+    if (my !== reqId) return;
     transcriptDownloadError.value =
       `Couldn't save the transcript: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
-    downloadingTranscript.value = false;
+    if (my === reqId) downloadingTranscript.value = false;
   }
 }
 

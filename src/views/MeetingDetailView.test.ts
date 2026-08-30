@@ -1744,4 +1744,96 @@ describe('MeetingDetailView transcript download', () => {
 
     expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
   });
+
+  it('ignores an export that fails after the user switched meetings', async () => {
+    // Unlike the test above, this rejection lands *after* the switch, so the
+    // reset in `load()` has already run and can't clean up behind it.
+    let rejectCopy!: (e: Error) => void;
+    copyRecordingFile.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectCopy = reject;
+      })
+    );
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        detail({ id: meeting.id, title: meeting.title, isLocal: true, hasTranscript: true })
+      )
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises(); // save dialog resolved; the copy is still in flight
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    rejectCopy(new Error('Permission denied'));
+    await flushPromises();
+
+    // The banner belongs to a meeting the user is no longer looking at.
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it("does not let a stale export re-enable the new meeting's button", async () => {
+    // The `finally` runs unconditionally, so a late rejection from meeting A
+    // would clear the flag guarding B's own in-flight export.
+    const rejecters: Array<(e: Error) => void> = [];
+    copyRecordingFile.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejecters.push(reject);
+        })
+    );
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        detail({ id: meeting.id, title: meeting.title, isLocal: true, hasTranscript: true })
+      )
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    // B starts its own export, which is still running.
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.tab-download').attributes('disabled')).toBeDefined();
+
+    rejecters[0](new Error('Permission denied')); // A's, arriving late
+    await flushPromises();
+
+    expect(wrapper.find('.tab-download').attributes('disabled')).toBeDefined();
+  });
 });
