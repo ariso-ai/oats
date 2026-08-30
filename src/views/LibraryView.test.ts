@@ -1201,11 +1201,16 @@ describe('LibraryView', () => {
     expect(badge.element.tagName).toBe('SPAN');
 
     // Once the recording resolves its id it has a meeting to return to, so the
-    // indicator becomes a clickable button again.
+    // indicator becomes a clickable button again. The resolved id synthesizes a
+    // recording row and selects it, so step off it deliberately (by id, not by
+    // row order) — on the recording's own row the strip docks and there is no
+    // indicator to assert on.
     emitEvent('recorder://state', localRecorderState());
     await flushPromises();
-    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    const standup = wrapper.findAll('.meeting-item').find((row) => row.text().includes('Standup'));
+    await standup?.trigger('click');
     await flushPromises();
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('a');
     expect(wrapper.find('.add-btn--recording').element.tagName).toBe('BUTTON');
   });
 
