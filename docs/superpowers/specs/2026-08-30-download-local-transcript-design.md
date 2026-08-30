@@ -29,9 +29,10 @@ A local recording's Transcript tab gets a **Download** action that:
 
 - Is visible only for local recordings once the tab itself is reachable
   (`detail.isLocal`).
-- Is disabled — with an explanatory tooltip — until the transcript exists
-  (`detail.hasTranscript`, the same flag that already gates the Transcript tab
-  itself in `availableTabs`, `MeetingDetailView.vue:1161`).
+- Appears only once the transcript exists (`detail.hasTranscript`, the same
+  flag that already gates the Transcript tab itself in `availableTabs`,
+  `MeetingDetailView.vue:1161`) — the tab can't even be selected before then,
+  so there's nothing to disable.
 - Copies the recording's existing `transcript.md` to a location the user picks
   via the native OS save dialog (`@tauri-apps/plugin-dialog`'s `save()`).
 
@@ -41,10 +42,10 @@ build.** `transcript.md` is already a complete, well-formed markdown document
 so nothing here reads, transforms, or re-serializes transcript text; the bytes
 the user gets are byte-identical to the bytes in the vault.
 
-Reviewable as: open a local recording whose transcription hasn't finished —
-the Download button is present but disabled with a tooltip explaining why.
-Open one with a finished transcript, click Download, save to Desktop; the
-resulting `.md` file is byte-identical to
+Reviewable as: with no transcript yet, the Transcript tab is disabled and no
+Download button appears anywhere. Once transcription finishes, the tab
+enables and Download appears in the tab row; click it, save to Desktop, and
+confirm the resulting `.md` file is byte-identical to
 `<vault>/.oats/recordings/<id>/transcript.md`.
 
 ## Non-goals
@@ -107,19 +108,20 @@ actually unwanted.
 
 ## Design
 
-### UI: a Download button in the Transcript tab
+### UI: a Download button in the tab row
 
-Add a small header row at the top of the `activeTab === 'transcript'`
-tab-pane (`MeetingDetailView.vue:287`, above the existing `card-audio` block),
-shown only when `detail.isLocal`:
+A "Download transcript" button sits in the `.card-tabs` row, right-aligned
+beside "Regenerate notes", gated by a `showDownloadTranscript` computed
+(`isLocal && activeTab === 'transcript' && hasTranscript`) — mirroring the
+`.tab-regen` precedent, so the button is hidden rather than disabled. Since
+`hasTranscript` also gates whether the Transcript tab can be selected at all
+(`availableTabs`, `MeetingDetailView.vue:1161`), the button is simply absent
+until transcription finishes, and it appears the moment the tab does.
 
-- A "Download transcript" button, `:disabled="!detail.hasTranscript"`,
-  `:title="detail.hasTranscript ? 'Download transcript' : 'Transcript not ready yet'"` —
-  the same disabled/tooltip pattern the tab list already uses
-  (`availableTabs` sets `disabled: !d.hasTranscript` for the tab itself).
-- An inline error message (`transcriptDownloadError` ref) shown below the
-  button on failure, styled like the existing `clipDeleteError` inline message
-  (`MeetingDetailView.vue:324`) — this app has no global toast system.
+An inline error message (`transcriptDownloadError` ref) stays in the
+tab-pane, shown below on failure, styled like the existing `clipDeleteError`
+inline message (`MeetingDetailView.vue:324`) — this app has no global toast
+system.
 
 This is a plain button, not a menu — there's no option to choose (unlike the
 deferred export spec's transcript-include checkbox), so an anchored dropdown
@@ -249,8 +251,9 @@ privacy guarantee by construction.
   `copy_recording_file` returns `Err`, caught in `onDownloadTranscriptClick`
   and shown as `transcriptDownloadError` ("Couldn't save the transcript:
   {message}") below the Download button.
-- **Transcript not ready**: prevented by the disabled button + tooltip; the
-  `!exists` check in the command is defense in depth, and returns the same
+- **Transcript not ready**: the button doesn't appear until `hasTranscript` is
+  true, and the Transcript tab itself can't be selected before then either;
+  the `!exists` check in the command is defense in depth, and returns the same
   "recording file not found" message `open_recording_file` already uses.
 
 ## Testing

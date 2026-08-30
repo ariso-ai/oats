@@ -1689,6 +1689,21 @@ describe('MeetingDetailView transcript download', () => {
     expect(wrapper.find('.tab-download').attributes('disabled')).toBeUndefined();
   });
 
+  it('shows an inline error when the copy rejects with a bare string', async () => {
+    // Tauri's `invoke` rejects with a plain string (e.g. the Rust command's
+    // `Err(String)`), not an `Error` instance — cover the `String(e)` branch.
+    copyRecordingFile.mockRejectedValue('copy export file: permission denied');
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+
+    await wrapper.find('.tab-download').trigger('click');
+    await flushPromises();
+
+    const text = wrapper.find('.transcript-download-error').text();
+    expect(text).toContain("Couldn't save the transcript: copy export file: permission denied");
+    expect(text).not.toContain('[object Object]');
+    expect(text).not.toContain('undefined');
+  });
+
   it('clears a stale download error when switching to a different meeting', async () => {
     copyRecordingFile.mockRejectedValue(new Error('Permission denied'));
     getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>

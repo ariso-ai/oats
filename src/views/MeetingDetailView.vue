@@ -919,12 +919,12 @@ const downloadingTranscript = ref(false);
 async function onDownloadTranscriptClick(): Promise<void> {
   const d = detail.value;
   if (!d?.isLocal || !d.hasTranscript || downloadingTranscript.value) return;
+  transcriptDownloadError.value = null;
   downloadingTranscript.value = true;
   try {
     const dest = await pickMarkdownSavePath(transcriptFilename(d.title, d.startAt));
     if (!dest) return; // canceled — silent no-op
     await local.copyRecordingFile(d.id, 'transcript', dest);
-    transcriptDownloadError.value = null;
   } catch (e) {
     transcriptDownloadError.value =
       `Couldn't save the transcript: ${e instanceof Error ? e.message : String(e)}`;
