@@ -1960,6 +1960,28 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
         .map_err(|e| e.to_string())
 }
 
+/// Copy a recording's `ari-note.md` or `transcript.md` to a user-picked path.
+/// The save-a-copy sibling of `open_recording_file`: same id/kind validation,
+/// but the bytes land wherever the caller's save dialog pointed.
+///
+/// `kind` must be `"note"` or `"transcript"`; `dest` must be absolute. The
+/// caller chooses *where* the bytes go but never *what* they are — the source
+/// is always a file inside the vault, named by a validated recording id.
+#[tauri::command]
+pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(), String> {
+    crate::storage::validate_recording_id(&id)?;
+    if !std::path::Path::new(&dest).is_absolute() {
+        return Err("Destination path must be absolute.".to_string());
+    }
+    let src = recording_dir(&id)?.join(note_or_transcript_filename(&kind)?);
+    if !src.exists() {
+        return Err(format!("recording file not found: {}", src.display()));
+    }
+    std::fs::copy(&src, &dest)
+        .map(|_| ())
+        .map_err(|e| format!("copy export file: {e}"))
+}
+
 /// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
 /// `view_height` is the content view's height in points; `y`/`height` are the
 /// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
@@ -3140,6 +3162,67 @@ mod tests {
             "attachment present ⇒ has_audio should be true"
         );
 
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_file_copies_transcript_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-08-30T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        // Front-matter included: the export is a copy, not a re-render.
+        let body = "---\ntitle: \"Weekly sync\"\n---\n\n**Speaker 1** [0:00]\nHello\n";
+        std::fs::write(dir.join("transcript.md"), body).unwrap();
+
+        let dest = tmp.path().join("exported.md");
+        copy_recording_file(
+            id.into(),
+            "transcript".into(),
+            dest.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), body);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_file_rejects_relative_destination() {
+        // The absolute-path guard runs before any vault lookup, so this branch
+        // needs no ARISO_ROOT and touches no filesystem.
+        let err = copy_recording_file(
+            "2026-08-30T10-00-00Z".into(),
+            "transcript".into(),
+            "relative/export.md".into(),
+        )
+        .unwrap_err();
+        assert!(err.contains("absolute"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn copy_recording_file_errors_when_transcript_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-08-30T11-00-00Z";
+        crate::storage::create_recording_dir(&root, id).unwrap();
+
+        let dest = tmp.path().join("exported.md");
+        let err = copy_recording_file(
+            id.into(),
+            "transcript".into(),
+            dest.to_string_lossy().into_owned(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("recording file not found"), "unexpected error: {err}");
+        assert!(!dest.exists(), "no file should be created when the source is missing");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }
