@@ -69,7 +69,20 @@ npm run tauri:build -- -- --features prod-api
 
 # Run the frontend test suite
 npm test
+
+# Run the Rust (backend) test suite — always serially, see below
+cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 ```
+
+### Running the Rust tests
+
+**`--test-threads=1` is not optional.** Parts of the suite drive the code through process-wide state — `ARISO_ROOT`, the vault-directory override — so tests running concurrently overwrite each other's fixtures. A parallel `cargo test` currently fails around 40 tests for that reason alone, with unrelated-looking errors ("No such file or directory", `unwrap()` on a `None`).
+
+Run it locally even for a Rust-only change: the `Desktop App` workflow runs the host test suite (with the same flag) on its **Windows** leg only — the macOS leg builds the host but doesn't test it — so a macOS-side regression is yours to catch before the PR.
+
+`cargo test` also builds the Tauri host, and `tauri.conf.json` declares the `ariso-stt` sidecar as an `externalBin`, so the sidecar binary must exist before the suite will build on a fresh checkout — see [Local backend](#local-backend-on-device-transcription).
+
+If the test binary aborts before running anything, see [`cargo test` aborts with a missing Swift runtime library](#cargo-test-aborts-with-a-missing-swift-runtime-library).
 
 ## API build targets vs. transcription backend
 
@@ -173,7 +186,7 @@ Both directories are git-ignored.
 
 1. Fork the repo and create a feature branch.
 2. Make your change, with a focused scope.
-3. Run `npm test` and make sure the app builds (`npm run tauri:build`).
+3. Run both test suites — `npm test` and `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` ([why serial](#running-the-rust-tests)) — and make sure the app builds (`npm run tauri:build`).
 4. Commit using [conventional commit](#commit-conventions) messages.
 5. Open a pull request against `main`. CI (`Desktop App`) will validate it.
 
@@ -357,6 +370,21 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 No PAT is required: the `Release` workflow uses the default `GITHUB_TOKEN` (with `contents: write` + `pull-requests: write` granted at the job level). This works because the macOS signing pipeline runs as downstream jobs in the same run rather than relying on the published Release to trigger a separate workflow — the one thing the default token can't do. The Windows workflow is reached by `workflow_dispatch` (with `actions: write`), which is explicitly exempt from that restriction.
 
 ## Troubleshooting
+
+### `cargo test` aborts with a missing Swift runtime library
+
+On macOS the test binary links the Swift runtime (through the audio and sidecar code). If your toolchain can't resolve Swift's concurrency library, the binary aborts at load time — before any test runs — with a dyld error naming `libswift_Concurrency.dylib`, which reads like a build failure rather than a missing back-deployment library.
+
+Point the loader at Xcode's copy for the run:
+
+```bash
+DYLD_LIBRARY_PATH="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx" \
+  cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+```
+
+That loads a second copy of the Swift runtime, so the run then prints an `objc[…]: Class SwiftNativeNSObject is implemented in both …` warning. It is benign — expect it whenever you use the override.
+
+Only reach for this if you actually hit the abort: on a current toolchain the suite runs green without it (verified on macOS 26.6 with Xcode's default toolchain), and the override is what introduces the warning above.
 
 ### `tauri:build` fails with `Cannot find module '.../node_modules/dist/node/cli.js'`
 
