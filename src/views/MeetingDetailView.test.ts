@@ -641,19 +641,19 @@ describe('MeetingDetailView audio player', () => {
   it('shows the audio player in the Transcript tab for an Ariso meeting', async () => {
     // Transcript is the only content, so it is the active tab on mount.
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio .play-btn').exists()).toBe(true);
   });
 
   it('renders the audio player only once the Transcript tab is opened', async () => {
     // Digest makes AI Notes the default tab; the player lives behind Transcript.
     const wrapper = await mountWith(detail({ digest: 'A quick digest', hasTranscript: true }));
-    expect(wrapper.find('.card-audio').exists()).toBe(false);
+    expect(wrapper.find('.tab-audio').exists()).toBe(false);
 
     const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
     await transcriptTab!.trigger('click');
     await flushPromises();
 
-    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio .play-btn').exists()).toBe(true);
   });
 
   it('shows the audio player for a local recording in the Transcript tab, like Ariso', async () => {
@@ -662,31 +662,31 @@ describe('MeetingDetailView audio player', () => {
     const transcriptTab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript');
     await transcriptTab!.trigger('click');
     await flushPromises();
-    expect(wrapper.find('.card-audio .play-btn').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio .play-btn').exists()).toBe(true);
 
     // Play routes through the same backend.getMeetingAudio path as Ariso (local
     // reads read_recording_audio off disk).
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
     expect(getMeetingAudio).toHaveBeenCalledWith(item);
-    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio audio').exists()).toBe(true);
   });
 
   it('clicking Play fetches audio through the backend that loaded the detail', async () => {
     getMeetingAudio.mockResolvedValue(new ArrayBuffer(4));
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
     expect(getMeetingAudio).toHaveBeenCalledWith(item);
-    expect(wrapper.find('.card-audio audio').exists()).toBe(true);
+    expect(wrapper.find('.tab-audio audio').exists()).toBe(true);
   });
 
   it('shows No audio when the meeting has no recording', async () => {
     getMeetingAudio.mockResolvedValue(null);
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
-    expect(wrapper.find('.card-audio .play-btn').text()).toContain('No audio');
+    expect(wrapper.find('.tab-audio .play-btn').text()).toContain('No audio');
   });
 
   it('renders one player per clip and filters transcript to the active clip', async () => {
@@ -804,7 +804,7 @@ describe('MeetingDetailView audio player', () => {
     expect(wrapper.find('.clip-row').exists()).toBe(false);
     expect(wrapper.findAllComponents(RecordingAudioPlayer)).toHaveLength(1);
 
-    await wrapper.find('.card-audio .play-btn').trigger('click');
+    await wrapper.find('.tab-audio .play-btn').trigger('click');
     await flushPromises();
 
     expect(getMeetingAudio).toHaveBeenCalledWith(item);
@@ -1647,6 +1647,13 @@ describe('MeetingDetailView transcript download', () => {
     await flushPromises();
 
     expect(wrapper.find('.tab-download').exists()).toBe(true);
+  });
+
+  it('labels the button Download with the longer tooltip', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+    const btn = wrapper.find('.tab-download');
+    expect(btn.text()).toBe('Download');
+    expect(btn.attributes('title')).toBe('Download transcript');
   });
 
   it('copies the transcript to the picked path', async () => {

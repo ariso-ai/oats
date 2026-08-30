@@ -196,6 +196,12 @@
           <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
           Regenerate notes
         </button>
+        <!-- The single-recording play control rides in the tab row ahead of Download.
+             Multi-clip recordings keep their per-clip players in the pane below, since
+             that is a list rather than one button. -->
+        <div v-if="showTabAudio" class="tab-audio">
+          <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
+        </div>
         <!-- Download = copy the recording's existing transcript.md to a path the user
              picks. Sits in the tab row beside Regenerate notes, and like it is shown only
              when usable rather than rendered-and-disabled. Local only: an Ariso transcript
@@ -209,7 +215,7 @@
           @click="onDownloadTranscriptClick"
         >
           <svg viewBox="0 0 24 24" class="ic"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
-          Download transcript
+          Download
         </button>
       </div>
 
@@ -310,35 +316,32 @@
                getMeetingAudio (Ariso fetches /meeting-notes/{id}/audio, local reads
                read_recording_audio off disk), and the player shows "No audio" when
                that resolves to null. -->
-          <div v-if="activeTab === 'transcript'" class="card-audio">
-            <template v-if="audioClips.length > 1">
-              <div
-                v-for="(clip, i) in audioClips"
-                :key="clip.transcript_id"
-                class="clip-row"
-                :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
-                role="button"
-                tabindex="0"
-                :aria-pressed="clip.transcript_id === activeClipId"
-                @click="activeClipId = clip.transcript_id"
-                @keydown.enter="activeClipId = clip.transcript_id"
-                @keydown.space.prevent="activeClipId = clip.transcript_id"
+          <div v-if="activeTab === 'transcript' && audioClips.length > 1" class="card-audio">
+            <div
+              v-for="(clip, i) in audioClips"
+              :key="clip.transcript_id"
+              class="clip-row"
+              :class="{ 'clip-row--active': clip.transcript_id === activeClipId }"
+              role="button"
+              tabindex="0"
+              :aria-pressed="clip.transcript_id === activeClipId"
+              @click="activeClipId = clip.transcript_id"
+              @keydown.enter="activeClipId = clip.transcript_id"
+              @keydown.space.prevent="activeClipId = clip.transcript_id"
+            >
+              <span class="clip-label">{{ clipLabel(clip, i) }}</span>
+              <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
+              <button
+                v-if="showPerClipDelete"
+                class="clip-del-btn"
+                type="button"
+                :disabled="deletingClip"
+                title="Delete this recording"
+                @click.stop="askDeleteClip(clip)"
               >
-                <span class="clip-label">{{ clipLabel(clip, i) }}</span>
-                <RecordingAudioPlayer :key="clip.transcript_id" :load="() => loadClipAudio(clip)" />
-                <button
-                  v-if="showPerClipDelete"
-                  class="clip-del-btn"
-                  type="button"
-                  :disabled="deletingClip"
-                  title="Delete this recording"
-                  @click.stop="askDeleteClip(clip)"
-                >
-                  Delete
-                </button>
-              </div>
-            </template>
-            <RecordingAudioPlayer v-else :key="detail.id" :load="loadAudio" />
+                Delete
+              </button>
+            </div>
             <p v-if="clipDeleteError" class="clip-delete-error" role="alert">⚠ {{ clipDeleteError }}</p>
           </div>
 
@@ -746,6 +749,14 @@ const showDownloadTranscript = computed(
     !!detail.value?.isLocal &&
     activeTab.value === 'transcript' &&
     !!detail.value?.hasTranscript
+);
+
+// The lone play control moves up into the tab row; a multi-clip recording keeps its
+// per-clip players in the pane instead. Gated on the Transcript tab like the audio block
+// it replaces, so it is created only when that tab is open (and torn down with it, which
+// is what revokes the blob URL).
+const showTabAudio = computed(
+  () => !!detail.value && activeTab.value === 'transcript' && audioClips.value.length <= 1
 );
 
 // Meeting prep (Ariso only): the Prep tab renders it, fetched on demand the
@@ -1675,9 +1686,15 @@ const durationLabel = computed<string | null>(() => {
 .tab-download:hover:not(:disabled) { background: #fbfbfb; }
 .tab-download:disabled { opacity: 0.6; cursor: default; }
 .tab-download .ic { width: 15px; height: 15px; }
+.tab-audio { margin-left: auto; display: inline-flex; align-items: center; min-width: 0; }
+/* Once Play is pressed the child swaps to a native <audio controls>, which is designed to
+   fill a pane row (`flex: 1 1 auto`). In this toolbar it must stay a fixed, row-height
+   control instead of stretching and shoving the tabs around. */
+.tab-audio :deep(.audio-el) { flex: 0 0 auto; height: 28px; width: 210px; }
 /* When the generation chip is also present it owns the row's free space; the
    button then sits directly beside it instead of splitting the gap. */
 .tab-status ~ .tab-download { margin-left: 0; }
+.tab-status ~ .tab-audio, .tab-audio ~ .tab-download { margin-left: 0; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }
