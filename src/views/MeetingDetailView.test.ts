@@ -1675,4 +1675,38 @@ describe('MeetingDetailView transcript download', () => {
     // The failure is inline; the tab stays usable and the button re-enables.
     expect(wrapper.find('.btn-download').attributes('disabled')).toBeUndefined();
   });
+
+  it('clears a stale download error when switching to a different meeting', async () => {
+    copyRecordingFile.mockRejectedValue(new Error('Permission denied'));
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        detail({ id: meeting.id, title: meeting.title, isLocal: true, hasTranscript: true })
+      )
+    );
+
+    const first: MeetingListItem = {
+      id: 'a',
+      title: 'First',
+      timestamp: '2026-06-02T10:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+    const second: MeetingListItem = {
+      id: 'b',
+      title: 'Second',
+      timestamp: '2026-06-02T11:00:00Z',
+      files: { hasAudio: false, hasNote: false, hasTranscript: true },
+    };
+
+    const wrapper = mount(MeetingDetailView, { props: { item: first } });
+    await flushPromises();
+
+    await wrapper.find('.btn-download').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(true);
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
 });

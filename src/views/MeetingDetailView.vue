@@ -977,6 +977,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showClipDeleteConfirm.value = false;
   clipPendingDelete.value = null;
   clipDeleteError.value = null;
+  transcriptDownloadError.value = null;
+  downloadingTranscript.value = false;
   await flushPendingNoteBeforeReset();
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
