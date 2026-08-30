@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 // Broadcast when any window completes desktop auth. Settings is pre-created and
 // can mount before onboarding signs in, so it needs a cross-window refresh cue.
@@ -418,6 +418,12 @@ export const local = {
   openRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<void> {
     return invoke('open_recording_file', { id, kind });
   },
+  /** Copy a recording's note/transcript file to a user-picked absolute path.
+   *  The export is a byte-for-byte copy of the vault file — nothing is
+   *  composed or reformatted on the way out. */
+  copyRecordingFile(id: string, kind: 'note' | 'transcript', dest: string): Promise<void> {
+    return invoke('copy_recording_file', { id, kind, dest });
+  },
   /** Read a recording's note/transcript markdown for in-app rendering.
    *  Resolves to null when the file hasn't been generated yet. */
   readRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<string | null> {
@@ -556,5 +562,16 @@ export function setVaultDir(path: string): Promise<void> {
 /** Open a native folder picker; returns the chosen absolute path or null. */
 export async function pickVaultFolder(current?: string): Promise<string | null> {
   const picked = await openDialog({ directory: true, multiple: false, defaultPath: current });
+  return typeof picked === 'string' ? picked : null;
+}
+
+/** Open a native save dialog for a markdown export; returns the chosen
+ *  absolute path, or null when the user cancels. Mirrors `pickVaultFolder`.
+ *  Requires `dialog:allow-save` for the calling window. */
+export async function pickMarkdownSavePath(defaultName: string): Promise<string | null> {
+  const picked = await saveDialog({
+    defaultPath: defaultName,
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+  });
   return typeof picked === 'string' ? picked : null;
 }
