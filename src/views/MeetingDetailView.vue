@@ -1688,10 +1688,13 @@ const durationLabel = computed<string | null>(() => {
 .tab-download .ic { width: 15px; height: 15px; }
 /* `overflow: hidden` is the hard guarantee that the player can never paint over Download:
    the row is `flex-wrap: nowrap`, so in a narrow window this box shrinks, and without it a
-   fixed-width child would spill out of the shrunken box and across its neighbour. */
+   fixed-width child would spill out of the shrunken box and across its neighbour.
+   The padding buys back the 2px the clip would otherwise take off the child's
+   `box-shadow: 2px 2px 0` — right for the shadow, top and bottom in a symmetric pair so the
+   control stays vertically centred against Download. */
 .tab-audio {
   margin-left: auto; display: inline-flex; align-items: center;
-  flex: 0 1 auto; min-width: 0; overflow: hidden;
+  flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 2px 2px 2px 0;
 }
 /* Play sits next to Download in the tab row, so it wears the same pill rather than the
    pane-row styling RecordingAudioPlayer ships with. Scoped to `.tab-audio` via :deep so the
