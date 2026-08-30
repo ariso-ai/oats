@@ -43,6 +43,10 @@ const PROBE_INTERVAL_MS = 1_000;
 // Per attempt, not per check: a webview that has not registered the plugin's
 // listener yet never answers, so this is how long one lost emit costs us.
 const JS_TIMEOUT_MS = 5_000;
+// The socket binds while the plugin initialises, which is before setup() has
+// built a window — this covers the rest of setup() (vault migration, tray,
+// notification wiring) up to the point `main` exists.
+const BOOT_TIMEOUT_MS = 60_000;
 // The socket accepts as soon as the Rust side is up, which is well before the
 // main webview has booted its bundle on a cold CI run.
 const BRIDGE_TIMEOUT_MS = 120_000;
@@ -200,11 +204,26 @@ async function runChecks(send) {
     }
   };
 
-  // 1. The app is alive and enumerating its windows.
+  // 1. The app is alive and enumerating its windows. tauri.conf.json declares no
+  //    windows — every one is built partway through setup() — while the plugin's
+  //    socket binds during plugin init, before setup() runs at all. So a socket
+  //    that accepts proves only that the process started, and asking right then
+  //    reports zero windows. Wait for `main` to actually exist.
   await check("app_up", async () => {
-    const windows = await listWindows();
-    if (windows.length === 0) throw new Error("no windows reported");
-    return `windows: ${windows.map((w) => w.label).join(", ")}`;
+    const deadline = Date.now() + BOOT_TIMEOUT_MS;
+    for (;;) {
+      const windows = await listWindows();
+      if (windows.some((w) => w.label === "main")) {
+        return `windows: ${windows.map((w) => w.label).join(", ")}`;
+      }
+      if (Date.now() >= deadline) {
+        const seen = windows.length ? windows.map((w) => w.label).join(", ") : "none";
+        throw new Error(
+          `no 'main' window ${Math.round(BOOT_TIMEOUT_MS / 1000)}s after the socket came up (saw: ${seen})`,
+        );
+      }
+      await sleep(PROBE_INTERVAL_MS);
+    }
   });
 
   // 2. The Rust<->JS bridge answers — round-trip a read-only backend command.
@@ -291,7 +310,12 @@ if (!pass && !ATTACH) {
   // The dev log is the only place a compile or vite failure shows up.
   console.log(`\n--- tail of ${DEV_LOG_PATH} ---`);
   try {
-    console.log(readFileSync(DEV_LOG_PATH, "utf8").split("\n").slice(-100).join("\n"));
+    // cargo redraws its progress bar with \r, so a whole build can be a couple
+    // of "lines" — split on those too or the tail shows the top of the file.
+    const lines = readFileSync(DEV_LOG_PATH, "utf8")
+      .split(/[\r\n]/)
+      .filter((l) => l.trim() !== "");
+    console.log(lines.slice(-100).join("\n"));
   } catch {
     console.log("(no dev log was written)");
   }
