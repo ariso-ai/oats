@@ -196,6 +196,21 @@
           <svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
           Regenerate notes
         </button>
+        <!-- Download = copy the recording's existing transcript.md to a path the user
+             picks. Sits in the tab row beside Regenerate notes, and like it is shown only
+             when usable rather than rendered-and-disabled. Local only: an Ariso transcript
+             is structured chunks fetched lazily, not a file on disk. -->
+        <button
+          v-if="showDownloadTranscript"
+          class="tab-download"
+          type="button"
+          :disabled="downloadingTranscript"
+          title="Download transcript"
+          @click="onDownloadTranscriptClick"
+        >
+          <svg viewBox="0 0 24 24" class="ic"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+          Download transcript
+        </button>
       </div>
 
       <!-- Content -->
@@ -285,23 +300,9 @@
         </div>
 
         <div v-show="activeTab === 'transcript'" class="tab-pane">
-          <!-- Download = copy the recording's existing transcript.md to a path
-               the user picks. Local only: an Ariso transcript is structured
-               chunks fetched lazily, not a file on disk. -->
-          <div v-if="detail.isLocal" class="transcript-actions">
-            <button
-              class="btn-download"
-              type="button"
-              :disabled="!detail.hasTranscript || downloadingTranscript"
-              :title="detail.hasTranscript ? 'Download transcript' : 'Transcript not ready yet'"
-              @click="onDownloadTranscriptClick"
-            >
-              Download transcript
-            </button>
-            <p v-if="transcriptDownloadError" class="transcript-download-error" role="alert">
-              ⚠ {{ transcriptDownloadError }}
-            </p>
-          </div>
+          <p v-if="transcriptDownloadError" class="transcript-download-error" role="alert">
+            ⚠ {{ transcriptDownloadError }}
+          </p>
           <!-- Audio playback sits right under the tabs, surfaced only while the
                Transcript tab is active; keyed by meeting id so switching selection
                remounts the player instead of leaking the previous blob URL. Both
@@ -734,6 +735,18 @@ const showRegenerate = computed(
 function onRegenerate(): void {
   void progress.retryNotes();
 }
+
+// The transcript's download action, shown in the tab row's right slot like
+// Regenerate notes: only on its own tab, and only once there is a transcript to
+// copy. Deliberately NOT gated on `showStatusChip` the way `showRegenerate` is —
+// a finished transcript stays downloadable while AI notes are still generating,
+// which is the most common state right after a recording ends.
+const showDownloadTranscript = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    activeTab.value === 'transcript' &&
+    !!detail.value?.hasTranscript
+);
 
 // Meeting prep (Ariso only): the Prep tab renders it, fetched on demand the
 // first time that tab opens and then cached for the lifetime of the loaded
@@ -1573,15 +1586,7 @@ const durationLabel = computed<string | null>(() => {
 .clip-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
 .clip-del-btn:disabled { opacity: 0.6; cursor: default; }
 .clip-delete-error { margin: 4px 8px 0; font-size: 12px; color: #dc2626; }
-.transcript-actions { display: flex; flex-direction: column; align-items: flex-start; padding: 0 0 8px; }
-.btn-download {
-  height: 26px; padding: 0 10px;
-  background: transparent; border: 1px solid #d6d6d6; border-radius: 6px;
-  font-family: inherit; font-size: 12px; font-weight: 500; color: #6f6f6f; cursor: pointer;
-}
-.btn-download:hover:not(:disabled) { background: #f7f6f4; color: #1c1c1c; }
-.btn-download:disabled { opacity: 0.6; cursor: default; }
-.transcript-download-error { margin: 4px 0 0; font-size: 12px; color: #dc2626; }
+.transcript-download-error { margin: 0 0 8px; font-size: 12px; color: #dc2626; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
@@ -1661,6 +1666,15 @@ const durationLabel = computed<string | null>(() => {
 }
 .tab-regen:hover { background: #fbfbfb; }
 .tab-regen .ic { width: 15px; height: 15px; }
+.tab-download {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; cursor: pointer;
+}
+.tab-download:hover:not(:disabled) { background: #fbfbfb; }
+.tab-download:disabled { opacity: 0.6; cursor: default; }
+.tab-download .ic { width: 15px; height: 15px; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }

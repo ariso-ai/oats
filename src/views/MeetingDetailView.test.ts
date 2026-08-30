@@ -1625,22 +1625,35 @@ describe('MeetingDetailView speaker assignment', () => {
 describe('MeetingDetailView transcript download', () => {
   it('does not offer download for an Ariso meeting', async () => {
     const wrapper = await mountWith(detail({ hasTranscript: true }));
-    expect(wrapper.find('.btn-download').exists()).toBe(false);
+    expect(wrapper.find('.tab-download').exists()).toBe(false);
   });
 
-  it('disables the button with an explanatory tooltip until the transcript exists', async () => {
+  it('does not render the button until the transcript exists', async () => {
     const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: false }));
-    const btn = wrapper.find('.btn-download');
-    expect(btn.exists()).toBe(true);
-    expect(btn.attributes('disabled')).toBeDefined();
-    expect(btn.attributes('title')).toBe('Transcript not ready yet');
+    expect(wrapper.find('.tab-download').exists()).toBe(false);
+  });
+
+  it('shows the button only on the Transcript tab', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: true, hasTranscript: true, note: 'AI notes body' })
+    );
+    // A local recording with notes opens on the AI Notes tab.
+    expect(wrapper.find('.tab-download').exists()).toBe(false);
+
+    const transcriptTab = wrapper
+      .findAll('.seg-btn')
+      .find((b) => b.text() === 'Transcript');
+    await transcriptTab!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.tab-download').exists()).toBe(true);
   });
 
   it('copies the transcript to the picked path', async () => {
     const wrapper = await mountWith(
       detail({ id: 'rec-1', isLocal: true, hasTranscript: true, title: 'Weekly sync' })
     );
-    const btn = wrapper.find('.btn-download');
+    const btn = wrapper.find('.tab-download');
     expect(btn.attributes('disabled')).toBeUndefined();
 
     await btn.trigger('click');
@@ -1655,7 +1668,7 @@ describe('MeetingDetailView transcript download', () => {
     pickMarkdownSavePath.mockResolvedValue(null);
     const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
 
-    await wrapper.find('.btn-download').trigger('click');
+    await wrapper.find('.tab-download').trigger('click');
     await flushPromises();
 
     expect(copyRecordingFile).not.toHaveBeenCalled();
@@ -1666,14 +1679,14 @@ describe('MeetingDetailView transcript download', () => {
     copyRecordingFile.mockRejectedValue(new Error('Permission denied'));
     const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
 
-    await wrapper.find('.btn-download').trigger('click');
+    await wrapper.find('.tab-download').trigger('click');
     await flushPromises();
 
     expect(wrapper.find('.transcript-download-error').text()).toContain(
       "Couldn't save the transcript: Permission denied"
     );
     // The failure is inline; the tab stays usable and the button re-enables.
-    expect(wrapper.find('.btn-download').attributes('disabled')).toBeUndefined();
+    expect(wrapper.find('.tab-download').attributes('disabled')).toBeUndefined();
   });
 
   it('clears a stale download error when switching to a different meeting', async () => {
@@ -1700,7 +1713,7 @@ describe('MeetingDetailView transcript download', () => {
     const wrapper = mount(MeetingDetailView, { props: { item: first } });
     await flushPromises();
 
-    await wrapper.find('.btn-download').trigger('click');
+    await wrapper.find('.tab-download').trigger('click');
     await flushPromises();
     expect(wrapper.find('.transcript-download-error').exists()).toBe(true);
 
