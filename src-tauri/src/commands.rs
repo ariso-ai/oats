@@ -1969,8 +1969,6 @@ pub fn open_recording_file(app: tauri::AppHandle, id: String, kind: String) -> R
 /// is always a file inside the vault, named by a validated recording id.
 #[tauri::command]
 pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-
     crate::storage::validate_recording_id(&id)?;
     if !std::path::Path::new(&dest).is_absolute() {
         return Err("Destination path must be absolute.".to_string());
@@ -1993,15 +1991,15 @@ pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(),
 
     // `fs::copy(p, p)` opens the destination with truncate(true) on the same inode, so it
     // zeroes the file and still returns Ok(0) — saving onto the vault's own transcript.md
-    // would destroy the only copy and report success. Comparing `(dev, ino)` (not paths)
-    // catches this whenever `src` and `dest` name the same inode — symlinks, hardlinks, and
-    // case-variant paths on case-insensitive APFS included — since `fs::metadata` follows
-    // symlinks to the underlying file. It fails harmlessly on `dest` in the normal case
-    // where the file is new, and the guard simply doesn't fire.
+    // would destroy the only copy and report success. `same_file` (not a path comparison)
+    // catches this whenever `src` and `dest` name the same file — symlinks, hardlinks, and
+    // case-variant paths on case-insensitive filesystems included — since `fs::metadata`
+    // follows symlinks to the underlying file. It fails harmlessly on `dest` in the normal
+    // case where the file is new, and the guard simply doesn't fire.
     if let (Ok(src_meta), Ok(dest_meta)) =
         (std::fs::metadata(&src), std::fs::metadata(&dest))
     {
-        if src_meta.dev() == dest_meta.dev() && src_meta.ino() == dest_meta.ino() {
+        if same_file(&src_meta, &dest_meta) {
             return Err(
                 "Pick a destination outside the vault — that path is the transcript itself."
                     .to_string(),
@@ -2009,9 +2007,43 @@ pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(),
         }
     }
 
-    std::fs::copy(&src, &dest)
-        .map(|_| ())
-        .map_err(|e| format!("copy export file: {e}"))
+    // Copy into a sibling temp file and rename it into place, rather than
+    // `fs::copy(&src, &dest)` directly: that opens `dest` with O_TRUNC, so a
+    // read or disk error partway through leaves `dest` empty or truncated
+    // instead of preserving whatever was there before the export.
+    let tmp = std::path::Path::new(&dest).with_extension("tmp");
+    if let Err(e) = std::fs::copy(&src, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("copy export file: {e}"));
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("finalize export file: {e}")
+    })
+}
+
+/// True if `a` and `b` are metadata for the same file on disk, not merely the
+/// same path — symlinks, hardlinks, and case-variant paths on case-insensitive
+/// filesystems included, since `fs::metadata` follows symlinks to the
+/// underlying file.
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(windows)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    match (
+        a.volume_serial_number(),
+        a.file_index(),
+        b.volume_serial_number(),
+        b.file_index(),
+    ) {
+        (Some(av), Some(ai), Some(bv), Some(bi)) => av == bv && ai == bi,
+        _ => false,
+    }
 }
 
 /// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
