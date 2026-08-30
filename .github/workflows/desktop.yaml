@@ -18,8 +18,96 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Documentation-only changes can't affect a build or a test, so the ~30-min
+  # matrix below is pure waste on them. This must be a *job-level* skip rather
+  # than a `paths-ignore:` on the workflow: "Validate (frontend + cargo build)"
+  # is a required status check in the main-branch ruleset, and a workflow
+  # skipped by path filtering never reports it (the PR blocks on a check that
+  # is pending forever). A job skipped by an `if:` condition still reports its
+  # check run, with a `skipped` conclusion that satisfies the requirement.
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # A gate that hangs would hold the matrix behind it; fail fast instead and
+    # let `validate`'s fail-open condition take over.
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # Diff locally rather than through the compare/pull-files APIs: those cap
+      # their file lists (300 and 3000 entries), and a truncated list read as
+      # "docs only" would skip validation on a change that needs it. The repo is
+      # a few MB, so full history costs seconds against a ~30-minute matrix.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect non-documentation changes
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+
+          # Every uncertain path leads here: if we can't prove a change is
+          # documentation-only, validate it.
+          validate_everything() {
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "$1 — running validation."
+            exit 0
+          }
+
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            # HEAD is the PR's merge commit, so diffing it against the base tip
+            # yields exactly the PR's own changes.
+            base="$BASE_SHA"
+          else
+            base="$BEFORE_SHA"
+          fi
+
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            # A branch's first push, a force-push, or a grafted history.
+            validate_everything "No usable base commit to diff against"
+          fi
+
+          # --no-renames splits a rename into its old and new path, so moving a
+          # source file into docs/ still shows the source path it left behind.
+          if ! files=$(git diff --name-only --no-renames "$base" HEAD); then
+            validate_everything "Could not diff ${base}..HEAD"
+          fi
+
+          echo 'Changed files:'
+          echo "$files"
+
+          if [ -z "$files" ]; then
+            validate_everything 'No changed files reported'
+          fi
+
+          # Documentation is every path under docs/, plus the top-level
+          # README.md. Any other path means the build could be affected.
+          # A here-string (not a pipe) keeps `grep -q`'s early exit from killing
+          # the writer with SIGPIPE, which `pipefail` would turn into a false
+          # "documentation-only" verdict on a large diff.
+          if grep -qvE '^(docs/|README\.md$)' <<< "$files"; then
+            validate_everything 'Non-documentation changes found'
+          fi
+
+          echo 'code=false' >> "$GITHUB_OUTPUT"
+          echo 'Documentation-only change — skipping validation.'
+
   validate:
     name: ${{ matrix.job_name }}
+    needs: changes
+    # Skip only on an explicit documentation-only verdict. If the gate job fails
+    # outright, its output is empty and validation still runs — the safe
+    # direction, because a skipped job satisfies the required check and a gate
+    # that failed closed would wave code through unvalidated.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Keep frontend and host validation under one cross-platform contract. The
     # matrix proves each native implementation builds; release signing and
     # installer publication deliberately remain outside pull-request CI.
