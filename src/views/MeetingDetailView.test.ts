@@ -22,6 +22,8 @@ const retryTranscription = vi.fn();
 const retryNotes = vi.fn();
 const apiRequest = vi.fn();
 const fetchSpeakerAudio = vi.fn();
+const pickMarkdownSavePath = vi.fn();
+const copyRecordingFile = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -44,6 +46,7 @@ vi.mock('../tauri', () => ({
     fetchSpeakerAudio: (...a: unknown[]) => fetchSpeakerAudio(...a),
   },
   shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
+  pickMarkdownSavePath: (name: string) => pickMarkdownSavePath(name),
   getDesktopConfig: () =>
     Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
   local: {
@@ -51,6 +54,8 @@ vi.mock('../tauri', () => ({
     readRecordingFile: (id: string, kind: string) => readRecordingFile(id, kind),
     retryTranscription: (id: string) => retryTranscription(id),
     retryNotes: (id: string) => retryNotes(id),
+    copyRecordingFile: (id: string, kind: string, dest: string) =>
+      copyRecordingFile(id, kind, dest),
   },
 }));
 
@@ -116,6 +121,8 @@ beforeEach(() => {
     notesStatus: 'ready',
   });
   readRecordingFile.mockResolvedValue(null);
+  pickMarkdownSavePath.mockResolvedValue('/Users/me/Desktop/export.md');
+  copyRecordingFile.mockResolvedValue(undefined);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
@@ -1612,5 +1619,60 @@ describe('MeetingDetailView speaker assignment', () => {
     expect(q('.sp-err')?.textContent).toContain('Only the host can do that');
     expect(q('.sp-name')).toBeNull();
     expect(wrapper!.find('.speakers-label').text()).toBe('2 unassigned');
+  });
+});
+
+describe('MeetingDetailView transcript download', () => {
+  it('does not offer download for an Ariso meeting', async () => {
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    expect(wrapper.find('.btn-download').exists()).toBe(false);
+  });
+
+  it('disables the button with an explanatory tooltip until the transcript exists', async () => {
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: false }));
+    const btn = wrapper.find('.btn-download');
+    expect(btn.exists()).toBe(true);
+    expect(btn.attributes('disabled')).toBeDefined();
+    expect(btn.attributes('title')).toBe('Transcript not ready yet');
+  });
+
+  it('copies the transcript to the picked path', async () => {
+    const wrapper = await mountWith(
+      detail({ id: 'rec-1', isLocal: true, hasTranscript: true, title: 'Weekly sync' })
+    );
+    const btn = wrapper.find('.btn-download');
+    expect(btn.attributes('disabled')).toBeUndefined();
+
+    await btn.trigger('click');
+    await flushPromises();
+
+    expect(pickMarkdownSavePath).toHaveBeenCalledWith('Weekly sync transcript - 2026-06-02.md');
+    expect(copyRecordingFile).toHaveBeenCalledWith('rec-1', 'transcript', '/Users/me/Desktop/export.md');
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it('does nothing when the user cancels the save dialog', async () => {
+    pickMarkdownSavePath.mockResolvedValue(null);
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+
+    await wrapper.find('.btn-download').trigger('click');
+    await flushPromises();
+
+    expect(copyRecordingFile).not.toHaveBeenCalled();
+    expect(wrapper.find('.transcript-download-error').exists()).toBe(false);
+  });
+
+  it('shows an inline error when the copy fails', async () => {
+    copyRecordingFile.mockRejectedValue(new Error('Permission denied'));
+    const wrapper = await mountWith(detail({ isLocal: true, hasTranscript: true }));
+
+    await wrapper.find('.btn-download').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.transcript-download-error').text()).toContain(
+      "Couldn't save the transcript: Permission denied"
+    );
+    // The failure is inline; the tab stays usable and the button re-enables.
+    expect(wrapper.find('.btn-download').attributes('disabled')).toBeUndefined();
   });
 });

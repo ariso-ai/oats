@@ -285,6 +285,23 @@
         </div>
 
         <div v-show="activeTab === 'transcript'" class="tab-pane">
+          <!-- Download = copy the recording's existing transcript.md to a path
+               the user picks. Local only: an Ariso transcript is structured
+               chunks fetched lazily, not a file on disk. -->
+          <div v-if="detail.isLocal" class="transcript-actions">
+            <button
+              class="btn-download"
+              type="button"
+              :disabled="!detail.hasTranscript || downloadingTranscript"
+              :title="detail.hasTranscript ? 'Download transcript' : 'Transcript not ready yet'"
+              @click="onDownloadTranscriptClick"
+            >
+              Download transcript
+            </button>
+            <p v-if="transcriptDownloadError" class="transcript-download-error" role="alert">
+              ⚠ {{ transcriptDownloadError }}
+            </p>
+          </div>
           <!-- Audio playback sits right under the tabs, surfaced only while the
                Transcript tab is active; keyed by meeting id so switching selection
                remounts the player instead of leaking the previous blob URL. Both
@@ -405,7 +422,8 @@ import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import SpeakerAssignPopover from './SpeakerAssignPopover.vue';
 import { useSpeakerAssignment } from '../composables/useSpeakerAssignment';
 import { composeLocalShareText } from './meetingShareText';
-import { shareTextNative, local } from '../tauri';
+import { transcriptFilename } from './transcriptDownloadName';
+import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
 import { ariJoinChip } from '../composables/meetingStatus';
 import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
 import { loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
@@ -875,6 +893,32 @@ const deletingClip = ref(false);
 // dialog has already closed by then, so this is the user's only signal that
 // the clip they were told "can't be undone" actually still exists.
 const clipDeleteError = ref<string | null>(null);
+
+const transcriptDownloadError = ref<string | null>(null);
+// Guards against a second dialog while one is already open (the click handler
+// is async), mirroring how `deletingClip` gates the per-clip delete button.
+const downloadingTranscript = ref(false);
+
+// Copy the recording's transcript.md to a user-picked path. Nothing is
+// composed here: the vault file is already a complete markdown document
+// (front-matter + speaker-attributed body), so the export is a byte-for-byte
+// copy and no transcript text crosses the IPC boundary.
+async function onDownloadTranscriptClick(): Promise<void> {
+  const d = detail.value;
+  if (!d?.isLocal || !d.hasTranscript || downloadingTranscript.value) return;
+  downloadingTranscript.value = true;
+  try {
+    const dest = await pickMarkdownSavePath(transcriptFilename(d.title, d.startAt));
+    if (!dest) return; // canceled — silent no-op
+    await local.copyRecordingFile(d.id, 'transcript', dest);
+    transcriptDownloadError.value = null;
+  } catch (e) {
+    transcriptDownloadError.value =
+      `Couldn't save the transcript: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    downloadingTranscript.value = false;
+  }
+}
 
 function askDeleteClip(clip: MeetingAudioClip): void {
   clipDeleteError.value = null;
@@ -1527,6 +1571,15 @@ const durationLabel = computed<string | null>(() => {
 .clip-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
 .clip-del-btn:disabled { opacity: 0.6; cursor: default; }
 .clip-delete-error { margin: 4px 8px 0; font-size: 12px; color: #dc2626; }
+.transcript-actions { display: flex; flex-direction: column; align-items: flex-start; padding: 0 0 8px; }
+.btn-download {
+  height: 26px; padding: 0 10px;
+  background: transparent; border: 1px solid #d6d6d6; border-radius: 6px;
+  font-family: inherit; font-size: 12px; font-weight: 500; color: #6f6f6f; cursor: pointer;
+}
+.btn-download:hover:not(:disabled) { background: #f7f6f4; color: #1c1c1c; }
+.btn-download:disabled { opacity: 0.6; cursor: default; }
+.transcript-download-error { margin: 4px 0 0; font-size: 12px; color: #dc2626; }
 .meta-item { display: flex; align-items: center; gap: 4px; color: #6f6f6f; }
 .meta-item .ic { width: 15px; height: 15px; }
 .dur { color: #1c1c1c; font-size: 14px; }
