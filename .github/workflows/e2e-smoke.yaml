@@ -1,15 +1,19 @@
 name: E2E Smoke
 
-# Drives the LIVE app (Tauri dev build + the oats-desktop MCP server) and asserts it
-# boots, answers a backend invoke, and renders the Meetings window. This is the
-# regression gate for the autonomous-refactor workflow (see issue: "Autonomous
-# refactoring in CI, gated by an E2E smoke test"). It is intentionally audio/TCC-free
-# and hermetic — no recording, no transcription — so it can run on a GitHub-hosted
-# runner. The full record→transcribe tier is a separate, self-hosted follow-up.
+# Drives the LIVE app (a Tauri dev build plus tauri-plugin-mcp's socket) on macOS
+# and Windows, and asserts it boots, answers a backend invoke, and opens and
+# renders the Meetings window. This is the regression gate for the
+# autonomous-refactor workflow (see issue: "Autonomous refactoring in CI, gated by
+# an E2E smoke test"), so the checks are deterministic — no LLM in the loop, and a
+# red run means the app broke.
 #
-# Auth: the headless `claude` CLI uses a Claude Code subscription via a long-lived
-# OAuth token. Generate it locally with `claude setup-token` and store the value as
-# the repo secret CLAUDE_CODE_OAUTH_TOKEN. Without it the "Run smoke" step fails fast.
+# It is intentionally audio/TCC-free and hermetic — no recording, no transcription
+# — so it runs on GitHub-hosted runners. The full record->transcribe tier is a
+# separate, self-hosted follow-up.
+#
+# The whole run (launch, wait, assert, tear down) lives in scripts/e2e-smoke.mjs
+# so the two platforms share one implementation instead of a bash copy and a
+# PowerShell copy, and so `npm run e2e:smoke` reproduces a red build locally.
 
 on:
   pull_request:
@@ -29,156 +33,131 @@ concurrency:
 
 jobs:
   smoke:
-    name: Smoke (drive live app via MCP)
-    runs-on: [self-hosted, macOS, ARM64]
+    name: Smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            sidecar: src-tauri/binaries/ariso-stt-aarch64-apple-darwin
+          - os: windows-latest
+            sidecar: src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
+    # macos-15 is a GitHub-hosted Apple Silicon (arm64) runner.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    permissions:
-      contents: read
-    #env:
-    #  CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           cache: 'npm'
           node-version: '24'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        if: runner.os == 'macOS'
         with:
           targets: aarch64-apple-darwin
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        if: runner.os == 'Windows'
+
+      # Same key as desktop.yaml so both workflows share one registry cache.
+      # `src-tauri/target` is deliberately not cached: the debug tree runs to
+      # several GB, which alone would blow the repo's cache quota and evict the
+      # sidecar entries that are actually worth minutes.
       - name: Cache Rust dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: rust-e2e-aarch64-apple-darwin-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: rust-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            rust-e2e-aarch64-apple-darwin-
+            rust-${{ runner.os }}-
 
       - name: Install dependencies
         run: npm ci --prefer-offline
 
-      - name: Install Claude Code CLI
-        run: npm i -g @anthropic-ai/claude-code
-
-      # Sidecar build + cache: identical contract to desktop.yaml. The ariso-stt
-      # Swift sidecar is a gitignored build artifact that tauri's `externalBin`
-      # requires to exist before any cargo build (dev included). Key on the Xcode
-      # toolchain + sources so an artifact from one toolchain is never reused under
-      # another; exact-match only (a partial restore would mismatch source/toolchain).
+      # The ariso-stt sidecar is a gitignored build artifact that tauri's
+      # `externalBin` requires to exist before any cargo build, `tauri dev`
+      # included. The smoke test never executes it (no transcription), but the
+      # build won't start without it — so restore it from the cache desktop.yaml
+      # and release.yaml already populate, keyed identically so the entry is
+      # shared rather than forked.
       - name: Fingerprint Xcode toolchain
+        if: runner.os == 'macOS'
         id: toolchain
         run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
 
       - name: Cache ariso-stt sidecar artifacts
+        if: runner.os == 'macOS'
         id: sidecar-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
             src-tauri/binaries/mlx-swift_Cmlx.bundle
-          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/Package.resolved', 'src-tauri/ariso-stt/Sources/**') }}
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved', 'src-tauri/ariso-stt/macos/Sources/**') }}
 
       - name: Build ariso-stt sidecar
-        if: steps.sidecar-cache.outputs.cache-hit != 'true'
-        working-directory: src-tauri/ariso-stt
+        if: runner.os == 'macOS' && steps.sidecar-cache.outputs.cache-hit != 'true'
+        working-directory: src-tauri/ariso-stt/macos
         run: |
-          mkdir -p ../binaries
+          mkdir -p ../../binaries
           xcodebuild build -scheme ariso-stt -configuration Release \
             -destination 'generic/platform=macOS' \
             -derivedDataPath .xcode -skipMacroValidation
-          cp .xcode/Build/Products/Release/ariso-stt ../binaries/ariso-stt-aarch64-apple-darwin
-          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../binaries/
+          cp .xcode/Build/Products/Release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
 
-      # Launch the app in the background. `tauri dev` compiles Rust + starts vite
-      # itself (beforeDevCommand = npm run vite:dev). We don't wait on it to "finish"
-      # — it's a never-exiting dev server — we wait for the socket to appear. The app
-      # derives the socket from $HOME (main.rs), matching .mcp.json's
-      # ${HOME}/.ariso/run/oats-mcp.sock, so both the app and the MCP client agree
-      # without any HOME override.
-      - name: Launch app (tauri dev --features mcp)
+      - name: Fingerprint Windows Rust toolchain
+        if: runner.os == 'Windows'
+        id: windows-toolchain
+        shell: pwsh
         run: |
-          set -euo pipefail
-          echo "MCP_SOCKET=$HOME/.ariso/run/oats-mcp.sock" >> "$GITHUB_ENV"
-          # Run detached; redirect logs for the artifact + failure diagnosis.
-          nohup npm run tauri:dev:debug > tauri-dev.log 2>&1 &
-          echo "app_pid=$!" >> "$GITHUB_ENV"
+          $version = (rustc --version).Replace(' ', '-')
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Wait for MCP socket
+      - name: Cache Windows ariso-stt sidecar artifacts
+        if: runner.os == 'Windows'
+        id: windows-sidecar-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-x86_64-pc-windows-msvc.exe
+            src-tauri/binaries/llama
+            src-tauri/binaries/windows-runtime
+          key: ariso-stt-windows-x64-${{ steps.windows-toolchain.outputs.version }}-${{ hashFiles('src-tauri/ariso-stt/windows/Cargo.lock', 'src-tauri/ariso-stt/windows/Cargo.toml', 'src-tauri/ariso-stt/windows/src/**', 'src-tauri/ariso-stt/shared/**', 'scripts/build-windows-sidecar.ps1', 'scripts/prepare-windows-llama-runtime.ps1', 'scripts/prepare-windows-vc-runtime.ps1', 'scripts/import-windows-build-env.ps1') }}
+
+      - name: Build Windows ariso-stt sidecar
+        if: runner.os == 'Windows' && steps.windows-sidecar-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/build-windows-sidecar.ps1
+
+      # Fail here rather than inside the smoke run, where a missing externalBin
+      # surfaces as an opaque tauri dev compile error.
+      - name: Verify sidecar is staged
+        shell: pwsh
         run: |
-          set -euo pipefail
-          # First cold compile of the Rust tree dominates this wait; the cargo cache
-          # keeps warm runs short. Fail loudly with the dev log if it never appears.
-          for i in $(seq 1 240); do
-            if [ -S "$MCP_SOCKET" ]; then
-              echo "MCP socket ready after ~$((i*5))s"
-              exit 0
-            fi
-            if ! kill -0 "${app_pid}" 2>/dev/null; then
-              echo "::error::tauri dev exited before the MCP socket appeared."
-              tail -n 100 tauri-dev.log || true
-              exit 1
-            fi
-            sleep 5
-          done
-          echo "::error::Timed out waiting for $MCP_SOCKET"
-          tail -n 100 tauri-dev.log || true
-          exit 1
+          if (-not (Test-Path -LiteralPath "${{ matrix.sidecar }}" -PathType Leaf)) {
+            throw "Expected ${{ matrix.sidecar }} to exist before tauri dev; the sidecar cache and build both failed."
+          }
 
-      - name: Run smoke (Claude drives the app)
-        run: |
-          set -euo pipefail
-          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-            echo "::error::CLAUDE_CODE_OAUTH_TOKEN secret is not set — generate one with 'claude setup-token' and add it as a repo secret."
-            exit 1
-          fi
-          rm -f /tmp/e2e-smoke-result.json
-          # .mcp.json's env resolves the socket from ${HOME}, the same path the app
-          # used — so no override is needed here. --mcp-config loads the server even
-          # though settings.local.json (personal, gitignored) would otherwise disable it.
-          claude -p "/run-e2e-smoke" \
-            --mcp-config .mcp.json \
-            --allowedTools "mcp__oats-desktop Write Bash(cat:*)" \
-            --permission-mode acceptEdits \
-            --output-format json > /tmp/claude-e2e.json || true
-          echo "Claude result:"
-          jq -r '.result // "(no result field)"' /tmp/claude-e2e.json || cat /tmp/claude-e2e.json || true
-
-      - name: Assert smoke passed
-        run: |
-          set -euo pipefail
-          if [ ! -s /tmp/e2e-smoke-result.json ]; then
-            echo "::error::No /tmp/e2e-smoke-result.json — the smoke harness crashed (see logs/artifacts)."
-            exit 1
-          fi
-          echo "Smoke result:"
-          jq . /tmp/e2e-smoke-result.json
-          pass=$(jq -r '.pass' /tmp/e2e-smoke-result.json)
-          if [ "$pass" != "true" ]; then
-            echo "::error::Smoke checks failed."
-            exit 1
-          fi
-          echo "Smoke gate passed."
-
-      - name: Stop app
-        if: always()
-        run: kill "${app_pid}" 2>/dev/null || true
+      # One step, one script, both platforms. Its exit code is the gate.
+      - name: Run smoke
+        run: npm run e2e:smoke
+        env:
+          E2E_ARTIFACT_DIR: e2e-artifacts
 
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: e2e-smoke-diagnostics
-          path: |
-            tauri-dev.log
-            /tmp/claude-e2e.json
-            /tmp/e2e-smoke-result.json
+          name: e2e-smoke-diagnostics-${{ matrix.os }}
+          path: e2e-artifacts/
           if-no-files-found: warn
           retention-days: 7

@@ -1,4 +1,5 @@
 dist/
+e2e-artifacts/
 node_modules/
 output/
 src-tauri/target/

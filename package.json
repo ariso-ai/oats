@@ -11,7 +11,8 @@
     "tauri:build": "tauri build",
     "dmg:compose": "bash scripts/compose-dmg.sh",
     "tauri:clean": "cd src-tauri && cargo clean",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e:smoke": "node scripts/e2e-smoke.mjs"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",

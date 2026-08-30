@@ -1,71 +1,155 @@
-// Deterministic E2E smoke test for the oats desktop app.
+#!/usr/bin/env node
+// Deterministic, cross-platform E2E smoke test for the oats desktop app.
 //
-// Drives the LIVE app through the tauri-plugin-mcp unix socket — the same
-// primitives the MCP server exposes (manage_window, execute_js) — but WITHOUT an
-// LLM in the loop, so it's fast, free, and repeatable. It is the regression gate
-// for the autonomous-refactor workflow (see issue "Autonomous refactoring in CI,
-// gated by an E2E smoke test").
+//   npm run e2e:smoke          # macOS and Windows
 //
-// Prereqs (the workflow handles these):
-//   - the app is running with `--features mcp` (debug build; the MCP plugin is
-//     #[cfg(all(debug_assertions, feature = "mcp"))]).
-//   - TAURI_MCP_IPC_PATH points at its socket (~/.ariso/run/oats-mcp.sock). The
-//     socket client reads this env at import time, so it MUST be set before node
-//     loads this module.
+// It owns the whole run — launch the app, wait for it, assert, tear down — so CI
+// is a single step and the same command reproduces a red build locally. There is
+// no LLM in the loop: the checks are fixed, so a red gate means the app broke,
+// not that a model wandered.
 //
-// It is intentionally audio/TCC-free: no recording, no transcription. It only
-// proves the app booted, the Rust↔webview bridge answers, and the Meetings window
-// renders. Writes /tmp/e2e-smoke-result.json and exits non-zero on any failure.
+// It drives the LIVE app over tauri-plugin-mcp's socket, using the same
+// `socketClient` the MCP server itself calls. It is intentionally audio/TCC-free
+// — no recording, no transcription — so it only proves the app booted, the
+// Rust<->webview bridge answers, and the Meetings window opens and renders. The
+// full record->transcribe tier is a separate, self-hosted follow-up.
 //
-// Note: we reuse the package's own tool handlers (registered into a stub server)
-// rather than re-implementing the action→socket mapping. That couples us to the
-// package's internal build path; it's pinned at ^0.1.0.
+// Env knobs:
+//   E2E_ATTACH=1             drive an app you already launched (skips spawn/kill)
+//   E2E_ARTIFACT_DIR=<dir>   where the dev log and result JSON land
+//   E2E_LAUNCH_TIMEOUT_MS    how long to wait for the app (default 20m: a cold
+//                            Rust compile dominates the first run)
 
-import { writeFileSync } from "node:fs";
-import { registerAllTools } from "tauri-plugin-mcp-server/build/tools/index.js";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
+import { homedir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const RESULT_PATH = process.env.E2E_RESULT_PATH || "/tmp/e2e-smoke-result.json";
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const IS_WINDOWS = process.platform === "win32";
+const ATTACH = process.env.E2E_ATTACH === "1";
 
-// Capture each tool's handler by registering into a stub `server`. The package
-// calls server.tool(name, desc, schema, annotations, handler); grab the last
-// function arg so we don't depend on the exact arity.
-const handlers = {};
-registerAllTools({
-  tool: (name, ...rest) => {
-    handlers[name] = rest.find((a) => typeof a === "function");
-  },
-});
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR
+  ? path.resolve(process.env.E2E_ARTIFACT_DIR)
+  : path.join(REPO_ROOT, "e2e-artifacts");
+const RESULT_PATH = path.join(ARTIFACT_DIR, "e2e-smoke-result.json");
+const DEV_LOG_PATH = path.join(ARTIFACT_DIR, "tauri-dev.log");
 
-async function call(name, args) {
-  const handler = handlers[name];
-  if (!handler) throw new Error(`tool '${name}' not registered`);
-  const res = await handler(args);
-  const text = res?.content?.[0]?.text ?? "";
-  if (res?.isError) throw new Error(`${name}: ${text}`);
-  return text;
-}
+const LAUNCH_TIMEOUT_MS = Number(process.env.E2E_LAUNCH_TIMEOUT_MS ?? 20 * 60_000);
+const PROBE_INTERVAL_MS = 1_000;
+// Per attempt, not per check: a webview that has not registered the plugin's
+// listener yet never answers, so this is how long one lost emit costs us.
+const JS_TIMEOUT_MS = 5_000;
+// The socket accepts as soon as the Rust side is up, which is well before the
+// main webview has booted its bundle on a cold CI run.
+const BRIDGE_TIMEOUT_MS = 120_000;
+const RENDER_TIMEOUT_MS = 30_000;
 
-const evalJs = (window_label, code, timeout_ms = 10000) =>
-  call("execute_js", { code, window_label, timeout_ms });
+// --- IPC endpoint -----------------------------------------------------------
+//
+// Both ends must land on one endpoint, and they negotiate it differently:
+//
+//   macOS   — a Unix socket. main.rs derives <home>/.ariso/run/oats-mcp.sock, the
+//             plugin's TAURI_MCP_IPC_PATH override takes precedence over that, and
+//             the node client dials whatever TAURI_MCP_IPC_PATH says. One value,
+//             both ends.
+//   Windows — a named pipe. The node client hardcodes \\.\pipe\tmp\tauri-mcp.sock
+//             and ignores TAURI_MCP_IPC_PATH entirely (client.js
+//             getEffectiveIpcPath), while the Rust side maps its configured path
+//             through interprocess' GenericNamespaced, which prepends \\.\pipe\.
+//             So the app is handed the *relative* name `tmp\tauri-mcp.sock`, which
+//             resolves to exactly the pipe the client dials. (main.rs' own
+//             USERPROFILE default would become \\.\pipe\C:\Users\...\oats-mcp.sock,
+//             which nothing dials.)
+const IPC_PATH = IS_WINDOWS
+  ? String.raw`tmp\tauri-mcp.sock`
+  : path.join(homedir(), ".ariso", "run", "oats-mcp.sock");
+const IPC_DIAL_PATH = IS_WINDOWS ? String.raw`\\.\pipe\tmp\tauri-mcp.sock` : IPC_PATH;
 
-async function showWindow(label) {
-  // Hidden macOS WKWebViews are JS-suspended, so show + focus before execute_js.
-  await call("manage_window", { action: "show", window_label: label });
-  await call("manage_window", { action: "focus", window_label: label });
-}
-
-// Poll execute_js until the snippet resolves to boolean true, or give up.
-async function waitForTrue(label, code, { tries = 20, delayMs = 500 } = {}) {
-  let last = "";
-  for (let i = 0; i < tries; i++) {
-    last = await evalJs(label, code);
-    if (last === "true" || last === true) return;
-    await new Promise((r) => setTimeout(r, delayMs));
+// Both ends read TAURI_MCP_AUTH_TOKEN, and it wins over the token the plugin
+// generates at init. Pinning one here skips the `<socket>.token` sidecar
+// handshake, which the client cannot perform on Windows — it would look for that
+// file *inside* the pipe namespace. The token is per-run and never leaves this
+// machine; it only gates local access to the socket.
+//
+// Attaching is the exception: that app already minted its own token, so we have
+// to adopt it rather than invent one it would reject.
+if (ATTACH && !process.env.TAURI_MCP_AUTH_TOKEN && !IS_WINDOWS) {
+  try {
+    process.env.TAURI_MCP_AUTH_TOKEN = readFileSync(`${IPC_PATH}.token`, "utf8").trim();
+  } catch {
+    // No token file — fall through and let the connection fail loudly.
   }
-  throw new Error(`condition never became true (last=${JSON.stringify(last)})`);
 }
+process.env.TAURI_MCP_AUTH_TOKEN ??= randomUUID();
+// Read at import time by the client singleton, and inherited by the app we spawn.
+process.env.TAURI_MCP_IPC_PATH = IPC_PATH;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// --- app lifecycle ----------------------------------------------------------
+
+function launchApp() {
+  // `tauri dev` compiles Rust and starts vite itself (beforeDevCommand). It never
+  // exits, so nothing waits on it — readiness is the socket accepting a connection.
+  const log = openSync(DEV_LOG_PATH, "w");
+  const child = spawn("npm", ["run", "tauri:dev:debug"], {
+    cwd: REPO_ROOT,
+    stdio: ["ignore", log, log],
+    detached: !IS_WINDOWS, // own process group, so teardown reaches cargo and vite too
+    shell: IS_WINDOWS, // npm is npm.cmd here
+  });
+  closeSync(log);
+  return child;
+}
+
+function stopApp(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (IS_WINDOWS) {
+    // No process groups; taskkill /T walks the tree (npm -> cargo -> app, vite).
+    spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  } else {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+function endpointAccepts() {
+  return new Promise((resolve) => {
+    const socket = createConnection({ path: IPC_DIAL_PATH });
+    const settle = (ok) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+  });
+}
+
+async function waitForApp(child) {
+  const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await endpointAccepts()) return;
+    if (child && child.exitCode !== null) {
+      throw new Error(`tauri dev exited with code ${child.exitCode} before the app came up`);
+    }
+    await sleep(PROBE_INTERVAL_MS);
+  }
+  throw new Error(
+    `timed out after ${Math.round(LAUNCH_TIMEOUT_MS / 1000)}s waiting for ${IPC_DIAL_PATH}`,
+  );
+}
+
+// --- checks -----------------------------------------------------------------
 
 const checks = [];
+
 async function check(name, fn) {
   try {
     const detail = (await fn()) || "";
@@ -78,50 +162,140 @@ async function check(name, fn) {
   }
 }
 
-console.log("oats E2E smoke:");
+async function runChecks(send) {
+  // `send` resolves the command's structured data and rejects on failure, so
+  // every check below reads real values rather than scraping formatted text.
+  const listWindows = async () => (await send("list_windows", {})).windows ?? [];
+  // The socket protocol's own field is `operation`; `action` is only the MCP
+  // tool's public spelling, and the Rust side rejects it as a missing field.
+  const manageWindow = (operation, window_label) =>
+    send("manage_window", { operation, window_label });
+  // execute_js answers { result, type } — the value, not the wrapper, is what a
+  // check wants to assert on.
+  const evalJs = async (window_label, code) => {
+    const res = await send("execute_js", { code, window_label, timeout_ms: JS_TIMEOUT_MS });
+    return res && typeof res === "object" && "result" in res ? res.result : res;
+  };
+  // The plugin emits its request event into the webview exactly once and drops
+  // it when no listener has registered yet, so a webview that just opened burns
+  // the whole timeout instead of answering. (Its own `wait_for` loses to that
+  // race outright — one emit, no retry — which is why the render check polls
+  // from here instead.) Every attempt is a fresh emit, so a lost one costs a
+  // poll rather than the run.
+  const evalUntil = async (window_label, code, timeoutMs, accept) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = "never answered";
+    for (;;) {
+      try {
+        const value = await evalJs(window_label, code);
+        if (accept(value)) return value;
+        last = `got ${JSON.stringify(value)}`;
+      } catch (e) {
+        last = String(e?.message ?? e);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`gave up after ${Math.round(timeoutMs / 1000)}s — ${last}`);
+      }
+      await sleep(PROBE_INTERVAL_MS);
+    }
+  };
 
-// 1. App is alive — at least the headless `main` window responds.
-await check("app_up", async () => {
-  const text = await call("manage_window", { action: "list" });
-  if (!text || text === "[]") throw new Error("no windows reported");
-  const labels = [...text.matchAll(/"label"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
-  return `windows: ${labels.length ? labels.join(", ") : text.slice(0, 80)}`;
-});
+  // 1. The app is alive and enumerating its windows.
+  await check("app_up", async () => {
+    const windows = await listWindows();
+    if (windows.length === 0) throw new Error("no windows reported");
+    return `windows: ${windows.map((w) => w.label).join(", ")}`;
+  });
 
-// 2. The Rust↔JS bridge works — round-trip a read-only backend command.
-await check("backend_roundtrip", async () => {
-  await showWindow("main");
-  const text = await evalJs(
-    "main",
-    "window.__TAURI_INTERNALS__.invoke('get_desktop_config').then(c => JSON.stringify(c))",
-  );
-  const cfg = JSON.parse(text);
-  if (!cfg.webAppBaseUrl) throw new Error(`webAppBaseUrl missing in ${text}`);
-  return `webAppBaseUrl=${cfg.webAppBaseUrl}`;
-});
+  // 2. The Rust<->JS bridge answers — round-trip a read-only backend command.
+  //    `main` is the headless BootstrapView window and starts hidden; hidden
+  //    WKWebViews are JS-suspended on macOS, so it has to be shown and focused
+  //    before any execute_js. That is an OS behavior, not an app defect.
+  await check("backend_roundtrip", async () => {
+    await manageWindow("show", "main");
+    await manageWindow("focus", "main");
+    const raw = await evalUntil(
+      "main",
+      "window.__TAURI_INTERNALS__.invoke('get_desktop_config').then(c => JSON.stringify(c))",
+      BRIDGE_TIMEOUT_MS,
+      (v) => typeof v === "string" && v.startsWith("{"),
+    );
+    const config = JSON.parse(raw);
+    if (!config.webAppBaseUrl) throw new Error(`webAppBaseUrl missing in ${raw}`);
+    return `webAppBaseUrl=${config.webAppBaseUrl}`;
+  });
 
-// 3. The Meetings window opens.
-await check("library_opens", async () => {
-  await evalJs(
-    "main",
-    "window.__TAURI_INTERNALS__.invoke('create_library_window').then(() => 'ok')",
-  );
-  await showWindow("library");
-  return "";
-});
+  // 3. The Meetings window opens *and presents itself*. Deliberately no show/focus
+  //    from here: making it visible is part of what create_library_window does, so
+  //    forcing it would mask the regression this check exists to catch.
+  await check("library_opens", async () => {
+    await evalJs("main", "window.__TAURI_INTERNALS__.invoke('create_library_window')");
+    const library = (await listWindows()).find((w) => w.label === "library");
+    if (!library) throw new Error("no window labelled 'library' after create_library_window");
+    if (!library.visible) throw new Error("the library window was created but never shown");
+    return `title=${library.title}`;
+  });
 
-// 4. LibraryView.vue actually mounted (a blank webview = the Vue bundle failed
-//    to load — one bad static import breaks the whole router graph).
-await check("library_rendered", async () => {
-  await waitForTrue(
-    "library",
-    "new Promise(r => r(!!document.querySelector('.library') && !!document.querySelector('.titlebar')))",
-  );
-  return ".library + .titlebar present";
-});
+  // 4. LibraryView.vue actually mounted. A blank webview means the Vue bundle
+  //    failed to load — the router statically imports every view, so one bad
+  //    import breaks the whole graph. Assert on the aria contract rather than a
+  //    scoped styling class, so a CSS refactor can't silently turn this red.
+  await check("library_rendered", async () => {
+    await evalUntil(
+      "library",
+      `String((() => {
+        const el = document.querySelector('[aria-label="Toggle meetings list"]');
+        return !!el && el.getBoundingClientRect().width > 0;
+      })())`,
+      RENDER_TIMEOUT_MS,
+      (v) => v === "true",
+    );
+    return "meetings list toggle visible";
+  });
+}
+
+// --- main -------------------------------------------------------------------
+
+mkdirSync(ARTIFACT_DIR, { recursive: true });
+
+let app = null;
+let failure = null;
+
+try {
+  if (ATTACH) {
+    console.log(`oats E2E smoke: attaching to a running app on ${IPC_DIAL_PATH}`);
+  } else {
+    console.log(`oats E2E smoke: launching the app (log: ${DEV_LOG_PATH})`);
+    app = launchApp();
+  }
+  await waitForApp(app);
+
+  // The client singleton reads TAURI_MCP_IPC_PATH at import time, so it must be
+  // loaded after the env is set above.
+  const { socketClient } = await import("tauri-plugin-mcp-server/build/tools/index.js");
+  console.log("oats E2E smoke:");
+  await runChecks((command, payload) => socketClient.sendCommand(command, payload));
+} catch (e) {
+  failure = String(e?.message ?? e);
+  console.log(`  FAIL launch — ${failure}`);
+  checks.push({ name: "launch", pass: false, detail: failure });
+} finally {
+  stopApp(app);
+}
 
 const passed = checks.filter((c) => c.pass).length;
-const pass = passed === checks.length;
+const pass = checks.length > 0 && passed === checks.length;
 writeFileSync(RESULT_PATH, JSON.stringify({ pass, checks }, null, 2));
-console.log(`\nSMOKE ${pass ? "PASS" : "FAIL"} (${passed}/${checks.length})`);
+
+if (!pass && !ATTACH) {
+  // The dev log is the only place a compile or vite failure shows up.
+  console.log(`\n--- tail of ${DEV_LOG_PATH} ---`);
+  try {
+    console.log(readFileSync(DEV_LOG_PATH, "utf8").split("\n").slice(-100).join("\n"));
+  } catch {
+    console.log("(no dev log was written)");
+  }
+}
+
+console.log(`\nSMOKE ${pass ? "PASS" : "FAIL"} (${passed}/${checks.length}) — ${RESULT_PATH}`);
 process.exit(pass ? 0 : 1);

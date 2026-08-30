@@ -163,3 +163,19 @@ powershell -ExecutionPolicy Bypass -File tools\bench\windows-local-sidecar.ps1 `
 ```
 
 Use `-RepeatAudio 4` for a longer real-time-factor sample. To prove offline behavior, install the models through oats first, disconnect networking, and run the same command; no URL overrides are needed because the sidecar has no downloader.
+
+## E2E smoke
+
+`scripts/e2e-smoke.mjs` drives the live app over tauri-plugin-mcp's socket and
+asserts it boots, answers a backend invoke, and opens and renders the Meetings
+window. It owns the whole run — launch, wait, assert, tear down — so the same
+command runs on macOS and Windows and reproduces a red CI build locally:
+
+```bash
+npm run e2e:smoke
+```
+
+The checks are deterministic (no LLM), audio/TCC-free, and write
+`e2e-artifacts/e2e-smoke-result.json` alongside the `tauri dev` log. The exit
+code is the verdict. `E2E_ATTACH=1 npm run e2e:smoke` drives an app you already
+started with `npm run tauri:dev:debug` instead of launching one.
