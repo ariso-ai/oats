@@ -1686,7 +1686,13 @@ const durationLabel = computed<string | null>(() => {
 .tab-download:hover:not(:disabled) { background: #fbfbfb; }
 .tab-download:disabled { opacity: 0.6; cursor: default; }
 .tab-download .ic { width: 15px; height: 15px; }
-.tab-audio { margin-left: auto; display: inline-flex; align-items: center; min-width: 0; }
+/* `overflow: hidden` is the hard guarantee that the player can never paint over Download:
+   the row is `flex-wrap: nowrap`, so in a narrow window this box shrinks, and without it a
+   fixed-width child would spill out of the shrunken box and across its neighbour. */
+.tab-audio {
+  margin-left: auto; display: inline-flex; align-items: center;
+  flex: 0 1 auto; min-width: 0; overflow: hidden;
+}
 /* Play sits next to Download in the tab row, so it wears the same pill rather than the
    pane-row styling RecordingAudioPlayer ships with. Scoped to `.tab-audio` via :deep so the
    per-clip players in the pane below keep their own look. */
@@ -1699,9 +1705,15 @@ const durationLabel = computed<string | null>(() => {
 .tab-audio :deep(.play-btn:hover:not(:disabled)) { background: #fbfbfb; }
 .tab-audio :deep(.play-btn:disabled) { opacity: 0.6; cursor: default; }
 /* Once Play is pressed the child swaps to a native <audio controls>, which is designed to
-   fill a pane row (`flex: 1 1 auto`). In this toolbar it must stay a fixed, row-height
-   control instead of stretching and shoving the tabs around. */
-.tab-audio :deep(.audio-el) { flex: 0 0 auto; height: 28px; width: 210px; }
+   fill a pane row (`flex: 1 1 auto`). In this toolbar it takes a fixed 210px at row height
+   instead of stretching — but it stays shrinkable (`max-width: 100%`, `min-width: 0`) so a
+   narrow window narrows the player rather than pushing it into Download. */
+.tab-audio :deep(.audio-el) {
+  flex: 1 1 auto; height: 28px; width: 210px; max-width: 100%; min-width: 0;
+}
+/* The tabs and Download hold their size; the player is the one that gives. Without this the
+   browser would shrink whichever flex item it liked, including Download. */
+.segment, .tab-download { flex-shrink: 0; }
 /* When the generation chip is also present it owns the row's free space; the
    button then sits directly beside it instead of splitting the gap. */
 .tab-status ~ .tab-download { margin-left: 0; }
