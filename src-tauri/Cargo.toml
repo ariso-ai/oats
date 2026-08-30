@@ -25,6 +25,10 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 url = "2"
 chrono = "0.4"
+# File identity (dev/ino on unix, GetFileInformationByHandle on Windows) so the
+# export guard in commands.rs can tell "same file" from "same path" on both
+# platforms — std's Windows equivalent is still nightly-only.
+same-file = "1"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
