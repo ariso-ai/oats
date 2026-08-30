@@ -1973,10 +1973,37 @@ pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(),
     if !std::path::Path::new(&dest).is_absolute() {
         return Err("Destination path must be absolute.".to_string());
     }
-    let src = recording_dir(&id)?.join(note_or_transcript_filename(&kind)?);
+    let src = if kind == "note" {
+        // Mirror `open_recording_file`'s resolution: vault note (new
+        // recordings) first, then the legacy `ari-note.md` fallback.
+        match crate::vault::find_note(&id)? {
+            Some(p) => p,
+            None => recording_dir(&id)?.join("ari-note.md"),
+        }
+    } else {
+        // Transcripts have no vault accessor; `recording_dir(id)/transcript.md`
+        // is the single source of truth.
+        recording_dir(&id)?.join(note_or_transcript_filename(&kind)?)
+    };
     if !src.exists() {
         return Err(format!("recording file not found: {}", src.display()));
     }
+
+    // `fs::copy(p, p)` opens the destination with truncate(true) on the same inode, so it
+    // zeroes the file and still returns Ok(0) — saving onto the vault's own transcript.md
+    // would destroy the only copy and report success. `canonicalize` resolves symlinks and
+    // hardlinks; it fails harmlessly on `dest` in the normal case where the file is new.
+    if let (Ok(src_real), Ok(dest_real)) =
+        (src.canonicalize(), std::path::Path::new(&dest).canonicalize())
+    {
+        if src_real == dest_real {
+            return Err(
+                "Pick a destination outside the vault — that path is the transcript itself."
+                    .to_string(),
+            );
+        }
+    }
+
     std::fs::copy(&src, &dest)
         .map(|_| ())
         .map_err(|e| format!("copy export file: {e}"))
@@ -3186,7 +3213,33 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(std::fs::read_to_string(&dest).unwrap(), body);
+        assert_eq!(std::fs::read(&dest).unwrap(), body.as_bytes());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_file_refuses_to_copy_onto_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-08-30T12-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let body = "---\ntitle: \"T\"\n---\n\n**Speaker 1** [0:00]\nHello\n";
+        let src = dir.join("transcript.md");
+        std::fs::write(&src, body).unwrap();
+
+        let err = copy_recording_file(
+            id.into(),
+            "transcript".into(),
+            src.to_string_lossy().into_owned(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("outside the vault"), "unexpected error: {err}");
+        // The guard must fire BEFORE the copy — otherwise the file is already zeroed.
+        assert_eq!(std::fs::read(&src).unwrap(), body.as_bytes());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
