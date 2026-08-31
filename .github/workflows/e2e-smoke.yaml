@@ -14,21 +14,22 @@ name: E2E Smoke
 # The whole run (launch, wait, assert, tear down) lives in scripts/e2e-smoke.mjs
 # so the two platforms share one implementation instead of a bash copy and a
 # PowerShell copy, and so `npm run e2e:smoke` reproduces a red build locally.
+#
+# Manual only. Two full `tauri dev` builds on hosted macOS and Windows runners is
+# too expensive to spend on every pull request and every push to main, so this
+# never fires on its own — anyone with write access runs it from the Actions tab
+# (Actions -> E2E Smoke -> Run workflow) against whichever branch they want.
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Keyed by actor as well as ref so one teammate's manual run doesn't cancel
+# another's on the same branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.actor }}
   cancel-in-progress: true
 
 jobs:
