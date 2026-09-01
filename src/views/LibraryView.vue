@@ -133,32 +133,61 @@
 
       <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
 
-      <p v-if="loading" class="hint">Loading…</p>
-      <p v-else-if="error" class="hint">{{ error }}</p>
-      <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
+      <!-- Todo: the action items assigned to the signed-in user across the last
+           two weeks of meetings, grouped by day. Selecting a row opens the
+           meeting it came from in the detail pane. -->
+      <template v-if="activeView === 'todo'">
+        <p v-if="todoLoading" class="hint">Loading…</p>
+        <p v-else-if="todoError" class="hint">{{ todoError }}</p>
+        <p v-else-if="todoSections.length === 0" class="hint">No action items.</p>
+        <div v-else class="meeting-list">
+          <template v-for="section in todoSections" :key="section.key">
+            <div class="group-label">{{ section.label }}</div>
+            <button
+              v-for="row in section.rows"
+              :key="row.key"
+              class="meeting-item todo-item"
+              :class="{ selected: selectedItem?.id === row.meeting.id }"
+              :aria-pressed="selectedItem?.id === row.meeting.id"
+              @click="selectMeeting(row.meeting, { userSelected: true })"
+            >
+              <span class="mi-head">
+                <span class="mi-title">{{ row.text }}</span>
+              </span>
+              <span class="mi-sub">{{ todoSub(row) }}</span>
+            </button>
+          </template>
+        </div>
+      </template>
 
-      <!-- Scrollable list with top/bottom fade mask -->
-      <div v-else class="meeting-list">
-        <template v-for="section in displayedSections" :key="section.key">
-          <div v-if="section.label" class="group-label">{{ section.label }}</div>
-          <button
-            v-for="m in section.items"
-            :key="m.id"
-            class="meeting-item"
-            :class="{ selected: selectedItem?.id === m.id }"
-            :aria-pressed="selectedItem?.id === m.id"
-            @click="selectMeeting(m, { userSelected: true })"
-          >
-            <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
-            <span class="mi-head">
-              <span class="mi-title" :class="{ 'mi-title--canceled': m.canceled }">{{ m.title }}</span>
-              <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
-            </span>
-            <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
-          </button>
-        </template>
-        <p v-if="displayedSections.length === 0" class="hint">{{ emptyListHint }}</p>
-      </div>
+      <template v-else>
+        <p v-if="loading" class="hint">Loading…</p>
+        <p v-else-if="error" class="hint">{{ error }}</p>
+        <p v-else-if="meetings.length === 0" class="hint">No meetings yet.</p>
+
+        <!-- Scrollable list with top/bottom fade mask -->
+        <div v-else class="meeting-list">
+          <template v-for="section in displayedSections" :key="section.key">
+            <div v-if="section.label" class="group-label">{{ section.label }}</div>
+            <button
+              v-for="m in section.items"
+              :key="m.id"
+              class="meeting-item"
+              :class="{ selected: selectedItem?.id === m.id }"
+              :aria-pressed="selectedItem?.id === m.id"
+              @click="selectMeeting(m, { userSelected: true })"
+            >
+              <span v-if="recordingActive && recordingMeetingId === m.id" class="mi-rec-dot" aria-hidden="true" />
+              <span class="mi-head">
+                <span class="mi-title" :class="{ 'mi-title--canceled': m.canceled }">{{ m.title }}</span>
+                <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
+              </span>
+              <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
+            </button>
+          </template>
+          <p v-if="displayedSections.length === 0" class="hint">{{ emptyListHint }}</p>
+        </div>
+      </template>
 
       <!-- Floating bottom navigation -->
       <nav class="bottom-nav">
@@ -171,9 +200,16 @@
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M4 6h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" /><path d="m16 10 5-3v10l-5-3" /></svg>
             <span>Meetings</span>
           </button>
-          <button class="nav-tab" type="button" title="Todo" disabled>
+          <button
+            class="nav-tab"
+            :class="{ 'nav-tab--active': activeView === 'todo' }"
+            type="button"
+            title="Todos"
+            :disabled="!activeBackend?.supportsActionItems"
+            @click="openTodoView"
+          >
             <svg viewBox="0 0 24 24" class="nav-ic"><path d="M9 6h11M9 12h11M9 18h11" /><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17" /></svg>
-            <span>Todo</span>
+            <span>Todos</span>
           </button>
         </div>
       </nav>
@@ -248,6 +284,12 @@ import {
   isMeetingInProgress,
   type MeetingSection,
 } from '../composables/groupMeetingsByDate';
+import {
+  recentDayKeys,
+  groupActionItemsByDay,
+  type ActionItemEntry,
+  type ActionItemRow,
+} from '../composables/actionItemSections';
 import MeetingDetailView from './MeetingDetailView.vue';
 import UpNextCard from './UpNextCard.vue';
 import LibrarySearchPalette from './LibrarySearchPalette.vue';
@@ -341,7 +383,13 @@ const now = ref(new Date());
 const dayNum = computed(() => now.value.getDate());
 const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'long' }).toUpperCase());
 
-const activeView = ref<'today' | 'meetings'>('meetings');
+const activeView = ref<'today' | 'meetings' | 'todo'>('meetings');
+// The action-items endpoint serves a single day, so the Todo tab asks for the
+// last two weeks one day at a time and groups what comes back.
+const TODO_DAY_COUNT = 14;
+const todoEntries = ref<ActionItemEntry[]>([]);
+const todoLoading = ref(false);
+const todoError = ref<string | null>(null);
 const isMac = computed(() =>
   typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 );
@@ -401,6 +449,71 @@ const displayedSections = computed<MeetingSection[]>(() => {
   }
   return groupMeetingsByDate(displayMeetings.value, now.value);
 });
+
+const todoSections = computed(() => groupActionItemsByDay(todoEntries.value, now.value));
+
+// Which meeting an action item came from, so a row reads on its own.
+function todoSub(row: ActionItemRow): string {
+  return `${row.meeting.title} · ${fmtClock(row.meeting.timestamp)}`;
+}
+
+async function openTodoView(): Promise<void> {
+  activeView.value = 'todo';
+  await loadActionItems();
+}
+
+// Bump per call so a slow fan-out can't overwrite a newer one.
+let loadActionItemsRequest = 0;
+
+// One request per day shown. A day that fails is skipped rather than blanking
+// the tab — only a week that returns nothing at all reads as an error.
+async function loadActionItems(): Promise<void> {
+  if (todoLoading.value) return;
+  const backend = activeBackend.value ?? (await getActiveBackend());
+  activeBackend.value = backend;
+  if (!backend.supportsActionItems) return;
+  const requestId = ++loadActionItemsRequest;
+  todoLoading.value = true;
+  todoError.value = null;
+  try {
+    const results = await Promise.allSettled(
+      recentDayKeys(now.value, TODO_DAY_COUNT).map((day) => backend.listActionItems(day))
+    );
+    if (requestId !== loadActionItemsRequest) return;
+    const loaded: ActionItemEntry[] = [];
+    let failures = 0;
+    for (const result of results) {
+      if (result.status === 'fulfilled') loaded.push(...result.value);
+      else {
+        failures++;
+        console.error('Failed to load a day of action items', result.reason);
+      }
+    }
+    if (failures === results.length) {
+      todoEntries.value = [];
+      todoError.value = 'Could not load action items.';
+    } else {
+      todoEntries.value = loaded;
+    }
+  } finally {
+    if (requestId === loadActionItemsRequest) todoLoading.value = false;
+  }
+}
+
+// Switching backends swaps the whole corpus: drop the previous backend's action
+// items, and leave the Todo tab when the new backend has none (offline mode),
+// where the tab is disabled and would otherwise stay highlighted over an
+// empty pane.
+watch(
+  () => activeBackend.value?.id,
+  () => {
+    todoEntries.value = [];
+    todoError.value = null;
+    if (activeView.value === 'todo' && !activeBackend.value?.supportsActionItems) {
+      activeView.value = 'meetings';
+    }
+  }
+);
 
 const emptyListHint = computed(() =>
   activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
@@ -1459,6 +1572,19 @@ onUnmounted(() => {
 .mi-rel { flex-shrink: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; color: #6f6f6f; }
 .mi-rel--now { color: #2e8b4f; }
 .mi-sub { font-size: 12px; color: #6f6f6f; }
+/* An action item is a sentence, not a title: let it wrap to two lines rather
+   than truncate mid-thought, and keep its source meeting on a single line. */
+.todo-item .mi-title {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.todo-item .mi-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .mi-sub--now { color: #2e8b4f; font-weight: 500; }
 
 /* Bottom nav */

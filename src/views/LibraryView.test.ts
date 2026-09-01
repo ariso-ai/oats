@@ -8,6 +8,8 @@ const getMeetingDetail = vi.fn();
 const backendId = vi.fn(() => 'local');
 const usesMeetingPicker = vi.fn(() => false);
 const supportsSearch = vi.fn(() => false);
+const supportsActionItems = vi.fn(() => false);
+const listActionItems = vi.fn();
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
 const readRecordingNote = vi.fn();
@@ -69,7 +71,9 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
         id: backendId(),
         usesMeetingPicker: usesMeetingPicker(),
         supportsSearch: supportsSearch(),
+        supportsActionItems: supportsActionItems(),
         listMeetings: () => listMeetings(),
+        listActionItems: (day: string) => listActionItems(day),
         searchMeetings: (query: string) => searchMeetings(query),
         getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
         getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
@@ -157,6 +161,8 @@ beforeEach(() => {
   backendId.mockReturnValue('local');
   usesMeetingPicker.mockReturnValue(false);
   supportsSearch.mockReturnValue(true);
+  supportsActionItems.mockReturnValue(false);
+  listActionItems.mockResolvedValue([]);
   searchMeetings.mockResolvedValue([]);
 });
 afterEach(() => {
@@ -1788,5 +1794,194 @@ describe('LibraryView meeting-prep notification', () => {
     // The auto-selected first row stays put — no meeting is yanked out from
     // under the user for a prep we can't place.
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('1');
+  });
+});
+
+describe('LibraryView Todo tab', () => {
+  const ymd = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const daysAgo = (n: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    return d;
+  };
+  const todoButton = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('.nav-tab').find((b) => b.text().includes('Todo'))!;
+
+  function actionItems(meeting: { id: string; title: string; timestamp: string }, ...items: string[]) {
+    return [{ meeting, items: items.map((item) => ({ item })) }];
+  }
+
+  it('keeps the Todo tab disabled for a backend that has no action items', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(false);
+    listMeetings.mockResolvedValue([]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(todoButton(wrapper).attributes('disabled')).toBeDefined();
+    expect(listActionItems).not.toHaveBeenCalled();
+  });
+
+  it('lists two weeks of action items grouped by day when the tab is opened', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const today = daysAgo(0);
+    const yesterday = daysAgo(1);
+    listActionItems.mockImplementation((day: string) => {
+      if (day === ymd(today)) {
+        return Promise.resolve(
+          actionItems(
+            { id: '9', title: 'Q3 Pricing Review', timestamp: today.toISOString() },
+            'Send pricing deck',
+            'Follow up with finance'
+          )
+        );
+      }
+      if (day === ymd(yesterday)) {
+        return Promise.resolve(
+          actionItems(
+            { id: '7', title: 'Platform Sync', timestamp: yesterday.toISOString() },
+            'Draft migration plan'
+          )
+        );
+      }
+      return Promise.resolve([]);
+    });
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    // One request per day shown, today first.
+    expect(listActionItems.mock.calls.map((c) => c[0])).toEqual(
+      Array.from({ length: 14 }, (_, n) => ymd(daysAgo(n)))
+    );
+
+    const headers = wrapper.findAll('.group-label').map((h) => h.text());
+    expect(headers[0]).toContain('TODAY');
+    expect(headers[1]).toContain('YESTERDAY');
+
+    const rows = wrapper.findAll('.todo-item');
+    expect(rows).toHaveLength(3);
+    expect(rows[0].text()).toContain('Send pricing deck');
+    expect(rows[0].text()).toContain('Q3 Pricing Review');
+    expect(rows[2].text()).toContain('Draft migration plan');
+  });
+
+  it('opens the source meeting in the detail pane when an action item is clicked', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === ymd(daysAgo(0))
+          ? actionItems(
+              { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+              'Send pricing deck'
+            )
+          : []
+      )
+    );
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    await wrapper.findAll('.todo-item')[0].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('9');
+    expect(wrapper.findAll('.todo-item')[0].classes()).toContain('selected');
+  });
+
+  it('still lists the days that loaded when one day request fails', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockImplementation((day: string) => {
+      if (day === ymd(daysAgo(0))) return Promise.reject(new Error('500'));
+      if (day === ymd(daysAgo(1))) {
+        return Promise.resolve(
+          actionItems(
+            { id: '7', title: 'Platform Sync', timestamp: daysAgo(1).toISOString() },
+            'Draft migration plan'
+          )
+        );
+      }
+      return Promise.resolve([]);
+    });
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Draft migration plan');
+  });
+
+  it('reports an error when every day fails to load', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockRejectedValue(new Error('offline'));
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Could not load action items.');
+  });
+
+  it('shows an empty state when the window has no action items', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Some meeting' })]);
+    listActionItems.mockResolvedValue([]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('No action items.');
+    expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
+  });
+
+  it('falls back to the meetings list when the backend switches to one without action items', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === ymd(daysAgo(0))
+          ? actionItems(
+              { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+              'Send pricing deck'
+            )
+          : []
+      )
+    );
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(false);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Local recording' })]);
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    expect(wrapper.findAll('.todo-item')).toHaveLength(0);
+    expect(wrapper.text()).toContain('Local recording');
+    expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
   });
 });
