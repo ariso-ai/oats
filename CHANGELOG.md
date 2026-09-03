@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/ariso-ai/oats/compare/v0.21.0...v0.22.0) (2026-09-03)
+
+
+### Features
+
+* **library:** list meeting action items in the Todos tab ([dd2ab37](https://github.com/ariso-ai/oats/commit/dd2ab3741fc4e6397be83370728d03a593b9ba5b))
+
 ## [0.21.0](https://github.com/ariso-ai/oats/compare/v0.20.0...v0.21.0) (2026-09-03)
 
 
