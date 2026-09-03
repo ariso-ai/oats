@@ -219,3 +219,48 @@ describe('uploadAudio stage tagging', () => {
     }
   });
 });
+
+describe('listActionItemsByDay', () => {
+  it('asks the action-items endpoint for one local day and returns its groups', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: {
+        actionItems: [
+          {
+            meetingId: 9,
+            meetingTitle: 'Q3 Pricing Review',
+            startAt: '2026-08-31T09:00:00Z',
+            actionItems: [{ name: 'Dana', item: 'Send pricing deck' }],
+          },
+        ],
+      },
+    });
+
+    const groups = await useMeetingApi().listActionItemsByDay('2026-08-31');
+
+    expect(apiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/meeting-notes/action-items?day=2026-08-31'
+    );
+    expect(groups).toEqual([
+      {
+        meetingId: 9,
+        meetingTitle: 'Q3 Pricing Review',
+        startAt: '2026-08-31T09:00:00Z',
+        actionItems: [{ name: 'Dana', item: 'Send pricing deck' }],
+      },
+    ]);
+  });
+
+  it('resolves to an empty list when the day carries no action items', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: {} });
+    await expect(useMeetingApi().listActionItemsByDay('2026-08-31')).resolves.toEqual([]);
+  });
+
+  it('surfaces the server error for a rejected day', async () => {
+    apiRequest.mockResolvedValue({ status: 400, data: { error: 'Invalid date format' } });
+    await expect(useMeetingApi().listActionItemsByDay('nope')).rejects.toThrow(
+      'Invalid date format'
+    );
+  });
+});

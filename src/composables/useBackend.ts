@@ -78,6 +78,13 @@ export interface MeetingActionItem {
   item: string;
 }
 
+/** One meeting's action items for the signed-in user, with the meeting itself as
+ *  a selectable list row. */
+export interface ActionItemEntry {
+  meeting: MeetingListItem;
+  items: MeetingActionItem[];
+}
+
 export interface MeetingCoaching {
   strengths?: string[];
   improvements?: string[];
@@ -169,12 +176,19 @@ export interface Backend {
    *  Ariso searches its remote note corpus; local does a title-only filter over
    *  its recordings. */
   supportsSearch: boolean;
+  /** Whether this backend can list the user's meeting action items (the Todo
+   *  tab). Extraction happens server-side, so offline mode has none. */
+  supportsActionItems: boolean;
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
   listMeetings(): Promise<MeetingListItem[]>;
   /** Search the backend's meeting-note corpus and return rows the Library can
    *  select like normal meetings. */
   searchMeetings(query: string): Promise<MeetingListItem[]>;
+  /** The user's action items for one local calendar day (`YYYY-MM-DD`), grouped
+   *  by their source meeting. The meeting comes back as a selectable list row so
+   *  a Todo row can open it in the detail pane. */
+  listActionItems(day: string): Promise<ActionItemEntry[]>;
   /** Load the detail for a single row (from the list item the user clicked). */
   getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
   /** Lazily load the meeting's transcript (null when none). Ariso meetings
@@ -319,6 +333,7 @@ export class ArisoBackend implements Backend {
   needsAuth = true;
   usesMeetingPicker = true;
   supportsSearch = true;
+  supportsActionItems = true;
 
   async isReady(): Promise<Readiness> {
     const session = await auth.checkSession();
@@ -379,6 +394,21 @@ export class ArisoBackend implements Backend {
     const { searchMeetings } = useMeetingApi();
     const meetings = await searchMeetings(query);
     return meetings.map(meetingSummaryToListItem);
+  }
+
+  async listActionItems(day: string): Promise<ActionItemEntry[]> {
+    const { listActionItemsByDay } = useMeetingApi();
+    const groups = await listActionItemsByDay(day);
+    return groups
+      .map((g) => ({
+        meeting: {
+          id: String(g.meetingId),
+          title: g.meetingTitle || 'Untitled meeting',
+          timestamp: g.startAt,
+        },
+        items: normalizeActionItems(g.actionItems),
+      }))
+      .filter((entry) => entry.items.length > 0);
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
@@ -476,6 +506,8 @@ export class LocalBackend implements Backend {
   needsAuth = false;
   usesMeetingPicker = false;
   supportsSearch = true;
+  // Action items are extracted server-side; nothing offline produces them.
+  supportsActionItems = false;
 
   async isReady(): Promise<Readiness> {
     const status = await local.modelStatus();
@@ -517,6 +549,10 @@ export class LocalBackend implements Backend {
       .filter((r) => r.title.toLowerCase().includes(q))
       .slice(0, MAX_LOCAL_SEARCH_RESULTS)
       .map(recordingToListItem);
+  }
+
+  async listActionItems(): Promise<ActionItemEntry[]> {
+    return [];
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {

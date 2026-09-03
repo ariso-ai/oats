@@ -6,7 +6,8 @@ export interface MeetingSection {
   items: MeetingListItem[];
 }
 
-function localDateKey(d: Date): string {
+/** `YYYY-MM-DD` in the viewer's timezone. Zero-padded so the keys sort lexically. */
+export function localDateKey(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

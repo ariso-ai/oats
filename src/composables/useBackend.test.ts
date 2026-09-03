@@ -19,6 +19,7 @@ const readRecordingAudio = vi.fn();
 const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
 const getMeetingPrepApi = vi.fn();
+const listActionItemsByDay = vi.fn();
 const reportUploadFailure = vi.fn(() => Promise.resolve());
 
 vi.mock('./useDiagnostics', () => ({
@@ -55,6 +56,7 @@ vi.mock('./useMeetingApi', () => ({
     getMeetingNotes: (...a: unknown[]) => getMeetingNotes(...a),
     deleteMeetingRecordingClip: (...a: unknown[]) => deleteMeetingRecordingClip(...a),
     getMeetingPrep: (...a: unknown[]) => getMeetingPrepApi(...a),
+    listActionItemsByDay: (...a: unknown[]) => listActionItemsByDay(...a),
   }),
 }));
 
@@ -672,5 +674,54 @@ describe('meeting prep plumbing', () => {
 
   it('LocalBackend.getMeetingPrep always resolves null', async () => {
     await expect(new LocalBackend().getMeetingPrep(4339)).resolves.toBeNull();
+  });
+});
+
+describe('action items', () => {
+  it('Ariso maps a day of action items onto selectable meeting rows', async () => {
+    listActionItemsByDay.mockResolvedValue([
+      {
+        meetingId: 9,
+        meetingTitle: 'Q3 Pricing Review',
+        startAt: '2026-08-31T09:00:00Z',
+        actionItems: [{ name: 'Dana', item: 'Send pricing deck' }, { item: '  ' }],
+      },
+    ]);
+
+    const entries = await new ArisoBackend().listActionItems('2026-08-31');
+
+    expect(listActionItemsByDay).toHaveBeenCalledWith('2026-08-31');
+    expect(entries).toEqual([
+      {
+        meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
+        items: [{ name: 'Dana', item: 'Send pricing deck' }],
+      },
+    ]);
+  });
+
+  it('Ariso titles an untitled meeting so its rows stay readable', async () => {
+    listActionItemsByDay.mockResolvedValue([
+      {
+        meetingId: 12,
+        meetingTitle: null,
+        startAt: '2026-08-31T09:00:00Z',
+        actionItems: [{ item: 'Ship it' }],
+      },
+    ]);
+
+    const entries = await new ArisoBackend().listActionItems('2026-08-31');
+
+    expect(entries[0].meeting.title).toBe('Untitled meeting');
+  });
+
+  it('offline mode neither advertises nor fetches action items', async () => {
+    const b = new LocalBackend();
+    expect(b.supportsActionItems).toBe(false);
+    await expect(b.listActionItems('2026-08-31')).resolves.toEqual([]);
+    expect(listActionItemsByDay).not.toHaveBeenCalled();
+  });
+
+  it('Ariso advertises action items', () => {
+    expect(new ArisoBackend().supportsActionItems).toBe(true);
   });
 });

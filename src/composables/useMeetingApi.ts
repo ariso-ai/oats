@@ -64,6 +64,15 @@ interface ScheduledMeeting {
   prep_id?: number | string;
 }
 
+/** One meeting's worth of action items assigned to the requester, as served by
+ *  `/meeting-notes/action-items?day=…`. */
+export interface DayActionItems {
+  meetingId: number | string;
+  meetingTitle: string | null;
+  startAt: string;
+  actionItems: Array<{ name?: string; item: string }>;
+}
+
 /** A meeting prep, reduced to the two fields the desktop consumes: the markdown
  *  to render, and the meeting it belongs to (used to resolve a prep-ready
  *  notification back to a row in the library). */
@@ -456,6 +465,18 @@ export function useMeetingApi() {
     };
   }
 
+  // The signed-in user's action items for one calendar day, grouped by the
+  // meeting they came from. The endpoint serves a single day (resolved in the
+  // user's profile timezone) and already scopes items to the caller, so the
+  // Todo tab fans out one request per day it shows.
+  async function listActionItemsByDay(day: string): Promise<DayActionItems[]> {
+    const params = new URLSearchParams({ day });
+    const res = await api.request('GET', `/meeting-notes/action-items?${params.toString()}`);
+    assertOk(res, 200, 'list action items');
+    const data = res.data as { actionItems?: DayActionItems[] } | null;
+    return data?.actionItems ?? [];
+  }
+
   // Search org members to assign a diarized speaker to. Scoped to the
   // meeting's org by the endpoint. Errors collapse to [] — this is a passive
   // type-ahead lookup, and an empty result already has a rendered state
@@ -711,6 +732,7 @@ export function useMeetingApi() {
     getMeetingTranscript,
     getMeetingIndividualNote,
     getMeetingPrep,
+    listActionItemsByDay,
     searchSpeakerMembers,
     assignSpeaker,
     updateMeeting,
