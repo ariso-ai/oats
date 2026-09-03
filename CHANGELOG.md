@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.21.0](https://github.com/ariso-ai/oats/compare/v0.20.0...v0.21.0) (2026-09-03)
+
+
+### Features
+
+* add copy_recording_file command for exporting transcripts ([0ed9f74](https://github.com/ariso-ai/oats/commit/0ed9f74d709ba00938e20f39bdeb4b8b76b35c7d))
+* add Download transcript button to the Transcript tab ([7499ef2](https://github.com/ariso-ai/oats/commit/7499ef243d5399adaf54d9ce87884fc8bd1d09db))
+* add save-dialog wrapper, copy IPC wrapper, and export filename helpers ([da72aa5](https://github.com/ariso-ai/oats/commit/da72aa5ed94c4a8b8122cbb768bcb1c8298aa84a))
+* download a local recording's transcript ([#337](https://github.com/ariso-ai/oats/issues/337)) ([8a0e997](https://github.com/ariso-ai/oats/commit/8a0e9973c10516a5d049f0d4f643fef561bda81b))
+
+
+### Bug Fixes
+
+* **ci:** repoint the e2e smoke gate at the split sidecar tree and drop wait_for ([2137f04](https://github.com/ariso-ai/oats/commit/2137f048e1437f3376b89aaf7e8ef6731ef50dd5))
+* **ci:** wait for the main window, not just the socket, before asserting ([58acc1f](https://github.com/ariso-ai/oats/commit/58acc1ffce0bf87c9562aa1321c7cf936b8791ad))
+* clear stale download error on click, test the real invoke error shape ([ae8b71e](https://github.com/ariso-ai/oats/commit/ae8b71e8f9fc6a6344fe4f14f99fb6aba9fb005f))
+* dock the recording pill only on the meeting it was recording when it started ([1feb474](https://github.com/ariso-ai/oats/commit/1feb474cb6553c4564e381198671c3cebadc32f3))
+* guard copy_recording_file against self-overwrite and vault-note paths ([9cf20b7](https://github.com/ariso-ai/oats/commit/9cf20b718e7534518ca48fb12255361db70e23b9))
+* guard the transcript export against meeting switches; pin test TZ ([46d1a8f](https://github.com/ariso-ai/oats/commit/46d1a8ffd124e041cd531f50fa20ff2ee7410eca))
+* never dock a recording that belongs to no meeting ([debe5ad](https://github.com/ariso-ai/oats/commit/debe5ad9a066b072494d49677cb8e174aaee003a))
+* never dock a recording that belongs to no meeting ([ec87484](https://github.com/ariso-ai/oats/commit/ec8748416a0556b2e57b128d0a3272f6832ad1ad))
+* report which recording blocks a new one, and in what state ([d85436d](https://github.com/ariso-ai/oats/commit/d85436d2dcfa9f4e7970a7287a04de4aa5605315))
+* report which recording blocks a new one, and in what state ([57a2764](https://github.com/ariso-ai/oats/commit/57a2764d7accb01555c28a40d6b2acad7d20f991)), closes [#320](https://github.com/ariso-ai/oats/issues/320)
+* reset transcript download error/state on meeting switch ([c760281](https://github.com/ariso-ai/oats/commit/c760281105ef0159321617f9969c2e5dd2a637c0))
+* residual cleanups for download-local-transcript review ([3df84cb](https://github.com/ariso-ai/oats/commit/3df84cbe9e065a8c1b61f1cb248e4bcd67885b9f))
+* stop the audio player overlapping Download in a narrow row ([651070e](https://github.com/ariso-ai/oats/commit/651070e32586b4a967d000bc7c1c69a40685ac1c))
+* stop the overlap clip from swallowing the Play button's shadow ([3f7d2d8](https://github.com/ariso-ai/oats/commit/3f7d2d874f343d1d0cf95b29d0cdc2afea6e2c76))
+* surface an error when a new recording can't start over a pending one ([cce31d4](https://github.com/ariso-ai/oats/commit/cce31d41bfc70439b796f3370b190adf5a7fb8e4))
+* use the same-file crate for the export same-file guard ([d93f2ef](https://github.com/ariso-ai/oats/commit/d93f2efb2dea540b7836f7a60adaf5569cd3fad8))
+
 ## [0.20.0](https://github.com/ariso-ai/oats/compare/v0.19.1...v0.20.0) (2026-08-26)
 
 
