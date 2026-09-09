@@ -53,7 +53,10 @@
 import { ref, onMounted } from 'vue';
 import { auth, pending, type PendingUploadMeta } from '../tauri';
 import { combineAndUpload, discardAll } from '../composables/usePendingUploads';
+import { useMeetingProcessing } from '../composables/useMeetingProcessing';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
+
+const processing = useMeetingProcessing();
 
 const emit = defineEmits<{ uploaded: [] }>();
 
@@ -129,7 +132,11 @@ async function onUpload(): Promise<void> {
       error.value = 'Upload failed — sign in to Ari again, then retry.';
       return;
     }
-    await combineAndUpload(items.value);
+    const meetingIds = await combineAndUpload(items.value);
+    // The audio is in, but the server still has to transcribe it. Track each
+    // meeting so its Library row and detail panel say "processing" instead of
+    // showing the same empty state as a meeting that will never have notes.
+    for (const id of meetingIds) processing.markUploaded(id);
     await refresh();
     emit('uploaded');
   } catch (e) {

@@ -9,6 +9,7 @@ const bufferPath = vi.fn();
 const checkSession = vi.fn();
 const combineAndUpload = vi.fn();
 const discardAll = vi.fn();
+const markUploaded = vi.fn();
 
 vi.mock('../tauri', () => ({
   auth: { checkSession: (...a: unknown[]) => checkSession(...a) },
@@ -22,6 +23,9 @@ vi.mock('../tauri', () => ({
 vi.mock('../composables/usePendingUploads', () => ({
   combineAndUpload: (...a: unknown[]) => combineAndUpload(...a),
   discardAll: (...a: unknown[]) => discardAll(...a),
+}));
+vi.mock('../composables/useMeetingProcessing', () => ({
+  useMeetingProcessing: () => ({ markUploaded: (...a: unknown[]) => markUploaded(...a) }),
 }));
 
 import PendingUploads from './PendingUploads.vue';
@@ -109,7 +113,7 @@ describe('PendingUploads', () => {
 
   it('Upload combines+uploads, refreshes, and emits uploaded on success', async () => {
     list.mockResolvedValueOnce(items).mockResolvedValueOnce([]);
-    combineAndUpload.mockResolvedValue(undefined);
+    combineAndUpload.mockResolvedValue([]);
     const wrapper = mount(PendingUploads);
     await flushPromises();
 
@@ -119,6 +123,32 @@ describe('PendingUploads', () => {
     expect(combineAndUpload).toHaveBeenCalledWith(items);
     expect(wrapper.emitted('uploaded')).toHaveLength(1);
     expect(wrapper.find('.pending').exists()).toBe(false);
+  });
+
+  // The retry hands the audio over but the server still has to transcribe it;
+  // tracking each meeting is what puts "Processing…" on its Library row.
+  it('marks every uploaded meeting as processing', async () => {
+    list.mockResolvedValueOnce(items).mockResolvedValueOnce([]);
+    combineAndUpload.mockResolvedValue([5, 9]);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.find('.upload').trigger('click');
+    await flushPromises();
+
+    expect(markUploaded.mock.calls).toEqual([[5], [9]]);
+  });
+
+  it('marks nothing when the upload fails', async () => {
+    list.mockResolvedValue(items);
+    combineAndUpload.mockRejectedValue(new Error('offline'));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.find('.upload').trigger('click');
+    await flushPromises();
+
+    expect(markUploaded).not.toHaveBeenCalled();
   });
 
   it('shows an error and keeps items when upload fails', async () => {

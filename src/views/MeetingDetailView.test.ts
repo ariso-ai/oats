@@ -40,6 +40,41 @@ vi.mock('../composables/useMeetingNotesPersistence', () => ({
 vi.mock('../composables/usePlatformCapabilities', () => ({
   loadPlatformCapabilities: () => loadPlatformCapabilities(),
 }));
+// Stand-in for the session-scoped cloud upload tracker. `trackProcessing` /
+// `resolveProcessing` play the part of "we just uploaded this" and "the poll
+// found content"; the refs live inside the factory, which is hoisted.
+const processingMock = vi.hoisted(() => ({
+  tracked: null as null | import('vue').Ref<Set<string>>,
+  version: null as null | import('vue').Ref<number>,
+}));
+vi.mock('../composables/useMeetingProcessing', async () => {
+  const { ref } = await import('vue');
+  const tracked = ref(new Set<string>());
+  const version = ref(0);
+  processingMock.tracked = tracked;
+  processingMock.version = version;
+  return {
+    useMeetingProcessing: () => ({
+      markUploaded: (id: string | number) => {
+        tracked.value = new Set(tracked.value).add(String(id));
+      },
+      isProcessing: (id: string | number) => tracked.value.has(String(id)),
+      version,
+      reset: () => {
+        tracked.value = new Set();
+      },
+    }),
+  };
+});
+function trackProcessing(id: string): void {
+  processingMock.tracked!.value = new Set(processingMock.tracked!.value).add(id);
+}
+function resolveProcessing(id: string): void {
+  const next = new Set(processingMock.tracked!.value);
+  next.delete(id);
+  processingMock.tracked!.value = next;
+  processingMock.version!.value++;
+}
 vi.mock('../tauri', () => ({
   api: {
     request: (...a: unknown[]) => apiRequest(...a),
@@ -91,6 +126,8 @@ beforeEach(() => {
   // clearAllMocks keeps queued `mockResolvedValueOnce` implementations, so an
   // unconsumed one would answer the next test's first detail load.
   getMeetingDetail.mockReset();
+  processingMock.tracked!.value = new Set();
+  processingMock.version!.value = 0;
   renameMeeting.mockResolvedValue(undefined);
   getMeetingTranscript.mockResolvedValue(null);
   getMeetingAudio.mockResolvedValue(null);
@@ -996,6 +1033,126 @@ describe('MeetingDetailView local generation progress', () => {
     // A note exists (old body) but notes are generating -> chip owns the row.
     expect(wrapper.find('.tab-status-label').text()).toBe('Generating AI Notes');
     expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+
+  // The Library row reads the pipeline state from the list payload, which only
+  // refreshes on a reload — this panel owns the live poll, so it has to say when
+  // the recording settles.
+  // The poll is on a 2s timer, so these mount under fake timers rather than
+  // starting them mid-flight — a timer scheduled for real never fires once the
+  // fakes take over.
+  async function mountLocalFaked(d: MeetingDetail) {
+    vi.useFakeTimers();
+    getMeetingDetail.mockResolvedValue(d);
+    const wrapper = mount(MeetingDetailView, { props: { item: localItem } });
+    await vi.advanceTimersByTimeAsync(0);
+    return wrapper;
+  }
+
+  it('tells the parent when a local recording finishes generating', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    });
+    const wrapper = await mountLocalFaked(detail({ isLocal: true }));
+    expect(wrapper.emitted('contentReady')).toBeUndefined();
+
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+  });
+
+  it('also reports a terminal failure, so the row stops claiming to be processing', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    });
+    const wrapper = await mountLocalFaked(detail({ isLocal: true }));
+
+    recordingStatus.mockResolvedValue({
+      status: 'failed', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+  });
+
+  // Also fires on the very first poll: a row that was listed while the recording
+  // was still transcribing is stale the moment it is opened and found finished.
+  // The Library ignores the report when its row wasn't claiming to be processing.
+  it('reports a recording found already finished on the first poll', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+    });
+    readRecordingFile.mockResolvedValue('AI body');
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
+    await flushPromises();
+
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+  });
+
+  it('says nothing for an Ariso meeting, which has no local pipeline', async () => {
+    const wrapper = await mountLocal(detail({ isLocal: false, digest: 'A digest' }));
+    await flushPromises();
+    expect(wrapper.emitted('contentReady')).toBeUndefined();
+  });
+});
+
+// Ariso exposes no processing status for an uploaded recording, so the chip is
+// driven by this session's own upload tracking (#315).
+describe('MeetingDetailView cloud processing chip', () => {
+  it('shows a spinner chip with no Retry while an uploaded meeting is processing', async () => {
+    trackProcessing('7');
+    const wrapper = await mountWith(detail({ isLocal: false }));
+
+    expect(wrapper.find('.tab-status-label').text()).toBe(
+      'Uploaded — processing transcript & notes…'
+    );
+    expect(wrapper.find('.tab-status .spinner').exists()).toBe(true);
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+  });
+
+  // A meeting nobody uploaded this session is indistinguishable from one that
+  // will never have notes; it keeps the plain empty state it has always had.
+  it('leaves an untracked empty meeting unchanged', async () => {
+    const wrapper = await mountWith(detail({ isLocal: false }));
+
+    expect(wrapper.find('.tab-status').exists()).toBe(false);
+    expect(wrapper.find('.content-empty').text()).toBe('No notes available for this meeting yet.');
+  });
+
+  it('drops the chip and refetches the meeting once its content lands', async () => {
+    trackProcessing('7');
+    const wrapper = await mountWith(detail({ isLocal: false }));
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: false, hasTranscript: true }));
+
+    resolveProcessing('7');
+    await flushPromises();
+
+    expect(wrapper.find('.tab-status').exists()).toBe(false);
+    expect(wrapper.findAll('.seg-btn').map((b) => b.text())).toContain('Transcript');
+  });
+
+  // Selecting another meeting also clears the tracked-and-open condition; that
+  // must not fire a second fetch on top of the selection's own load.
+  it('does not refetch when the tracked meeting is simply closed', async () => {
+    // Its own meeting id: wrappers mounted by earlier tests in this file stay
+    // alive and would react to tracking changes for the shared id.
+    const openItem: MeetingListItem = { id: '99', title: 'Rec', timestamp: '2026-06-02T10:00:00Z' };
+    trackProcessing('99');
+    getMeetingDetail.mockResolvedValue(detail({ id: '99', isLocal: false }));
+    const wrapper = mount(MeetingDetailView, { props: { item: openItem } });
+    await flushPromises();
+    getMeetingDetail.mockClear();
+
+    await wrapper.setProps({ item: null });
+    await flushPromises();
+    resolveProcessing('99');
+    await flushPromises();
+
+    expect(getMeetingDetail).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 });
 

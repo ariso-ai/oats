@@ -9,7 +9,7 @@ vi.mock('../tauri', () => ({
   },
 }));
 
-import { useMeetingApi } from './useMeetingApi';
+import { useMeetingApi, isMeetingNotesReady } from './useMeetingApi';
 
 beforeEach(() => {
   apiRequest.mockReset();
@@ -262,5 +262,21 @@ describe('listActionItemsByDay', () => {
     await expect(useMeetingApi().listActionItemsByDay('nope')).rejects.toThrow(
       'Invalid date format'
     );
+  });
+});
+
+describe('isMeetingNotesReady', () => {
+  it('is ready once a transcript exists', () => {
+    expect(isMeetingNotesReady({ hasTranscript: true })).toBe(true);
+  });
+
+  it('is ready once a summary exists, even without a transcript', () => {
+    expect(isMeetingNotesReady({ hasTranscript: false, summary: '{"digest":"x"}' })).toBe(true);
+  });
+
+  it('is not ready when neither is present', () => {
+    expect(isMeetingNotesReady({})).toBe(false);
+    expect(isMeetingNotesReady({ hasTranscript: false, summary: null })).toBe(false);
+    expect(isMeetingNotesReady({ summary: '' })).toBe(false);
   });
 });

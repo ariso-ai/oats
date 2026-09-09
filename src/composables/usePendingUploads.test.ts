@@ -163,9 +163,23 @@ describe('combineAndUpload', () => {
   });
 
   it('is a no-op for an empty list', async () => {
-    await combineAndUpload([]);
+    await expect(combineAndUpload([])).resolves.toEqual([]);
     expect(combine).not.toHaveBeenCalled();
     expect(uploadAudio).not.toHaveBeenCalled();
+  });
+
+  // The caller shows each uploaded meeting as "processing" until the server has
+  // a transcript for it, so the ids have to survive the upload.
+  it('returns the meeting id each group uploaded to', async () => {
+    const a = { ...items[0], createdAt: 'a', meetingId: 5 };
+    const d = { ...items[0], createdAt: 'd', meetingId: 9 };
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockImplementation((_blob: unknown, meta: { meetingId?: number }) =>
+      Promise.resolve({ meetingId: meta.meetingId ?? 77 })
+    );
+    discardAudio.mockResolvedValue(undefined);
+
+    await expect(combineAndUpload([a, d, items[0]])).resolves.toEqual([5, 9, 77]);
   });
 });
 

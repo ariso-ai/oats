@@ -169,6 +169,17 @@ interface MeetingNotes {
   audio_clips?: MeetingAudioClip[];
 }
 
+/** Whether the server has produced *anything* for a meeting yet. These are the
+ *  same two fields `ArisoBackend.getMeetingDetail` reads off `/meeting-notes/:id`
+ *  to decide whether the Transcript/AI-Notes tabs exist, so one truthy value is
+ *  enough to call the meeting "no longer processing" — the later assessment and
+ *  coaching fields lag and must not hold the indicator up. */
+export function isMeetingNotesReady(
+  n: Pick<MeetingNotes, 'hasTranscript' | 'summary'>
+): boolean {
+  return !!n.hasTranscript || !!n.summary;
+}
+
 interface ScheduledMeetingsResponse {
   meetings: ScheduledMeeting[];
 }
