@@ -52,7 +52,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { auth, pending, type PendingUploadMeta } from '../tauri';
-import { combineAndUpload, discardAll } from '../composables/usePendingUploads';
+import { combineAndUpload, discardAll, PartialUploadError } from '../composables/usePendingUploads';
 import { useMeetingProcessing } from '../composables/useMeetingProcessing';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
@@ -141,6 +141,13 @@ async function onUpload(): Promise<void> {
     emit('uploaded');
   } catch (e) {
     console.error('Pending upload failed', e);
+    // A partial failure still uploaded some groups — track those as processing
+    // and refresh so they drop off the pending list, even though we surface
+    // the failure for the group that didn't make it.
+    if (e instanceof PartialUploadError && e.uploadedMeetingIds.length > 0) {
+      for (const id of e.uploadedMeetingIds) processing.markUploaded(id);
+      await refresh();
+    }
     error.value = uploadErrorMessage(e);
   } finally {
     busy.value = false;

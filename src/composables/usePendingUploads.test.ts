@@ -20,7 +20,13 @@ vi.mock('./useMeetingApi', () => ({
   useMeetingApi: () => ({ uploadAudio: (...a: unknown[]) => uploadAudio(...a) }),
 }));
 
-import { mergedMeta, groupByMeetingId, combineAndUpload, discardAll } from './usePendingUploads';
+import {
+  mergedMeta,
+  groupByMeetingId,
+  combineAndUpload,
+  discardAll,
+  PartialUploadError,
+} from './usePendingUploads';
 
 const items = [
   { createdAt: '2026-06-12T09:00:00Z', startAt: '2026-06-12T09:00:00Z', endAt: '2026-06-12T09:05:00Z', durationSeconds: 300 },
@@ -133,6 +139,24 @@ describe('combineAndUpload', () => {
     // The succeeded group is discarded; the failed group is left in place.
     expect(discardAudio).toHaveBeenCalledWith('a');
     expect(discardAudio).not.toHaveBeenCalledWith('d');
+  });
+
+  // The caller only learns about the failed group via the throw, so the
+  // succeeded group's meeting id must ride along on the error or it's lost.
+  it('carries the succeeded meeting ids on a PartialUploadError when one group fails', async () => {
+    const a = { ...items[0], createdAt: 'a', durationSeconds: 300, meetingId: 5 };
+    const d = { ...items[0], createdAt: 'd', durationSeconds: 90, meetingId: 9 };
+
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockImplementation((_blob: unknown, meta: { meetingId?: number }) =>
+      meta.meetingId === 9 ? Promise.reject(new Error('offline')) : Promise.resolve({ meetingId: 5 })
+    );
+    discardAudio.mockResolvedValue(undefined);
+
+    const error = await combineAndUpload([a, d]).catch((e) => e);
+    expect(error).toBeInstanceOf(PartialUploadError);
+    expect((error as PartialUploadError).uploadedMeetingIds).toEqual([5]);
+    expect((error as PartialUploadError).message).toBe('offline');
   });
 
   it('does not discard when the upload fails', async () => {
