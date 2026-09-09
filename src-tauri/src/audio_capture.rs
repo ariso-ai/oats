@@ -535,6 +535,13 @@ mod imp {
     /// meeting, so retry a couple of times before giving up.
     const REBUILD_ATTEMPTS: u32 = 3;
     const REBUILD_BACKOFF: Duration = Duration::from_millis(300);
+    /// How long to wait before re-signaling the watcher after every
+    /// `build_capture` attempt in a rebuild has failed. Without this, the
+    /// listeners that would report the *next* device change were already
+    /// torn down with the broken capture, so nothing would ever wake the
+    /// watcher again and system audio would be lost for the rest of the
+    /// recording.
+    const REARM_DELAY: Duration = Duration::from_secs(5);
 
     /// The device- and format-dependent inputs baked into a live capture: the
     /// UID is the aggregate device's clock sub-device, the rate is what the
@@ -582,6 +589,13 @@ mod imp {
     }
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
+
+    /// Set when a rebuild exhausted every `build_capture` attempt while a
+    /// recording was still in progress: `CAPTURE` is `None` but that means
+    /// "capture is down and needs retrying", not "nothing is recording".
+    /// `stop()` clears this so a stale retry can't resurrect capture after
+    /// the user has already ended the recording.
+    static REBUILD_PENDING: Mutex<Option<tauri::AppHandle>> = Mutex::new(None);
 
     /// Wakes the watcher thread. Held in a `OnceLock` rather than in
     /// `CaptureState` so the listener callback never touches the `CAPTURE`
@@ -983,40 +997,60 @@ mod imp {
         // including the rebuilds it performs itself — so act only on a binding
         // that has genuinely changed. A tap whose format can no longer be read
         // is broken and rebuilt regardless.
-        let change = match guard.as_ref() {
-            // Not recording: nothing to rebind.
-            None => return,
+        let (app, change) = match guard.as_ref() {
             Some(state) => match unsafe { current_config(state.tap_id) } {
                 Ok(latest) if !latest.differs_from(&state.config) => return,
-                Ok(latest) => format!(
-                    "{} @ {} Hz -> {} @ {} Hz",
-                    state.config.output_uid,
-                    state.config.src_rate,
-                    latest.output_uid,
-                    latest.src_rate
+                Ok(latest) => (
+                    state.app.clone(),
+                    format!(
+                        "{} @ {} Hz -> {} @ {} Hz",
+                        state.config.output_uid,
+                        state.config.src_rate,
+                        latest.output_uid,
+                        latest.src_rate
+                    ),
                 ),
-                Err(e) => format!("tap format unreadable ({e})"),
+                Err(e) => (state.app.clone(), format!("tap format unreadable ({e})")),
             },
+            // `CAPTURE` is empty either because nothing is recording, or
+            // because a previous rebuild exhausted its retries while one
+            // was in progress — `REBUILD_PENDING` tells the two apart.
+            None => {
+                let Ok(mut pending) = REBUILD_PENDING.lock() else {
+                    return;
+                };
+                match pending.take() {
+                    Some(app) => (app, "retrying after a previous rebuild failure".to_string()),
+                    None => return,
+                }
+            }
         };
-        let Some(state) = guard.take() else {
-            return;
-        };
+        if let Some(state) = guard.take() {
+            let errors = unsafe { teardown(state) };
+            if !errors.is_empty() {
+                eprintln!("system-audio teardown before rebuild: {}", errors.join("; "));
+            }
+        }
 
         eprintln!("system-audio: output changed, rebuilding capture ({change})");
-        let app = state.app.clone();
-        let errors = unsafe { teardown(state) };
-        if !errors.is_empty() {
-            eprintln!("system-audio teardown before rebuild: {}", errors.join("; "));
-        }
 
         for attempt in 1..=REBUILD_ATTEMPTS {
             match unsafe { build_capture(app.clone()) } {
                 Ok(rebuilt) => {
                     *guard = Some(rebuilt);
+                    if let Ok(mut pending) = REBUILD_PENDING.lock() {
+                        *pending = None;
+                    }
                     return;
                 }
                 Err(e) if attempt == REBUILD_ATTEMPTS => {
-                    eprintln!("system-audio capture stopped after an output change: {e}");
+                    eprintln!(
+                        "system-audio rebuild attempt {attempt} failed, will retry in {REARM_DELAY:?}: {e}"
+                    );
+                    if let Ok(mut pending) = REBUILD_PENDING.lock() {
+                        *pending = Some(app.clone());
+                    }
+                    rearm_after_delay();
                 }
                 Err(e) => {
                     eprintln!("system-audio rebuild attempt {attempt} failed: {e}");
@@ -1026,8 +1060,36 @@ mod imp {
         }
     }
 
+    /// Wake the watcher again after `REARM_DELAY`, so an exhausted rebuild
+    /// keeps retrying instead of leaving system audio down for the rest of
+    /// the recording. Runs on its own thread so it doesn't block the caller,
+    /// which is itself running on the watcher thread it will go on to wake.
+    fn rearm_after_delay() {
+        let Some(tx) = CHANGE_TX.get() else {
+            return;
+        };
+        let tx = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("oats-system-audio-rearm".into())
+            .spawn(move || {
+                std::thread::sleep(REARM_DELAY);
+                let _ = tx.send(());
+            });
+        if let Err(e) = spawned {
+            eprintln!("system-audio rearm thread unavailable: {e}");
+        }
+    }
+
     pub fn stop() -> Result<(), String> {
+        // Locked in the same order as `rebuild_capture` (`CAPTURE` before
+        // `REBUILD_PENDING`) to avoid a lock-order inversion between the two.
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
+        // Clear a pending rebuild too: without this, a rearm signal that
+        // fires after `stop()` would find `REBUILD_PENDING` still set and
+        // resurrect capture for a recording that has already ended.
+        if let Ok(mut pending) = REBUILD_PENDING.lock() {
+            *pending = None;
+        }
         if let Some(state) = guard.take() {
             let errors = unsafe { teardown(state) };
             if !errors.is_empty() {
