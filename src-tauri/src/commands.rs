@@ -1073,8 +1073,16 @@ pub async fn set_recording_meeting(
     meeting_id: Option<i64>,
     title: Option<String>,
 ) -> Result<(), String> {
-    app.state::<crate::recording_state::RecordingState>()
-        .set_recording_meeting(meeting_id, title);
+    let state = app.state::<crate::recording_state::RecordingState>();
+    // Same guard as `refresh_recording_menu`, and for the same reason: an
+    // identity push races the stop path. Finalize clears the state via
+    // `set_tray_recording(false)` and can then resolve a meeting id (an
+    // unattached Ariso upload), which would otherwise repopulate the state
+    // after the recording ended and leave a stale id behind.
+    if !state.is_active() {
+        return Ok(());
+    }
+    state.set_recording_meeting(meeting_id, title);
     crate::tray::refresh_recording_menu(&app);
     Ok(())
 }
