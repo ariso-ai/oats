@@ -130,17 +130,19 @@ describe('UpNextCard', () => {
     expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ id: 'a' });
   });
 
-  it('emits record when the Impromptu Meeting button is clicked', async () => {
+  it('emits record when the New Meeting button is clicked', async () => {
     const wrapper = mountCard([meeting({ id: 'a' })]);
     await flushPromises();
-    await wrapper.find('.impromptu-btn').trigger('click');
+    expect(wrapper.find('.new-meeting-label').text()).toBe('New Meeting');
+    await wrapper.find('.new-meeting-btn').trigger('click');
     expect(wrapper.emitted('record')).toHaveLength(1);
   });
 
-  it('shows the Impromptu Meeting button even with no upcoming meetings', async () => {
+  it('shows the New Meeting button even with no upcoming meetings', async () => {
     const wrapper = mountCard([meeting({ id: 'past', timestamp: '2020-01-01T00:00:00Z', endTimestamp: '2020-01-01T01:00:00Z' })]);
     await flushPromises();
-    expect(wrapper.find('.impromptu-btn').exists()).toBe(true);
+    expect(wrapper.find('.new-meeting-btn').exists()).toBe(true);
+    expect(wrapper.find('.new-meeting-label').text()).toBe('New Meeting');
   });
 
   it('pages between upcoming meetings with the chevrons', async () => {

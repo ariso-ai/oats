@@ -2,15 +2,15 @@
   <div class="up-next">
     <!-- Big serif date/time heading for the empty home state. -->
     <p class="greeting">{{ greeting }}</p>
-    <!-- Greeting prompt: oats mark + chat bubble, with the impromptu-record CTA
+    <!-- Greeting prompt: oats mark + chat bubble, with the new-meeting CTA
          tucked under the bubble's bottom-right corner. -->
     <div class="prompt">
       <img class="prompt-logo" :src="oatsLogo" alt="oats" />
       <div class="prompt-body">
-        <p class="prompt-bubble">Ready for the next meet? Or do you want to spin up an impromptu meeting?</p>
-        <button class="impromptu-btn" type="button" title="Start an impromptu recording" @click="$emit('record')">
-          <span class="impromptu-label">Impromptu Meeting</span>
-          <span class="impromptu-icon" aria-hidden="true">
+        <p class="prompt-bubble">Ready for the next meet? Or do you want to spin up a new meeting?</p>
+        <button class="new-meeting-btn" type="button" title="Start a new recording" @click="$emit('record')">
+          <span class="new-meeting-label">New Meeting</span>
+          <span class="new-meeting-icon" aria-hidden="true">
             <svg viewBox="0 0 16 16">
               <circle cx="8" cy="8" r="6.5" fill="none" stroke="#e0443e" stroke-width="1.5" />
               <circle cx="8" cy="8" r="3.5" fill="#e0443e" />
@@ -387,9 +387,9 @@ function rowSub(m: MeetingListItem): string {
   color: #1c1c1c;
 }
 
-/* Primary split CTA — black "Impromptu Meeting" label + record-dot segment,
+/* Primary split CTA — black "New Meeting" label + record-dot segment,
    overlapping the bubble's bottom-right corner. */
-.impromptu-btn {
+.new-meeting-btn {
   align-self: flex-end;
   position: relative;
   z-index: 1;
@@ -406,8 +406,8 @@ function rowSub(m: MeetingListItem): string {
   font-family: inherit;
   transition: transform 0.1s, box-shadow 0.1s;
 }
-.impromptu-btn:hover { box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.12); transform: translate(1px, 1px); }
-.impromptu-label {
+.new-meeting-btn:hover { box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.12); transform: translate(1px, 1px); }
+.new-meeting-label {
   display: flex;
   align-items: center;
   padding: 8px 12px 8px 16px;
@@ -416,14 +416,14 @@ function rowSub(m: MeetingListItem): string {
   color: #ffffff;
   white-space: nowrap;
 }
-.impromptu-icon {
+.new-meeting-icon {
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 8px;
   border-left: 1px solid rgba(255, 255, 255, 0.22);
 }
-.impromptu-icon svg { width: 16px; height: 16px; display: block; }
+.new-meeting-icon svg { width: 16px; height: 16px; display: block; }
 
 /* "Up Next • …" label row with the prev/next chevrons. */
 .up-next-head {
