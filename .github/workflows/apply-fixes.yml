@@ -1,8 +1,9 @@
 name: Apply review fixes
 
 # Triggered when CodeRabbit or shawnzhu submits a PR review. Fetches the
-# major/critical findings, runs Claude with edit tools to apply them,
-# verifies the Tauri + Rust builds, then commits + pushes as
+# major/critical and minor findings, runs Claude with edit tools to apply
+# them (minors only when triage confirms a true positive), verifies the
+# Tauri + Rust builds, then commits + pushes as
 # github-actions[bot]. CodeRabbit re-reviews the new commit and posts
 # the merge verdict (configured by .coderabbit.yaml). This workflow does
 # not gate merges itself.
@@ -28,6 +29,14 @@ env:
   # as "majors". The keyword alternatives still catch severe issues by
   # content even if the badge wording shifts.
   MAJOR_PATTERN: '🛑|🔴 Critical|🟠 Major|security|data loss|race condition'
+  # CodeRabbit's 🟡 Minor badge. Minors go to Claude in their own bucket
+  # and are held to a stricter bar — fixed only when triage confirms a
+  # true positive (see .github/apply-fixes-prompt.md). 🔵 Trivial and
+  # nitpicks are still ignored.
+  MINOR_PATTERN: '🟡 Minor'
+  # GraphQL login of the identity that posts this workflow's thread
+  # replies (github-actions[bot], [bot] suffix stripped).
+  ACTIONS_BOT_GQL: "github-actions"
 
 jobs:
   apply-fixes:
@@ -122,51 +131,68 @@ jobs:
             ' \
             | jq -s '[.[] | .data.repository.pullRequest.reviewThreads.nodes[]]')
 
-          # Split into coderabbit majors + shawnzhu (all unresolved inline).
-          # Resolved threads are dropped (already handled).
+          # Split into coderabbit majors, coderabbit minors, and shawnzhu
+          # (all unresolved inline). Resolved threads are dropped (already
+          # handled). So are threads this workflow already replied to,
+          # unless a human reviewer followed up after that reply: skipped
+          # findings stay unresolved, and without this every CodeRabbit
+          # re-review would re-triage them and post a duplicate reply.
           jq \
             --arg cr "$CODERABBIT_GQL" \
+            --arg bot "$ACTIONS_BOT_GQL" \
             --arg human "$HUMAN_REVIEWERS" \
             --arg major "$MAJOR_PATTERN" \
+            --arg minor "$MINOR_PATTERN" \
             '
+            def finding:
+              {threadId: .id, path, line,
+               rootCommentId: .comments.nodes[0].databaseId,
+               body: .comments.nodes[0].body,
+               replies: [.comments.nodes[1:][]
+                         | {author: (.author.login // ""), body}]};
             ($human | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $humans
-            | . as $threads
+            | [
+                .[]
+                | select(.isResolved == false)
+                | (.comments.nodes | map(.author.login // "")) as $authors
+                | ($authors | indices($bot) | last) as $replied_at
+                | select($replied_at == null
+                         or any($authors[($replied_at + 1):][]; IN($humans[])))
+              ] as $threads
+            | [$threads[] | select((.comments.nodes[0].author.login // "") == $cr)] as $cr_threads
             | {
                 coderabbit: [
-                  $threads[]
-                  | select(.isResolved == false)
-                  | select((.comments.nodes[0].author.login // "") == $cr)
+                  $cr_threads[]
                   | select(.comments.nodes[0].body | test($major; "i"))
-                  | {threadId: .id, path, line,
-                     rootCommentId: .comments.nodes[0].databaseId,
-                     body: .comments.nodes[0].body}
+                  | finding
+                ],
+                coderabbit_minor: [
+                  $cr_threads[]
+                  | select(.comments.nodes[0].body | test($major; "i") | not)
+                  | select(.comments.nodes[0].body | test($minor))
+                  | finding
                 ],
                 shawnzhu: [
                   $threads[]
-                  | select(.isResolved == false)
-                  # Bind author.login first; otherwise `$humans | index(…)`
-                  # would re-evaluate the path expression against $humans
-                  # (an array) and error out.
-                  | (.comments.nodes[0].author.login // "") as $login
-                  | select(($humans | index($login)) != null)
-                  | {threadId: .id, path, line,
-                     rootCommentId: .comments.nodes[0].databaseId,
-                     body: .comments.nodes[0].body}
+                  | select((.comments.nodes[0].author.login // "") | IN($humans[]))
+                  | finding
                 ]
               }
             ' <<< "$threads_json" > "$RUNNER_TEMP/actionable-findings.json"
 
           cr_count=$(jq '.coderabbit | length' "$RUNNER_TEMP/actionable-findings.json")
+          minor_count=$(jq '.coderabbit_minor | length' "$RUNNER_TEMP/actionable-findings.json")
           sz_count=$(jq '.shawnzhu | length' "$RUNNER_TEMP/actionable-findings.json")
-          total=$((cr_count + sz_count))
+          total=$((cr_count + minor_count + sz_count))
           echo "CodeRabbit majors: $cr_count"
+          echo "CodeRabbit minors: $minor_count"
           echo "shawnzhu comments: $sz_count"
           echo "total=$total" >> "$GITHUB_OUTPUT"
 
       - name: Exit early if nothing actionable
         if: steps.findings.outputs.total == '0'
         run: |
-          echo "No unresolved major findings to apply. Done."
+          echo "No unresolved, untriaged findings to apply. Done."
           exit 0
 
       - name: Run Claude to triage + apply fixes
