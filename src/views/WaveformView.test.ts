@@ -64,10 +64,19 @@ vi.mock('../composables/useWaveform', () => ({
     stop: () => waveformStop(),
   }),
 }));
-vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () =>
-    Promise.resolve({ id: backendKind.value, finalizeRecording: (...a: unknown[]) => finalizeRecording(...a) }),
-}));
+vi.mock('../composables/useBackend', async () => {
+  const actual = await vi.importActual<typeof import('../composables/useBackend')>(
+    '../composables/useBackend',
+  );
+  return {
+    timestampTitle: actual.timestampTitle,
+    getActiveBackend: () =>
+      Promise.resolve({
+        id: backendKind.value,
+        finalizeRecording: (...a: unknown[]) => finalizeRecording(...a),
+      }),
+  };
+});
 vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
 }));
@@ -83,20 +92,28 @@ vi.mock('../composables/useMeetingApi', () => ({
 
 // vi.mock is hoisted before top-level consts, so shared mock handles that the
 // factory closes over must live in vi.hoisted() to avoid TDZ errors.
-const { discardPendingAudio, recordingIdForStart } = vi.hoisted(() => ({
+const { discardPendingAudio, recordingIdForStart, beginRecording } = vi.hoisted(() => ({
   discardPendingAudio: vi.fn(() => Promise.resolve()),
   // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
   // i.e. a fresh recording. Tests that exercise the append case override this.
-  recordingIdForStart: vi.fn((createdAt: string) =>
-    Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
-  ),
+  // Strips sub-second precision (if any) and re-appends the trailing `Z`,
+  // matching storage::sanitize_iso_to_id's head+"Z" reconstruction.
+  recordingIdForStart: vi.fn((createdAt: string) => {
+    const head = createdAt.includes('.') ? createdAt.split('.')[0] : createdAt.replace(/Z$/, '');
+    return Promise.resolve(`${head.replace(/:/g, '-')}Z`);
+  }),
+  beginRecording: vi.fn(() => Promise.resolve()),
 }));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
-  local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
+  local: {
+    recordingIdForStart: (...a: [string]) => recordingIdForStart(...a),
+    beginRecording: (...a: [string, string, string]) => beginRecording(...a),
+  },
 }));
 
 import WaveformView from './WaveformView.vue';
+import { timestampTitle } from '../composables/useBackend';
 import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch';
 
 // Recorder views own native listeners and timers, so every test must exercise
@@ -970,5 +987,57 @@ describe('WaveformView recorder://yield handshake', () => {
     settleUpload({ backend: 'local' });
     await flushPromises();
     wrapper.unmount();
+  });
+});
+
+describe('WaveformView local recording identity (#355)', () => {
+  it('creates the local recording on disk as soon as its id resolves', async () => {
+    backendKind.value = 'local';
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(beginRecording).toHaveBeenCalledTimes(1);
+    const [id, createdAt, title] = beginRecording.mock.calls[0];
+    expect(id).toBe('2026-06-09T10-00-00Z');
+    expect(createdAt).toBe('2026-06-09T10:00:00.000Z');
+    // The same string LocalBackend.finalizeRecording will pass, so the row's
+    // label does not change when the recording stops.
+    expect(title).toBe(timestampTitle('2026-06-09T10:00:00.000Z'));
+  });
+
+  it('skips the disk write when continuing into an existing recording', async () => {
+    backendKind.value = 'local';
+    routeQuery = { localAppendId: '2026-06-09T09-00-00Z' };
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(beginRecording).not.toHaveBeenCalled();
+    expect(recordingIdForStart).not.toHaveBeenCalled();
+  });
+
+  it('does not touch local storage for an Ariso recording', async () => {
+    backendKind.value = 'ariso';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(beginRecording).not.toHaveBeenCalled();
+  });
+
+  // A cosmetic feature must never take the recording down with it.
+  it('keeps recording when the identity write fails', async () => {
+    backendKind.value = 'local';
+    beginRecording.mockRejectedValueOnce(new Error('disk full'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(startRecording).toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
   });
 });

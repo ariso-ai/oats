@@ -112,6 +112,7 @@ import { recordingStartErrorMessage } from '../composables/recordingStartError';
 import { useWaveform } from '../composables/useWaveform';
 import {
   getActiveBackend,
+  timestampTitle,
   type Backend,
   type FinalizeResult,
   type RecordingMeta,
@@ -270,7 +271,19 @@ watch(
       // forceNew makes the backend return this session's own new id (never an
       // append target), so the recorder docks to a fresh row.
       const id = await local.recordingIdForStart(startAt, forceNew);
-      if (token === idResolveToken) effectiveLocalRecordingId.value = id;
+      if (token !== idResolveToken) return;
+      effectiveLocalRecordingId.value = id;
+      // Give the recording an on-disk identity right away so its row is real
+      // and renamable while it captures (#355), not only after Stop. Pass the
+      // exact title finalize will use so the label never changes under the
+      // user. A no-op when the resolve picked an append target.
+      try {
+        await local.beginRecording(id, startAt, timestampTitle(startAt));
+      } catch (e) {
+        // Cosmetic: without it the rename affordance stays broken until Stop
+        // (today's behavior). Never worth aborting a live recording over.
+        console.error('Failed to create the local recording on disk', e);
+      }
     } catch (e) {
       // Fall back to this session's own id so recording still works if the
       // resolve fails (worst case: today's behavior, a new-recording row).
