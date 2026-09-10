@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { ref } from 'vue';
 
 const startRecording = vi.fn();
 const stopRecording = vi.fn();
@@ -40,7 +41,10 @@ let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
 const recorderIsRecording = { value: true };
 const recorderIsPaused = { value: false };
-const recorderDuration = { value: 5 };
+// A real ref (not a plain `{ value }` stub like its neighbors): Task 8's
+// duration watcher in WaveformView needs actual Vue reactivity to fire when a
+// test mutates this mid-recording.
+const recorderDuration = ref(5);
 const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
@@ -1108,5 +1112,111 @@ describe('WaveformView tray identity (#355)', () => {
       'set_recording_meeting',
       expect.anything(),
     );
+  });
+});
+
+describe('WaveformView unmatched auto-trigger (#355)', () => {
+  it('creates an ad-hoc meeting once the recording outlives the discard window', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]); // no calendar match
+    recorderDuration.value = 5;
+
+    mount(WaveformView);
+    await flushPromises();
+
+    // Still inside the 15s window that discards a mic blip.
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+
+    recorderDuration.value = 15;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 77,
+      title: 'Budget sync',
+    });
+  });
+
+  it('creates only one meeting however long the recording runs', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+
+    mount(WaveformView);
+    await flushPromises();
+
+    recorderDuration.value = 15;
+    await flushPromises();
+    recorderDuration.value = 20;
+    await flushPromises();
+    recorderDuration.value = 90;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a calendar-matched auto recording alone', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    const now = Date.now();
+    // `ScheduledMeeting` is snake_case on the wire (useMeetingApi.ts:51), and
+    // `pickDefaultMeeting` reads `start_at`. A meeting counts as "current" from
+    // start-5min to start+60min, so a start 1 minute ago matches.
+    listScheduledMeetings.mockResolvedValue([
+      { id: 9, title: 'Standup', start_at: new Date(now - 60_000).toISOString() },
+    ]);
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  it('leaves a manually-started recording alone', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = {}; // no auto=1: the picker already resolved an id
+    listScheduledMeetings.mockResolvedValue([]);
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  it('leaves a local auto recording alone', async () => {
+    backendKind.value = 'local';
+    routeQuery = { auto: '1' };
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  // Identical to today's total lack of an id — never a regression, never a retry.
+  it('records unattached when the ad-hoc meeting cannot be created', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    createAudioMeeting.mockRejectedValueOnce(new Error('offline'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 20;
+    await flushPromises();
+    recorderDuration.value = 40;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1); // no retry
+    expect(err).toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
   });
 });

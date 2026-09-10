@@ -537,10 +537,16 @@ async function startRecording() {
   await invoke('set_tray_recording', { isRecording: true, isPaused: false });
 }
 
+// True once an Ariso auto-trigger has run and found no calendar meeting to
+// attach to. Such a session has no identity at all today, so nothing can
+// surface it while it runs; `awaitAdHocMeeting` gives it one.
+const needsAdHocMeeting = ref(false);
+let adHocMeetingRequested = false;
+
 // Auto-trigger: attach to a matching calendar meeting when one is found. The
 // user has already opted in via the pre-recording notification prompt (or
 // auto-record is on), so there's no in-pill confirmation — a no-match recording
-// simply proceeds unattached.
+// gets its own ad-hoc meeting instead (see the duration watcher below).
 async function resolveAuto() {
   try {
     if (backend.value?.id === 'ariso') {
@@ -551,12 +557,48 @@ async function resolveAuto() {
       const assoc = resolveAssociation('ariso', meetings, now);
       if (assoc.kind === 'matched') {
         effectiveMeetingId.value = assoc.meetingId ?? null;
+      } else {
+        // No calendar match. Don't create the meeting yet: this could still be
+        // a two-second mic blip that handleStop discards.
+        needsAdHocMeeting.value = true;
       }
     }
   } catch (e) {
     console.error('Auto-trigger calendar match failed; recording unattached', e);
   }
 }
+
+// Once an unmatched auto recording outlives the discard threshold it is a real
+// meeting, so give it a real one — the same ad-hoc endpoint "Record a new
+// meeting" uses. From here it is indistinguishable, to every list/pill/tray
+// surface, from a manually-started ad-hoc recording.
+//
+// Deferring to this point sidesteps a hard problem for free: there is no
+// delete-meeting endpoint, so a meeting created for a session that then gets
+// discarded would be permanent garbage.
+async function createAdHocMeeting(): Promise<void> {
+  if (adHocMeetingRequested) return;
+  adHocMeetingRequested = true; // one attempt per session, never a mid-session retry
+  try {
+    const { meetingId } = await useMeetingApi().createAudioMeeting();
+    effectiveMeetingId.value = meetingId;
+  } catch (e) {
+    // Leave the session unattached for its remaining duration — identical to
+    // today's behavior, not a regression. Finalize still creates a meeting
+    // server-side when the upload arrives with no id attached.
+    console.error('Failed to create an ad-hoc meeting for this recording', e);
+  }
+}
+
+watch(
+  () => recorder.durationSeconds.value,
+  (seconds) => {
+    if (!needsAdHocMeeting.value || isStopping.value) return;
+    if (seconds < MIN_AUTO_DURATION_S) return;
+    needsAdHocMeeting.value = false;
+    void createAdHocMeeting();
+  },
+);
 
 // Discard the in-progress capture without uploading, then close.
 async function discardRecording() {
