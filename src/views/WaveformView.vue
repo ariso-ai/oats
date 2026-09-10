@@ -259,15 +259,25 @@ async function registerTrayIdentity(): Promise<void> {
   const meetingId = effectiveMeetingId.value;
   const localId = effectiveLocalRecordingId.value;
   if (meetingId === null && localId === null) return;
+  // Wait for the backend to resolve rather than registering an unnamed row we
+  // would immediately have to correct; the watcher re-runs once it is known.
+  const backendId = backend.value?.id;
+  if (!backendId) return;
 
   let title: string | null = null;
   if (meetingId !== null) {
-    try {
-      const { meeting } = await useMeetingApi().getMeeting(meetingId);
-      title = meeting.title ?? null;
-    } catch (e) {
-      // The row still needs to exist and be clickable; only its label suffers.
-      console.error('Failed to resolve the recording title for the tray', e);
+    // Ariso only. A local recording must never reach out to the network, and
+    // that guarantee shouldn't rest on "a local recording can't carry a meeting
+    // id anyway" — resolveSilenceSubtitle and resolveMeetingEnd guard the same
+    // way. Without a title the row still exists and is still clickable.
+    if (backendId === 'ariso') {
+      try {
+        const { meeting } = await useMeetingApi().getMeeting(meetingId);
+        title = meeting.title ?? null;
+      } catch (e) {
+        // The row still needs to exist and be clickable; only its label suffers.
+        console.error('Failed to resolve the recording title for the tray', e);
+      }
     }
   } else if (recorder.startedAt.value) {
     title = timestampTitle(recorder.startedAt.value);
@@ -280,10 +290,34 @@ async function registerTrayIdentity(): Promise<void> {
   }
 }
 watch(
-  [effectiveMeetingId, effectiveLocalRecordingId],
+  // The backend is a source too: it resolves asynchronously, and an Ariso
+  // meeting id can already be known (route query) before it does.
+  [effectiveMeetingId, effectiveLocalRecordingId, () => backend.value?.id],
   () => void registerTrayIdentity(),
   { immediate: true },
 );
+// The resolved local recording id whose stub `meta.json` has not been written
+// yet. Null when there is nothing to write: an explicit append target, a failed
+// resolve, a non-local backend, or a stub already written.
+let pendingStubId: string | null = null;
+
+// Write the stub `meta.json` that makes a capturing local recording a real,
+// renamable row. Pass the exact title finalize will use so the label never
+// changes under the user. At most one write per session, success or not.
+async function writeLocalRecordingStub(): Promise<void> {
+  const id = pendingStubId;
+  const startAt = recorder.startedAt.value;
+  if (!id || !startAt) return;
+  pendingStubId = null;
+  try {
+    await local.beginRecording(id, startAt, timestampTitle(startAt));
+  } catch (e) {
+    // Cosmetic: without it the rename affordance stays broken until Stop
+    // (today's behavior). Never worth aborting a live recording over.
+    console.error('Failed to create the local recording on disk', e);
+  }
+}
+
 // When a local recording starts, ask Rust which recording it will finalize into
 // (append target vs. new) and broadcast that id. Resolving once here — rather
 // than deriving a fresh id from the start time on every heartbeat — is what
@@ -297,6 +331,7 @@ watch(
     const token = ++idResolveToken;
     if (!startAt || backendId !== 'local') {
       effectiveLocalRecordingId.value = null;
+      pendingStubId = null;
       return;
     }
     if (localAppendId) {
@@ -310,17 +345,14 @@ watch(
       const id = await local.recordingIdForStart(startAt, forceNew);
       if (token !== idResolveToken) return;
       effectiveLocalRecordingId.value = id;
-      // Give the recording an on-disk identity right away so its row is real
-      // and renamable while it captures (#355), not only after Stop. Pass the
-      // exact title finalize will use so the label never changes under the
-      // user. A no-op when the resolve picked an append target.
-      try {
-        await local.beginRecording(id, startAt, timestampTitle(startAt));
-      } catch (e) {
-        // Cosmetic: without it the rename affordance stays broken until Stop
-        // (today's behavior). Never worth aborting a live recording over.
-        console.error('Failed to create the local recording on disk', e);
-      }
+      // Give the recording an on-disk identity so its row is real and renamable
+      // while it captures (#355), not only after Stop. A manual recording gets
+      // it right away; an auto one waits until it outlives the discard window
+      // (see the duration watcher), because handleStop discards a sub-15s blip
+      // without ever finalizing and there is no delete for local recordings —
+      // the stub would be a permanent phantom row.
+      pendingStubId = id;
+      if (!isAuto) await writeLocalRecordingStub();
     } catch (e) {
       // Fall back to this session's own id so recording still works if the
       // resolve fails (worst case: today's behavior, a new-recording row).
@@ -590,13 +622,20 @@ async function createAdHocMeeting(): Promise<void> {
   }
 }
 
+// An auto recording only earns a persistent identity once it outlives the
+// discard threshold — before that, handleStop throws the capture away and
+// neither backend can clean up after itself (no delete-meeting endpoint on
+// Ariso, no delete at all for local recordings). Both deferrals land here.
 watch(
   () => recorder.durationSeconds.value,
   (seconds) => {
-    if (!needsAdHocMeeting.value || isStopping.value) return;
+    if (isStopping.value) return;
     if (seconds < MIN_AUTO_DURATION_S) return;
-    needsAdHocMeeting.value = false;
-    void createAdHocMeeting();
+    if (needsAdHocMeeting.value) {
+      needsAdHocMeeting.value = false;
+      void createAdHocMeeting();
+    }
+    if (isAuto && pendingStubId) void writeLocalRecordingStub();
   },
 );
 

@@ -90,7 +90,11 @@ vi.mock('../composables/useSilenceDetection', () => ({
 }));
 
 const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
-const getMeeting = vi.fn(() => Promise.resolve({ meeting: { title: 'Budget sync' } }));
+// `title` is nullable on the wire: an ad-hoc meeting is created without one.
+const getMeeting = vi.fn(
+  (): Promise<{ meeting: { title: string | null } }> =>
+    Promise.resolve({ meeting: { title: 'Budget sync' } }),
+);
 const createAudioMeeting = vi.fn(() => Promise.resolve({ meetingId: 77 }));
 vi.mock('../composables/useMeetingApi', () => ({
   useMeetingApi: () => ({
@@ -1004,6 +1008,9 @@ describe('WaveformView recorder://yield handshake', () => {
 });
 
 describe('WaveformView local recording identity (#355)', () => {
+  // Manual recordings are never length-gated and never auto-discarded, so the
+  // stub goes down the moment the id resolves — that is what makes the row
+  // renamable mid-capture.
   it('creates the local recording on disk as soon as its id resolves', async () => {
     backendKind.value = 'local';
     recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
@@ -1018,6 +1025,60 @@ describe('WaveformView local recording identity (#355)', () => {
     // The same string LocalBackend.finalizeRecording will pass, so the row's
     // label does not change when the recording stops.
     expect(title).toBe(timestampTitle('2026-06-09T10:00:00.000Z'));
+  });
+
+  // An auto recording under 15s is discarded without ever finalizing, and there
+  // is no delete for local recordings — a stub written at capture start would
+  // survive on disk forever as an empty phantom row. So it waits, exactly as
+  // the Ariso ad-hoc meeting does.
+  it('defers an auto recording\'s disk write until it outlives the discard window', async () => {
+    backendKind.value = 'local';
+    routeQuery = { auto: '1' };
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+    recorderDuration.value = 5;
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(recordingIdForStart).toHaveBeenCalled(); // the id still resolves early
+    expect(beginRecording).not.toHaveBeenCalled();
+
+    recorderDuration.value = 15;
+    await flushPromises();
+
+    expect(beginRecording).toHaveBeenCalledTimes(1);
+    expect(beginRecording).toHaveBeenCalledWith(
+      '2026-06-09T10-00-00Z',
+      '2026-06-09T10:00:00.000Z',
+      timestampTitle('2026-06-09T10:00:00.000Z'),
+    );
+
+    // Still exactly one stub however long the recording then runs.
+    recorderDuration.value = 90;
+    await flushPromises();
+    expect(beginRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it('never writes a stub for an auto recording that stops inside the discard window', async () => {
+    backendKind.value = 'local';
+    routeQuery = { auto: '1' };
+    recorderDuration.value = 5;
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+
+    mount(WaveformView);
+    await flushPromises();
+
+    await eventHandlers['auto-record://stop']?.({});
+    await flushPromises();
+
+    // Discarded, so nothing was ever finalized — and nothing is left on disk.
+    expect(finalizeRecording).not.toHaveBeenCalled();
+    expect(beginRecording).not.toHaveBeenCalled();
+
+    // A duration tick landing after the stop must not resurrect the write.
+    recorderDuration.value = 20;
+    await flushPromises();
+    expect(beginRecording).not.toHaveBeenCalled();
   });
 
   it('skips the disk write when continuing into an existing recording', async () => {
@@ -1083,6 +1144,24 @@ describe('WaveformView tray identity (#355)', () => {
     });
   });
 
+  // Offline mode means offline: the label comes from the start time, and the
+  // meeting API is never touched — the same guard resolveSilenceSubtitle and
+  // resolveMeetingEnd apply, rather than relying on "a local recording can't
+  // carry a meeting id anyway".
+  it('never reaches the network for a local recording', async () => {
+    backendKind.value = 'local';
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(getMeeting).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: null,
+      title: timestampTitle('2026-06-09T10:00:00.000Z'),
+    });
+  });
+
   // A meeting whose title can't be fetched still names the tray row, so the
   // click-through exists — the label just falls back.
   it('still registers the meeting when its title lookup fails', async () => {
@@ -1136,6 +1215,49 @@ describe('WaveformView unmatched auto-trigger (#355)', () => {
       meetingId: 77,
       title: 'Budget sync',
     });
+  });
+
+  // The realistic shape: createAudioMeeting() sends no title, so the ad-hoc
+  // meeting really is untitled until the user renames it. The tray row must
+  // still be registered (and, in Rust, still rendered) off the meeting id alone.
+  it('registers an untitled ad-hoc meeting with the tray', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    getMeeting.mockResolvedValue({ meeting: { title: null } });
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 15;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 77,
+      title: null,
+    });
+  });
+
+  // The watcher fires on every duration tick, including ones that land after
+  // the user hit Stop. A discarded recording must not gain a permanent meeting.
+  it('creates no meeting once the recording is already stopping', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    recorderDuration.value = 5;
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+
+    mount(WaveformView);
+    await flushPromises();
+
+    // Under 15s and auto: this discards, setting isStopping.
+    await eventHandlers['auto-record://stop']?.({});
+    await flushPromises();
+
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
   });
 
   it('creates only one meeting however long the recording runs', async () => {
