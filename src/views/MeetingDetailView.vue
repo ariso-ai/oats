@@ -938,8 +938,9 @@ async function onNoteTaskToggle(e: Event): Promise<void> {
   box.disabled = true;
   try {
     const body = await local.setVaultTaskDone(d.id, line, expected, done);
-    if (my !== reqId || !detail.value) return;
-    detail.value.note = body;
+    if (my === reqId && detail.value?.id === d.id) {
+      detail.value.note = body;
+    }
     emit('tasksChanged', { id: d.id });
   } catch (err) {
     console.error('Failed to update task', err);

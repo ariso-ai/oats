@@ -2076,4 +2076,42 @@ describe('MeetingDetailView local AI-notes tasks', () => {
     expect(wrapper.emitted('tasksChanged')).toBeUndefined();
     err.mockRestore();
   });
+
+  it('still emits tasksChanged when the write resolves after the user switched meetings', async () => {
+    // The vault write succeeded, so the Library's Todos view must be told to
+    // refresh even though the panel has since moved on to a different
+    // meeting — only the (now stale) local note update should be skipped.
+    let resolveToggle!: (body: string) => void;
+    setVaultTaskDone.mockReturnValue(
+      new Promise<string>((resolve) => {
+        resolveToggle = resolve;
+      })
+    );
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        meeting.id === '7'
+          ? detail({ id: '7', isLocal: true, note: NOTE })
+          : detail({ id: meeting.id, isLocal: true, note: 'Other note' })
+      )
+    );
+    const second: MeetingListItem = { id: 'b', title: 'Second', timestamp: '2026-06-02T11:00:00Z' };
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    const box = wrapper.find('.md input[data-task-line="1"]');
+    await box.setValue(true);
+    await flushPromises();
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    resolveToggle(
+      NOTE.replace('- [ ] Ship the RFC ➕ 2026-09-09', '- [x] Ship the RFC ➕ 2026-09-09 ✅ 2026-09-10')
+    );
+    await flushPromises();
+
+    expect(wrapper.emitted('tasksChanged')).toEqual([[{ id: '7' }]]);
+    expect(wrapper.find('.md').text()).not.toContain('Ship the RFC');
+  });
 });

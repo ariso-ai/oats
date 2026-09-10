@@ -1,13 +1,18 @@
 use crate::storage::{format_hms, RecordingMeta};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 /// Process-global override for the vault directory. `None` = default
 /// `<ariso_root>/vault`. Set at startup from the persisted `vaultDir` setting
 /// and whenever the user changes it. `RwLock::new` is const, so this is a
 /// zero-init static.
 static VAULT_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Serializes the read-modify-write in `update_note_task` so two in-app
+/// toggles racing on the same (or different) notes can't interleave their
+/// reads and writes. `Mutex::new` is const, so this is a zero-init static.
+static NOTE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Point the vault at `path` for the rest of the process (and future calls).
 pub fn set_vault_override(path: PathBuf) {
@@ -454,18 +459,49 @@ pub fn open_tasks(note_contents: &str) -> Vec<String> {
     legacy_action_item_bullets(&body)
 }
 
+/// True when `s` opens with a `YYYY-MM-DD`-shaped date: 4 digits, `-`, 2
+/// digits, `-`, 2 digits, not immediately followed by another digit (so a
+/// longer digit run isn't mistaken for a date with trailing garbage).
+fn starts_with_date_stamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b.get(10).map_or(true, |c| !c.is_ascii_digit())
+}
+
+/// The byte range of a `✅ YYYY-MM-DD` done stamp in `text`, if present as
+/// that exact token — a bare `✅` in the task's own text (not followed by a
+/// dated stamp) does not match.
+fn find_done_stamp(text: &str) -> Option<std::ops::Range<usize>> {
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find('✅') {
+        let at = search_from + rel;
+        let after = &text[at + '✅'.len_utf8()..];
+        let trimmed = after.trim_start();
+        if starts_with_date_stamp(trimmed) {
+            let date_start = after.len() - trimmed.len();
+            let end = at + '✅'.len_utf8() + date_start + 10;
+            return Some(at..end);
+        }
+        search_from = at + '✅'.len_utf8();
+    }
+    None
+}
+
 /// Drop a `✅ YYYY-MM-DD` done stamp (and the space before it) from task text,
 /// keeping any metadata that follows it.
 fn strip_done_stamp(text: &str) -> String {
-    let Some(at) = text.find('✅') else { return text.to_string() };
-    let before = text[..at].trim_end();
-    let after = text[at + '✅'.len_utf8()..].trim_start();
-    let date_len = after.bytes().take_while(|b| b.is_ascii_digit() || *b == b'-').count();
-    let tail = after[date_len..].trim_start();
-    if tail.is_empty() {
+    let Some(range) = find_done_stamp(text) else { return text.to_string() };
+    let before = text[..range.start].trim_end();
+    let after = text[range.end..].trim_start();
+    if after.is_empty() {
         before.to_string()
     } else {
-        format!("{before} {tail}")
+        format!("{before} {after}")
     }
 }
 
@@ -486,7 +522,7 @@ fn toggle_task_line(line: &str, done: bool, today: &str) -> Option<String> {
     let rest = &content[3..];
     if done {
         let rest = rest.trim_end();
-        let stamp = if rest.contains('✅') { String::new() } else { format!(" ✅ {today}") };
+        let stamp = if find_done_stamp(rest).is_some() { String::new() } else { format!(" ✅ {today}") };
         Some(format!("{lead}[x]{rest}{stamp}"))
     } else {
         Some(format!("{lead}[ ]{}", strip_done_stamp(rest)))
@@ -650,10 +686,20 @@ pub fn update_note_task(
     done: bool,
     today: &str,
 ) -> Result<String, String> {
+    let _guard = NOTE_WRITE_LOCK.lock().expect("NOTE_WRITE_LOCK poisoned");
     let path = find_note(oats_id)?.ok_or_else(|| format!("no vault note for {oats_id}"))?;
     let contents = std::fs::read_to_string(&path).map_err(|e| format!("read vault note: {e}"))?;
     let updated = set_task_done(&contents, line, expected, done, today)?;
     if updated != contents {
+        // Re-read immediately before writing: an Obsidian edit (or another
+        // writer, absent the lock above) landing between the read at the top
+        // of this function and this point would otherwise be silently
+        // overwritten, since `updated` carries the whole file body.
+        let current =
+            std::fs::read_to_string(&path).map_err(|e| format!("read vault note: {e}"))?;
+        if current != contents {
+            return Err("the note changed since it was loaded".into());
+        }
         crate::storage::write_atomic(&path, updated.as_bytes())?;
     }
     Ok(note_body(&updated))
@@ -1578,5 +1624,65 @@ mod tests {
         assert!(set_task_done(&note, 2, "- [-] Dropped", true, "2026-09-10").is_err());
         assert!(set_task_done(&note, 4, "- [ ] code", true, "2026-09-10").is_err());
         assert!(set_task_done(&note, 99, "- [ ] nope", true, "2026-09-10").is_err());
+    }
+
+    #[test]
+    fn set_task_done_stamps_a_task_whose_text_has_a_natural_checkmark() {
+        // A ✅ in the task's own text (not followed by a date) must not be
+        // mistaken for an existing done stamp — the real stamp still gets
+        // appended, and the natural checkmark survives untouched.
+        let note = render_note(&meta_for_note(), "a.mp3", "- [ ] Reply ✅ looks good\n");
+        let out = set_task_done(&note, 0, "- [ ] Reply ✅ looks good", true, "2026-09-10").unwrap();
+        assert!(
+            out.contains("\n- [x] Reply ✅ looks good ✅ 2026-09-10\n"),
+            "natural checkmark preserved and dated stamp appended: {out}"
+        );
+    }
+
+    #[test]
+    fn set_task_done_reopen_only_strips_the_dated_stamp_not_natural_checkmarks() {
+        // Reopening must remove exactly the `✅ YYYY-MM-DD` token, leaving any
+        // other ✅ in the task's own text untouched.
+        let note = render_note(&meta_for_note(), "a.mp3", "- [x] Reply ✅ looks good ✅ 2026-09-10\n");
+        let out =
+            set_task_done(&note, 0, "- [x] Reply ✅ looks good ✅ 2026-09-10", false, "2026-09-11")
+                .unwrap();
+        assert!(out.contains("\n- [ ] Reply ✅ looks good\n"), "natural checkmark survives: {out}");
+    }
+
+    #[test]
+    fn update_note_task_serializes_concurrent_racing_writers() {
+        // Two threads race to toggle DIFFERENT lines of the same note at the
+        // same time. Before NOTE_WRITE_LOCK, both could read the file before
+        // either wrote, so the second writer's save would overwrite the
+        // first's change (each writes the whole file body, not just its own
+        // line). With the lock serializing update_note_task end-to-end, both
+        // toggles must survive regardless of interleaving.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        let mut meta = meta_for_note();
+        meta.id = "id-race".into();
+        write_note("2026-06-02 Race", &meta, "2026-06-02 Race.mp3", TASKS_BODY).unwrap();
+
+        std::thread::scope(|s| {
+            let t1 = s.spawn(|| {
+                update_note_task("id-race", 1, "- [ ] Ship the RFC ➕ 2026-06-02", true, "2026-09-10")
+            });
+            let t2 = s.spawn(|| {
+                update_note_task("id-race", 2, "- [ ] Email legal ➕ 2026-06-02", true, "2026-09-10")
+            });
+            t1.join().unwrap().unwrap();
+            t2.join().unwrap().unwrap();
+        });
+
+        // Whichever order they ran in, both toggles must have landed — proof
+        // that no writer's save was silently lost to the other.
+        assert_eq!(open_tasks(&read_note("id-race").unwrap().unwrap()), Vec::<String>::new());
+
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
     }
 }

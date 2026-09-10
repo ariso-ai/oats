@@ -79,6 +79,11 @@ export function renderMarkdown(src: string, options: RenderMarkdownOptions = {})
   let listType: 'ul' | 'ol' | null = null;
   let para: string[] = [];
   let quote: string[] = [];
+  // Fenced-code-block state, tracked only to gate interactive task controls:
+  // Obsidian Tasks (and the vault writer's `set_task_done`) never treat a
+  // fenced line as a task, so a control must not be made clickable there
+  // either. Mirrors advance_fence in src-tauri/src/vault.rs.
+  let fence: '`' | '~' | null = null;
 
   const flushList = () => {
     if (listType) {
@@ -106,6 +111,13 @@ export function renderMarkdown(src: string, options: RenderMarkdownOptions = {})
 
   for (const [index, raw] of lines.entries()) {
     const line = raw.trimEnd();
+
+    const fenceMarker = line.trimStart().match(/^(`{3,}|~{3,})/);
+    if (fenceMarker) {
+      const delim = fenceMarker[1][0] as '`' | '~';
+      if (fence === null) fence = delim;
+      else if (fence === delim) fence = null;
+    }
 
     if (!line.trim()) {
       flushAll();
@@ -147,7 +159,9 @@ export function renderMarkdown(src: string, options: RenderMarkdownOptions = {})
       if (task) {
         const checked = task[1] === 'x' || task[1] === 'X';
         const control =
-          options.interactiveTasks && task[1] !== '' ? ` data-task-line="${index}"` : ' disabled';
+          options.interactiveTasks && task[1] !== '' && !fence
+            ? ` data-task-line="${index}"`
+            : ' disabled';
         html.push(
           `<li class="task-list-item${checked ? ' task-done' : ''}"><input type="checkbox"${control}${
             checked ? ' checked' : ''

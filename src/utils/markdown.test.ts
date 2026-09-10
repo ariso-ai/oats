@@ -111,4 +111,21 @@ describe('renderMarkdown interactive tasks', () => {
     expect(html).toContain('<input type="checkbox" disabled />');
     expect(html).not.toContain('data-task-line');
   });
+
+  it('keeps a task-looking line inside a fenced code block read-only', () => {
+    // The backend's set_task_done rejects a line inside a fence as "not a
+    // task", so the control here must stay disabled rather than clickable.
+    const src = '- [ ] Real task\n```\n- [ ] fenced, not a task\n```\n- [ ] Another real task';
+    const html = renderMarkdown(src, { interactiveTasks: true });
+    expect(html).toContain('data-task-line="0"');
+    expect(html).toContain('data-task-line="4"');
+    expect(html).not.toContain('data-task-line="2"');
+  });
+
+  it('keeps a task-looking line inside a tilde-fenced code block read-only', () => {
+    const src = '~~~\n- [ ] fenced, not a task\n~~~\n- [ ] Real task';
+    const html = renderMarkdown(src, { interactiveTasks: true });
+    expect(html).not.toContain('data-task-line="1"');
+    expect(html).toContain('data-task-line="3"');
+  });
 });
