@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { nextTick } from 'vue';
 
 const listMeetings = vi.fn();
 const searchMeetings = vi.fn();
@@ -19,6 +20,7 @@ const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
 const getMeetingPrep = vi.fn();
 const openPrepTab = vi.fn();
+const saveNotesNow = vi.fn(() => Promise.resolve());
 const listPendingUploads = vi.fn(() => Promise.resolve([]));
 const minimizeWindow = vi.fn(() => Promise.resolve());
 const toggleMaximizeWindow = vi.fn(() => Promise.resolve());
@@ -157,11 +159,11 @@ function item(over: Record<string, unknown>) {
 // chrome (selection, the recorder strip, the titlebar button).
 const detailStub = {
   name: 'MeetingDetailView',
-  emits: ['close', 'title-updated', 'content-ready'],
+  emits: ['close', 'title-updated', 'content-ready', 'deleted'],
   props: ['item'],
   methods: {
     openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
-    saveNotesNow: () => Promise.resolve(),
+    saveNotesNow: () => saveNotesNow(),
   },
   template:
     '<div class="detail-stub" :data-meeting="item?.id" :data-prep="item?.prepId"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
@@ -827,6 +829,53 @@ describe('LibraryView', () => {
       await flushPromises();
 
       expect(listMeetings).not.toHaveBeenCalled();
+    });
+
+    // The detail panel performs the delete; the list has to stop showing the row.
+    describe('a deleted local note', () => {
+      it('drops the row and clears the selection, then re-syncs from disk', async () => {
+        const wrapper = await mountWithRows([item({ id: 'a' }), item({ id: 'b' })]);
+        await wrapper.get('.meeting-item').trigger('click');
+        await flushPromises();
+        listMeetings.mockClear();
+        listMeetings.mockResolvedValue([item({ id: 'b' })]);
+
+        wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('deleted', { id: 'a' });
+        await flushPromises();
+
+        const rows = wrapper.findAll('.meeting-item');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].text()).not.toContain('a');
+        // Selection cleared -> the detail pane is replaced by the Up Next card.
+        expect(wrapper.findComponent({ name: 'MeetingDetailView' }).exists()).toBe(false);
+        expect(listMeetings).toHaveBeenCalled();
+      });
+
+      it('drops the row immediately, without waiting on the list reload', async () => {
+        const wrapper = await mountWithRows([item({ id: 'a' }), item({ id: 'b' })]);
+        await wrapper.get('.meeting-item').trigger('click');
+        await flushPromises();
+        // A reload that never settles: the row must still be gone from the UI.
+        listMeetings.mockReturnValue(new Promise(() => {}));
+
+        wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('deleted', { id: 'a' });
+        await nextTick();
+
+        expect(wrapper.findAll('.meeting-item')).toHaveLength(1);
+      });
+
+      it('does not autosave the notes of the recording it just deleted', async () => {
+        const wrapper = await mountWithRows([item({ id: 'a' })]);
+        await wrapper.get('.meeting-item').trigger('click');
+        await flushPromises();
+        saveNotesNow.mockClear();
+
+        wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('deleted', { id: 'a' });
+        await flushPromises();
+
+        // The folder is gone; the usual pre-selection-change flush must be skipped.
+        expect(saveNotesNow).not.toHaveBeenCalled();
+      });
     });
   });
 

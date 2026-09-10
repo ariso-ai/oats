@@ -218,6 +218,7 @@ fn main() {
             commands::open_recording_file,
             commands::copy_recording_file,
             commands::rename_local_recording,
+            commands::delete_local_recording,
             commands::buffer_pending_audio,
             commands::discard_pending_audio,
             commands::list_pending_uploads,

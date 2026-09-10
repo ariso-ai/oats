@@ -209,6 +209,9 @@ export interface Backend {
   getMeetingAudio(item: MeetingListItem, transcriptId?: string): Promise<ArrayBuffer | null>;
   /** Delete a single recording clip by transcript_id. Ariso only; local throws. */
   deleteMeetingClip(item: MeetingListItem, transcriptId: string): Promise<void>;
+  /** Permanently delete a whole meeting note and everything under it. Local
+   *  only; Ariso throws (the server owns its own retention). */
+  deleteMeeting(item: MeetingListItem): Promise<void>;
 }
 
 interface RawMeetingSummary {
@@ -499,6 +502,10 @@ export class ArisoBackend implements Backend {
     const { deleteMeetingRecordingClip } = useMeetingApi();
     await deleteMeetingRecordingClip(item.id, transcriptId);
   }
+
+  async deleteMeeting(): Promise<void> {
+    throw new Error('Deleting a meeting is not supported for Ariso meetings');
+  }
 }
 
 export class LocalBackend implements Backend {
@@ -611,6 +618,10 @@ export class LocalBackend implements Backend {
 
   async deleteMeetingClip(): Promise<void> {
     throw new Error('Deleting individual recordings is not supported for local meetings');
+  }
+
+  async deleteMeeting(item: MeetingListItem): Promise<void> {
+    await local.deleteRecording(item.id);
   }
 }
 

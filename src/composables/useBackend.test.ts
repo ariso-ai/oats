@@ -11,6 +11,7 @@ const modelStatus = vi.fn();
 const getBackendSetting = vi.fn();
 const uploadAudio = vi.fn();
 const renameRecording = vi.fn();
+const deleteRecording = vi.fn();
 const updateMeetingNotesTitle = vi.fn();
 const bufferPendingAudio = vi.fn();
 const discardPendingAudio = vi.fn();
@@ -32,6 +33,7 @@ vi.mock('../tauri', () => ({
     modelStatus: () => modelStatus(),
     listRecordings: () => listRecordings(),
     renameRecording: (...a: unknown[]) => renameRecording(...a),
+    deleteRecording: (...a: unknown[]) => deleteRecording(...a),
     readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
   },
   auth: { checkSession: () => checkSession() },
@@ -475,6 +477,26 @@ describe('LocalBackend clips', () => {
   it('deleteMeetingClip rejects as unsupported', async () => {
     const item = { id: 'a', title: 'T', timestamp: 't' };
     await expect(new LocalBackend().deleteMeetingClip(item, 'x')).rejects.toThrow(/not supported/i);
+  });
+});
+
+describe('whole-note delete', () => {
+  it('LocalBackend.deleteMeeting deletes the local recording', async () => {
+    deleteRecording.mockResolvedValue(undefined);
+    const item = { id: 'rec-1', title: 'T', timestamp: 't' };
+    await new LocalBackend().deleteMeeting(item);
+    expect(deleteRecording).toHaveBeenCalledWith('rec-1');
+  });
+
+  it('LocalBackend.deleteMeeting propagates a backend failure', async () => {
+    deleteRecording.mockRejectedValue(new Error('disk on fire'));
+    const item = { id: 'rec-1', title: 'T', timestamp: 't' };
+    await expect(new LocalBackend().deleteMeeting(item)).rejects.toThrow('disk on fire');
+  });
+
+  it('ArisoBackend.deleteMeeting rejects as unsupported', async () => {
+    const item = { id: '42', title: 'T', timestamp: 't' };
+    await expect(new ArisoBackend().deleteMeeting(item)).rejects.toThrow(/not supported/i);
   });
 });
 

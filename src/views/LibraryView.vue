@@ -235,6 +235,7 @@
           @close="clearSelection"
           @title-updated="onTitleUpdated"
           @content-ready="onContentReady"
+          @deleted="onNoteDeleted"
         />
         <UpNextCard
           v-else
@@ -680,6 +681,25 @@ function onTitleUpdated(payload: { id: string; title: string }): void {
   }
 }
 
+// The open local note was deleted from the detail panel. Drop the row and the
+// selection right away so the list reflects it without waiting on a round trip,
+// then reload from disk so the removal survives navigation and relaunch.
+//
+// Deliberately does NOT go through `clearSelection()`: that flushes the notes
+// editor via `saveNotesNow()`, and the recording's folder no longer exists.
+function onNoteDeleted(payload: { id: string }): void {
+  meetings.value = meetings.value.filter((m) => m.id !== payload.id);
+  pinnedMeetings.value.delete(payload.id);
+  if (selectedItem.value?.id === payload.id) {
+    // Invalidate any in-flight selection so a racing `selectMeeting` can't
+    // re-seat the deleted note after this clears it.
+    selectionReqId++;
+    selectedItem.value = null;
+    userSelectedMeetingId.value = null;
+  }
+  void loadMeetings(false, true);
+}
+
 // The open local recording finished generating. Its row still shows the stale
 // "Processing…" sub-line the list payload described, so pull fresh list data —
 // but only when the row actually claims to be processing, so simply opening an
@@ -741,9 +761,12 @@ let loadMeetingsRequest = 0;
 // lands on the first visible grouped row, not the backend's raw list order.
 // Refresh-driven reloads (window focus/move, upload completion) pass false so
 // they never yank the user off the Up Next greeting/card view back into detail.
-async function loadMeetings(autoSelectFirst = false): Promise<void> {
+// `silent` re-syncs the list without the full-list "Loading…" placeholder, for
+// callers that have already updated the UI optimistically and only need disk to
+// confirm — blanking the list there would undo the immediate feedback.
+async function loadMeetings(autoSelectFirst = false, silent = false): Promise<void> {
   const requestId = ++loadMeetingsRequest;
-  loading.value = true;
+  if (!silent) loading.value = true;
   error.value = null;
   try {
     const backend = await getActiveBackend();
@@ -784,7 +807,7 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     console.error('Failed to list meetings', e);
     error.value = 'Could not load meetings.';
   } finally {
-    if (requestId === loadMeetingsRequest) loading.value = false;
+    if (requestId === loadMeetingsRequest && !silent) loading.value = false;
   }
 }
 
