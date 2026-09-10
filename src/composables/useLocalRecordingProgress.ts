@@ -15,7 +15,11 @@ export type LocalProgressStage =
 export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (!s) return 'idle';
   if (s.status === 'failed') return 'transcript-failed';
-  if (s.status === 'recording' || s.status === 'transcribing') return 'transcribing';
+  // 'recording' means capture is still running (the stub meta.json written at
+  // start, issue #355) — no generation has begun, and the recorder pill / strip
+  // already communicate "recording", so the detail pane shows no status chip.
+  if (s.status === 'recording') return 'idle';
+  if (s.status === 'transcribing') return 'transcribing';
   // status === 'done'
   if (s.hasNote || s.notesStatus === 'ready') return 'ready';
   if (s.notesStatus === 'failed') return 'notes-failed';

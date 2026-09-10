@@ -24,9 +24,32 @@ describe('deriveStage', () => {
   it('returns idle for null', () => {
     expect(deriveStage(null)).toBe('idle');
   });
-  it('maps recording/transcribing to transcribing', () => {
-    expect(deriveStage(view({ status: 'recording' }))).toBe('transcribing');
+  it('maps transcribing to transcribing', () => {
     expect(deriveStage(view({ status: 'transcribing' }))).toBe('transcribing');
+  });
+  // Issue #355: a local recording now writes status 'recording' from the moment
+  // capture starts. It is not generating anything yet — RecorderStrip and the
+  // pill already say "recording", so the detail pane shows no chip.
+  it('treats a live recording as idle, not transcribing', () => {
+    expect(
+      deriveStage({
+        status: 'recording',
+        hasTranscript: false,
+        hasNote: false,
+        notesStatus: 'pending',
+      }),
+    ).toBe('idle');
+  });
+
+  it('still maps a real transcription to the transcribing stage', () => {
+    expect(
+      deriveStage({
+        status: 'transcribing',
+        hasTranscript: false,
+        hasNote: false,
+        notesStatus: 'pending',
+      }),
+    ).toBe('transcribing');
   });
   it('maps failed status to transcript-failed', () => {
     expect(deriveStage(view({ status: 'failed' }))).toBe('transcript-failed');
