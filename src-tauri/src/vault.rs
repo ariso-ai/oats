@@ -251,6 +251,21 @@ fn fence_delimiter(trimmed: &str) -> Option<char> {
     }
 }
 
+/// Advance fenced-code-block state for one line, returning true when the line
+/// is itself a fence marker (the caller decides whether to emit or skip it).
+/// CommonMark closes a fence only with its own delimiter, so a `~~~` line
+/// inside a ```-fence is literal text and leaves the fence open.
+fn advance_fence(trimmed: &str, fence: &mut Option<char>) -> bool {
+    let Some(delim) = fence_delimiter(trimmed) else { return false };
+    match *fence {
+        None => *fence = Some(delim),
+        Some(open) if open == delim => *fence = None,
+        // A different delimiter inside an open fence is literal text.
+        Some(_) => {}
+    }
+    true
+}
+
 /// Rewrite the `## Action Items` section's bullets as Obsidian Tasks
 /// checkboxes stamped with the meeting's date: `- [ ] <task> ➕ YYYY-MM-DD`.
 /// `➕` (created) is the only signifier we can populate truthfully — a meeting
@@ -265,13 +280,7 @@ pub fn render_action_items(notes_md: &str, date: &str) -> String {
     let mut fence: Option<char> = None;
     for line in notes_md.lines() {
         let trimmed = line.trim_start();
-        if let Some(delim) = fence_delimiter(trimmed) {
-            match fence {
-                None => fence = Some(delim),
-                Some(open) if open == delim => fence = None,
-                // A different delimiter inside an open fence is literal text.
-                Some(_) => {}
-            }
+        if advance_fence(trimmed, &mut fence) {
             out.push(line.to_string());
             continue;
         }
@@ -369,8 +378,15 @@ fn strip_task_metadata(text: &str) -> String {
 fn legacy_action_item_bullets(body: &str) -> Vec<String> {
     let mut items = Vec::new();
     let mut in_section = false;
+    let mut fence: Option<char> = None;
     for line in body.lines() {
         let trimmed = line.trim_start();
+        if advance_fence(trimmed, &mut fence) {
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
         if is_heading(trimmed) {
             in_section = is_action_items_heading(trimmed);
             continue;
@@ -409,13 +425,7 @@ pub fn open_tasks(note_contents: &str) -> Vec<String> {
     let mut fence: Option<char> = None;
     for line in body.lines() {
         let trimmed = line.trim_start();
-        if let Some(delim) = fence_delimiter(trimmed) {
-            match fence {
-                None => fence = Some(delim),
-                Some(open) if open == delim => fence = None,
-                // A different delimiter inside an open fence is literal text.
-                Some(_) => {}
-            }
+        if advance_fence(trimmed, &mut fence) {
             continue;
         }
         if fence.is_some() {
@@ -1304,6 +1314,14 @@ mod tests {
     fn open_tasks_legacy_fallback_skips_placeholder_bullets() {
         let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n*   None explicitly stated in the transcript.\n";
         assert!(open_tasks(legacy).is_empty());
+    }
+
+    #[test]
+    fn open_tasks_legacy_fallback_ignores_fenced_bullets() {
+        // A legacy note (no checkboxes anywhere) whose Action Items section
+        // contains a fenced block must not leak the fenced lines as tasks.
+        let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n```\n*   not a task\n```\n*   Real task\n";
+        assert_eq!(open_tasks(legacy), vec!["Real task"]);
     }
 
     #[test]
