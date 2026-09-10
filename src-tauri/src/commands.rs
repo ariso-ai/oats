@@ -1573,6 +1573,32 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     Ok(summaries)
 }
 
+/// One vault note's open tasks, keyed by the recording that produced the note.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTaskGroup {
+    pub oats_id: String,
+    pub tasks: Vec<String>,
+}
+
+/// Every open Obsidian task in the vault's oats-generated notes, grouped by
+/// recording. Notes with no open tasks are omitted; unreadable notes are
+/// skipped with the same "skip junk" tolerance as `list_local_recordings`.
+/// Sorted by id so the result is stable (`scan_vault` returns a HashMap).
+#[tauri::command]
+pub fn list_vault_tasks() -> Result<Vec<VaultTaskGroup>, String> {
+    let mut groups = Vec::new();
+    for (oats_id, path) in crate::vault::scan_vault()? {
+        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+        let tasks = crate::vault::open_tasks(&contents);
+        if !tasks.is_empty() {
+            groups.push(VaultTaskGroup { oats_id, tasks });
+        }
+    }
+    groups.sort_by(|a, b| a.oats_id.cmp(&b.oats_id));
+    Ok(groups)
+}
+
 /// Lightweight status for a single local recording, used by the detail panel's
 /// generation poller. Reads only that recording's `meta.json` and probes its
 /// two artifact files, deriving the AI-notes state the list summary omits.
@@ -2797,6 +2823,56 @@ mod tests {
             std::path::PathBuf::from(&path),
             tmp.path().join("pending-uploads")
         );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_vault_tasks_groups_open_tasks_by_recording() {
+        // SAFETY: command tests run with --test-threads=1, so the process-wide
+        // ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::vault::ensure_vault().unwrap();
+
+        let mut meta = test_meta("2026-06-02T14-30-05Z");
+        meta.title = "Standup".into();
+        crate::vault::write_note(
+            "2026-06-02 Standup",
+            &meta,
+            "2026-06-02 Standup.mp3",
+            "## Action Items\n*   Ship the RFC\n*   Email legal\n",
+        )
+        .unwrap();
+
+        let mut done = test_meta("2026-06-03T09-00-00Z");
+        done.title = "Retro".into();
+        crate::vault::write_note(
+            "2026-06-03 Retro",
+            &done,
+            "2026-06-03 Retro.mp3",
+            "## Action Items\n- [x] Nothing left ➕ 2026-06-03\n",
+        )
+        .unwrap();
+
+        // Junk in the vault must be skipped, not fail the call.
+        std::fs::write(crate::vault::vault_root().unwrap().join("scratch.md"), "no front-matter").unwrap();
+
+        let groups = list_vault_tasks().unwrap();
+
+        // Only the recording with open tasks comes back.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].oats_id, "2026-06-02T14-30-05Z");
+        assert_eq!(groups[0].tasks, vec!["Ship the RFC", "Email legal"]);
+
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_vault_tasks_is_empty_when_the_vault_has_no_notes() {
+        // SAFETY: as above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        assert!(list_vault_tasks().unwrap().is_empty());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

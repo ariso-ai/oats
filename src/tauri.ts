@@ -347,6 +347,11 @@ export interface RecordingStatusView {
   notesStatus: NotesStatus;
 }
 
+export interface VaultTaskGroup {
+  oatsId: string;
+  tasks: string[];
+}
+
 export interface LocalFinalizeResult {
   backend: 'local';
   id: string;
@@ -378,6 +383,11 @@ export const local = {
   },
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
+  },
+  /** Open Obsidian tasks found in the vault's generated notes, grouped by the
+   *  recording each note belongs to. */
+  listVaultTasks(): Promise<VaultTaskGroup[]> {
+    return invoke<VaultTaskGroup[]>('list_vault_tasks');
   },
   /** Resolve the recording id a new local recording (starting at `createdAt`)
    *  will finalize into — the append target if it will merge into the recent

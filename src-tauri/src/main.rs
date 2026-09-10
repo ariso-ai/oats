@@ -204,6 +204,7 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::list_vault_tasks,
             commands::get_vault_dir,
             commands::set_vault_dir,
             commands::local_recording_status,
