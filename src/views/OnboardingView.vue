@@ -8,7 +8,7 @@
       <button
         :disabled="isSigningIn"
         class="google-btn"
-        @click="handleGoogleSignIn"
+        @click="handleSignIn('google')"
       >
         <svg class="google-icon" viewBox="0 0 24 24">
           <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
@@ -17,8 +17,23 @@
           <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
         </svg>
         <span v-if="isConnectingCalendar">Connecting your calendar…</span>
-        <span v-else-if="isSigningIn">Continue in your browser…</span>
+        <span v-else-if="signingInWith === 'google'">Continue in your browser…</span>
         <span v-else>Sign in with Google</span>
+      </button>
+
+      <button
+        :disabled="isSigningIn"
+        class="microsoft-btn"
+        @click="handleSignIn('microsoft')"
+      >
+        <svg class="microsoft-icon" viewBox="0 0 21 21" aria-hidden="true">
+          <path fill="#F25022" d="M0 0h10v10H0z" />
+          <path fill="#7FBA00" d="M11 0h10v10H11z" />
+          <path fill="#00A4EF" d="M0 11h10v10H0z" />
+          <path fill="#FFB900" d="M11 11h10v10H11z" />
+        </svg>
+        <span v-if="signingInWith === 'microsoft'">Continue in your browser…</span>
+        <span v-else>Sign in with Microsoft</span>
       </button>
 
       <p v-if="isSigningIn" class="subheading">
@@ -56,7 +71,11 @@ import { ONBOARDING_STEPS, nextStepIndex } from './onboarding';
 const currentStep = ref(0);
 const step = computed(() => ONBOARDING_STEPS[currentStep.value]);
 
-const isSigningIn = ref(false);
+type SignInProvider = 'google' | 'microsoft';
+// The provider whose browser flow is pending. Both buttons disable while
+// either is pending; only the clicked one reads "Continue in your browser…".
+const signingInWith = ref<SignInProvider | null>(null);
+const isSigningIn = computed(() => signingInWith.value !== null);
 const isConnectingCalendar = ref(false);
 const errorMessage = ref('');
 
@@ -90,11 +109,12 @@ async function advance() {
   }
 }
 
-async function handleGoogleSignIn() {
-  isSigningIn.value = true;
+async function handleSignIn(provider: SignInProvider) {
+  signingInWith.value = provider;
   errorMessage.value = '';
   try {
-    const result = await auth.googleSignIn();
+    const result =
+      provider === 'google' ? await auth.googleSignIn() : await auth.microsoftSignIn();
     if (result.error) {
       // Treat a user-triggered cancel as silent (matches Settings).
       if (result.error !== SIGN_IN_CANCELED_ERROR) {
@@ -108,22 +128,26 @@ async function handleGoogleSignIn() {
     void emit(AUTH_SIGNED_IN_EVENT).catch((err) => {
       console.warn('Failed to broadcast desktop sign-in', err);
     });
-    // Sign-in alone may not carry Calendar: a user who already granted Google
-    // Workspace keeps their broader grant, which might not cover Calendar.
-    // Non-fatal — onboarding completes either way, and Settings can retry.
-    isConnectingCalendar.value = true;
-    try {
-      await auth.ensureCalendarAccess();
-    } catch (err) {
-      console.warn('Could not connect Google Calendar during onboarding', err);
-    } finally {
-      isConnectingCalendar.value = false;
+    // Calendar comes from Google only: ensureCalendarAccess opens Google's
+    // Workspace consent page, which a Microsoft user must never land on.
+    if (provider === 'google') {
+      // Sign-in alone may not carry Calendar: a user who already granted Google
+      // Workspace keeps their broader grant, which might not cover Calendar.
+      // Non-fatal — onboarding completes either way, and Settings can retry.
+      isConnectingCalendar.value = true;
+      try {
+        await auth.ensureCalendarAccess();
+      } catch (err) {
+        console.warn('Could not connect Google Calendar during onboarding', err);
+      } finally {
+        isConnectingCalendar.value = false;
+      }
     }
     await finishOnboarding({ openSettings: true });
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {
-    isSigningIn.value = false;
+    signingInWith.value = null;
   }
 }
 
@@ -135,7 +159,7 @@ async function handleSkip() {
 }
 
 // Abort a pending browser sign-in. The backend resolves the waiting
-// googleSignIn() call with the silent-cancel error, which resets the UI.
+// sign-in call with the silent-cancel error, which resets the UI.
 async function handleCancelSignIn() {
   try {
     await auth.cancelSignIn();
@@ -181,7 +205,8 @@ async function handleCancelSignIn() {
   max-width: 320px;
 }
 
-.google-btn {
+.google-btn,
+.microsoft-btn {
   width: 100%;
   max-width: 320px;
   display: flex;
@@ -200,16 +225,19 @@ async function handleCancelSignIn() {
   transition: background 0.15s;
 }
 
-.google-btn:hover {
+.google-btn:hover,
+.microsoft-btn:hover {
   background: #f9fafb;
 }
 
-.google-btn:disabled {
+.google-btn:disabled,
+.microsoft-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.google-icon {
+.google-icon,
+.microsoft-icon {
   width: 20px;
   height: 20px;
   flex-shrink: 0;
