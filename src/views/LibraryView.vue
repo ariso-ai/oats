@@ -502,10 +502,13 @@ async function loadActionItems(): Promise<void> {
 // Switching backends swaps the whole corpus: drop the previous backend's action
 // items, and leave the Todo tab when the new backend has none (offline mode),
 // where the tab is disabled and would otherwise stay highlighted over an
-// empty pane.
+// empty pane. A load still in flight belongs to the old backend: invalidate it
+// so it can't land its items here, and so the reload below isn't skipped.
 watch(
   () => activeBackend.value?.id,
   () => {
+    loadActionItemsRequest++;
+    todoLoading.value = false;
     todoEntries.value = [];
     todoError.value = null;
     if (activeView.value === 'todo' && !activeBackend.value?.supportsActionItems) {

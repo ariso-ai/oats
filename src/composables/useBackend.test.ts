@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const localFinalize = vi.fn();
 const listRecordings = vi.fn();
@@ -704,11 +704,20 @@ describe('recentDayKeys', () => {
 });
 
 describe('action items', () => {
+  // The Ariso window is derived from "now"; pin it so a run that straddles
+  // local midnight can't compute two different windows.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 7, 31, 12));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('Ariso fans out over the last two weeks and maps rows', async () => {
-    const today = recentDayKeys(new Date(), 14)[0];
     listActionItemsByDay.mockImplementation((day: string) =>
       Promise.resolve(
-        day === today
+        day === '2026-08-31'
           ? [
               {
                 meetingId: 9,
@@ -724,9 +733,22 @@ describe('action items', () => {
     const entries = await new ArisoBackend().listActionItems();
 
     expect(listActionItemsByDay).toHaveBeenCalledTimes(14);
-    expect(listActionItemsByDay.mock.calls.map((c) => c[0])).toEqual(
-      recentDayKeys(new Date(), 14)
-    );
+    expect(listActionItemsByDay.mock.calls.map((c) => c[0])).toEqual([
+      '2026-08-31',
+      '2026-08-30',
+      '2026-08-29',
+      '2026-08-28',
+      '2026-08-27',
+      '2026-08-26',
+      '2026-08-25',
+      '2026-08-24',
+      '2026-08-23',
+      '2026-08-22',
+      '2026-08-21',
+      '2026-08-20',
+      '2026-08-19',
+      '2026-08-18',
+    ]);
     expect(entries).toEqual([
       {
         meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
@@ -753,10 +775,9 @@ describe('action items', () => {
   it('Ariso returns the days that loaded when one day fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      const days = recentDayKeys(new Date(), 14);
       listActionItemsByDay.mockImplementation((day: string) => {
-        if (day === days[0]) return Promise.reject(new Error('500'));
-        if (day === days[1]) {
+        if (day === '2026-08-31') return Promise.reject(new Error('500'));
+        if (day === '2026-08-30') {
           return Promise.resolve([
             {
               meetingId: 7,

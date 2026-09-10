@@ -2191,4 +2191,40 @@ describe('LibraryView Todo tab', () => {
     expect(wrapper.text()).toContain('Ship the RFC');
     expect(wrapper.text()).not.toContain('Send pricing deck');
   });
+
+  it('drops a still-loading Todo request when the backend switches mid-load', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    let resolveAriso!: (entries: ReturnType<typeof actionItems>) => void;
+    listActionItems.mockReturnValueOnce(new Promise((resolve) => (resolveAriso = resolve)));
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('Loading…');
+
+    backendId.mockReturnValue('local');
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
+        'Ship the RFC'
+      )
+    );
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    resolveAriso(
+      actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+        'Send pricing deck'
+      )
+    );
+    await flushPromises();
+
+    expect(listActionItems).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain('Ship the RFC');
+    expect(wrapper.text()).not.toContain('Send pricing deck');
+  });
 });
