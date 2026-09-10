@@ -8,11 +8,8 @@
     @click.self="$emit('cancel')"
   >
     <div class="rec-del__card">
-      <h2 id="rec-del-title" class="rec-del__title">Delete this recording?</h2>
-      <p class="rec-del__body">
-        This removes the selected recording and its transcript from the meeting.
-        The meeting's other recordings and notes are kept. This can't be undone.
-      </p>
+      <h2 id="rec-del-title" class="rec-del__title">{{ title }}</h2>
+      <p class="rec-del__body">{{ body }}</p>
       <div class="rec-del__actions">
         <button class="secondary-btn" @click="$emit('cancel')">Cancel</button>
         <button class="danger-btn" @click="$emit('confirm')">Delete</button>
@@ -22,7 +19,14 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{ open: boolean }>();
+// Shared by the per-clip delete (the defaults) and the whole-note delete, which
+// passes its own copy — same modal, same danger styling, different stakes.
+withDefaults(defineProps<{ open: boolean; title?: string; body?: string }>(), {
+  title: 'Delete this recording?',
+  body:
+    "This removes the selected recording and its transcript from the meeting. " +
+    "The meeting's other recordings and notes are kept. This can't be undone.",
+});
 defineEmits<{ (e: 'confirm'): void; (e: 'cancel'): void }>();
 </script>
 
