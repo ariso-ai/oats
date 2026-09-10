@@ -85,4 +85,30 @@ describe('renderMarkdown task lists', () => {
     expect(html).toContain('🎉');
     expect(html).toContain('📅');
   });
+
+  it('marks a checked item as done so it can be struck through', () => {
+    expect(renderMarkdown('- [x] done item')).toContain('<li class="task-list-item task-done">');
+    expect(renderMarkdown('- [ ] open item')).toContain('<li class="task-list-item">');
+  });
+});
+
+describe('renderMarkdown interactive tasks', () => {
+  it('renders enabled checkboxes tagged with their source line', () => {
+    const src = '## Action Items\n- [ ] Ship the RFC ➕ 2026-09-09\n- [x] Email legal ✅ 2026-09-10';
+    const html = renderMarkdown(src, { interactiveTasks: true });
+    expect(html).toContain('<input type="checkbox" data-task-line="1" />');
+    expect(html).toContain('<input type="checkbox" data-task-line="2" checked />');
+    expect(html).not.toContain('disabled');
+  });
+
+  it('counts source lines across CRLF endings and blank lines', () => {
+    const html = renderMarkdown('Intro\r\n\r\n- [ ] Task', { interactiveTasks: true });
+    expect(html).toContain('data-task-line="2"');
+  });
+
+  it('keeps a `[]` item read-only, since it is not an Obsidian task', () => {
+    const html = renderMarkdown('- [] not quite a task', { interactiveTasks: true });
+    expect(html).toContain('<input type="checkbox" disabled />');
+    expect(html).not.toContain('data-task-line');
+  });
 });

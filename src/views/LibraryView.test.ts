@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { nextTick } from 'vue';
 
 const listMeetings = vi.fn();
 const searchMeetings = vi.fn();
@@ -157,7 +158,7 @@ function item(over: Record<string, unknown>) {
 // chrome (selection, the recorder strip, the titlebar button).
 const detailStub = {
   name: 'MeetingDetailView',
-  emits: ['close', 'title-updated', 'content-ready'],
+  emits: ['close', 'title-updated', 'content-ready', 'tasks-changed'],
   props: ['item'],
   methods: {
     openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
@@ -2117,6 +2118,49 @@ describe('LibraryView Todo tab', () => {
 
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('9');
     expect(wrapper.findAll('.todo-item')[0].classes()).toContain('selected');
+  });
+
+  it('drops a todo ticked in the detail pane without flashing the loading state', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    const meeting = { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() };
+    listActionItems.mockResolvedValue(actionItems(meeting, 'Ship the RFC', 'Email legal'));
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    await wrapper.findAll('.todo-item')[0].trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.todo-item')).toHaveLength(2);
+
+    listActionItems.mockResolvedValue(actionItems(meeting, 'Email legal'));
+    wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('tasks-changed', { id: meeting.id });
+    await nextTick();
+    expect(wrapper.text()).not.toContain('Loading…');
+    await flushPromises();
+
+    const rows = wrapper.findAll('.todo-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain('Email legal');
+    // The meeting stays open in the detail pane.
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe(meeting.id);
+  });
+
+  it('does not reload action items for a task ticked outside the Todo tab', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Some meeting' })]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    await flushPromises();
+    wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('tasks-changed', { id: 'a' });
+    await flushPromises();
+
+    expect(listActionItems).not.toHaveBeenCalled();
   });
 
   it('reports an error when the backend cannot load action items', async () => {

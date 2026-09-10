@@ -1602,6 +1602,22 @@ pub fn list_vault_tasks() -> Result<Vec<VaultTaskGroup>, String> {
     Ok(groups)
 }
 
+/// Tick (or untick) one task in a recording's vault note from the AI Notes
+/// pane, closing (or reopening) its todo. `line` indexes the notes body the
+/// pane rendered and `expected` is that line's text as rendered; a note edited
+/// in Obsidian since then is rejected rather than ticking the wrong task.
+/// Returns the updated notes body.
+#[tauri::command]
+pub fn set_vault_task_done(
+    id: String,
+    line: usize,
+    expected: String,
+    done: bool,
+) -> Result<String, String> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    crate::vault::update_note_task(&id, line, &expected, done, &today)
+}
+
 /// Lightweight status for a single local recording, used by the detail panel's
 /// generation poller. Reads only that recording's `meta.json` and probes its
 /// two artifact files, deriving the AI-notes state the list summary omits.

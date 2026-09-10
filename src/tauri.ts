@@ -392,6 +392,12 @@ export const local = {
   listVaultTasks(): Promise<VaultTaskGroup[]> {
     return invoke<VaultTaskGroup[]>('list_vault_tasks');
   },
+  /** Tick (or untick) the task on `line` of a recording's vault notes body.
+   *  `expected` is that line as last rendered — the backend rejects the write
+   *  when the note has changed since. Resolves to the updated notes body. */
+  setVaultTaskDone(id: string, line: number, expected: string, done: boolean): Promise<string> {
+    return invoke<string>('set_vault_task_done', { id, line, expected, done });
+  },
   /** Resolve the recording id a new local recording (starting at `createdAt`)
    *  will finalize into — the append target if it will merge into the recent
    *  recording, else the new recording's own id. Lets the recorder surface the

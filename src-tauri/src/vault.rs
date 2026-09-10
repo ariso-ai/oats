@@ -415,7 +415,7 @@ fn legacy_action_item_bullets(body: &str) -> Vec<String> {
 /// Scans the whole body rather than just the Action Items section: once oats
 /// has written the note it belongs to the user, who may reorganize or add items
 /// in Obsidian. `[x]` (done) and `[-]` (cancelled) are excluded — that is how a
-/// todo gets closed, since oats never writes completion back.
+/// todo gets closed, whether in Obsidian or via `set_task_done` in-app.
 ///
 /// A note containing no checkbox at all falls back to the plain bullets under
 /// `## Action Items`, so notes generated before this feature still populate the
@@ -452,6 +452,94 @@ pub fn open_tasks(note_contents: &str) -> Vec<String> {
         return tasks;
     }
     legacy_action_item_bullets(&body)
+}
+
+/// Drop a `✅ YYYY-MM-DD` done stamp (and the space before it) from task text,
+/// keeping any metadata that follows it.
+fn strip_done_stamp(text: &str) -> String {
+    let Some(at) = text.find('✅') else { return text.to_string() };
+    let before = text[..at].trim_end();
+    let after = text[at + '✅'.len_utf8()..].trim_start();
+    let date_len = after.bytes().take_while(|b| b.is_ascii_digit() || *b == b'-').count();
+    let tail = after[date_len..].trim_start();
+    if tail.is_empty() {
+        before.to_string()
+    } else {
+        format!("{before} {tail}")
+    }
+}
+
+/// `line` with its checkbox set to `done`, or None when it is not a `[ ]` /
+/// `[x]` task. Ticking appends a `✅ <today>` stamp, as the Obsidian Tasks
+/// plugin does; unticking removes it.
+fn toggle_task_line(line: &str, done: bool, today: &str) -> Option<String> {
+    let (_, content) = split_list_item(line)?;
+    let is_done = match checkbox_state(content)? {
+        ' ' => false,
+        'x' | 'X' => true,
+        _ => return None,
+    };
+    if is_done == done {
+        return Some(line.to_string());
+    }
+    let lead = &line[..line.len() - content.len()];
+    let rest = &content[3..];
+    if done {
+        let rest = rest.trim_end();
+        let stamp = if rest.contains('✅') { String::new() } else { format!(" ✅ {today}") };
+        Some(format!("{lead}[x]{rest}{stamp}"))
+    } else {
+        Some(format!("{lead}[ ]{}", strip_done_stamp(rest)))
+    }
+}
+
+/// Tick (or untick) the task on line `line` of the note's body, returning the
+/// note's new contents. `line` indexes the lines of `note_body(contents)` — the
+/// body the in-app renderer shows — and `expected` must equal that line as the
+/// caller last saw it, so an edit made in Obsidian since the note was loaded
+/// fails instead of ticking the wrong task. Everything outside the line is
+/// preserved byte-for-byte, including its line ending.
+pub fn set_task_done(
+    contents: &str,
+    line: usize,
+    expected: &str,
+    done: bool,
+    today: &str,
+) -> Result<String, String> {
+    let body = note_body(contents);
+    // `note_body` always returns a suffix of `contents`.
+    let head = &contents[..contents.len() - body.len()];
+    let mut out = String::with_capacity(contents.len() + 16);
+    out.push_str(head);
+    let mut fence: Option<char> = None;
+    let mut found = false;
+    for (i, raw) in body.split_inclusive('\n').enumerate() {
+        let text = raw.strip_suffix('\n').unwrap_or(raw);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let is_fence_marker = advance_fence(text.trim_start(), &mut fence);
+        if i != line {
+            out.push_str(raw);
+            continue;
+        }
+        if text != expected {
+            return Err("the note changed since it was loaded".into());
+        }
+        let updated = if is_fence_marker || fence.is_some() {
+            None
+        } else {
+            toggle_task_line(text, done, today)
+        };
+        let Some(updated) = updated else {
+            return Err(format!("line {line} is not a task"));
+        };
+        out.push_str(&updated);
+        out.push_str(&raw[text.len()..]);
+        found = true;
+    }
+    if !found {
+        return Err(format!("the note has no line {line}"));
+    }
+    Ok(out)
 }
 
 /// Reject a note basename that could escape the vault root.
@@ -550,6 +638,25 @@ pub fn read_note(oats_id: &str) -> Result<Option<String>, String> {
         }
         None => Ok(None),
     }
+}
+
+/// Tick (or untick) one task in a recording's vault note — see `set_task_done`
+/// — and atomically write it back. Returns the new notes body so the caller
+/// can re-render without another read.
+pub fn update_note_task(
+    oats_id: &str,
+    line: usize,
+    expected: &str,
+    done: bool,
+    today: &str,
+) -> Result<String, String> {
+    let path = find_note(oats_id)?.ok_or_else(|| format!("no vault note for {oats_id}"))?;
+    let contents = std::fs::read_to_string(&path).map_err(|e| format!("read vault note: {e}"))?;
+    let updated = set_task_done(&contents, line, expected, done, today)?;
+    if updated != contents {
+        crate::storage::write_atomic(&path, updated.as_bytes())?;
+    }
+    Ok(note_body(&updated))
 }
 
 /// Atomically write a recording's vault note (front-matter + embed + body).
@@ -1363,5 +1470,113 @@ mod tests {
     fn open_tasks_returns_nothing_for_a_note_with_no_items() {
         let note = render_note(&meta_for_note(), "a.mp3", "## Summary\nWe met and agreed.\n");
         assert!(open_tasks(&note).is_empty());
+    }
+
+    const TASKS_BODY: &str =
+        "## Action Items\n- [ ] Ship the RFC ➕ 2026-06-02\n- [ ] Email legal ➕ 2026-06-02\n";
+
+    #[test]
+    fn set_task_done_ticks_and_stamps_the_line_and_closes_the_todo() {
+        let note = render_note(&meta_for_note(), "a.mp3", TASKS_BODY);
+        let out =
+            set_task_done(&note, 1, "- [ ] Ship the RFC ➕ 2026-06-02", true, "2026-09-10").unwrap();
+        assert!(out.contains("\n- [x] Ship the RFC ➕ 2026-06-02 ✅ 2026-09-10\n"));
+        assert_eq!(open_tasks(&out), vec!["Email legal"]);
+        // Front-matter, embed, and every other line are preserved byte-for-byte.
+        assert_eq!(
+            out,
+            note.replace(
+                "- [ ] Ship the RFC ➕ 2026-06-02",
+                "- [x] Ship the RFC ➕ 2026-06-02 ✅ 2026-09-10"
+            )
+        );
+    }
+
+    #[test]
+    fn set_task_done_reopens_a_task_and_drops_its_done_stamp() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "- [x] Ship the RFC ➕ 2026-06-02 ✅ 2026-09-10\n- [X] Email legal ✅ 2026-09-10 📅 2026-09-12\n",
+        );
+        let out = set_task_done(
+            &note,
+            0,
+            "- [x] Ship the RFC ➕ 2026-06-02 ✅ 2026-09-10",
+            false,
+            "2026-09-11",
+        )
+        .unwrap();
+        assert!(out.contains("\n- [ ] Ship the RFC ➕ 2026-06-02\n"));
+        let out =
+            set_task_done(&out, 1, "- [X] Email legal ✅ 2026-09-10 📅 2026-09-12", false, "2026-09-11")
+                .unwrap();
+        assert!(out.contains("\n- [ ] Email legal 📅 2026-09-12\n"));
+        assert_eq!(open_tasks(&out), vec!["Ship the RFC", "Email legal"]);
+    }
+
+    #[test]
+    fn set_task_done_keeps_indentation_and_ordered_markers() {
+        let note = render_note(&meta_for_note(), "a.mp3", "1. [ ] Parent\n    - [ ] Child\n");
+        let out = set_task_done(&note, 1, "    - [ ] Child", true, "2026-09-10").unwrap();
+        assert!(out.contains("\n1. [ ] Parent\n    - [x] Child ✅ 2026-09-10\n"));
+        let out = set_task_done(&out, 0, "1. [ ] Parent", true, "2026-09-10").unwrap();
+        assert!(out.contains("\n1. [x] Parent ✅ 2026-09-10\n"));
+    }
+
+    #[test]
+    fn set_task_done_is_a_noop_when_already_in_the_requested_state() {
+        let note = render_note(&meta_for_note(), "a.mp3", "- [x] Done ✅ 2026-09-01\n");
+        let out = set_task_done(&note, 0, "- [x] Done ✅ 2026-09-01", true, "2026-09-10").unwrap();
+        assert_eq!(out, note);
+    }
+
+    #[test]
+    fn set_task_done_preserves_crlf_line_endings() {
+        // A note the user saved with CRLF has no `---\n` front-matter match, so
+        // the whole file is the body.
+        let note = "- [ ] One\r\n- [ ] Two\r\n";
+        let out = set_task_done(note, 1, "- [ ] Two", true, "2026-09-10").unwrap();
+        assert_eq!(out, "- [ ] One\r\n- [x] Two ✅ 2026-09-10\r\n");
+    }
+
+    #[test]
+    fn set_task_done_rejects_a_line_that_changed_since_it_was_read() {
+        // The user edited the note in Obsidian after the app rendered it: the
+        // line index now points somewhere else, so refuse rather than tick the
+        // wrong task.
+        let note = render_note(&meta_for_note(), "a.mp3", TASKS_BODY);
+        assert!(set_task_done(&note, 1, "- [ ] Email legal ➕ 2026-06-02", true, "2026-09-10").is_err());
+    }
+
+    #[test]
+    fn update_note_task_writes_the_ticked_note_and_returns_its_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARISO_ROOT", tmp.path());
+        }
+        let mut meta = meta_for_note();
+        meta.id = "id-t".into();
+        write_note("2026-06-02 Team Standup", &meta, "2026-06-02 Team Standup.mp3", TASKS_BODY)
+            .unwrap();
+        let body =
+            update_note_task("id-t", 1, "- [ ] Ship the RFC ➕ 2026-06-02", true, "2026-09-10")
+                .unwrap();
+        assert!(body.starts_with("## Action Items\n- [x] Ship the RFC ➕ 2026-06-02 ✅ 2026-09-10\n"));
+        assert_eq!(read_note("id-t").unwrap().as_deref(), Some(body.as_str()));
+        assert!(update_note_task("missing", 1, "- [ ] x", true, "2026-09-10").is_err());
+        unsafe {
+            std::env::remove_var("ARISO_ROOT");
+        }
+    }
+
+    #[test]
+    fn set_task_done_rejects_non_task_lines_fences_and_missing_lines() {
+        let note = render_note(&meta_for_note(), "a.mp3", "## Action Items\n- plain\n- [-] Dropped\n```\n- [ ] code\n```\n");
+        assert!(set_task_done(&note, 0, "## Action Items", true, "2026-09-10").is_err());
+        assert!(set_task_done(&note, 1, "- plain", true, "2026-09-10").is_err());
+        assert!(set_task_done(&note, 2, "- [-] Dropped", true, "2026-09-10").is_err());
+        assert!(set_task_done(&note, 4, "- [ ] code", true, "2026-09-10").is_err());
+        assert!(set_task_done(&note, 99, "- [ ] nope", true, "2026-09-10").is_err());
     }
 }
