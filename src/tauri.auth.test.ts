@@ -55,6 +55,14 @@ describe('auth.microsoftSignIn', () => {
     await expect(auth.microsoftSignIn()).resolves.toEqual({ error: 'API returned 500' });
     expect(hoisted.emit).toBeNull();
   });
+
+  it('rejects when the command fails and stops listening', async () => {
+    invoke.mockRejectedValue(new Error('network'));
+
+    await expect(auth.microsoftSignIn()).rejects.toThrow('network');
+    expect(hoisted.listenedTo).toEqual(['oauth-result']);
+    expect(hoisted.emit).toBeNull();
+  });
 });
 
 describe('auth.googleSignIn', () => {

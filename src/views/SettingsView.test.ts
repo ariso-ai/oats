@@ -575,6 +575,28 @@ describe('SettingsView sign-in providers', () => {
     expect(wrapper.text()).toContain('Sign Out');
     expect(wrapper.find('.calendar-connect').exists()).toBe(false);
   });
+
+  it('drops the Google calendar nudge on sign-out even when the next sign-in happens in another window', async () => {
+    ensureCalendarAccess.mockResolvedValue({ connected: false, reason: 'no_calendar_scope' });
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.google-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.calendar-connect').exists()).toBe(true);
+
+    await wrapper.get('.account-info .sign-out-btn').trigger('click');
+    await flushPromises();
+
+    // A Microsoft sign-in completed in Onboarding: this window only hears the
+    // broadcast and refreshes, so handleSignIn's reset never runs here.
+    checkSession.mockResolvedValue({ token: 'session' });
+    const onSignedIn = listeners.get('auth://signed-in');
+    expect(onSignedIn).toBeDefined();
+    onSignedIn!({ payload: null });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Sign Out');
+    expect(wrapper.find('.calendar-connect').exists()).toBe(false);
+  });
 });
 
 describe('SettingsView silence detection toggle', () => {
