@@ -256,6 +256,12 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         .as_deref()
         .is_some_and(|bytes| !transcript_has_speech(&String::from_utf8_lossy(bytes)))
     {
+        // Re-check against the current transcript: an append/regeneration may
+        // have raced this branch between the read above and here, and a newer
+        // run owns the result — don't clobber it with a stale notes_error.
+        if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
+            return;
+        }
         meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
         let _ = storage::write_meta(&dir, &meta);
         return;
