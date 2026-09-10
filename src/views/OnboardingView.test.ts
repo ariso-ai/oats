@@ -9,11 +9,9 @@ const ensureCalendarAccess = vi.fn();
 const setOnboarded = vi.fn();
 const openSettingsWindow = vi.fn();
 const emitNotificationsSync = vi.fn();
-const emit = vi.fn();
 const close = vi.fn();
 
 vi.mock('../tauri', () => ({
-  AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
   SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
   auth: {
     googleSignIn: () => googleSignIn(),
@@ -27,9 +25,6 @@ vi.mock('../tauri', () => ({
 vi.mock('../composables/useMeetingNotifications', () => ({
   emitNotificationsSync: () => emitNotificationsSync(),
 }));
-vi.mock('@tauri-apps/api/event', () => ({
-  emit: (event: string) => emit(event),
-}));
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ close: () => close() }),
 }));
@@ -41,7 +36,6 @@ beforeEach(() => {
   setOnboarded.mockResolvedValue(undefined);
   openSettingsWindow.mockResolvedValue(undefined);
   emitNotificationsSync.mockResolvedValue(undefined);
-  emit.mockResolvedValue(undefined);
   ensureCalendarAccess.mockResolvedValue({ connected: true });
 });
 
@@ -109,7 +103,6 @@ describe('OnboardingView', () => {
     await wrapper.find('.google-btn').trigger('click');
     await flushPromises();
     expect(emitNotificationsSync).toHaveBeenCalled();
-    expect(emit).toHaveBeenCalledWith('auth://signed-in');
     expect(setOnboarded).toHaveBeenCalledWith(true);
     expect(openSettingsWindow).toHaveBeenCalled();
     expect(close).toHaveBeenCalled();
@@ -131,7 +124,7 @@ describe('OnboardingView', () => {
     expect(wrapper.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
   });
 
-  it('Microsoft sign-in broadcasts, skips the calendar hop, and finishes onboarding', async () => {
+  it('Microsoft sign-in syncs notifications, skips the calendar hop, and finishes onboarding', async () => {
     microsoftSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
     const wrapper = mount(OnboardingView);
     await wrapper.get('.microsoft-btn').trigger('click');
@@ -139,7 +132,6 @@ describe('OnboardingView', () => {
 
     expect(googleSignIn).not.toHaveBeenCalled();
     expect(emitNotificationsSync).toHaveBeenCalled();
-    expect(emit).toHaveBeenCalledWith('auth://signed-in');
     // ensureCalendarAccess opens Google's Workspace consent page.
     expect(ensureCalendarAccess).not.toHaveBeenCalled();
     expect(setOnboarded).toHaveBeenCalledWith(true);

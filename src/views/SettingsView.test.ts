@@ -48,7 +48,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: (...args: unknown[]) => emit(...args),
 }));
 vi.mock('../tauri', () => ({
-  AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
+  AUTH_CHANGED_EVENT: 'auth://changed',
   SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
   auth: {
     checkSession: () => checkSession(),
@@ -162,12 +162,28 @@ beforeEach(() => {
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
-  googleSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
-  microsoftSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
+  // Sign-in stores a session and sign-out clears it, as the backend does, so
+  // the account refresh that follows each one reads the new state.
+  googleSignIn.mockImplementation(storeSession);
+  microsoftSignIn.mockImplementation(storeSession);
   cancelSignIn.mockResolvedValue(undefined);
   ensureCalendarAccess.mockResolvedValue({ connected: true });
-  signOut.mockResolvedValue(undefined);
+  signOut.mockImplementation(() => {
+    checkSession.mockResolvedValue(null);
+    return Promise.resolve();
+  });
 });
+
+function storeSession(): Promise<SignInResult> {
+  checkSession.mockResolvedValue({ sessionToken: 't' });
+  return Promise.resolve({ success: true, sessionToken: 't' });
+}
+
+function fireAuthChanged() {
+  const cb = listeners.get('auth://changed');
+  expect(cb).toBeDefined();
+  cb!({ payload: null });
+}
 
 function fireRecordingState(active: boolean) {
   const cb = listeners.get('recording://state');
@@ -533,7 +549,7 @@ describe('SettingsView sign-in providers', () => {
     expect(google.text()).toContain('Sign in with Google');
 
     // One Cancel covers both providers.
-    await wrapper.get('.sign-in-container .sign-out-btn').trigger('click');
+    await wrapper.get('.sign-in-cancel').trigger('click');
     expect(cancelSignIn).toHaveBeenCalledTimes(1);
   });
 
@@ -543,7 +559,7 @@ describe('SettingsView sign-in providers', () => {
     await wrapper.get('.microsoft-btn').trigger('click');
     await flushPromises();
 
-    expect(wrapper.find('.sign-in-container .error').exists()).toBe(false);
+    expect(wrapper.find('.sign-in-error').exists()).toBe(false);
     expect(wrapper.get('.google-btn').attributes('disabled')).toBeUndefined();
     expect(wrapper.get('.microsoft-btn').attributes('disabled')).toBeUndefined();
     expect(wrapper.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
@@ -555,7 +571,7 @@ describe('SettingsView sign-in providers', () => {
     await wrapper.get('.microsoft-btn').trigger('click');
     await flushPromises();
 
-    expect(wrapper.get('.sign-in-container .error').text()).toBe('API returned 500');
+    expect(wrapper.get('.sign-in-error').text()).toBe('API returned 500');
   });
 
   it('never shows a Microsoft user the Google calendar nudge left over from a Google session', async () => {
@@ -589,13 +605,61 @@ describe('SettingsView sign-in providers', () => {
     // A Microsoft sign-in completed in Onboarding: this window only hears the
     // broadcast and refreshes, so handleSignIn's reset never runs here.
     checkSession.mockResolvedValue({ token: 'session' });
-    const onSignedIn = listeners.get('auth://signed-in');
-    expect(onSignedIn).toBeDefined();
-    onSignedIn!({ payload: null });
+    fireAuthChanged();
     await flushPromises();
 
     expect(wrapper.text()).toContain('Sign Out');
     expect(wrapper.find('.calendar-connect').exists()).toBe(false);
+  });
+});
+
+describe('SettingsView auth broadcast', () => {
+  it('clears the account card when the session ends elsewhere', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 'session' });
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Sign Out');
+
+    // Signed out from another window, or a rejected session cleared natively.
+    checkSession.mockResolvedValue(null);
+    fireAuthChanged();
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain('Sign Out');
+    expect(wrapper.get('.google-btn').text()).toContain('Sign in with Google');
+  });
+
+  it('shows a sign-in from another window without a remount', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.find('.sign-in-container').exists()).toBe(true);
+
+    checkSession.mockResolvedValue({ sessionToken: 'session' });
+    fireAuthChanged();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Sign Out');
+    // The broadcast only prompts a re-read; this window starts no flow.
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(microsoftSignIn).not.toHaveBeenCalled();
+  });
+
+  it('keeps the recording sign-in banner until a session actually exists', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    listeners.get('tray://show-sign-in-prompt')!({ payload: null });
+    await flushPromises();
+    expect(wrapper.text()).toContain('Please sign in to start recording.');
+
+    // A sign-out elsewhere is also a change, but leaves the user signed out.
+    fireAuthChanged();
+    await flushPromises();
+    expect(wrapper.text()).toContain('Please sign in to start recording.');
+
+    checkSession.mockResolvedValue({ sessionToken: 'session' });
+    fireAuthChanged();
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Please sign in to start recording.');
   });
 });
 
@@ -634,7 +698,7 @@ describe('SettingsView tray sign-in', () => {
     await flushPromises();
 
     expect(wrapper.get('.google-btn').text()).toContain('Continue in your browser…');
-    expect(wrapper.find('.sign-in-container .sign-out-btn').exists()).toBe(true);
+    expect(wrapper.find('.sign-in-cancel').exists()).toBe(true);
   });
 
   it('ignores a request while a flow is already pending', async () => {

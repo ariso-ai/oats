@@ -3,9 +3,10 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
-// Broadcast when any window completes desktop auth. Settings is pre-created and
-// can mount before onboarding signs in, so it needs a cross-window refresh cue.
-export const AUTH_SIGNED_IN_EVENT = 'auth://signed-in';
+// Broadcast by the backend to every window whenever the stored session changes:
+// sign-in or sign-out from any window, or a native path clearing a session the
+// server rejected. It carries no payload; listeners re-read via checkSession().
+export const AUTH_CHANGED_EVENT = 'auth://changed';
 
 /** Header carrying the non-binary arguments of a raw-body command. */
 const RAW_META_HEADER = 'x-oats-meta';
@@ -23,7 +24,7 @@ function rawMetaOptions(meta: unknown): { headers: Record<string, string> } {
   return { headers: { [RAW_META_HEADER]: hex } };
 }
 
-interface SignInResult {
+export interface SignInResult {
   success?: boolean;
   sessionToken?: string;
   error?: string;
@@ -102,7 +103,10 @@ export const auth = {
     return browserSignIn('microsoft_sign_in');
   },
 
-  /** Abort whichever browser flow is pending: either sign-in, or Calendar connect. */
+  /**
+   * Abort this window's pending browser flow: either sign-in, or Calendar
+   * connect. A flow another window started is left running.
+   */
   async cancelSignIn(): Promise<void> {
     await invoke('cancel_sign_in');
   },

@@ -27,6 +27,15 @@ const toggleMaximizeWindow = vi.fn(() => Promise.resolve());
 const closeWindow = vi.fn(() => Promise.resolve());
 const isWindowMaximized = vi.fn(() => Promise.resolve(false));
 const onWindowResized = vi.fn(() => Promise.resolve(() => undefined));
+type SignInResult = { success?: boolean; sessionToken?: string; error?: string };
+const checkSession = vi.fn((): Promise<unknown> => Promise.resolve(null));
+const googleSignIn = vi.fn((): Promise<SignInResult> => Promise.resolve({ success: true }));
+const microsoftSignIn = vi.fn((): Promise<SignInResult> => Promise.resolve({ success: true }));
+const cancelSignIn = vi.fn(() => Promise.resolve());
+const apiRequest = vi.fn(
+  (_method: string, _path: string): Promise<{ status: number; data: unknown }> =>
+    Promise.resolve({ status: 200, data: {} })
+);
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -128,6 +137,18 @@ function resolveProcessing(id: string): void {
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
 // pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
 vi.mock('../tauri', () => ({
+  AUTH_CHANGED_EVENT: 'auth://changed',
+  SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
+  auth: {
+    checkSession: () => checkSession(),
+    googleSignIn: () => googleSignIn(),
+    microsoftSignIn: () => microsoftSignIn(),
+    cancelSignIn: () => cancelSignIn(),
+    signOut: () => Promise.resolve(),
+  },
+  api: {
+    request: (method: string, path: string) => apiRequest(method, path),
+  },
   local: {
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
@@ -207,6 +228,11 @@ beforeEach(() => {
   searchMeetings.mockResolvedValue([]);
   processingMock.tracked!.value = new Set();
   processingMock.version!.value = 0;
+  checkSession.mockResolvedValue(null);
+  googleSignIn.mockResolvedValue({ success: true });
+  microsoftSignIn.mockResolvedValue({ success: true });
+  cancelSignIn.mockResolvedValue(undefined);
+  apiRequest.mockResolvedValue({ status: 200, data: {} });
 });
 afterEach(() => {
   // Restore real timers even if a fake-timer test failed before its own
@@ -2337,5 +2363,265 @@ describe('LibraryView Todo tab', () => {
     expect(listActionItems).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain('Ship the RFC');
     expect(wrapper.text()).not.toContain('Send pricing deck');
+  });
+});
+
+describe('LibraryView backend indicator', () => {
+  function mockProfile() {
+    apiRequest.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(
+        path === '/auth/me'
+          ? { status: 200, data: { full_name: 'Ada Lovelace', email: 'ada@example.com' } }
+          : { status: 200, data: {} }
+      )
+    );
+  }
+
+  async function mountOn(backend: 'ariso' | 'local') {
+    backendId.mockReturnValue(backend);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, { attachTo: document.body });
+    await flushPromises();
+    return wrapper;
+  }
+
+  function pill(wrapper: ReturnType<typeof mount>) {
+    return wrapper.get('.titlebar .account-pill');
+  }
+
+  it('shows a static Local badge and never checks the session, even on an auth broadcast', async () => {
+    const wrapper = await mountOn('local');
+
+    expect(pill(wrapper).element.tagName).toBe('SPAN');
+    expect(pill(wrapper).text()).toBe('Local');
+    expect(pill(wrapper).attributes('title')).toContain('Local mode');
+
+    emitEvent('auth://changed', null);
+    await flushPromises();
+
+    expect(checkSession).not.toHaveBeenCalled();
+    expect(apiRequest).not.toHaveBeenCalled();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+  });
+
+  it('shows Ariso, not yet clickable, until the first session check lands', async () => {
+    let resolveCheck!: (v: unknown) => void;
+    checkSession.mockReturnValue(new Promise((resolve) => (resolveCheck = resolve)));
+    const wrapper = await mountOn('ariso');
+
+    expect(pill(wrapper).element.tagName).toBe('SPAN');
+    expect(pill(wrapper).text()).toBe('Ariso');
+
+    resolveCheck(null);
+    await flushPromises();
+    expect(pill(wrapper).text()).toBe('Sign in');
+  });
+
+  it('offers both providers from the Sign in pill when signed out', async () => {
+    const wrapper = await mountOn('ariso');
+
+    const signIn = pill(wrapper);
+    expect(signIn.element.tagName).toBe('BUTTON');
+    expect(signIn.text()).toBe('Sign in');
+    expect(signIn.attributes('aria-expanded')).toBe('false');
+
+    await signIn.trigger('click');
+    await flushPromises();
+
+    const popover = wrapper.get('.sign-in-popover');
+    expect(popover.attributes('role')).toBe('dialog');
+    expect(popover.get('.google-btn').text()).toContain('Sign in with Google');
+    expect(popover.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+    expect(pill(wrapper).attributes('aria-expanded')).toBe('true');
+    // Focus moves into the popover so the keyboard can pick a provider.
+    expect(document.activeElement).toBe(popover.get('.google-btn').element);
+  });
+
+  it('shows initials when signed in, and opens Settings on click', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+
+    expect(pill(wrapper).element.tagName).toBe('BUTTON');
+    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(pill(wrapper).get('.account-pill-avatar').text()).toBe('AD');
+    expect(pill(wrapper).attributes('title')).toBe('ada@example.com');
+
+    await pill(wrapper).trigger('click');
+    expect(invoke).toHaveBeenCalledWith('create_settings_window', {});
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+  });
+
+  it('shows the avatar image when the account has one', async () => {
+    class FakeImage {
+      referrerPolicy = '';
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_v: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal('Image', FakeImage);
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    apiRequest.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(
+        path === '/users/google-avatar'
+          ? { status: 200, data: { avatar: 'https://example.com/a.png' } }
+          : { status: 200, data: { email: 'ada@example.com' } }
+      )
+    );
+    const wrapper = await mountOn('ariso');
+
+    expect(pill(wrapper).get('img.account-pill-avatar').attributes('src')).toBe(
+      'https://example.com/a.png'
+    );
+  });
+
+  it('signs in from the popover and switches to the signed-in pill', async () => {
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+
+    microsoftSignIn.mockImplementation(() => {
+      checkSession.mockResolvedValue({ sessionToken: 't' });
+      return Promise.resolve({ success: true });
+    });
+    mockProfile();
+    await wrapper.get('.sign-in-popover .microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(microsoftSignIn).toHaveBeenCalledTimes(1);
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(emitNotificationsSync).toHaveBeenCalled();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(pill(wrapper).attributes('title')).toBe('ada@example.com');
+  });
+
+  it('shows the pending flow with a Cancel, and a failure inline', async () => {
+    let resolveSignIn!: (r: SignInResult) => void;
+    googleSignIn.mockReturnValue(new Promise((resolve) => (resolveSignIn = resolve)));
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('.sign-in-popover .google-btn').text()).toContain('Continue in your browser…');
+    await wrapper.get('.sign-in-popover .sign-in-cancel').trigger('click');
+    expect(cancelSignIn).toHaveBeenCalledTimes(1);
+
+    resolveSignIn({ error: 'API returned 500' });
+    await flushPromises();
+    expect(wrapper.get('.sign-in-popover .sign-in-error').text()).toBe('API returned 500');
+  });
+
+  it('closes the popover on Escape and returns focus to the pill', async () => {
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+    await flushPromises();
+
+    await wrapper.get('.sign-in-popover .google-btn').trigger('keydown', { key: 'Escape' });
+
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(document.activeElement).toBe(pill(wrapper).element);
+  });
+
+  it('closes the popover on an outside click, unless a flow is pending', async () => {
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+    await flushPromises();
+
+    // A click inside keeps it open.
+    wrapper.get('.sign-in-popover').element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+
+    googleSignIn.mockReturnValue(new Promise(() => {}));
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+  });
+
+  it('closes the popover on an outside click while idle', async () => {
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+    await flushPromises();
+
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+  });
+
+  it('follows an auth broadcast without a remount', async () => {
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+    expect(pill(wrapper).text()).toBe('Sign in');
+
+    // Signed in from Settings or a tray row.
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+
+    // Then signed out elsewhere.
+    checkSession.mockResolvedValue(null);
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(pill(wrapper).text()).toBe('Sign in');
+  });
+
+  it('follows a backend switch without a remount, and asks nothing on Local', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+    expect(pill(wrapper).text()).toContain('Ariso');
+
+    backendId.mockReturnValue('local');
+    checkSession.mockClear();
+    apiRequest.mockClear();
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(pill(wrapper).text()).toBe('Local');
+    expect(checkSession).not.toHaveBeenCalled();
+    expect(apiRequest).not.toHaveBeenCalled();
+
+    // Back to Ariso: re-checked, not the stale signed-in state from before.
+    checkSession.mockResolvedValue(null);
+    backendId.mockReturnValue('ariso');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(checkSession).toHaveBeenCalledTimes(1);
+    expect(pill(wrapper).text()).toBe('Sign in');
+  });
+
+  it('hides the popover and cancels its pending flow on a switch to Local', async () => {
+    googleSignIn.mockReturnValue(new Promise(() => {}));
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
+    await flushPromises();
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    expect(cancelSignIn).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(pill(wrapper).text()).toBe('Local');
+  });
+
+  it('does not cancel on a switch to Local when this window has no flow pending', async () => {
+    const wrapper = await mountOn('ariso');
+    await pill(wrapper).trigger('click');
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    // Another window's flow is not this window's to cancel.
+    expect(cancelSignIn).not.toHaveBeenCalled();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
   });
 });

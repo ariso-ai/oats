@@ -73,6 +73,92 @@
           {{ recordingStarting ? 'Starting recording…' : 'Start recording' }}
         </span>
       </button>
+      <!-- Which backend oats is on, and on Ariso whether it's signed in. Local
+           is a plain badge: it never needs auth, so it offers nothing to click. -->
+      <div
+        v-if="accountPill"
+        ref="accountPillWrap"
+        class="account-pill-wrap"
+        @keydown.escape="closeSignInPopover({ restoreFocus: true })"
+      >
+        <span
+          v-if="accountPill === 'local'"
+          class="account-pill account-pill--static"
+          title="Local mode — recordings stay on this device"
+        >
+          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="10" rx="2" />
+            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+          </svg>
+          <span class="account-pill-label">Local</span>
+        </span>
+        <span
+          v-else-if="accountPill === 'checking'"
+          class="account-pill account-pill--static"
+          title="Ariso"
+        >
+          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span class="account-pill-label">Ariso</span>
+        </span>
+        <button
+          v-else-if="accountPill === 'signed-in'"
+          type="button"
+          class="account-pill"
+          :title="accountEmail"
+          :aria-label="accountEmail ? `Ariso account ${accountEmail}, open Settings` : 'Ariso account, open Settings'"
+          @click="openSettings"
+        >
+          <img
+            v-if="accountAvatarUrl"
+            class="account-pill-avatar"
+            :src="accountAvatarUrl"
+            alt=""
+            referrerpolicy="no-referrer"
+            @error="accountAvatarUrl = ''"
+          />
+          <span v-else-if="accountDisplayName || accountEmail" class="account-pill-avatar" aria-hidden="true">
+            {{ accountInitials }}
+          </span>
+          <svg v-else class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span class="account-pill-label">Ariso</span>
+        </button>
+        <button
+          v-else
+          ref="signInPill"
+          type="button"
+          class="account-pill account-pill--sign-in"
+          title="Sign in to Ariso"
+          aria-haspopup="dialog"
+          :aria-expanded="signInPopoverOpen"
+          aria-controls="sign-in-popover"
+          @click="toggleSignInPopover"
+        >
+          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span class="account-pill-label">Sign in</span>
+        </button>
+        <div
+          v-if="signInPopoverOpen && accountPill === 'signed-out'"
+          id="sign-in-popover"
+          class="sign-in-popover"
+          role="dialog"
+          aria-labelledby="sign-in-popover-title"
+        >
+          <p id="sign-in-popover-title" class="sign-in-popover-title">Sign in to Ariso</p>
+          <SignInButtons
+            ref="signInButtons"
+            :signing-in-with="accountSigningInWith"
+            :error-message="accountErrorMessage"
+            @sign-in="account.signIn"
+            @cancel="account.cancelSignIn"
+          />
+        </div>
+      </div>
       <div v-if="isWindows" class="window-controls">
         <button
           class="window-control"
@@ -317,6 +403,9 @@ import {
   recordingBlockedPayload,
   recordingStartErrorMessage,
 } from '../composables/recordingStartError';
+import { useAccountState } from '../composables/useAccountState';
+import { AUTH_CHANGED_EVENT } from '../tauri';
+import SignInButtons from './SignInButtons.vue';
 import oatsLogo from '../assets/oats-dark.svg';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -538,6 +627,84 @@ watch(
 const emptyListHint = computed(() =>
   activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
 );
+
+// Titlebar backend indicator. This window's own account state, kept current by
+// the backend's AUTH_CHANGED_EVENT broadcast. It is only ever refreshed on
+// Ariso: Local mode makes no session or profile request from this window.
+const account = useAccountState();
+const {
+  isSignedIn: accountSignedIn,
+  checked: accountChecked,
+  displayName: accountDisplayName,
+  email: accountEmail,
+  avatarUrl: accountAvatarUrl,
+  initials: accountInitials,
+  signingInWith: accountSigningInWith,
+  errorMessage: accountErrorMessage,
+} = account;
+type AccountPill = 'local' | 'checking' | 'signed-in' | 'signed-out';
+const accountPill = computed<AccountPill | null>(() => {
+  const id = activeBackend.value?.id;
+  if (id === 'local') return 'local';
+  if (id !== 'ariso') return null; // backend not loaded yet
+  if (!accountChecked.value) return 'checking';
+  return accountSignedIn.value ? 'signed-in' : 'signed-out';
+});
+
+const signInPopoverOpen = ref(false);
+const accountPillWrap = ref<HTMLElement | null>(null);
+const signInPill = ref<HTMLButtonElement | null>(null);
+const signInButtons = ref<{ focus: () => void } | null>(null);
+
+async function toggleSignInPopover(): Promise<void> {
+  if (signInPopoverOpen.value) {
+    closeSignInPopover();
+    return;
+  }
+  signInPopoverOpen.value = true;
+  await nextTick();
+  signInButtons.value?.focus();
+}
+
+function closeSignInPopover({ restoreFocus = false } = {}): void {
+  if (!signInPopoverOpen.value) return;
+  signInPopoverOpen.value = false;
+  if (restoreFocus) signInPill.value?.focus();
+}
+
+// A click elsewhere dismisses the popover, except while a browser flow is
+// pending: its Cancel button lives there.
+function onDocumentMousedown(event: MouseEvent): void {
+  if (!signInPopoverOpen.value || accountSigningInWith.value) return;
+  if (accountPillWrap.value?.contains(event.target as Node)) return;
+  closeSignInPopover();
+}
+
+// However the session arrived (the popover, Settings, Onboarding, a tray row),
+// the pill switches to the signed-in state and the popover has nothing to offer.
+watch(accountSignedIn, (signedIn) => {
+  if (signedIn) closeSignInPopover();
+});
+
+// Covers both the first load on mount and every backend switch, since each
+// re-reads the active backend. On Local, forget the account instead of asking,
+// so a later switch back doesn't flash the stale state.
+watch(
+  () => activeBackend.value?.id,
+  (id) => {
+    if (id === 'ariso') {
+      void account.refresh();
+    } else if (id === 'local') {
+      closeSignInPopover();
+      if (accountSigningInWith.value) void account.cancelSignIn();
+      account.reset();
+    }
+  }
+);
+
+function onAuthChanged(): void {
+  if (activeBackend.value?.id === 'ariso') void account.refresh();
+}
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
 // relative-time chip; it's the first item of the Today view's UPCOMING section.
@@ -1218,6 +1385,7 @@ let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
 let unlistenPrepOpen: UnlistenFn | null = null;
 let unlistenWindowResized: UnlistenFn | null = null;
+let unlistenAuthChanged: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -1294,17 +1462,23 @@ onMounted(() => {
   }).then((un) => {
     unlistenPrepOpen = un;
   });
+  // A sign-in or sign-out anywhere, or a rejected session cleared natively.
+  void listen(AUTH_CHANGED_EVENT, onAuthChanged).then((un) => {
+    unlistenAuthChanged = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
   window.addEventListener('focus', onWindowFocus);
   window.addEventListener('keydown', onGlobalKeydown);
+  document.addEventListener('mousedown', onDocumentMousedown);
 });
 
 onUnmounted(() => {
   if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
   window.removeEventListener('keydown', onGlobalKeydown);
+  document.removeEventListener('mousedown', onDocumentMousedown);
   unlistenRecordingStarted?.();
   unlistenRecordingState?.();
   unlistenRecordingStartFailed?.();
@@ -1313,6 +1487,7 @@ onUnmounted(() => {
   unlistenBackendChanged?.();
   unlistenPrepOpen?.();
   unlistenWindowResized?.();
+  unlistenAuthChanged?.();
 });
 </script>
 
@@ -1539,6 +1714,108 @@ onUnmounted(() => {
    to re-dock on), so it must not invite a click it can't honor. */
 .add-btn--static { cursor: default; }
 .add-btn--static:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: none; }
+/* Backend indicator: a compact pill after Start recording. Capped so it can't
+   push Start recording off a narrow window. */
+.account-pill-wrap {
+  position: relative;
+  display: flex;
+  margin-left: 6px;
+}
+.titlebar--windows .account-pill-wrap { margin: 0 9px 0 0; }
+.account-pill {
+  max-width: 120px;
+  height: 22px;
+  padding: 0 9px 0 5px;
+  gap: 5px;
+  border-radius: 11px;
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  box-shadow: 1px 1px 0 #e7e5e2;
+  color: #1a1a1a;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.titlebar--windows .account-pill { height: 26px; border-radius: 13px; }
+button.account-pill:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px, 1px); }
+.titlebar--windows .account-pill:focus-visible {
+  outline: 2px solid #3b6fc4;
+  outline-offset: -3px;
+}
+/* Local, and Ariso before the first session check: informational only. */
+.account-pill--static {
+  background: transparent;
+  border-color: #e4e2de;
+  box-shadow: none;
+  color: #6f6f6f;
+  cursor: default;
+}
+.account-pill-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.account-pill-avatar {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #1c1c1c;
+  color: #ffffff;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  object-fit: cover;
+}
+.account-pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.sign-in-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 260px;
+  box-sizing: border-box;
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.sign-in-popover-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c1c1c;
+}
+/* Narrow windows keep only the pill's glyph; the label stays readable to
+   assistive tech, and the title tooltip still names the state. */
+@media (max-width: 520px) {
+  .account-pill { padding: 0 5px; }
+  .account-pill-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
 /* Mini live waveform: four bars pulsing on a staggered cycle. */
 .rec-wave {
   display: inline-flex;
