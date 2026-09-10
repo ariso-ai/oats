@@ -2057,6 +2057,63 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
     crate::storage::write_meta(&dir, &meta)
 }
 
+/// Create a local recording's on-disk identity the moment capture starts, so
+/// rename / status / list all work *during* the recording instead of only after
+/// Stop. Before this, `meta.json` was written only by finalize, and a
+/// mid-recording rename failed with "recording does not exist".
+///
+/// Idempotent and cheap to call unconditionally: when the recorder resolved an
+/// append target (a prior `Done` recording inside the 5-minute window), that
+/// directory already has a real `meta.json` and is left exactly as it is.
+///
+/// `title` comes from the frontend's `timestampTitle(createdAt)` — the same
+/// string `LocalBackend.finalizeRecording` passes — so the row's label does not
+/// change when the recording stops. It is clamped (not rejected) to
+/// `MAX_TITLE_CHARS`: an over-long title is a cosmetic problem, and failing here
+/// would cost the user their rename affordance for the whole session.
+///
+/// The stub's `status: Recording` deliberately fails
+/// `storage::most_recent_appendable`'s `status == Done` check, so a recording
+/// can never pick *itself* as an append target.
+#[tauri::command]
+pub fn local_begin_recording(
+    id: String,
+    created_at: String,
+    title: String,
+) -> Result<(), String> {
+    // Rejects traversal ids before any path join (same guard as the note writers).
+    let dir = recording_dir(&id)?;
+    if crate::storage::read_meta(&dir).is_ok() {
+        return Ok(()); // append target, or a re-entrant call: keep what's there
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording dir: {e}"))?;
+
+    let trimmed = title.trim();
+    let title = if trimmed.is_empty() {
+        id.clone()
+    } else {
+        trimmed.chars().take(MAX_TITLE_CHARS).collect()
+    };
+    let meta = crate::storage::RecordingMeta {
+        id: id.clone(),
+        title,
+        created_at,
+        duration_seconds: 0,
+        status: crate::storage::RecordingStatus::Recording,
+        language: None,
+        participants: vec![],
+        model_version: None,
+        error: None,
+        notes_error: None,
+        last_clip_end_at: None,
+        // Audio lands in the vault at finalize; there is nothing to point at yet.
+        audio_file: None,
+        notes_written: None,
+        title_is_default: true,
+    };
+    crate::storage::write_meta(&dir, &meta)
+}
+
 /// Read the user-authored local note artifact used by the Library editor.
 /// Missing notes return an empty string so a fresh recording can autosave into
 /// `user-note.md` without affecting generated Overview content.
@@ -2951,6 +3008,120 @@ mod tests {
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
         assert!(res.is_err());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn local_begin_recording_creates_a_recording_stub() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation requires `--test-threads=1` so no concurrent
+        // env access races with these calls (same convention as transcribe).
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+
+        local_begin_recording(
+            id.to_string(),
+            "2026-06-02T14:30:05.000Z".to_string(),
+            "Tue Jun 2 @ 2:30PM".to_string(),
+        )
+        .unwrap();
+
+        let meta = crate::storage::read_meta(&recording_dir(id).unwrap()).unwrap();
+        assert_eq!(meta.id, id);
+        assert_eq!(meta.title, "Tue Jun 2 @ 2:30PM");
+        assert_eq!(meta.created_at, "2026-06-02T14:30:05.000Z");
+        assert_eq!(meta.duration_seconds, 0);
+        assert_eq!(meta.status, crate::storage::RecordingStatus::Recording);
+        assert!(meta.title_is_default);
+        assert_eq!(meta.audio_file, None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The 5-minute-window resolve can hand back a *prior* recording as the
+    /// append target. That recording already has real content; the stub write
+    /// must never overwrite it.
+    #[test]
+    fn local_begin_recording_leaves_an_existing_recording_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir =
+            crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        local_begin_recording(
+            id.to_string(),
+            "2026-06-02T14:30:05.000Z".to_string(),
+            "Replacement".to_string(),
+        )
+        .unwrap();
+
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Old");
+        assert_eq!(meta.status, crate::storage::RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn local_begin_recording_rejects_traversal_ids() {
+        // The guard runs before any env read, so no ARISO_ROOT is needed.
+        for id in ["", "..", "../foo", "a/b", "a\\b", "C:foo"] {
+            assert!(
+                local_begin_recording(
+                    id.to_string(),
+                    "2026-06-02T14:30:05.000Z".to_string(),
+                    "T".to_string(),
+                )
+                .is_err(),
+                "id {id:?} should be rejected"
+            );
+        }
+    }
+
+    /// The title round-trips through the frontend, so clamp it to the same
+    /// limit `rename_local_recording` enforces rather than trusting it.
+    #[test]
+    fn local_begin_recording_clamps_an_over_long_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+
+        local_begin_recording(
+            id.to_string(),
+            "2026-06-02T14:30:05.000Z".to_string(),
+            "x".repeat(60),
+        )
+        .unwrap();
+
+        let meta = crate::storage::read_meta(&recording_dir(id).unwrap()).unwrap();
+        assert_eq!(meta.title, "x".repeat(MAX_TITLE_CHARS));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The bug this whole feature exists to fix: before the stub, a rename
+    /// during capture failed with "read meta: No such file or directory".
+    #[test]
+    fn rename_local_recording_succeeds_on_a_stub() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        local_begin_recording(
+            id.to_string(),
+            "2026-06-02T14:30:05.000Z".to_string(),
+            "Tue Jun 2 @ 2:30PM".to_string(),
+        )
+        .unwrap();
+
+        rename_local_recording(id.to_string(), "Budget sync".to_string()).unwrap();
+
+        let meta = crate::storage::read_meta(&recording_dir(id).unwrap()).unwrap();
+        assert_eq!(meta.title, "Budget sync");
+        assert!(!meta.title_is_default);
+        // Still mid-capture: finalize has not run.
+        assert_eq!(meta.status, crate::storage::RecordingStatus::Recording);
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
