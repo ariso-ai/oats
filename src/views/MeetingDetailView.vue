@@ -254,7 +254,12 @@
 
         <div v-show="activeTab === 'note'" class="tab-pane">
           <!-- Local note -->
-          <div v-if="detail.isLocal && detail.note" class="md" v-html="renderMarkdown(stripFrontmatter(detail.note))" />
+          <div
+            v-if="detail.isLocal && localNoteMarkdown"
+            class="md"
+            @change="onNoteTaskToggle"
+            v-html="renderMarkdown(localNoteMarkdown, { interactiveTasks: true })"
+          />
 
           <!-- Ariso rich content -->
           <template v-if="!detail.isLocal">
@@ -472,6 +477,9 @@ const emit = defineEmits<{
    *  panel was open. The Library reloads its list so the row drops its
    *  "Processing…" sub-line and picks up the finished content. */
   contentReady: [payload: { id: string }];
+  /** A task in a local recording's AI notes was ticked or unticked, opening or
+   *  closing its todo. The Library refreshes its Todos list. */
+  tasksChanged: [payload: { id: string }];
   /** The open local note was permanently deleted. The Library drops its row and
    *  clears the selection — without the usual notes autosave, since there is no
    *  longer anywhere on disk to save into. */
@@ -937,6 +945,39 @@ async function reloadLocalArtifact(kind: 'note' | 'transcript'): Promise<void> {
     }
   } catch (e) {
     console.error('reload local artifact failed', e);
+  }
+}
+
+// The local AI-notes body as rendered. Task checkboxes carry their line index
+// into this string, which the backend resolves against the same vault note body.
+const localNoteMarkdown = computed(() => stripFrontmatter(detail.value?.note ?? ''));
+
+// Ticking a task writes it back to the vault note, which closes (or reopens)
+// its todo. The re-read body replaces the rendered note so the item picks up its
+// struck-through style. A rejected write (the note changed in Obsidian since it
+// was rendered) reverts the box and re-reads the note.
+async function onNoteTaskToggle(e: Event): Promise<void> {
+  const box = e.target;
+  const d = detail.value;
+  if (!(box instanceof HTMLInputElement) || !box.dataset.taskLine || !d?.isLocal) return;
+  const line = Number(box.dataset.taskLine);
+  const expected = localNoteMarkdown.value.replace(/\r\n/g, '\n').split('\n')[line];
+  if (expected === undefined) return;
+  const done = box.checked;
+  const my = reqId;
+  box.disabled = true;
+  try {
+    const body = await local.setVaultTaskDone(d.id, line, expected, done);
+    if (my === reqId && detail.value?.id === d.id) {
+      detail.value.note = body;
+    }
+    emit('tasksChanged', { id: d.id });
+  } catch (err) {
+    console.error('Failed to update task', err);
+    box.checked = !done;
+    void reloadLocalArtifact('note');
+  } finally {
+    box.disabled = false;
   }
 }
 
@@ -2059,6 +2100,8 @@ const durationLabel = computed<string | null>(() => {
 .md :deep(li) { line-height: 1.5; }
 .md :deep(li.task-list-item) { list-style: none; margin-left: -22px; display: flex; align-items: flex-start; gap: 8px; }
 .md :deep(li.task-list-item input[type="checkbox"]) { margin: 4px 0 0; flex: none; }
+.md :deep(li.task-list-item input[type="checkbox"]:enabled) { cursor: pointer; }
+.md :deep(li.task-done) { text-decoration: line-through; color: #9a9a9a; }
 .md :deep(strong) { font-weight: 600; color: #1c1c1c; }
 .md :deep(code) { background: #f0eeed; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
 .md :deep(a) { color: #6c63c0; text-decoration: underline; }

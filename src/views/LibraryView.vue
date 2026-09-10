@@ -234,6 +234,7 @@
           @close="clearSelection"
           @title-updated="onTitleUpdated"
           @content-ready="onContentReady"
+          @tasks-changed="onTasksChanged"
           @deleted="onNoteDeleted"
         />
         <UpNextCard
@@ -477,27 +478,41 @@ async function openTodoView(): Promise<void> {
 let loadActionItemsRequest = 0;
 
 // The backend owns its own window (Ariso: the last two weeks; local: the whole
-// vault). It rejects only when nothing at all could be loaded.
-async function loadActionItems(): Promise<void> {
-  if (todoLoading.value) return;
+// vault). It rejects only when nothing at all could be loaded. A `silent`
+// refresh keeps the current rows on screen instead of swapping in "Loading…",
+// supersedes any load in flight (which may predate the change being picked
+// up), and keeps the rows it has if the refresh fails.
+async function loadActionItems({ silent = false } = {}): Promise<void> {
+  if (todoLoading.value && !silent) return;
   const backend = activeBackend.value ?? (await getActiveBackend());
   activeBackend.value = backend;
   if (!backend.supportsActionItems) return;
   const requestId = ++loadActionItemsRequest;
-  todoLoading.value = true;
-  todoError.value = null;
+  if (!silent) {
+    todoLoading.value = true;
+    todoError.value = null;
+  }
   try {
     const loaded = await backend.listActionItems();
     if (requestId !== loadActionItemsRequest) return;
     todoEntries.value = loaded;
+    todoError.value = null;
   } catch (e) {
     if (requestId !== loadActionItemsRequest) return;
     console.error('Failed to load action items', e);
-    todoEntries.value = [];
-    todoError.value = 'Could not load action items.';
+    if (!silent) {
+      todoEntries.value = [];
+      todoError.value = 'Could not load action items.';
+    }
   } finally {
     if (requestId === loadActionItemsRequest) todoLoading.value = false;
   }
+}
+
+// A task ticked in the open meeting's AI notes closes its todo; drop it from
+// the list in place. Outside the Todo tab, opening the tab reloads anyway.
+function onTasksChanged(): void {
+  if (activeView.value === 'todo') void loadActionItems({ silent: true });
 }
 
 // Switching backends swaps the whole corpus: drop the previous backend's action
