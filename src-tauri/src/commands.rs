@@ -1562,6 +1562,8 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     for s in &mut summaries {
         if vault_notes.contains_key(&s.id) {
             s.has_note = true;
+            // A present note always wins over a stale `notes_error`.
+            s.notes_status = crate::storage::NotesStatus::Ready;
         }
         if let Some(af) = &s.audio_file {
             // New recording: audio lives in the vault; reflect real existence
@@ -3166,6 +3168,31 @@ mod tests {
 
         let list = list_local_recordings().unwrap();
         assert!(list.iter().find(|s| s.id == id).unwrap().has_note);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_local_recordings_vault_note_makes_notes_status_ready() {
+        // SAFETY: command tests run with --test-threads=1 (see plan conventions),
+        // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        // A stale error from an earlier attempt: the vault note that exists now
+        // must still win, exactly as `local_recording_status` reports it.
+        meta.notes_error = Some("boom".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "b").unwrap();
+
+        let list = list_local_recordings().unwrap();
+        assert_eq!(
+            list.iter().find(|s| s.id == id).unwrap().notes_status,
+            crate::storage::NotesStatus::Ready
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

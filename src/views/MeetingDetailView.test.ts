@@ -1105,6 +1105,24 @@ describe('MeetingDetailView local generation progress', () => {
     expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
   });
 
+  // The Library answers a report by refetching its list and swapping in the
+  // fresh row. That row is a new object with the same fields, so reloading on it
+  // would restart the poll, re-report the same settled stage, and loop forever.
+  it('does not reload or re-report when a list refresh hands it an identical row', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'empty-transcript',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+    expect(getMeetingDetail).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ item: { ...localItem, files: { ...localItem.files! } } });
+    await flushPromises();
+
+    expect(getMeetingDetail).toHaveBeenCalledTimes(1);
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+  });
+
   it('says nothing for an Ariso meeting, which has no local pipeline', async () => {
     const wrapper = await mountLocal(detail({ isLocal: false, digest: 'A digest' }));
     await flushPromises();

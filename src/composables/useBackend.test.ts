@@ -164,6 +164,22 @@ describe('LocalBackend', () => {
     ]);
   });
 
+  // The Library row needs it to tell a settled note-less recording from one
+  // whose notes are still generating.
+  it('carries the derived notes status onto local rows', async () => {
+    listRecordings.mockResolvedValue([
+      {
+        id: 'a', title: 'Silent', createdAt: '2026-06-01T09:00:00Z', durationSeconds: 60,
+        status: 'done', hasAudio: true, hasNote: false, hasTranscript: true,
+        notesStatus: 'empty-transcript',
+      },
+    ]);
+    const [row] = await new LocalBackend().listMeetings();
+    expect(row.files).toEqual({
+      hasAudio: true, hasNote: false, hasTranscript: true, notesStatus: 'empty-transcript',
+    });
+  });
+
   it('returns nothing for a blank local query without hitting the bridge', async () => {
     const rows = await new LocalBackend().searchMeetings('   ');
     expect(rows).toEqual([]);

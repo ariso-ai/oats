@@ -1,4 +1,12 @@
-import { local, auth, pending, api, getBackendSetting, type RecordingSummary } from '../tauri';
+import {
+  local,
+  auth,
+  pending,
+  api,
+  getBackendSetting,
+  type NotesStatus,
+  type RecordingSummary,
+} from '../tauri';
 import {
   useMeetingApi,
   type AudioSpeaker,
@@ -54,8 +62,9 @@ export interface MeetingListItem {
   durationSeconds?: number;
   /** Local recordings only. */
   status?: RecordingSummary['status'];
-  /** Local recordings only — drives the row's audio/note/transcript controls. */
-  files?: { hasAudio: boolean; hasNote: boolean; hasTranscript: boolean };
+  /** Local recordings only — drives the row's audio/note/transcript controls.
+   *  `notesStatus` lets the row tell settled notes from ones still generating. */
+  files?: { hasAudio: boolean; hasNote: boolean; hasTranscript: boolean; notesStatus?: NotesStatus };
   /** Remote search only: a short backend-provided match preview when available. */
   snippet?: string | null;
   /** Remote search only: the exact matched text, when the backend returns it. */
@@ -297,6 +306,7 @@ function recordingToListItem(r: RecordingSummary): MeetingListItem {
       hasAudio: r.hasAudio,
       hasNote: r.hasNote,
       hasTranscript: r.hasTranscript,
+      notesStatus: r.notesStatus,
     },
   };
 }
