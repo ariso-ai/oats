@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const localFinalize = vi.fn();
 const listRecordings = vi.fn();
+const listVaultTasks = vi.fn();
 const listMeetingsInWindow = vi.fn();
 const searchMeetings = vi.fn();
 const apiRequest = vi.fn();
@@ -31,6 +32,7 @@ vi.mock('../tauri', () => ({
     finalizeRecording: (...a: unknown[]) => localFinalize(...a),
     modelStatus: () => modelStatus(),
     listRecordings: () => listRecordings(),
+    listVaultTasks: () => listVaultTasks(),
     renameRecording: (...a: unknown[]) => renameRecording(...a),
     readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
   },
@@ -66,11 +68,13 @@ import {
   getActiveBackend,
   arisoMeetingWindow,
   timestampTitle,
+  recentDayKeys,
 } from './useBackend';
 
 beforeEach(() => {
   vi.clearAllMocks();
   getMeetingNotes.mockReset();
+  listVaultTasks.mockReset();
 });
 
 describe('LocalBackend', () => {
@@ -326,30 +330,38 @@ describe('ArisoBackend', () => {
   });
 
   it('finalizeRecording still uploads when buffering itself fails', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    bufferPendingAudio.mockRejectedValue(new Error('disk full'));
-    uploadAudio.mockResolvedValue({ meetingId: 7 });
-    discardPendingAudio.mockResolvedValue(undefined);
-    const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
-      startAt: '2026-06-02T14:30:05.000Z',
-      endAt: '2026-06-02T15:10:00.000Z',
-      durationSeconds: 10,
-    });
-    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
-    expect(uploadAudio).toHaveBeenCalled();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      bufferPendingAudio.mockRejectedValue(new Error('disk full'));
+      uploadAudio.mockResolvedValue({ meetingId: 7 });
+      discardPendingAudio.mockResolvedValue(undefined);
+      const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+        startAt: '2026-06-02T14:30:05.000Z',
+        endAt: '2026-06-02T15:10:00.000Z',
+        durationSeconds: 10,
+      });
+      expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+      expect(uploadAudio).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('finalizeRecording succeeds even when the post-upload discard fails', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    bufferPendingAudio.mockResolvedValue('id');
-    uploadAudio.mockResolvedValue({ meetingId: 7 });
-    discardPendingAudio.mockRejectedValue(new Error('locked'));
-    const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
-      startAt: '2026-06-02T14:30:05.000Z',
-      endAt: '2026-06-02T15:10:00.000Z',
-      durationSeconds: 10,
-    });
-    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      bufferPendingAudio.mockResolvedValue('id');
+      uploadAudio.mockResolvedValue({ meetingId: 7 });
+      discardPendingAudio.mockRejectedValue(new Error('locked'));
+      const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+        startAt: '2026-06-02T14:30:05.000Z',
+        endAt: '2026-06-02T15:10:00.000Z',
+        durationSeconds: 10,
+      });
+      expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('getMeetingAudio returns bytes, maps 404 to null, and rethrows other errors', async () => {
@@ -693,20 +705,66 @@ describe('meeting prep plumbing', () => {
   });
 });
 
-describe('action items', () => {
-  it('Ariso maps a day of action items onto selectable meeting rows', async () => {
-    listActionItemsByDay.mockResolvedValue([
-      {
-        meetingId: 9,
-        meetingTitle: 'Q3 Pricing Review',
-        startAt: '2026-08-31T09:00:00Z',
-        actionItems: [{ name: 'Dana', item: 'Send pricing deck' }, { item: '  ' }],
-      },
+describe('recentDayKeys', () => {
+  it('walks back from today, newest first', () => {
+    expect(recentDayKeys(new Date(2026, 2, 1, 9, 30), 3)).toEqual([
+      '2026-03-01',
+      '2026-02-28',
+      '2026-02-27',
     ]);
+  });
 
-    const entries = await new ArisoBackend().listActionItems('2026-08-31');
+  it('uses local calendar days, not UTC', () => {
+    expect(recentDayKeys(new Date(2026, 7, 31, 23, 59), 1)).toEqual(['2026-08-31']);
+  });
+});
 
-    expect(listActionItemsByDay).toHaveBeenCalledWith('2026-08-31');
+describe('action items', () => {
+  // The Ariso window is derived from "now"; pin it so a run that straddles
+  // local midnight can't compute two different windows.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 7, 31, 12));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('Ariso fans out over the last two weeks and maps rows', async () => {
+    listActionItemsByDay.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === '2026-08-31'
+          ? [
+              {
+                meetingId: 9,
+                meetingTitle: 'Q3 Pricing Review',
+                startAt: '2026-08-31T09:00:00Z',
+                actionItems: [{ name: 'Dana', item: 'Send pricing deck' }, { item: '  ' }],
+              },
+            ]
+          : []
+      )
+    );
+
+    const entries = await new ArisoBackend().listActionItems();
+
+    expect(listActionItemsByDay).toHaveBeenCalledTimes(14);
+    expect(listActionItemsByDay.mock.calls.map((c) => c[0])).toEqual([
+      '2026-08-31',
+      '2026-08-30',
+      '2026-08-29',
+      '2026-08-28',
+      '2026-08-27',
+      '2026-08-26',
+      '2026-08-25',
+      '2026-08-24',
+      '2026-08-23',
+      '2026-08-22',
+      '2026-08-21',
+      '2026-08-20',
+      '2026-08-19',
+      '2026-08-18',
+    ]);
     expect(entries).toEqual([
       {
         meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
@@ -725,16 +783,138 @@ describe('action items', () => {
       },
     ]);
 
-    const entries = await new ArisoBackend().listActionItems('2026-08-31');
+    const entries = await new ArisoBackend().listActionItems();
 
     expect(entries[0].meeting.title).toBe('Untitled meeting');
   });
 
-  it('offline mode neither advertises nor fetches action items', async () => {
-    const b = new LocalBackend();
-    expect(b.supportsActionItems).toBe(false);
-    await expect(b.listActionItems('2026-08-31')).resolves.toEqual([]);
-    expect(listActionItemsByDay).not.toHaveBeenCalled();
+  it('Ariso returns the days that loaded when one day fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      listActionItemsByDay.mockImplementation((day: string) => {
+        if (day === '2026-08-31') return Promise.reject(new Error('500'));
+        if (day === '2026-08-30') {
+          return Promise.resolve([
+            {
+              meetingId: 7,
+              meetingTitle: 'Platform Sync',
+              startAt: '2026-08-30T09:00:00Z',
+              actionItems: [{ item: 'Draft migration plan' }],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const entries = await new ArisoBackend().listActionItems();
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0].items[0].item).toBe('Draft migration plan');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('Ariso throws when every day fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      listActionItemsByDay.mockRejectedValue(new Error('offline'));
+      await expect(new ArisoBackend().listActionItems()).rejects.toThrow();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('local advertises action items', () => {
+    expect(new LocalBackend().supportsActionItems).toBe(true);
+  });
+
+  it('local joins vault tasks onto their recordings', async () => {
+    listVaultTasks.mockResolvedValue([
+      { oatsId: '2026-06-02T14-30-05Z', tasks: ['Ship the RFC', 'Email legal'] },
+    ]);
+    listRecordings.mockResolvedValue([
+      {
+        id: '2026-06-02T14-30-05Z',
+        title: 'Standup',
+        createdAt: '2026-06-02T14:30:05Z',
+        durationSeconds: 42,
+        status: 'done',
+        hasAudio: true,
+        hasNote: true,
+        hasTranscript: true,
+      },
+    ]);
+
+    const entries = await new LocalBackend().listActionItems();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].meeting.id).toBe('2026-06-02T14-30-05Z');
+    expect(entries[0].meeting.title).toBe('Standup');
+    expect(entries[0].meeting.timestamp).toBe('2026-06-02T14:30:05Z');
+    // The row must be selectable in the detail pane, so it carries `files`.
+    expect(entries[0].meeting.files).toEqual({
+      hasAudio: true,
+      hasNote: true,
+      hasTranscript: true,
+    });
+    expect(entries[0].items).toEqual([{ item: 'Ship the RFC' }, { item: 'Email legal' }]);
+  });
+
+  it('local trims whitespace-only tasks out of a group', async () => {
+    listVaultTasks.mockResolvedValue([
+      { oatsId: '2026-06-02T14-30-05Z', tasks: ['  ', 'Real task'] },
+    ]);
+    listRecordings.mockResolvedValue([
+      {
+        id: '2026-06-02T14-30-05Z',
+        title: 'Standup',
+        createdAt: '2026-06-02T14:30:05Z',
+        durationSeconds: 42,
+        status: 'done',
+        hasAudio: true,
+        hasNote: true,
+        hasTranscript: true,
+      },
+    ]);
+
+    const entries = await new LocalBackend().listActionItems();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].items).toEqual([{ item: 'Real task' }]);
+  });
+
+  it('local drops a group whose tasks are all whitespace', async () => {
+    listVaultTasks.mockResolvedValue([{ oatsId: '2026-06-02T14-30-05Z', tasks: ['  ', '\t'] }]);
+    listRecordings.mockResolvedValue([
+      {
+        id: '2026-06-02T14-30-05Z',
+        title: 'Standup',
+        createdAt: '2026-06-02T14:30:05Z',
+        durationSeconds: 42,
+        status: 'done',
+        hasAudio: true,
+        hasNote: true,
+        hasTranscript: true,
+      },
+    ]);
+
+    await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
+  });
+
+  it('local skips vault notes whose recording is gone', async () => {
+    // Nothing to open in the detail pane, so the row would be a dead end.
+    listVaultTasks.mockResolvedValue([{ oatsId: 'orphan', tasks: ['Ship the RFC'] }]);
+    listRecordings.mockResolvedValue([]);
+
+    await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
+  });
+
+  it('local returns nothing when the vault has no open tasks', async () => {
+    listVaultTasks.mockResolvedValue([]);
+    listRecordings.mockResolvedValue([]);
+
+    await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
   });
 
   it('Ariso advertises action items', () => {

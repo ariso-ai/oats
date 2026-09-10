@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { recentDayKeys, groupActionItemsByDay, type ActionItemEntry } from './actionItemSections';
+import { groupActionItemsByDay, type ActionItemEntry } from './actionItemSections';
 
 function meeting(id: string, title: string, timestamp: string) {
   return { id, title, timestamp };
@@ -13,20 +13,6 @@ function entry(
 ): ActionItemEntry {
   return { meeting: meeting(id, title, timestamp), items };
 }
-
-describe('recentDayKeys', () => {
-  it('returns today first, then the preceding local calendar days', () => {
-    expect(recentDayKeys(new Date(2026, 2, 1, 9, 30), 3)).toEqual([
-      '2026-03-01',
-      '2026-02-28',
-      '2026-02-27',
-    ]);
-  });
-
-  it('returns only today for a single-day window', () => {
-    expect(recentDayKeys(new Date(2026, 7, 31, 23, 59), 1)).toEqual(['2026-08-31']);
-  });
-});
 
 describe('groupActionItemsByDay', () => {
   const now = new Date(2026, 7, 31, 12, 0);

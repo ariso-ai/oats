@@ -38,6 +38,17 @@ function renderInline(text: string): string {
   return out;
 }
 
+// Obsidian Tasks emoji signifiers (created, start, scheduled, due, done,
+// cancelled, the five priorities, recurrence, on-completion, id, dependsOn).
+// oats stamps `➕ <date>` on generated action items; in-app that metadata is
+// noise, so a task line is shown from its start up to the first signifier.
+// Mirrors TASK_SIGNIFIERS in src-tauri/src/vault.rs — keep the two in sync.
+const TASK_METADATA = /\s*[➕🛫⏳📅✅❌🔺⏫🔼🔽⏬🔁🏁🆔⛔].*$/u;
+
+function stripTaskMetadata(text: string): string {
+  return text.replace(TASK_METADATA, '');
+}
+
 // Strip a leading YAML front-matter block (`---` … `---`) if the string opens
 // with one. Local recordings persist note/transcript markdown with metadata
 // front-matter (title/date/duration/participants) that's useful in the exported
@@ -130,7 +141,7 @@ export function renderMarkdown(src: string): string {
         html.push(
           `<li class="task-list-item"><input type="checkbox" disabled${
             checked ? ' checked' : ''
-          } />${renderInline(task[2] ?? '')}</li>`,
+          } />${renderInline(stripTaskMetadata(task[2] ?? ''))}</li>`,
         );
       } else {
         html.push(`<li>${renderInline(ul[1])}</li>`);

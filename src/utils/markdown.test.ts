@@ -63,4 +63,26 @@ describe('renderMarkdown task lists', () => {
     const html = renderMarkdown('- [x] **bold** task');
     expect(html).toContain('<strong>bold</strong>');
   });
+
+  it('hides Obsidian Tasks metadata on a task list item', () => {
+    const html = renderMarkdown('- [ ] Ship the RFC ➕ 2026-09-09');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('Ship the RFC');
+    expect(html).not.toContain('➕');
+    expect(html).not.toContain('2026-09-09');
+  });
+
+  it('hides every Tasks signifier, not just the created date', () => {
+    const html = renderMarkdown('- [x] Ship it ➕ 2026-09-01 📅 2026-09-09 ⏫');
+    expect(html).toContain('checked');
+    expect(html).toContain('Ship it');
+    expect(html).not.toContain('📅');
+    expect(html).not.toContain('⏫');
+  });
+
+  it('leaves emoji in a plain bullet alone', () => {
+    const html = renderMarkdown('- Shipped 🎉 on 📅 Friday');
+    expect(html).toContain('🎉');
+    expect(html).toContain('📅');
+  });
 });

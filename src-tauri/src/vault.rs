@@ -122,14 +122,22 @@ fn sanitize_component(s: &str) -> String {
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The `YYYY-MM-DD` date a note is filed under, derived from an RFC3339
+/// `created_at`. Falls back to the first 10 characters when `created_at` is not
+/// RFC3339. `note_basename` and the `➕` stamp on generated tasks both call
+/// this, so a note's filename date and its task dates can never disagree.
+pub fn note_date(created_at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(created_at) {
+        Ok(dt) => dt.format("%Y-%m-%d").to_string(),
+        Err(_) => sanitize_component(&created_at.chars().take(10).collect::<String>()),
+    }
+}
+
 /// Derive a human note basename: `YYYY-MM-DD <title>`. Falls back to the first
 /// 10 chars of `created_at` if it is not RFC3339, and to `id` if the sanitized
 /// title is empty.
 pub fn note_basename(created_at: &str, title: &str, id: &str) -> String {
-    let date = match chrono::DateTime::parse_from_rfc3339(created_at) {
-        Ok(dt) => dt.format("%Y-%m-%d").to_string(),
-        Err(_) => sanitize_component(&created_at.chars().take(10).collect::<String>()),
-    };
+    let date = note_date(created_at);
     let mut name = sanitize_component(title);
     if name.is_empty() {
         name = sanitize_component(id);
@@ -156,6 +164,154 @@ pub fn unique_basename(root: &Path, base: &str) -> String {
     }
 }
 
+/// Split a Markdown list item into its leading whitespace and its content.
+/// Recognizes `-`, `*`, `+`, `1.` and `2)` markers — the same set the Obsidian
+/// Tasks plugin accepts. Returns None for anything that is not a list item.
+fn split_list_item(line: &str) -> Option<(&str, &str)> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, rest) = line.split_at(indent_len);
+    for marker in ['-', '*', '+'] {
+        if let Some(after) = rest.strip_prefix(marker) {
+            if after.starts_with(' ') || after.starts_with('\t') {
+                return Some((indent, after.trim_start()));
+            }
+        }
+    }
+    // Ordered markers: one or more digits, then `.` or `)`.
+    let digit_len = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_len > 0 {
+        let after_digits = &rest[digit_len..];
+        for marker in ['.', ')'] {
+            if let Some(after) = after_digits.strip_prefix(marker) {
+                if after.starts_with(' ') || after.starts_with('\t') {
+                    return Some((indent, after.trim_start()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The state character of a list item that is already a checkbox: `[ ]` → ' ',
+/// `[x]` → 'x', `[-]` → '-'. None for a plain bullet. The closing bracket must
+/// end the item or be followed by a space, so a `[label](url)` link at the
+/// start of a bullet is not mistaken for a checkbox.
+fn checkbox_state(content: &str) -> Option<char> {
+    let b = content.as_bytes();
+    if b.len() >= 3 && b[0] == b'[' && b[2] == b']' && (b.len() == 3 || b[3] == b' ') {
+        return Some(b[1] as char);
+    }
+    None
+}
+
+/// True for an ATX heading line (`#` … `######` followed by a space or EOL).
+/// Guards against treating a bare `#tag` as a heading.
+fn is_heading(trimmed: &str) -> bool {
+    let after = trimmed.trim_start_matches('#');
+    after.len() < trimmed.len() && (after.is_empty() || after.starts_with(' '))
+}
+
+/// True for an `Action Items` heading at any level, tolerating a trailing colon
+/// and any case — the sidecar prompt asks for `## Action Items`, but the model
+/// occasionally varies it.
+fn is_action_items_heading(trimmed: &str) -> bool {
+    let text = trimmed.trim_start_matches('#').trim();
+    text.trim_end_matches(':').trim().eq_ignore_ascii_case("action items")
+}
+
+/// True for an item that is a "nothing here" placeholder rather than a task.
+/// The 1B notes model fills empty sections with lines like "None explicitly
+/// stated in the transcript." despite the prompt forbidding it.
+///
+/// Deliberately narrow: a real action item can legitimately begin with "None"
+/// ("None of the vendors confirmed — follow up Monday"), and silently dropping
+/// one is invisible data loss, whereas a leaked placeholder is a visible row
+/// the user deletes. So only a bare placeholder, or one that names the
+/// transcript the way this model does, is dropped.
+fn is_placeholder_item(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    let core = lower.trim_end_matches(['.', ' ']);
+    core == "none"
+        || core == "n/a"
+        || core == "na"
+        || (lower.starts_with("none") && lower.contains("transcript"))
+}
+
+/// The delimiter character of a fenced-code-block marker line, if the line is
+/// one. CommonMark closes a fence only with its own delimiter, so callers must
+/// remember which one opened the block: a literal `~~~` inside a ```-fence is
+/// text, not a close.
+fn fence_delimiter(trimmed: &str) -> Option<char> {
+    if trimmed.starts_with("```") {
+        Some('`')
+    } else if trimmed.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
+    }
+}
+
+/// Advance fenced-code-block state for one line, returning true when the line
+/// is itself a fence marker (the caller decides whether to emit or skip it).
+/// CommonMark closes a fence only with its own delimiter, so a `~~~` line
+/// inside a ```-fence is literal text and leaves the fence open.
+fn advance_fence(trimmed: &str, fence: &mut Option<char>) -> bool {
+    let Some(delim) = fence_delimiter(trimmed) else { return false };
+    match *fence {
+        None => *fence = Some(delim),
+        Some(open) if open == delim => *fence = None,
+        // A different delimiter inside an open fence is literal text.
+        Some(_) => {}
+    }
+    true
+}
+
+/// Rewrite the `## Action Items` section's bullets as Obsidian Tasks
+/// checkboxes stamped with the meeting's date: `- [ ] <task> ➕ YYYY-MM-DD`.
+/// `➕` (created) is the only signifier we can populate truthfully — a meeting
+/// gives us no due date, priority, or recurrence.
+///
+/// Idempotent: an item that is already a checkbox is passed through untouched,
+/// so regenerating notes after an append never double-stamps. Lines inside
+/// fenced code blocks are never rewritten (Tasks ignores those anyway).
+pub fn render_action_items(notes_md: &str, date: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_section = false;
+    let mut fence: Option<char> = None;
+    for line in notes_md.lines() {
+        let trimmed = line.trim_start();
+        if advance_fence(trimmed, &mut fence) {
+            out.push(line.to_string());
+            continue;
+        }
+        if fence.is_none() && is_heading(trimmed) {
+            in_section = is_action_items_heading(trimmed);
+            out.push(line.to_string());
+            continue;
+        }
+        if fence.is_some() || !in_section {
+            out.push(line.to_string());
+            continue;
+        }
+        match split_list_item(line) {
+            Some((indent, content)) if checkbox_state(content).is_none() => {
+                if is_placeholder_item(content) || content.trim().is_empty() {
+                    continue; // drop the line entirely
+                }
+                out.push(format!("{indent}- [ ] {content} ➕ {date}"));
+            }
+            _ => out.push(line.to_string()),
+        }
+    }
+    let mut joined = out.join("\n");
+    // `lines()` drops the trailing newline; restore it so the note body's
+    // shape is unchanged for input that had one.
+    if notes_md.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Render a vault note: YAML front-matter, the audio embed, then the notes body.
 pub fn render_note(meta: &RecordingMeta, audio_file: &str, notes_md: &str) -> String {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
@@ -174,7 +330,7 @@ pub fn render_note(meta: &RecordingMeta, audio_file: &str, notes_md: &str) -> St
     out.push_str(&format!("participants: [{participants}]\n"));
     out.push_str("---\n");
     out.push_str(&format!("![[Attachments/{audio_file}]]\n\n"));
-    out.push_str(notes_md);
+    out.push_str(&render_action_items(notes_md, &note_date(&meta.created_at)));
     out
 }
 
@@ -199,6 +355,103 @@ pub fn note_body(contents: &str) -> String {
         _ => after_fence,
     };
     body.to_string()
+}
+
+/// Obsidian Tasks emoji signifiers: created, start, scheduled, due, done,
+/// cancelled, the five priorities, recurrence, on-completion, id, dependsOn.
+/// Everything from the first one onward is metadata, not task text.
+///
+/// Mirrors TASK_SIGNIFIERS in src/utils/markdown.ts — keep the two in sync.
+const TASK_SIGNIFIERS: [char; 15] = [
+    '➕', '🛫', '⏳', '📅', '✅', '❌', '🔺', '⏫', '🔼', '🔽', '⏬', '🔁', '🏁', '🆔', '⛔',
+];
+
+/// Drop Obsidian Tasks emoji metadata, leaving the task's own text.
+fn strip_task_metadata(text: &str) -> String {
+    match text.find(TASK_SIGNIFIERS.as_slice()) {
+        Some(i) => text[..i].trim().to_string(),
+        None => text.trim().to_string(),
+    }
+}
+
+/// Plain (checkbox-less) bullets under `## Action Items`, for notes written
+/// before oats emitted checkboxes. Placeholders are skipped for the same reason
+/// `render_action_items` drops them.
+fn legacy_action_item_bullets(body: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut in_section = false;
+    let mut fence: Option<char> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if advance_fence(trimmed, &mut fence) {
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if is_heading(trimmed) {
+            in_section = is_action_items_heading(trimmed);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((_, content)) = split_list_item(line) {
+            if is_placeholder_item(content) {
+                continue;
+            }
+            let text = strip_task_metadata(content);
+            if !text.is_empty() {
+                items.push(text);
+            }
+        }
+    }
+    items
+}
+
+/// The note's open (unchecked) tasks, in document order, with Tasks emoji
+/// metadata stripped so each row reads as the task itself.
+///
+/// Scans the whole body rather than just the Action Items section: once oats
+/// has written the note it belongs to the user, who may reorganize or add items
+/// in Obsidian. `[x]` (done) and `[-]` (cancelled) are excluded — that is how a
+/// todo gets closed, since oats never writes completion back.
+///
+/// A note containing no checkbox at all falls back to the plain bullets under
+/// `## Action Items`, so notes generated before this feature still populate the
+/// Todos tab.
+pub fn open_tasks(note_contents: &str) -> Vec<String> {
+    let body = note_body(note_contents);
+    let mut tasks = Vec::new();
+    let mut saw_checkbox = false;
+    let mut fence: Option<char> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if advance_fence(trimmed, &mut fence) {
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let Some((_, content)) = split_list_item(line) else { continue };
+        let Some(state) = checkbox_state(content) else { continue };
+        saw_checkbox = true;
+        if state != ' ' {
+            continue;
+        }
+        let raw = &content[3..];
+        if is_placeholder_item(raw) {
+            continue;
+        }
+        let text = strip_task_metadata(raw);
+        if !text.is_empty() {
+            tasks.push(text);
+        }
+    }
+    if saw_checkbox {
+        return tasks;
+    }
+    legacy_action_item_bullets(&body)
 }
 
 /// Reject a note basename that could escape the vault root.
@@ -874,5 +1127,241 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+
+    #[test]
+    fn note_date_matches_the_basename_date_prefix() {
+        assert_eq!(note_date("2026-06-02T14:30:05Z"), "2026-06-02");
+        assert_eq!(note_date("2026-06-02T14:30:05.168Z"), "2026-06-02");
+        // Not RFC3339: fall back to the first 10 characters, exactly as
+        // note_basename does, so the two can never disagree.
+        assert_eq!(note_date("2026-06-02 oops"), "2026-06-02");
+        assert!(note_basename("2026-06-02T14:30:05Z", "Standup", "id")
+            .starts_with(&note_date("2026-06-02T14:30:05Z")));
+    }
+
+    #[test]
+    fn render_action_items_rewrites_bullets_as_tasks() {
+        let notes = "## Summary\nWe met.\n\n## Action Items\n*   Ship the RFC\n- Sam: email legal\n+ Book the room\n1. Update the deck\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert_eq!(
+            out,
+            "## Summary\nWe met.\n\n## Action Items\n- [ ] Ship the RFC ➕ 2026-09-09\n- [ ] Sam: email legal ➕ 2026-09-09\n- [ ] Book the room ➕ 2026-09-09\n- [ ] Update the deck ➕ 2026-09-09\n"
+        );
+    }
+
+    #[test]
+    fn render_action_items_leaves_other_sections_alone() {
+        let notes = "## Key Points\n*   A point\n\n## Action Items\n*   Do the thing\n\n## Decisions\n*   Ship on Friday\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("## Key Points\n*   A point"));
+        assert!(out.contains("## Decisions\n*   Ship on Friday"));
+        assert!(out.contains("- [ ] Do the thing ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_is_idempotent() {
+        let notes = "## Action Items\n*   Ship the RFC\n";
+        let once = render_action_items(notes, "2026-09-09");
+        // Re-rendering after an append must not double-stamp or re-checkbox.
+        assert_eq!(render_action_items(&once, "2026-09-10"), once);
+    }
+
+    #[test]
+    fn render_action_items_preserves_completed_and_cancelled_items() {
+        let notes = "## Action Items\n- [x] Already done ➕ 2026-09-01\n- [-] Dropped\n- Still open\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("- [x] Already done ➕ 2026-09-01"));
+        assert!(out.contains("- [-] Dropped"));
+        assert!(out.contains("- [ ] Still open ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_preserves_indentation() {
+        let notes = "## Action Items\n*   Parent task\n    *   Child task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("\n- [ ] Parent task ➕ 2026-09-09\n"));
+        assert!(out.contains("\n    - [ ] Child task ➕ 2026-09-09\n"));
+    }
+
+    #[test]
+    fn render_action_items_drops_placeholder_items() {
+        // The 1B model fills empty sections despite the prompt forbidding it.
+        // "None explicitly stated in the transcript." must never become a todo.
+        let notes = "## Action Items\n*   None explicitly stated in the transcript.\n*   None\n*   N/A\n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(!out.contains("None explicitly stated"));
+        assert!(!out.contains("- [ ] None ➕"));
+        assert!(!out.contains("N/A"));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_drops_empty_list_items() {
+        // A textless bullet would otherwise write a permanent blank checkbox
+        // into the user's vault, which oats can never remove.
+        let notes = "## Action Items\n- \n*   \n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(!out.contains("- [ ]  "));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_keeps_a_real_task_that_starts_with_none() {
+        // Dropping this would be invisible data loss; a leaked placeholder is
+        // only a visible row the user deletes.
+        let notes = "## Action Items\n*   None of the vendors confirmed pricing — follow up Monday\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("- [ ] None of the vendors confirmed pricing — follow up Monday ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_ignores_fenced_code_blocks() {
+        let notes = "## Action Items\n```\n- not a task\n```\n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("\n- not a task\n"));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_keeps_a_backtick_fence_open_across_a_tilde_line() {
+        // CommonMark closes a fence only with its own delimiter, so the `~~~`
+        // here is literal text and everything up to the closing ``` stays code.
+        let notes = "## Action Items\n```\n~~~\n- still inside the fence\n```\n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("\n- still inside the fence\n"));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_passes_through_notes_without_the_section() {
+        let notes = "## Summary\nWe met.\n\n## Key Points\n*   A point\n";
+        assert_eq!(render_action_items(notes, "2026-09-09"), notes);
+    }
+
+    #[test]
+    fn render_action_items_tolerates_heading_case_and_trailing_colon() {
+        let notes = "## Action items:\n*   Ship it\n";
+        assert!(render_action_items(notes, "2026-09-09").contains("- [ ] Ship it ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_note_emits_tasks_stamped_with_the_meeting_date() {
+        let md = render_note(
+            &meta_for_note(),
+            "2026-06-02 Team Standup.mp3",
+            "## Action Items\n*   Ship the RFC\n",
+        );
+        // meta_for_note()'s created_at is 2026-06-02T14:30:05Z.
+        assert!(md.contains("- [ ] Ship the RFC ➕ 2026-06-02"));
+    }
+
+    #[test]
+    fn open_tasks_returns_unchecked_items_without_metadata() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Action Items\n- [ ] Ship the RFC ➕ 2026-06-02\n- [x] Already done ➕ 2026-06-02\n- [-] Dropped\n- [ ] Email legal ➕ 2026-06-02\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Ship the RFC", "Email legal"]);
+    }
+
+    #[test]
+    fn open_tasks_skips_a_placeholder_checkbox() {
+        // The model occasionally emits a checkbox directly; render_action_items
+        // passes existing checkboxes through, so the read side must filter too.
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Action Items\n- [ ] None explicitly stated in the transcript.\n- [ ] Real task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Real task"]);
+    }
+
+    #[test]
+    fn open_tasks_scans_the_whole_body_not_just_action_items() {
+        // Once the note is written it belongs to the user, who may move items
+        // anywhere in Obsidian.
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Summary\nWe met.\n\n## Follow-ups I added myself\n- [ ] Call the vendor\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Call the vendor"]);
+    }
+
+    #[test]
+    fn open_tasks_strips_every_tasks_signifier() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "- [ ] Ship it ➕ 2026-06-02 📅 2026-06-09 ⏫\n- [ ] Plain task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Ship it", "Plain task"]);
+    }
+
+    #[test]
+    fn open_tasks_ignores_fenced_code_blocks() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "```\n- [ ] not a real task\n```\n- [ ] real task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["real task"]);
+    }
+
+    #[test]
+    fn open_tasks_keeps_a_backtick_fence_open_across_a_tilde_line() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "```\n~~~\n- [ ] not a real task\n```\n- [ ] real task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["real task"]);
+    }
+
+    #[test]
+    fn open_tasks_falls_back_to_plain_bullets_for_legacy_notes() {
+        // Notes written before this feature have no checkboxes at all; without
+        // this fallback every existing vault would show an empty Todos tab.
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Summary\nWe met.\n\n## Key Points\n*   A point\n\n## Action Items\n*   Ship the RFC\n*   Sam: email legal\n",
+        );
+        // render_note now checkboxes the section, so build the legacy shape by
+        // hand to represent a note already on disk.
+        let legacy = note.replace("- [ ] Ship the RFC ➕ 2026-06-02", "*   Ship the RFC")
+            .replace("- [ ] Sam: email legal ➕ 2026-06-02", "*   Sam: email legal");
+        assert_eq!(open_tasks(&legacy), vec!["Ship the RFC", "Sam: email legal"]);
+        // Only the Action Items section — not the Key Points bullet.
+        assert!(!open_tasks(&legacy).iter().any(|t| t == "A point"));
+    }
+
+    #[test]
+    fn open_tasks_legacy_fallback_skips_placeholder_bullets() {
+        let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n*   None explicitly stated in the transcript.\n";
+        assert!(open_tasks(legacy).is_empty());
+    }
+
+    #[test]
+    fn open_tasks_legacy_fallback_ignores_fenced_bullets() {
+        // A legacy note (no checkboxes anywhere) whose Action Items section
+        // contains a fenced block must not leak the fenced lines as tasks.
+        let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n```\n*   not a task\n```\n*   Real task\n";
+        assert_eq!(open_tasks(legacy), vec!["Real task"]);
+    }
+
+    #[test]
+    fn open_tasks_does_not_fall_back_when_every_checkbox_is_done() {
+        // A note whose tasks are all ticked is finished, not legacy.
+        let note = render_note(&meta_for_note(), "a.mp3", "## Action Items\n- [x] Ship the RFC ➕ 2026-06-02\n");
+        assert!(open_tasks(&note).is_empty());
+    }
+
+    #[test]
+    fn open_tasks_returns_nothing_for_a_note_with_no_items() {
+        let note = render_note(&meta_for_note(), "a.mp3", "## Summary\nWe met and agreed.\n");
+        assert!(open_tasks(&note).is_empty());
     }
 }
