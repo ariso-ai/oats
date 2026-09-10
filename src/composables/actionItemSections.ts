@@ -18,19 +18,6 @@ export interface ActionItemSection {
   rows: ActionItemRow[];
 }
 
-/** The `YYYY-MM-DD` days the Todo tab asks the API for: today first, then the
- *  preceding local calendar days. One request per key — the endpoint serves a
- *  single day. */
-export function recentDayKeys(now: Date, count: number): string[] {
-  const keys: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    keys.push(localDateKey(d));
-  }
-  return keys;
-}
-
 /** Bucket action items under per-calendar-date headers, newest day first, with
  *  each day's meetings ordered earliest-first. Meetings are deduped by id: the
  *  same meeting can surface in two day requests near a timezone boundary, and

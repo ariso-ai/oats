@@ -66,6 +66,7 @@ import {
   getActiveBackend,
   arisoMeetingWindow,
   timestampTitle,
+  recentDayKeys,
 } from './useBackend';
 
 beforeEach(() => {
@@ -677,20 +678,45 @@ describe('meeting prep plumbing', () => {
   });
 });
 
-describe('action items', () => {
-  it('Ariso maps a day of action items onto selectable meeting rows', async () => {
-    listActionItemsByDay.mockResolvedValue([
-      {
-        meetingId: 9,
-        meetingTitle: 'Q3 Pricing Review',
-        startAt: '2026-08-31T09:00:00Z',
-        actionItems: [{ name: 'Dana', item: 'Send pricing deck' }, { item: '  ' }],
-      },
+describe('recentDayKeys', () => {
+  it('walks back from today, newest first', () => {
+    expect(recentDayKeys(new Date(2026, 2, 1, 9, 30), 3)).toEqual([
+      '2026-03-01',
+      '2026-02-28',
+      '2026-02-27',
     ]);
+  });
 
-    const entries = await new ArisoBackend().listActionItems('2026-08-31');
+  it('uses local calendar days, not UTC', () => {
+    expect(recentDayKeys(new Date(2026, 7, 31, 23, 59), 1)).toEqual(['2026-08-31']);
+  });
+});
 
-    expect(listActionItemsByDay).toHaveBeenCalledWith('2026-08-31');
+describe('action items', () => {
+  it('Ariso fans out over the last two weeks and maps rows', async () => {
+    listActionItemsByDay.mockResolvedValue([]);
+    const today = recentDayKeys(new Date(), 14)[0];
+    listActionItemsByDay.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === today
+          ? [
+              {
+                meetingId: 9,
+                meetingTitle: 'Q3 Pricing Review',
+                startAt: '2026-08-31T09:00:00Z',
+                actionItems: [{ name: 'Dana', item: 'Send pricing deck' }, { item: '  ' }],
+              },
+            ]
+          : []
+      )
+    );
+
+    const entries = await new ArisoBackend().listActionItems();
+
+    expect(listActionItemsByDay).toHaveBeenCalledTimes(14);
+    expect(listActionItemsByDay.mock.calls.map((c) => c[0])).toEqual(
+      recentDayKeys(new Date(), 14)
+    );
     expect(entries).toEqual([
       {
         meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
@@ -709,15 +735,43 @@ describe('action items', () => {
       },
     ]);
 
-    const entries = await new ArisoBackend().listActionItems('2026-08-31');
+    const entries = await new ArisoBackend().listActionItems();
 
     expect(entries[0].meeting.title).toBe('Untitled meeting');
+  });
+
+  it('Ariso returns the days that loaded when one day fails', async () => {
+    const days = recentDayKeys(new Date(), 14);
+    listActionItemsByDay.mockImplementation((day: string) => {
+      if (day === days[0]) return Promise.reject(new Error('500'));
+      if (day === days[1]) {
+        return Promise.resolve([
+          {
+            meetingId: 7,
+            meetingTitle: 'Platform Sync',
+            startAt: '2026-08-30T09:00:00Z',
+            actionItems: [{ item: 'Draft migration plan' }],
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const entries = await new ArisoBackend().listActionItems();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].items[0].item).toBe('Draft migration plan');
+  });
+
+  it('Ariso throws when every day fails', async () => {
+    listActionItemsByDay.mockRejectedValue(new Error('offline'));
+    await expect(new ArisoBackend().listActionItems()).rejects.toThrow();
   });
 
   it('offline mode neither advertises nor fetches action items', async () => {
     const b = new LocalBackend();
     expect(b.supportsActionItems).toBe(false);
-    await expect(b.listActionItems('2026-08-31')).resolves.toEqual([]);
+    await expect(b.listActionItems()).resolves.toEqual([]);
     expect(listActionItemsByDay).not.toHaveBeenCalled();
   });
 

@@ -11,6 +11,7 @@ import {
 import { arisoTruthy } from './autoJoin';
 import { reportUploadFailure } from './useDiagnostics';
 import { isCanceledMeetingStatus } from './meetingStatus';
+import { localDateKey } from './groupMeetingsByDate';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -176,8 +177,9 @@ export interface Backend {
    *  Ariso searches its remote note corpus; local does a title-only filter over
    *  its recordings. */
   supportsSearch: boolean;
-  /** Whether this backend can list the user's meeting action items (the Todo
-   *  tab). Extraction happens server-side, so offline mode has none. */
+  /** Whether this backend can list the user's action items (the Todo tab).
+   *  Ariso extracts them server-side; local reads the Obsidian tasks in its
+   *  vault notes. */
   supportsActionItems: boolean;
   isReady(): Promise<Readiness>;
   finalizeRecording(blob: Blob, meta: RecordingMeta): Promise<FinalizeResult>;
@@ -185,10 +187,12 @@ export interface Backend {
   /** Search the backend's meeting-note corpus and return rows the Library can
    *  select like normal meetings. */
   searchMeetings(query: string): Promise<MeetingListItem[]>;
-  /** The user's action items for one local calendar day (`YYYY-MM-DD`), grouped
-   *  by their source meeting. The meeting comes back as a selectable list row so
-   *  a Todo row can open it in the detail pane. */
-  listActionItems(day: string): Promise<ActionItemEntry[]>;
+  /** The user's open action items, grouped by their source meeting. Each
+   *  backend decides its own window: Ariso fans out over the recent days its
+   *  per-day endpoint serves; local scans the whole vault history. The meeting
+   *  comes back as a selectable list row so a Todo row can open it in the
+   *  detail pane. Rejects only when nothing at all could be loaded. */
+  listActionItems(): Promise<ActionItemEntry[]>;
   /** Load the detail for a single row (from the list item the user clicked). */
   getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
   /** Lazily load the meeting's transcript (null when none). Ariso meetings
@@ -328,6 +332,22 @@ export function timestampTitle(iso: string): string {
   return `${day} @ ${time}`;
 }
 
+// Ariso's action-items endpoint serves a single day, so the backend asks for
+// the last two weeks one day at a time and concatenates. This is an endpoint
+// constraint, not a UI one — the Library just asks for "the action items".
+const ARISO_TODO_DAY_COUNT = 14;
+
+/** The `YYYY-MM-DD` local calendar days to request: today first, then back. */
+export function recentDayKeys(now: Date, count: number): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    keys.push(localDateKey(d));
+  }
+  return keys;
+}
+
 export class ArisoBackend implements Backend {
   id: BackendId = 'ariso';
   needsAuth = true;
@@ -396,19 +416,36 @@ export class ArisoBackend implements Backend {
     return meetings.map(meetingSummaryToListItem);
   }
 
-  async listActionItems(day: string): Promise<ActionItemEntry[]> {
+  async listActionItems(): Promise<ActionItemEntry[]> {
     const { listActionItemsByDay } = useMeetingApi();
-    const groups = await listActionItemsByDay(day);
-    return groups
-      .map((g) => ({
-        meeting: {
-          id: String(g.meetingId),
-          title: g.meetingTitle || 'Untitled meeting',
-          timestamp: g.startAt,
-        },
-        items: normalizeActionItems(g.actionItems),
-      }))
-      .filter((entry) => entry.items.length > 0);
+    const results = await Promise.allSettled(
+      recentDayKeys(new Date(), ARISO_TODO_DAY_COUNT).map((day) => listActionItemsByDay(day))
+    );
+    const entries: ActionItemEntry[] = [];
+    let failures = 0;
+    // A day that fails is skipped rather than blanking the tab — only a window
+    // that returns nothing at all reads as an error.
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        failures++;
+        console.error('Failed to load a day of action items', result.reason);
+        continue;
+      }
+      for (const g of result.value) {
+        const items = normalizeActionItems(g.actionItems);
+        if (items.length === 0) continue;
+        entries.push({
+          meeting: {
+            id: String(g.meetingId),
+            title: g.meetingTitle || 'Untitled meeting',
+            timestamp: g.startAt,
+          },
+          items,
+        });
+      }
+    }
+    if (failures === results.length) throw new Error('Could not load action items.');
+    return entries;
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {

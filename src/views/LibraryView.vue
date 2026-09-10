@@ -133,9 +133,8 @@
 
       <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
 
-      <!-- Todo: the action items assigned to the signed-in user across the last
-           two weeks of meetings, grouped by day. Selecting a row opens the
-           meeting it came from in the detail pane. -->
+      <!-- Todo: the user's open action items, grouped by day. Selecting a row
+           opens the meeting it came from in the detail pane. -->
       <template v-if="activeView === 'todo'">
         <p v-if="todoLoading" class="hint">Loading…</p>
         <p v-else-if="todoError" class="hint">{{ todoError }}</p>
@@ -294,7 +293,6 @@ import {
   type MeetingSection,
 } from '../composables/groupMeetingsByDate';
 import {
-  recentDayKeys,
   groupActionItemsByDay,
   type ActionItemEntry,
   type ActionItemRow,
@@ -399,9 +397,6 @@ const dayNum = computed(() => now.value.getDate());
 const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'long' }).toUpperCase());
 
 const activeView = ref<'today' | 'meetings' | 'todo'>('meetings');
-// The action-items endpoint serves a single day, so the Todo tab asks for the
-// last two weeks one day at a time and groups what comes back.
-const TODO_DAY_COUNT = 14;
 const todoEntries = ref<ActionItemEntry[]>([]);
 const todoLoading = ref(false);
 const todoError = ref<string | null>(null);
@@ -477,11 +472,11 @@ async function openTodoView(): Promise<void> {
   await loadActionItems();
 }
 
-// Bump per call so a slow fan-out can't overwrite a newer one.
+// Bump per call so a slow load can't overwrite a newer one.
 let loadActionItemsRequest = 0;
 
-// One request per day shown. A day that fails is skipped rather than blanking
-// the tab — only a week that returns nothing at all reads as an error.
+// The backend owns its own window (Ariso: the last two weeks; local: the whole
+// vault). It rejects only when nothing at all could be loaded.
 async function loadActionItems(): Promise<void> {
   if (todoLoading.value) return;
   const backend = activeBackend.value ?? (await getActiveBackend());
@@ -491,25 +486,14 @@ async function loadActionItems(): Promise<void> {
   todoLoading.value = true;
   todoError.value = null;
   try {
-    const results = await Promise.allSettled(
-      recentDayKeys(now.value, TODO_DAY_COUNT).map((day) => backend.listActionItems(day))
-    );
+    const loaded = await backend.listActionItems();
     if (requestId !== loadActionItemsRequest) return;
-    const loaded: ActionItemEntry[] = [];
-    let failures = 0;
-    for (const result of results) {
-      if (result.status === 'fulfilled') loaded.push(...result.value);
-      else {
-        failures++;
-        console.error('Failed to load a day of action items', result.reason);
-      }
-    }
-    if (failures === results.length) {
-      todoEntries.value = [];
-      todoError.value = 'Could not load action items.';
-    } else {
-      todoEntries.value = loaded;
-    }
+    todoEntries.value = loaded;
+  } catch (e) {
+    if (requestId !== loadActionItemsRequest) return;
+    console.error('Failed to load action items', e);
+    todoEntries.value = [];
+    todoError.value = 'Could not load action items.';
   } finally {
     if (requestId === loadActionItemsRequest) todoLoading.value = false;
   }
