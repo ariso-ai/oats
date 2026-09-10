@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const localFinalize = vi.fn();
 const listRecordings = vi.fn();
+const listVaultTasks = vi.fn();
 const listMeetingsInWindow = vi.fn();
 const searchMeetings = vi.fn();
 const apiRequest = vi.fn();
@@ -31,6 +32,7 @@ vi.mock('../tauri', () => ({
     finalizeRecording: (...a: unknown[]) => localFinalize(...a),
     modelStatus: () => modelStatus(),
     listRecordings: () => listRecordings(),
+    listVaultTasks: () => listVaultTasks(),
     renameRecording: (...a: unknown[]) => renameRecording(...a),
     readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
   },
@@ -72,6 +74,7 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   getMeetingNotes.mockReset();
+  listVaultTasks.mockReset();
 });
 
 describe('LocalBackend', () => {
@@ -768,11 +771,55 @@ describe('action items', () => {
     await expect(new ArisoBackend().listActionItems()).rejects.toThrow();
   });
 
-  it('offline mode neither advertises nor fetches action items', async () => {
-    const b = new LocalBackend();
-    expect(b.supportsActionItems).toBe(false);
-    await expect(b.listActionItems()).resolves.toEqual([]);
-    expect(listActionItemsByDay).not.toHaveBeenCalled();
+  it('local advertises action items', () => {
+    expect(new LocalBackend().supportsActionItems).toBe(true);
+  });
+
+  it('local joins vault tasks onto their recordings', async () => {
+    listVaultTasks.mockResolvedValue([
+      { oatsId: '2026-06-02T14-30-05Z', tasks: ['Ship the RFC', 'Email legal'] },
+    ]);
+    listRecordings.mockResolvedValue([
+      {
+        id: '2026-06-02T14-30-05Z',
+        title: 'Standup',
+        createdAt: '2026-06-02T14:30:05Z',
+        durationSeconds: 42,
+        status: 'done',
+        hasAudio: true,
+        hasNote: true,
+        hasTranscript: true,
+      },
+    ]);
+
+    const entries = await new LocalBackend().listActionItems();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].meeting.id).toBe('2026-06-02T14-30-05Z');
+    expect(entries[0].meeting.title).toBe('Standup');
+    expect(entries[0].meeting.timestamp).toBe('2026-06-02T14:30:05Z');
+    // The row must be selectable in the detail pane, so it carries `files`.
+    expect(entries[0].meeting.files).toEqual({
+      hasAudio: true,
+      hasNote: true,
+      hasTranscript: true,
+    });
+    expect(entries[0].items).toEqual([{ item: 'Ship the RFC' }, { item: 'Email legal' }]);
+  });
+
+  it('local skips vault notes whose recording is gone', async () => {
+    // Nothing to open in the detail pane, so the row would be a dead end.
+    listVaultTasks.mockResolvedValue([{ oatsId: 'orphan', tasks: ['Ship the RFC'] }]);
+    listRecordings.mockResolvedValue([]);
+
+    await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
+  });
+
+  it('local returns nothing when the vault has no open tasks', async () => {
+    listVaultTasks.mockResolvedValue([]);
+    listRecordings.mockResolvedValue([]);
+
+    await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
   });
 
   it('Ariso advertises action items', () => {

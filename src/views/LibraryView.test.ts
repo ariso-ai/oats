@@ -2020,6 +2020,28 @@ describe('LibraryView Todo tab', () => {
     expect(listActionItems).not.toHaveBeenCalled();
   });
 
+  it('enables the Todo tab for a local backend that has vault tasks', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
+        'Ship the RFC'
+      )
+    );
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(todoButton(wrapper).attributes('disabled')).toBeUndefined();
+
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Ship the RFC');
+  });
+
   it('lists action items grouped by day when the tab is opened', async () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);

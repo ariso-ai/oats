@@ -543,8 +543,9 @@ export class LocalBackend implements Backend {
   needsAuth = false;
   usesMeetingPicker = false;
   supportsSearch = true;
-  // Action items are extracted server-side; nothing offline produces them.
-  supportsActionItems = false;
+  // Read from the vault's generated notes: oats writes each meeting's action
+  // items as Obsidian Tasks checkboxes, and an unchecked one is a todo.
+  supportsActionItems = true;
 
   async isReady(): Promise<Readiness> {
     const status = await local.modelStatus();
@@ -588,8 +589,27 @@ export class LocalBackend implements Backend {
       .map(recordingToListItem);
   }
 
+  // The whole vault history, not a date window — the local Meetings list has no
+  // window either, and an open action item from three weeks ago is still open.
+  // Notes whose recording folder is gone are skipped: a row with no meeting to
+  // open would be a dead end.
   async listActionItems(): Promise<ActionItemEntry[]> {
-    return [];
+    const [groups, recordings] = await Promise.all([
+      local.listVaultTasks(),
+      local.listRecordings(),
+    ]);
+    const byId = new Map(recordings.map((r) => [r.id, r]));
+    const entries: ActionItemEntry[] = [];
+    for (const group of groups) {
+      const recording = byId.get(group.oatsId);
+      if (!recording) continue;
+      const items = group.tasks
+        .map((task) => ({ item: task.trim() }))
+        .filter((it) => it.item.length > 0);
+      if (items.length === 0) continue;
+      entries.push({ meeting: recordingToListItem(recording), items });
+    }
+    return entries;
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
