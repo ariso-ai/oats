@@ -182,7 +182,7 @@
             {{ statusLabel }}
           </span>
           <button
-            v-if="!statusGenerating"
+            v-if="showRetry"
             class="tab-retry"
             type="button"
             :disabled="progress.retrying.value"
@@ -720,7 +720,7 @@ const showStatusChip = computed(
   () =>
     cloudProcessing.value ||
     (!!detail.value?.isLocal &&
-      ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed'].includes(progress.stage.value))
+      ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed', 'notes-empty-transcript'].includes(progress.stage.value))
 );
 // Cloud has no post-upload failure signal, so its chip is always the spinner
 // variant — there is nothing to offer a Retry for.
@@ -742,10 +742,18 @@ const statusLabel = computed(() => {
       return 'Transcript failed';
     case 'notes-failed':
       return 'AI Notes failed';
+    case 'notes-empty-transcript':
+      return 'Empty transcript';
     default:
       return '';
   }
 });
+// An empty transcript is a settled outcome, not a fault: nothing was said, so
+// re-running generation would only reach the same conclusion. Every other
+// non-generating stage has a real retry to offer.
+const showRetry = computed(
+  () => !statusGenerating.value && progress.stage.value !== 'notes-empty-transcript'
+);
 function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
   else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
@@ -763,7 +771,12 @@ watch(cloudProcessing, (isProcessing, was) => {
   if (item && detail.value?.id === item.id) void load(item);
 });
 
-const TERMINAL_STAGES: LocalProgressStage[] = ['ready', 'transcript-failed', 'notes-failed'];
+const TERMINAL_STAGES: LocalProgressStage[] = [
+  'ready',
+  'transcript-failed',
+  'notes-failed',
+  'notes-empty-transcript',
+];
 
 // The Library row reads its "Processing…" state from the list payload, which is
 // only refetched on a reload. Tell the parent the moment this recording's

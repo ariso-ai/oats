@@ -177,6 +177,40 @@ fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool
     before != after
 }
 
+/// Body of a rendered transcript, with the leading YAML frontmatter removed.
+fn transcript_body(md: &str) -> &str {
+    let Some(rest) = md.strip_prefix("---\n") else {
+        return md;
+    };
+    match rest.find("\n---\n") {
+        Some(i) => &rest[i + "\n---\n".len()..],
+        None => md,
+    }
+}
+
+/// Whether `line` is one of `render_markdown`'s `**Speaker 1** [00:00:00]`
+/// headers rather than transcribed speech.
+fn is_speaker_header(line: &str) -> bool {
+    let line = line.trim();
+    let Some(rest) = line.strip_prefix("**") else {
+        return false;
+    };
+    line.ends_with(']') && rest.find("** [").is_some_and(|label_len| label_len > 0)
+}
+
+/// Whether a rendered transcript carries any spoken words.
+///
+/// A recording whose microphone delivered pure silence still produces a
+/// well-formed transcript — frontmatter plus a speaker header with an empty
+/// body — and the notes model answers that by inventing a meeting that never
+/// happened. Everything that is neither frontmatter nor a speaker header counts
+/// as speech.
+fn transcript_has_speech(md: &str) -> bool {
+    transcript_body(md)
+        .lines()
+        .any(|line| !line.trim().is_empty() && !is_speaker_header(line))
+}
+
 /// Current instant as an RFC3339 string.
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -215,6 +249,23 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     // Capture the transcript this run generates from; if it changes while notes
     // run (a later append/regeneration), a newer run owns the result — discard.
     let before = std::fs::read(&transcript_path).ok();
+    // A speechless transcript gives the notes model nothing to summarize, and it
+    // fills the gap by fabricating a meeting. Refuse the run rather than write a
+    // plausible-looking note about something that was never said.
+    if before
+        .as_deref()
+        .is_some_and(|bytes| !transcript_has_speech(&String::from_utf8_lossy(bytes)))
+    {
+        // Re-check against the current transcript: an append/regeneration may
+        // have raced this branch between the read above and here, and a newer
+        // run owns the result — don't clobber it with a stale notes_error.
+        if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
+            return;
+        }
+        meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
+        let _ = storage::write_meta(&dir, &meta);
+        return;
+    }
     let outcome = run_notes(&transcript_path, &models).await;
     if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
         return;
@@ -1160,6 +1211,43 @@ mod tests {
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
         assert!(meta.notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn finalize_skips_notes_when_transcript_has_no_speech() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A silent recording (dead mic, nothing playing): STT returns a segment
+        // with no text, so the transcript body is only a speaker header. The
+        // notes model must not be asked to invent a meeting from that.
+        let json = r#"{"language":"en","durationSeconds":45.0,"segments":[{"speaker":"model-speaker-0","text":"","start":0.0,"end":0.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json)
+                .with_notes(StubOutcome::success("# Notes\n- fabricated meeting")),
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05Z".into(), 45,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.status, RecordingStatus::Done);
+        assert!(
+            crate::vault::read_note(&res.id).unwrap().is_none(),
+            "a speechless transcript must not produce AI notes"
+        );
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert!(
+            meta.notes_error.as_deref().unwrap_or("").contains("no speech"),
+            "expected a no-speech reason, got: {:?}",
+            meta.notes_error
+        );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

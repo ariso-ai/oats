@@ -8,6 +8,8 @@ export type LocalProgressStage =
   | 'transcript-failed'
   | 'notes-pending'
   | 'notes-failed'
+  /** Nothing was said: notes were skipped, and no retry can change that. */
+  | 'notes-empty-transcript'
   | 'ready';
 
 /** Derive the UI stage from a recording's status view. A present note ('ready')
@@ -18,6 +20,7 @@ export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (s.status === 'recording' || s.status === 'transcribing') return 'transcribing';
   // status === 'done'
   if (s.hasNote || s.notesStatus === 'ready') return 'ready';
+  if (s.notesStatus === 'empty-transcript') return 'notes-empty-transcript';
   if (s.notesStatus === 'failed') return 'notes-failed';
   return 'notes-pending';
 }

@@ -336,7 +336,9 @@ export interface RecordingSummary {
   hasTranscript: boolean;
 }
 
-export type NotesStatus = 'pending' | 'ready' | 'failed';
+/** `empty-transcript`: nothing was said, so notes were deliberately skipped —
+ *  not a failure, and nothing a retry can fix. */
+export type NotesStatus = 'pending' | 'ready' | 'failed' | 'empty-transcript';
 
 /** Mirrors the Rust `RecordingStatusView`. Drives the detail panel's local
  *  generation poller (tab enable/disable + the inline status chip). */
