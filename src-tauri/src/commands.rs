@@ -1827,8 +1827,12 @@ pub fn pending_uploads_path() -> Result<String, String> {
 /// (e.g. `2026-06-02T14-30-05Z`), so the guard never rejects legitimate ids.
 fn recording_dir(id: &str) -> Result<std::path::PathBuf, String> {
     // Reject ids that could escape the recordings dir. `:` is blocked too so a
-    // Windows drive-relative form (e.g. `C:foo`) can never slip past the guard.
+    // Windows drive-relative form (e.g. `C:foo`) can never slip past the guard,
+    // and a bare `.` is blocked because it resolves to the recordings root
+    // itself — harmless for a read, but `delete_local_recording` would take the
+    // whole directory with it.
     if id.is_empty()
+        || id == "."
         || id.contains('/')
         || id.contains('\\')
         || id.contains(':')
@@ -2200,6 +2204,51 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
         meta.audio_file = Some(new_audio_file);
     }
     crate::storage::write_meta(&dir, &meta)
+}
+
+/// Permanently delete a local recording: its vault note and audio attachment,
+/// then its own directory (`meta.json`, `transcript.md`, `segments.json`, the
+/// user note, and any legacy `ari-note.md` / `recording.mp3`).
+///
+/// Refuses while the recording is still `Recording` or `Transcribing`, or
+/// while AI notes are still `Pending` on an otherwise-`Done` recording: those
+/// pipelines run in detached tasks that would re-create files underneath the
+/// delete — and because `write_note` targets the vault root (which survives),
+/// a deleted note could reappear in Obsidian with no library row pointing at
+/// it. The UI hides the action in those states; this is defense in depth.
+///
+/// Vault artifacts go first on purpose. If that step fails nothing is lost and
+/// the library row remains as a retry handle; if the directory removal fails
+/// the row still remains, and a retry is idempotent. The reverse order could
+/// orphan a vault note with no way to reach it from the UI.
+#[tauri::command]
+pub fn delete_local_recording(id: String) -> Result<(), String> {
+    let dir = recording_dir(&id)?;
+    let meta = crate::storage::read_meta(&dir)?;
+    if matches!(
+        meta.status,
+        crate::storage::RecordingStatus::Recording | crate::storage::RecordingStatus::Transcribing
+    ) {
+        return Err("this recording is still being processed — try again once it finishes".to_string());
+    }
+    if meta.status == crate::storage::RecordingStatus::Done {
+        // Same derivation as `local_recording_status`. A `Failed` recording
+        // never reached notes generation, so this check is scoped to `Done` —
+        // otherwise a failed transcription (no note, no notes_error) would
+        // misread as notes-pending and become permanently undeletable.
+        let has_note =
+            dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
+        let notes_status =
+            crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+        if notes_status == crate::storage::NotesStatus::Pending {
+            return Err(
+                "AI notes are still generating for this recording — try again once they finish"
+                    .to_string(),
+            );
+        }
+    }
+    crate::vault::delete_recording_artifacts(&id, meta.audio_file.as_deref())?;
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("delete recording files: {e}"))
 }
 
 /// Read the user-authored local note artifact used by the Library editor.
@@ -2961,6 +3010,9 @@ mod tests {
         assert!(recording_dir("a\\b").is_err());
         assert!(recording_dir("C:foo").is_err());
         assert!(recording_dir("foo/../bar").is_err());
+        // "." slips past a `..`-only check but resolves to the recordings root
+        // itself — which `delete_local_recording` would try to remove wholesale.
+        assert!(recording_dir(".").is_err());
     }
 
     #[test]
@@ -3270,6 +3322,129 @@ mod tests {
         let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
         assert!(res.is_err());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_removes_dir_and_vault_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("2026-06-02 Old.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"transcript").unwrap();
+        std::fs::write(dir.join("user-note.md"), b"my note").unwrap();
+        crate::vault::write_audio("2026-06-02 Old.mp3", b"aud").unwrap();
+        crate::vault::write_note("2026-06-02 Old", &meta, "2026-06-02 Old.mp3", "body").unwrap();
+
+        delete_local_recording(id.to_string()).unwrap();
+
+        assert!(!dir.exists(), "recording dir should be gone");
+        let root = crate::vault::vault_root().unwrap();
+        assert!(!crate::vault::note_path(&root, "2026-06-02 Old").exists());
+        assert!(!crate::vault::audio_path(&root, "2026-06-02 Old.mp3").exists());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_handles_legacy_recording_without_audio_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&crate::vault::meta_root().unwrap(), id).unwrap();
+        // Legacy recordings predate the vault: audio and note live in the
+        // recording dir itself, and `meta.audio_file` is absent.
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+        std::fs::write(dir.join("recording.mp3"), b"aud").unwrap();
+        std::fs::write(dir.join("ari-note.md"), b"note").unwrap();
+
+        delete_local_recording(id.to_string()).unwrap();
+
+        assert!(!dir.exists(), "recording dir should be gone");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_refuses_while_still_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        for status in [
+            crate::storage::RecordingStatus::Recording,
+            crate::storage::RecordingStatus::Transcribing,
+        ] {
+            let id = "2026-06-02T14-30-05Z";
+            let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+            let mut meta = test_meta(id);
+            meta.status = status;
+            crate::storage::write_meta(&dir, &meta).unwrap();
+
+            // Deleting mid-flight would let the in-progress finalize/STT task
+            // re-create files (including a now-orphaned vault note).
+            assert!(delete_local_recording(id.to_string()).is_err());
+            assert!(dir.exists(), "recording must survive a refused delete");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_refuses_while_notes_are_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        // `Done` with no note and no notes_error: the transcript finished but
+        // the detached notes task hasn't written its outcome yet.
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // A concurrent `process_notes` finishing here would recreate the vault
+        // note out from under a delete that raced ahead of it.
+        assert!(delete_local_recording(id.to_string()).is_err());
+        assert!(dir.exists(), "recording must survive a refused delete");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_allows_failed_transcription_with_no_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.status = crate::storage::RecordingStatus::Failed;
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        // A failed transcription never reaches notes generation, so the
+        // (has_note=false, notes_error=None) combination here must not be
+        // misread as notes-pending.
+        delete_local_recording(id.to_string()).unwrap();
+        assert!(!dir.exists(), "recording dir should be gone");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_rejects_missing_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        assert!(delete_local_recording("2026-06-02T14-30-05Z".to_string()).is_err());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_rejects_traversal_id() {
+        // Validation runs before any filesystem access, so no ARISO_ROOT needed.
+        assert!(delete_local_recording("../../etc".to_string()).is_err());
+        assert!(delete_local_recording("a/b".to_string()).is_err());
     }
 
     #[test]

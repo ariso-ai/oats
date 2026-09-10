@@ -49,11 +49,26 @@
             <svg viewBox="0 0 24 24" class="ic"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" /><path d="M16 6l-4-4-4 4" /><path d="M12 2v13" /></svg>
             Share
           </button>
+          <!-- Local notes only: Ariso meetings are deleted server-side, and
+               `ArisoBackend.deleteMeeting` refuses. -->
+          <button
+            v-if="detail.isLocal"
+            class="note-del-btn"
+            type="button"
+            :disabled="!canDeleteNote"
+            :title="deleteDisabledReason ?? 'Delete this note'"
+            @click="askDeleteNote"
+          >
+            <svg viewBox="0 0 24 24" class="ic"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+            Delete
+          </button>
           <button class="btn-icon btn-close" type="button" aria-label="Close" title="Close" @click="emit('close')">
             <svg viewBox="0 0 24 24" class="ic"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>
       </header>
+
+      <p v-if="noteDeleteError" class="note-delete-error" role="alert">⚠ {{ noteDeleteError }}</p>
 
       <ShareMeetingPopover
         v-if="showShare && detail && !detail.isLocal"
@@ -403,6 +418,14 @@
         @confirm="confirmDeleteClip"
         @cancel="cancelDeleteClip"
       />
+
+      <RecordingDeleteConfirmDialog
+        :open="showNoteDeleteConfirm"
+        title="Delete this note?"
+        :body="noteDeleteBody"
+        @confirm="confirmDeleteNote"
+        @cancel="cancelDeleteNote"
+      />
     </template>
   </div>
 </template>
@@ -449,6 +472,10 @@ const emit = defineEmits<{
    *  panel was open. The Library reloads its list so the row drops its
    *  "Processing…" sub-line and picks up the finished content. */
   contentReady: [payload: { id: string }];
+  /** The open local note was permanently deleted. The Library drops its row and
+   *  clears the selection — without the usual notes autosave, since there is no
+   *  longer anywhere on disk to save into. */
+  deleted: [payload: { id: string }];
 }>();
 
 const loading = ref(false);
@@ -689,6 +716,9 @@ let reqId = 0;
 let noteReqId = 0;
 let saveReqId = 0;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+// Tracks a save currently awaiting `notesPersistence.save()`, so a whole-note
+// delete can wait it out instead of racing the folder removal.
+let activeSave: Promise<void> | null = null;
 let suppressAutoSave = false;
 let noteDirty = false;
 let loadedNoteItem: MeetingListItem | null = null;
@@ -1016,6 +1046,97 @@ async function onDownloadTranscriptClick(): Promise<void> {
   }
 }
 
+// Whole-note delete (local recordings only). Blocked while the pipeline is
+// still in flight: both the finalize/STT task and the notes task write into the
+// recording's folder AND the vault, and `write_note` targets the vault root,
+// which survives the delete — so a mid-flight delete could leave an orphaned
+// note in the user's Obsidian vault with no library row pointing at it. The
+// Rust command refuses the recording/transcribing cases too (defense in depth);
+// `notes-pending` is gated here, where the poller already knows about it.
+const showNoteDeleteConfirm = ref(false);
+const deletingNote = ref(false);
+const noteDeleteError = ref<string | null>(null);
+// Set once a delete succeeds, so the parent's `saveNotesNow()` on selection
+// change doesn't write `user-note.md` back into the folder we just removed.
+const noteDeleted = ref(false);
+
+const deleteDisabledReason = computed<string | null>(() => {
+  if (progress.stage.value === 'transcribing')
+    return 'Wait until this recording finishes processing';
+  if (progress.stage.value === 'notes-pending') return 'Wait until AI notes finish generating';
+  if (progress.retrying.value) return 'Wait until the retry finishes';
+  return null;
+});
+const canDeleteNote = computed(
+  () => !!detail.value?.isLocal && !deletingNote.value && deleteDisabledReason.value === null
+);
+const noteDeleteBody = computed(
+  () =>
+    `This permanently deletes “${detail.value?.title ?? 'this note'}” — its transcript, AI notes, ` +
+    `audio, and the note file in your Obsidian vault. This can't be undone.`
+);
+
+function askDeleteNote(): void {
+  if (!canDeleteNote.value) return;
+  noteDeleteError.value = null;
+  showNoteDeleteConfirm.value = true;
+}
+
+function cancelDeleteNote(): void {
+  showNoteDeleteConfirm.value = false;
+}
+
+async function confirmDeleteNote(): Promise<void> {
+  const item = props.item;
+  const backend = detailBackend;
+  showNoteDeleteConfirm.value = false;
+  if (!item || !backend || deletingNote.value) return;
+  // The dialog can sit open long enough for AI notes to start generating or a
+  // retry to kick off — recheck eligibility rather than trusting the state
+  // from when it was opened. Checked before `deletingNote` flips below, since
+  // `canDeleteNote` treats an in-flight delete as ineligible too.
+  if (!canDeleteNote.value) {
+    noteDeleteError.value = deleteDisabledReason.value ?? 'This note can no longer be deleted right now.';
+    return;
+  }
+  // Guarded by reqId like onDownloadTranscriptClick: the delete outlives a
+  // meeting switch, so a late failure must not blame the newly-opened note.
+  const my = reqId;
+  deletingNote.value = true;
+  let failed = false;
+  try {
+    // Cancel the pending debounce and wait out a save already in flight —
+    // otherwise it can recreate `user-note.md` after (or racing) the removal.
+    // `scheduleNoteAutoSave`/`saveNotesNow` are gated on `deletingNote` above
+    // so nothing new gets scheduled in the meantime.
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (activeSave) await activeSave;
+    await backend.deleteMeeting(item);
+    if (my !== reqId) return;
+    // Stop the status poller before announcing: its folder is gone, so the next
+    // poll would only log a read-meta failure.
+    progress.stop();
+    noteDeleted.value = true;
+    emit('deleted', { id: item.id });
+  } catch (e) {
+    console.error('Failed to delete local note', e);
+    if (my !== reqId) return;
+    noteDeleteError.value = `Could not delete this note: ${
+      e instanceof Error ? e.message : String(e)
+    }`;
+    failed = true;
+  } finally {
+    if (my === reqId) deletingNote.value = false;
+  }
+  // Deletion failed — the folder is still there, so restore autosave for
+  // whatever the cancelled timer would otherwise have written. Deferred until
+  // here since scheduleNoteAutoSave is itself gated on `deletingNote`.
+  if (failed && noteDirty) scheduleNoteAutoSave();
+}
+
 function askDeleteClip(clip: MeetingAudioClip): void {
   clipDeleteError.value = null;
   clipPendingDelete.value = clip;
@@ -1075,7 +1196,13 @@ async function load(item: MeetingListItem | null): Promise<void> {
   clipDeleteError.value = null;
   transcriptDownloadError.value = null;
   downloadingTranscript.value = false;
+  showNoteDeleteConfirm.value = false;
+  noteDeleteError.value = null;
+  deletingNote.value = false;
+  // Deliberately before the reset below: the flush must still see `noteDeleted`
+  // so a pending draft isn't written back into the folder we just removed.
   await flushPendingNoteBeforeReset();
+  noteDeleted.value = false;
   // Bump the token first so any in-flight load for the previous selection
   // (including one cleared by item=null) is treated as stale on resolve.
   const my = ++reqId;
@@ -1390,6 +1517,9 @@ async function loadIndividualNote(): Promise<void> {
 // parent calls this before changing selection, and the editor calls it on blur.
 async function saveNotesNow(): Promise<void> {
   const item = loadedNoteItem ?? props.item;
+  // The recording's folder no longer exists (or is being removed right now) —
+  // saving would either fail or re-create the artifact a delete just removed.
+  if (noteDeleted.value || deletingNote.value) return;
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   const my = ++saveReqId;
   const markdown = notesMarkdown.value;
@@ -1399,21 +1529,29 @@ async function saveNotesNow(): Promise<void> {
     saveTimer = null;
   }
   saveState.value = 'saving';
-  try {
-    await notesPersistence.save(item, { content: markdown, title });
-    const stillViewingSavedItem = props.item?.id === item.id;
-    if (my === saveReqId) noteDirty = false;
-    if (my !== saveReqId || !stillViewingSavedItem) return;
-    if (detail.value) {
-      detail.value.hasIndividualNote = markdown.trim().length > 0;
+  const run = (async () => {
+    try {
+      await notesPersistence.save(item, { content: markdown, title });
+      const stillViewingSavedItem = props.item?.id === item.id;
+      if (my === saveReqId) noteDirty = false;
+      if (my !== saveReqId || !stillViewingSavedItem) return;
+      if (detail.value) {
+        detail.value.hasIndividualNote = markdown.trim().length > 0;
+      }
+      individualNote.value = { content: markdown, title };
+      individualNoteLoaded.value = true;
+      saveState.value = 'saved';
+    } catch (e) {
+      if (my !== saveReqId || props.item?.id !== item.id) return;
+      console.error('Failed to save individual note', e);
+      saveState.value = 'error';
     }
-    individualNote.value = { content: markdown, title };
-    individualNoteLoaded.value = true;
-    saveState.value = 'saved';
-  } catch (e) {
-    if (my !== saveReqId || props.item?.id !== item.id) return;
-    console.error('Failed to save individual note', e);
-    saveState.value = 'error';
+  })();
+  activeSave = run;
+  try {
+    await run;
+  } finally {
+    if (activeSave === run) activeSave = null;
   }
 }
 
@@ -1438,6 +1576,7 @@ watch(activeTab, (t) => {
 function scheduleNoteAutoSave(): void {
   if (
     suppressAutoSave ||
+    deletingNote.value ||
     loadingIndividualNote.value ||
     !individualNoteLoaded.value ||
     !props.item ||
@@ -1648,6 +1787,18 @@ const durationLabel = computed<string | null>(() => {
   font-family: inherit; font-size: 14px; font-weight: 600; color: #1a1a1a; cursor: pointer;
 }
 .btn-share:hover { background: #fbfbfb; }
+/* Same shape as .btn-share, but it reads destructive only on hover — this sits
+   next to Close and must not shout at the user on every local note. */
+.note-del-btn {
+  display: flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 12px;
+  background: #fff; border: 1px solid #d6d6d6; border-radius: 8px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+  font-family: inherit; font-size: 14px; font-weight: 600; color: #6f6f6f; cursor: pointer;
+}
+.note-del-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
+.note-del-btn:disabled { opacity: 0.5; cursor: default; }
+.note-delete-error { margin: 0; padding: 8px 24px 0; font-size: 12px; color: #dc2626; }
 .btn-icon {
   width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
   background: #fff; border: 1px solid #d6d6d6; border-radius: 8px; box-shadow: 2px 2px 0 #e7e5e2;
