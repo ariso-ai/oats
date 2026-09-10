@@ -348,6 +348,96 @@ pub fn note_body(contents: &str) -> String {
     body.to_string()
 }
 
+/// Obsidian Tasks emoji signifiers: created, start, scheduled, due, done,
+/// cancelled, the five priorities, recurrence, on-completion, id, dependsOn.
+/// Everything from the first one onward is metadata, not task text.
+const TASK_SIGNIFIERS: [char; 15] = [
+    '➕', '🛫', '⏳', '📅', '✅', '❌', '🔺', '⏫', '🔼', '🔽', '⏬', '🔁', '🏁', '🆔', '⛔',
+];
+
+/// Drop Obsidian Tasks emoji metadata, leaving the task's own text.
+fn strip_task_metadata(text: &str) -> String {
+    match text.find(TASK_SIGNIFIERS.as_slice()) {
+        Some(i) => text[..i].trim().to_string(),
+        None => text.trim().to_string(),
+    }
+}
+
+/// Plain (checkbox-less) bullets under `## Action Items`, for notes written
+/// before oats emitted checkboxes. Placeholders are skipped for the same reason
+/// `render_action_items` drops them.
+fn legacy_action_item_bullets(body: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut in_section = false;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if is_heading(trimmed) {
+            in_section = is_action_items_heading(trimmed);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((_, content)) = split_list_item(line) {
+            if is_placeholder_item(content) {
+                continue;
+            }
+            let text = strip_task_metadata(content);
+            if !text.is_empty() {
+                items.push(text);
+            }
+        }
+    }
+    items
+}
+
+/// The note's open (unchecked) tasks, in document order, with Tasks emoji
+/// metadata stripped so each row reads as the task itself.
+///
+/// Scans the whole body rather than just the Action Items section: once oats
+/// has written the note it belongs to the user, who may reorganize or add items
+/// in Obsidian. `[x]` (done) and `[-]` (cancelled) are excluded — that is how a
+/// todo gets closed, since oats never writes completion back.
+///
+/// A note containing no checkbox at all falls back to the plain bullets under
+/// `## Action Items`, so notes generated before this feature still populate the
+/// Todos tab.
+pub fn open_tasks(note_contents: &str) -> Vec<String> {
+    let body = note_body(note_contents);
+    let mut tasks = Vec::new();
+    let mut saw_checkbox = false;
+    let mut fence: Option<char> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some(delim) = fence_delimiter(trimmed) {
+            match fence {
+                None => fence = Some(delim),
+                Some(open) if open == delim => fence = None,
+                // A different delimiter inside an open fence is literal text.
+                Some(_) => {}
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let Some((_, content)) = split_list_item(line) else { continue };
+        let Some(state) = checkbox_state(content) else { continue };
+        saw_checkbox = true;
+        if state != ' ' {
+            continue;
+        }
+        let text = strip_task_metadata(&content[3..]);
+        if !text.is_empty() {
+            tasks.push(text);
+        }
+    }
+    if saw_checkbox {
+        return tasks;
+    }
+    legacy_action_item_bullets(&body)
+}
+
 /// Reject a note basename that could escape the vault root.
 fn validate_basename(basename: &str) -> Result<(), String> {
     if basename.is_empty()
@@ -1138,5 +1228,94 @@ mod tests {
         );
         // meta_for_note()'s created_at is 2026-06-02T14:30:05Z.
         assert!(md.contains("- [ ] Ship the RFC ➕ 2026-06-02"));
+    }
+
+    #[test]
+    fn open_tasks_returns_unchecked_items_without_metadata() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Action Items\n- [ ] Ship the RFC ➕ 2026-06-02\n- [x] Already done ➕ 2026-06-02\n- [-] Dropped\n- [ ] Email legal ➕ 2026-06-02\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Ship the RFC", "Email legal"]);
+    }
+
+    #[test]
+    fn open_tasks_scans_the_whole_body_not_just_action_items() {
+        // Once the note is written it belongs to the user, who may move items
+        // anywhere in Obsidian.
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Summary\nWe met.\n\n## Follow-ups I added myself\n- [ ] Call the vendor\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Call the vendor"]);
+    }
+
+    #[test]
+    fn open_tasks_strips_every_tasks_signifier() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "- [ ] Ship it ➕ 2026-06-02 📅 2026-06-09 ⏫\n- [ ] Plain task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Ship it", "Plain task"]);
+    }
+
+    #[test]
+    fn open_tasks_ignores_fenced_code_blocks() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "```\n- [ ] not a real task\n```\n- [ ] real task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["real task"]);
+    }
+
+    #[test]
+    fn open_tasks_keeps_a_backtick_fence_open_across_a_tilde_line() {
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "```\n~~~\n- [ ] not a real task\n```\n- [ ] real task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["real task"]);
+    }
+
+    #[test]
+    fn open_tasks_falls_back_to_plain_bullets_for_legacy_notes() {
+        // Notes written before this feature have no checkboxes at all; without
+        // this fallback every existing vault would show an empty Todos tab.
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Summary\nWe met.\n\n## Key Points\n*   A point\n\n## Action Items\n*   Ship the RFC\n*   Sam: email legal\n",
+        );
+        // render_note now checkboxes the section, so build the legacy shape by
+        // hand to represent a note already on disk.
+        let legacy = note.replace("- [ ] Ship the RFC ➕ 2026-06-02", "*   Ship the RFC")
+            .replace("- [ ] Sam: email legal ➕ 2026-06-02", "*   Sam: email legal");
+        assert_eq!(open_tasks(&legacy), vec!["Ship the RFC", "Sam: email legal"]);
+        // Only the Action Items section — not the Key Points bullet.
+        assert!(!open_tasks(&legacy).iter().any(|t| t == "A point"));
+    }
+
+    #[test]
+    fn open_tasks_legacy_fallback_skips_placeholder_bullets() {
+        let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n*   None explicitly stated in the transcript.\n";
+        assert!(open_tasks(legacy).is_empty());
+    }
+
+    #[test]
+    fn open_tasks_does_not_fall_back_when_every_checkbox_is_done() {
+        // A note whose tasks are all ticked is finished, not legacy.
+        let note = render_note(&meta_for_note(), "a.mp3", "## Action Items\n- [x] Ship the RFC ➕ 2026-06-02\n");
+        assert!(open_tasks(&note).is_empty());
+    }
+
+    #[test]
+    fn open_tasks_returns_nothing_for_a_note_with_no_items() {
+        let note = render_note(&meta_for_note(), "a.mp3", "## Summary\nWe met and agreed.\n");
+        assert!(open_tasks(&note).is_empty());
     }
 }
