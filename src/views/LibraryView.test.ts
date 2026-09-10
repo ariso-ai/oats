@@ -2386,8 +2386,24 @@ describe('LibraryView backend indicator', () => {
   }
 
   function pill(wrapper: ReturnType<typeof mount>) {
-    return wrapper.get('.titlebar .account-pill');
+    return wrapper.get('.sidebar .account-pill');
   }
+
+  // Every ariso.ai state carries the same label, so tell them apart by shape.
+  function pillState(wrapper: ReturnType<typeof mount>) {
+    const el = pill(wrapper);
+    if (el.element.tagName === 'SPAN') return el.text() === 'Local' ? 'local' : 'checking';
+    return el.classes('account-pill--signed-out') ? 'signed-out' : 'signed-in';
+  }
+
+  it('sits at the bottom-left, under the sidebar nav, not in the titlebar', async () => {
+    const wrapper = await mountOn('local');
+
+    expect(wrapper.find('.titlebar .account-pill').exists()).toBe(false);
+    const wrap = wrapper.get('.sidebar .account-pill-wrap').element;
+    expect(wrap.previousElementSibling?.classList.contains('bottom-nav')).toBe(true);
+    expect(wrap.nextElementSibling).toBeNull();
+  });
 
   it('shows a static Local badge and never checks the session, even on an auth broadcast', async () => {
     const wrapper = await mountOn('local');
@@ -2410,11 +2426,11 @@ describe('LibraryView backend indicator', () => {
     const wrapper = await mountOn('ariso');
 
     expect(pill(wrapper).element.tagName).toBe('SPAN');
-    expect(pill(wrapper).text()).toBe('Ariso');
+    expect(pill(wrapper).text()).toBe('ariso.ai');
 
     resolveCheck(null);
     await flushPromises();
-    expect(pill(wrapper).text()).toBe('Sign in');
+    expect(pillState(wrapper)).toBe('signed-out');
   });
 
   it('offers both providers from the Sign in pill when signed out', async () => {
@@ -2422,7 +2438,10 @@ describe('LibraryView backend indicator', () => {
 
     const signIn = pill(wrapper);
     expect(signIn.element.tagName).toBe('BUTTON');
-    expect(signIn.text()).toBe('Sign in');
+    // Named after the backend; the dot and the accessible name carry the state.
+    expect(signIn.text()).toBe('ariso.ai');
+    expect(signIn.find('.account-pill-dot').exists()).toBe(true);
+    expect(signIn.attributes('aria-label')).toContain('not signed in');
     expect(signIn.attributes('aria-expanded')).toBe('false');
 
     await signIn.trigger('click');
@@ -2443,7 +2462,8 @@ describe('LibraryView backend indicator', () => {
     const wrapper = await mountOn('ariso');
 
     expect(pill(wrapper).element.tagName).toBe('BUTTON');
-    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(pillState(wrapper)).toBe('signed-in');
+    expect(pill(wrapper).text()).toContain('ariso.ai');
     expect(pill(wrapper).get('.account-pill-avatar').text()).toBe('AD');
     expect(pill(wrapper).attributes('title')).toBe('ada@example.com');
 
@@ -2493,7 +2513,7 @@ describe('LibraryView backend indicator', () => {
     expect(googleSignIn).not.toHaveBeenCalled();
     expect(emitNotificationsSync).toHaveBeenCalled();
     expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
-    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(pillState(wrapper)).toBe('signed-in');
     expect(pill(wrapper).attributes('title')).toBe('ada@example.com');
   });
 
@@ -2555,28 +2575,28 @@ describe('LibraryView backend indicator', () => {
   it('follows an auth broadcast without a remount', async () => {
     const wrapper = await mountOn('ariso');
     await pill(wrapper).trigger('click');
-    expect(pill(wrapper).text()).toBe('Sign in');
+    expect(pillState(wrapper)).toBe('signed-out');
 
     // Signed in from Settings or a tray row.
     checkSession.mockResolvedValue({ sessionToken: 't' });
     mockProfile();
     emitEvent('auth://changed', null);
     await flushPromises();
-    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(pillState(wrapper)).toBe('signed-in');
     expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
 
     // Then signed out elsewhere.
     checkSession.mockResolvedValue(null);
     emitEvent('auth://changed', null);
     await flushPromises();
-    expect(pill(wrapper).text()).toBe('Sign in');
+    expect(pillState(wrapper)).toBe('signed-out');
   });
 
   it('follows a backend switch without a remount, and asks nothing on Local', async () => {
     checkSession.mockResolvedValue({ sessionToken: 't' });
     mockProfile();
     const wrapper = await mountOn('ariso');
-    expect(pill(wrapper).text()).toContain('Ariso');
+    expect(pillState(wrapper)).toBe('signed-in');
 
     backendId.mockReturnValue('local');
     checkSession.mockClear();
@@ -2593,7 +2613,7 @@ describe('LibraryView backend indicator', () => {
     emitEvent('backend://changed', null);
     await flushPromises();
     expect(checkSession).toHaveBeenCalledTimes(1);
-    expect(pill(wrapper).text()).toBe('Sign in');
+    expect(pillState(wrapper)).toBe('signed-out');
   });
 
   it('hides the popover and cancels its pending flow on a switch to Local', async () => {

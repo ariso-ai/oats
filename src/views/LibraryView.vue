@@ -73,92 +73,6 @@
           {{ recordingStarting ? 'Starting recording…' : 'Start recording' }}
         </span>
       </button>
-      <!-- Which backend oats is on, and on Ariso whether it's signed in. Local
-           is a plain badge: it never needs auth, so it offers nothing to click. -->
-      <div
-        v-if="accountPill"
-        ref="accountPillWrap"
-        class="account-pill-wrap"
-        @keydown.escape="closeSignInPopover({ restoreFocus: true })"
-      >
-        <span
-          v-if="accountPill === 'local'"
-          class="account-pill account-pill--static"
-          title="Local mode — recordings stay on this device"
-        >
-          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="5" y="11" width="14" height="10" rx="2" />
-            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-          </svg>
-          <span class="account-pill-label">Local</span>
-        </span>
-        <span
-          v-else-if="accountPill === 'checking'"
-          class="account-pill account-pill--static"
-          title="Ariso"
-        >
-          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
-          </svg>
-          <span class="account-pill-label">Ariso</span>
-        </span>
-        <button
-          v-else-if="accountPill === 'signed-in'"
-          type="button"
-          class="account-pill"
-          :title="accountEmail"
-          :aria-label="accountEmail ? `Ariso account ${accountEmail}, open Settings` : 'Ariso account, open Settings'"
-          @click="openSettings"
-        >
-          <img
-            v-if="accountAvatarUrl"
-            class="account-pill-avatar"
-            :src="accountAvatarUrl"
-            alt=""
-            referrerpolicy="no-referrer"
-            @error="accountAvatarUrl = ''"
-          />
-          <span v-else-if="accountDisplayName || accountEmail" class="account-pill-avatar" aria-hidden="true">
-            {{ accountInitials }}
-          </span>
-          <svg v-else class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
-          </svg>
-          <span class="account-pill-label">Ariso</span>
-        </button>
-        <button
-          v-else
-          ref="signInPill"
-          type="button"
-          class="account-pill account-pill--sign-in"
-          title="Sign in to Ariso"
-          aria-haspopup="dialog"
-          :aria-expanded="signInPopoverOpen"
-          aria-controls="sign-in-popover"
-          @click="toggleSignInPopover"
-        >
-          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
-          </svg>
-          <span class="account-pill-label">Sign in</span>
-        </button>
-        <div
-          v-if="signInPopoverOpen && accountPill === 'signed-out'"
-          id="sign-in-popover"
-          class="sign-in-popover"
-          role="dialog"
-          aria-labelledby="sign-in-popover-title"
-        >
-          <p id="sign-in-popover-title" class="sign-in-popover-title">Sign in to Ariso</p>
-          <SignInButtons
-            ref="signInButtons"
-            :signing-in-with="accountSigningInWith"
-            :error-message="accountErrorMessage"
-            @sign-in="account.signIn"
-            @cancel="account.cancelSignIn"
-          />
-        </div>
-      </div>
       <div v-if="isWindows" class="window-controls">
         <button
           class="window-control"
@@ -306,6 +220,97 @@
           </button>
         </div>
       </nav>
+
+      <!-- Which backend oats is on, named as in Settings. On ariso.ai it also
+           says whether you're signed in, and signs you in when you're not.
+           Local is a plain badge: it never needs auth, so it offers nothing to
+           click. -->
+      <div
+        v-if="accountPill"
+        ref="accountPillWrap"
+        class="account-pill-wrap"
+        @keydown.escape="closeSignInPopover({ restoreFocus: true })"
+      >
+        <span
+          v-if="accountPill === 'local'"
+          class="account-pill account-pill--static"
+          title="Local mode — recordings stay on this device"
+        >
+          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="10" rx="2" />
+            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+          </svg>
+          <span class="account-pill-label">Local</span>
+        </span>
+        <span
+          v-else-if="accountPill === 'checking'"
+          class="account-pill account-pill--static"
+          title="ariso.ai"
+        >
+          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span class="account-pill-label">ariso.ai</span>
+        </span>
+        <button
+          v-else-if="accountPill === 'signed-in'"
+          type="button"
+          class="account-pill"
+          :title="accountEmail"
+          :aria-label="accountEmail ? `ariso.ai account ${accountEmail}, open Settings` : 'ariso.ai account, open Settings'"
+          @click="openSettings"
+        >
+          <img
+            v-if="accountAvatarUrl"
+            class="account-pill-avatar"
+            :src="accountAvatarUrl"
+            alt=""
+            referrerpolicy="no-referrer"
+            @error="accountAvatarUrl = ''"
+          />
+          <span v-else-if="accountDisplayName || accountEmail" class="account-pill-avatar" aria-hidden="true">
+            {{ accountInitials }}
+          </span>
+          <svg v-else class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span class="account-pill-label">ariso.ai</span>
+        </button>
+        <button
+          v-else
+          ref="signInPill"
+          type="button"
+          class="account-pill account-pill--signed-out"
+          title="Not signed in — click to sign in"
+          aria-label="ariso.ai, not signed in. Sign in"
+          aria-haspopup="dialog"
+          :aria-expanded="signInPopoverOpen"
+          aria-controls="sign-in-popover"
+          @click="toggleSignInPopover"
+        >
+          <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span class="account-pill-label">ariso.ai</span>
+          <span class="account-pill-dot" aria-hidden="true" />
+        </button>
+        <div
+          v-if="signInPopoverOpen && accountPill === 'signed-out'"
+          id="sign-in-popover"
+          class="sign-in-popover"
+          role="dialog"
+          aria-labelledby="sign-in-popover-title"
+        >
+          <p id="sign-in-popover-title" class="sign-in-popover-title">Sign in to ariso.ai</p>
+          <SignInButtons
+            ref="signInButtons"
+            :signing-in-with="accountSigningInWith"
+            :error-message="accountErrorMessage"
+            @sign-in="account.signIn"
+            @cancel="account.cancelSignIn"
+          />
+        </div>
+      </div>
     </aside>
 
     <!-- Floating detail card on the backdrop, with the recorder strip
@@ -628,7 +633,7 @@ const emptyListHint = computed(() =>
   activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
 );
 
-// Titlebar backend indicator. This window's own account state, kept current by
+// Bottom-left backend indicator. This window's own account state, kept current by
 // the backend's AUTH_CHANGED_EVENT broadcast. It is only ever refreshed on
 // Ariso: Local mode makes no session or profile request from this window.
 const account = useAccountState();
@@ -1714,20 +1719,21 @@ onUnmounted(() => {
    to re-dock on), so it must not invite a click it can't honor. */
 .add-btn--static { cursor: default; }
 .add-btn--static:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: none; }
-/* Backend indicator: a compact pill after Start recording. Capped so it can't
-   push Start recording off a narrow window. */
+/* Backend indicator: a compact pill under the bottom nav, at the window's
+   bottom-left. Capped so a long label can't stretch the sidebar. */
 .account-pill-wrap {
   position: relative;
+  flex-shrink: 0;
+  align-self: flex-start;
   display: flex;
-  margin-left: 6px;
+  margin-top: 10px;
 }
-.titlebar--windows .account-pill-wrap { margin: 0 9px 0 0; }
 .account-pill {
-  max-width: 120px;
-  height: 22px;
-  padding: 0 9px 0 5px;
-  gap: 5px;
-  border-radius: 11px;
+  max-width: 160px;
+  height: 24px;
+  padding: 0 10px 0 6px;
+  gap: 6px;
+  border-radius: 12px;
   background: #ffffff;
   border: 1px solid #d6d6d6;
   box-shadow: 1px 1px 0 #e7e5e2;
@@ -1738,13 +1744,12 @@ onUnmounted(() => {
   cursor: pointer;
   transition: transform 0.1s, box-shadow 0.1s;
 }
-.titlebar--windows .account-pill { height: 26px; border-radius: 13px; }
 button.account-pill:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px, 1px); }
-.titlebar--windows .account-pill:focus-visible {
+button.account-pill:focus-visible {
   outline: 2px solid #3b6fc4;
-  outline-offset: -3px;
+  outline-offset: 2px;
 }
-/* Local, and Ariso before the first session check: informational only. */
+/* Local, and ariso.ai before the first session check: informational only. */
 .account-pill--static {
   background: transparent;
   border-color: #e4e2de;
@@ -1753,8 +1758,8 @@ button.account-pill:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px,
   cursor: default;
 }
 .account-pill-icon {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   flex: 0 0 auto;
   fill: none;
   stroke: currentColor;
@@ -1779,15 +1784,24 @@ button.account-pill:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px,
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
 }
+/* Signed out: the label stays the backend's name, so a dot carries the state. */
+.account-pill-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #d97706;
+}
+/* Opens upward: the pill sits at the bottom of the window. */
 .sign-in-popover {
   position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+  bottom: calc(100% + 6px);
+  left: 0;
   z-index: 30;
   width: 260px;
   box-sizing: border-box;
@@ -1802,19 +1816,6 @@ button.account-pill:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px,
   font-size: 13px;
   font-weight: 600;
   color: #1c1c1c;
-}
-/* Narrow windows keep only the pill's glyph; the label stays readable to
-   assistive tech, and the title tooltip still names the state. */
-@media (max-width: 520px) {
-  .account-pill { padding: 0 5px; }
-  .account-pill-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
 }
 /* Mini live waveform: four bars pulsing on a staggered cycle. */
 .rec-wave {
