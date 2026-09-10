@@ -26,7 +26,18 @@ pub enum NotesStatus {
     Pending,
     Ready,
     Failed,
+    /// Nothing was said in the recording, so notes were deliberately skipped.
+    /// Distinct from `Failed`: there is no fault to retry, and the UI names the
+    /// empty transcript instead of blaming notes generation.
+    #[serde(rename = "empty-transcript")]
+    EmptyTranscript,
 }
+
+/// Reason stored in `meta.notes_error` when a recording carries no speech.
+/// `derive_notes_status` recognizes it, so this is the single source of truth
+/// linking the skip (in `transcribe`) to the status the UI renders.
+pub const NO_SPEECH_NOTES_ERROR: &str =
+    "no speech detected in this recording — notes generation skipped";
 
 /// Classify AI-notes generation from the note file's presence and any recorded
 /// `notes_error`. A present `ari-note.md` always means success (a stale error
@@ -34,6 +45,8 @@ pub enum NotesStatus {
 pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
     if has_note {
         NotesStatus::Ready
+    } else if notes_error == Some(NO_SPEECH_NOTES_ERROR) {
+        NotesStatus::EmptyTranscript
     } else if notes_error.is_some() {
         NotesStatus::Failed
     } else {
@@ -1010,6 +1023,24 @@ mod tests {
     #[test]
     fn derive_notes_status_pending_when_no_note_no_error() {
         assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+    }
+
+    #[test]
+    fn derive_notes_status_empty_transcript_for_the_no_speech_reason() {
+        // A recording with nothing said isn't a failure to report and retry —
+        // the UI names it for what it is.
+        assert_eq!(
+            derive_notes_status(false, Some(NO_SPEECH_NOTES_ERROR)),
+            NotesStatus::EmptyTranscript
+        );
+    }
+
+    #[test]
+    fn notes_status_empty_transcript_serializes_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&NotesStatus::EmptyTranscript).unwrap(),
+            r#""empty-transcript""#
+        );
     }
 
     #[test]

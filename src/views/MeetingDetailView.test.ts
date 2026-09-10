@@ -965,6 +965,19 @@ describe('MeetingDetailView local generation progress', () => {
     expect(retryNotes).toHaveBeenCalledWith('7');
   });
 
+  it('names an empty transcript instead of blaming notes, with no Retry', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'empty-transcript',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
+    await flushPromises();
+
+    expect(wrapper.find('.tab-status-label').text()).toBe('Empty transcript');
+    // Nothing was said — regenerating cannot produce notes, so offering a retry
+    // would promise a fix that does not exist.
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+  });
+
   it('shows a Retry button on transcript failure and calls retryTranscription', async () => {
     recordingStatus.mockResolvedValue({
       status: 'failed', hasTranscript: false, hasNote: false, notesStatus: 'pending',

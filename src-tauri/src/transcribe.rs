@@ -177,10 +177,6 @@ fn transcript_changed(before: &Option<Vec<u8>>, after: &Option<Vec<u8>>) -> bool
     before != after
 }
 
-/// Reason recorded in `meta.notes_error` when a recording carries no speech.
-const NO_SPEECH_NOTES_ERROR: &str =
-    "no speech detected in this recording — notes generation skipped";
-
 /// Body of a rendered transcript, with the leading YAML frontmatter removed.
 fn transcript_body(md: &str) -> &str {
     let Some(rest) = md.strip_prefix("---\n") else {
@@ -260,7 +256,7 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         .as_deref()
         .is_some_and(|bytes| !transcript_has_speech(&String::from_utf8_lossy(bytes)))
     {
-        meta.notes_error = Some(NO_SPEECH_NOTES_ERROR.to_string());
+        meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
         let _ = storage::write_meta(&dir, &meta);
         return;
     }

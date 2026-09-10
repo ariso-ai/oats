@@ -37,6 +37,11 @@ describe('deriveStage', () => {
   it('maps done+notes failed to notes-failed', () => {
     expect(deriveStage(view({ status: 'done', hasTranscript: true, notesStatus: 'failed' }))).toBe('notes-failed');
   });
+  it('maps done+empty transcript to notes-empty-transcript', () => {
+    expect(
+      deriveStage(view({ status: 'done', hasTranscript: true, notesStatus: 'empty-transcript' }))
+    ).toBe('notes-empty-transcript');
+  });
   it('maps done+note ready to ready', () => {
     expect(deriveStage(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready' }))).toBe('ready');
   });
