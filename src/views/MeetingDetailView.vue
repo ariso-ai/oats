@@ -716,6 +716,9 @@ let reqId = 0;
 let noteReqId = 0;
 let saveReqId = 0;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+// Tracks a save currently awaiting `notesPersistence.save()`, so a whole-note
+// delete can wait it out instead of racing the folder removal.
+let activeSave: Promise<void> | null = null;
 let suppressAutoSave = false;
 let noteDirty = false;
 let loadedNoteItem: MeetingListItem | null = null;
@@ -1075,11 +1078,29 @@ async function confirmDeleteNote(): Promise<void> {
   const backend = detailBackend;
   showNoteDeleteConfirm.value = false;
   if (!item || !backend || deletingNote.value) return;
+  // The dialog can sit open long enough for AI notes to start generating or a
+  // retry to kick off — recheck eligibility rather than trusting the state
+  // from when it was opened. Checked before `deletingNote` flips below, since
+  // `canDeleteNote` treats an in-flight delete as ineligible too.
+  if (!canDeleteNote.value) {
+    noteDeleteError.value = deleteDisabledReason.value ?? 'This note can no longer be deleted right now.';
+    return;
+  }
   // Guarded by reqId like onDownloadTranscriptClick: the delete outlives a
   // meeting switch, so a late failure must not blame the newly-opened note.
   const my = reqId;
   deletingNote.value = true;
+  let failed = false;
   try {
+    // Cancel the pending debounce and wait out a save already in flight —
+    // otherwise it can recreate `user-note.md` after (or racing) the removal.
+    // `scheduleNoteAutoSave`/`saveNotesNow` are gated on `deletingNote` above
+    // so nothing new gets scheduled in the meantime.
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (activeSave) await activeSave;
     await backend.deleteMeeting(item);
     if (my !== reqId) return;
     // Stop the status poller before announcing: its folder is gone, so the next
@@ -1093,9 +1114,14 @@ async function confirmDeleteNote(): Promise<void> {
     noteDeleteError.value = `Could not delete this note: ${
       e instanceof Error ? e.message : String(e)
     }`;
+    failed = true;
   } finally {
     if (my === reqId) deletingNote.value = false;
   }
+  // Deletion failed — the folder is still there, so restore autosave for
+  // whatever the cancelled timer would otherwise have written. Deferred until
+  // here since scheduleNoteAutoSave is itself gated on `deletingNote`.
+  if (failed && noteDirty) scheduleNoteAutoSave();
 }
 
 function askDeleteClip(clip: MeetingAudioClip): void {
@@ -1475,9 +1501,9 @@ async function loadIndividualNote(): Promise<void> {
 // parent calls this before changing selection, and the editor calls it on blur.
 async function saveNotesNow(): Promise<void> {
   const item = loadedNoteItem ?? props.item;
-  // The recording's folder no longer exists — saving would either fail or
-  // re-create the artifact the user just deleted.
-  if (noteDeleted.value) return;
+  // The recording's folder no longer exists (or is being removed right now) —
+  // saving would either fail or re-create the artifact a delete just removed.
+  if (noteDeleted.value || deletingNote.value) return;
   if (!item || loadingIndividualNote.value || !individualNoteLoaded.value || !notesPersistence.canEdit(item)) return;
   const my = ++saveReqId;
   const markdown = notesMarkdown.value;
@@ -1487,21 +1513,29 @@ async function saveNotesNow(): Promise<void> {
     saveTimer = null;
   }
   saveState.value = 'saving';
-  try {
-    await notesPersistence.save(item, { content: markdown, title });
-    const stillViewingSavedItem = props.item?.id === item.id;
-    if (my === saveReqId) noteDirty = false;
-    if (my !== saveReqId || !stillViewingSavedItem) return;
-    if (detail.value) {
-      detail.value.hasIndividualNote = markdown.trim().length > 0;
+  const run = (async () => {
+    try {
+      await notesPersistence.save(item, { content: markdown, title });
+      const stillViewingSavedItem = props.item?.id === item.id;
+      if (my === saveReqId) noteDirty = false;
+      if (my !== saveReqId || !stillViewingSavedItem) return;
+      if (detail.value) {
+        detail.value.hasIndividualNote = markdown.trim().length > 0;
+      }
+      individualNote.value = { content: markdown, title };
+      individualNoteLoaded.value = true;
+      saveState.value = 'saved';
+    } catch (e) {
+      if (my !== saveReqId || props.item?.id !== item.id) return;
+      console.error('Failed to save individual note', e);
+      saveState.value = 'error';
     }
-    individualNote.value = { content: markdown, title };
-    individualNoteLoaded.value = true;
-    saveState.value = 'saved';
-  } catch (e) {
-    if (my !== saveReqId || props.item?.id !== item.id) return;
-    console.error('Failed to save individual note', e);
-    saveState.value = 'error';
+  })();
+  activeSave = run;
+  try {
+    await run;
+  } finally {
+    if (activeSave === run) activeSave = null;
   }
 }
 
@@ -1526,6 +1560,7 @@ watch(activeTab, (t) => {
 function scheduleNoteAutoSave(): void {
   if (
     suppressAutoSave ||
+    deletingNote.value ||
     loadingIndividualNote.value ||
     !individualNoteLoaded.value ||
     !props.item ||

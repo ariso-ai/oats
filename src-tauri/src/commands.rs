@@ -2065,7 +2065,8 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
 /// then its own directory (`meta.json`, `transcript.md`, `segments.json`, the
 /// user note, and any legacy `ari-note.md` / `recording.mp3`).
 ///
-/// Refuses while the recording is still `Recording` or `Transcribing`: those
+/// Refuses while the recording is still `Recording` or `Transcribing`, or
+/// while AI notes are still `Pending` on an otherwise-`Done` recording: those
 /// pipelines run in detached tasks that would re-create files underneath the
 /// delete — and because `write_note` targets the vault root (which survives),
 /// a deleted note could reappear in Obsidian with no library row pointing at
@@ -2084,6 +2085,22 @@ pub fn delete_local_recording(id: String) -> Result<(), String> {
         crate::storage::RecordingStatus::Recording | crate::storage::RecordingStatus::Transcribing
     ) {
         return Err("this recording is still being processed — try again once it finishes".to_string());
+    }
+    if meta.status == crate::storage::RecordingStatus::Done {
+        // Same derivation as `local_recording_status`. A `Failed` recording
+        // never reached notes generation, so this check is scoped to `Done` —
+        // otherwise a failed transcription (no note, no notes_error) would
+        // misread as notes-pending and become permanently undeletable.
+        let has_note =
+            dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
+        let notes_status =
+            crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+        if notes_status == crate::storage::NotesStatus::Pending {
+            return Err(
+                "AI notes are still generating for this recording — try again once they finish"
+                    .to_string(),
+            );
+        }
     }
     crate::vault::delete_recording_artifacts(&id, meta.audio_file.as_deref())?;
     std::fs::remove_dir_all(&dir).map_err(|e| format!("delete recording files: {e}"))
@@ -3054,6 +3071,45 @@ mod tests {
             assert!(dir.exists(), "recording must survive a refused delete");
             std::fs::remove_dir_all(&dir).unwrap();
         }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_refuses_while_notes_are_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        // `Done` with no note and no notes_error: the transcript finished but
+        // the detached notes task hasn't written its outcome yet.
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        // A concurrent `process_notes` finishing here would recreate the vault
+        // note out from under a delete that raced ahead of it.
+        assert!(delete_local_recording(id.to_string()).is_err());
+        assert!(dir.exists(), "recording must survive a refused delete");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_allows_failed_transcription_with_no_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: see above.
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.status = crate::storage::RecordingStatus::Failed;
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        // A failed transcription never reaches notes generation, so the
+        // (has_note=false, notes_error=None) combination here must not be
+        // misread as notes-pending.
+        delete_local_recording(id.to_string()).unwrap();
+        assert!(!dir.exists(), "recording dir should be gone");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
