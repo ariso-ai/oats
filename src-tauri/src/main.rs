@@ -197,6 +197,7 @@ fn main() {
             commands::api_request,
             commands::upload_file,
             commands::set_tray_recording,
+            commands::set_recording_meeting,
             commands::create_settings_window,
             commands::create_onboarding_window,
             commands::start_recording_window,

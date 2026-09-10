@@ -1047,11 +1047,35 @@ pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_pa
         // Mark capture before redrawing the tray so the title refresh sees the
         // active recording and clears the countdown text in the menu bar.
         state.mark_capture_active();
+        // Cached so a later identity-only menu rebuild keeps the right
+        // Pause/Resume row (see tray::refresh_recording_menu).
+        state.set_paused(is_paused);
     } else {
         state.clear();
         let _ = app.emit("recording://state", false);
     }
     crate::tray::set_menu(&app, is_recording, is_paused);
+    Ok(())
+}
+
+/// Tell the native side what the active recording is attached to, so the tray's
+/// recording menu can name it and open it. Called by the recorder window
+/// whenever a real identity becomes known: a calendar-matched Ariso meeting, an
+/// ad-hoc meeting created for an unmatched auto-trigger, a picker-selected
+/// meeting, or a local recording's resolved default label.
+///
+/// Local recordings pass `meeting_id: None` — they have no server-side meeting
+/// — and the tray routes their click through the same `recording://reveal`
+/// broadcast the floating pill already uses.
+#[tauri::command]
+pub async fn set_recording_meeting(
+    app: tauri::AppHandle,
+    meeting_id: Option<i64>,
+    title: Option<String>,
+) -> Result<(), String> {
+    app.state::<crate::recording_state::RecordingState>()
+        .set_recording_meeting(meeting_id, title);
+    crate::tray::refresh_recording_menu(&app);
     Ok(())
 }
 
