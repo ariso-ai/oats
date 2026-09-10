@@ -503,6 +503,7 @@ mod imp {
         kAudioAggregateDeviceNameKey, kAudioAggregateDeviceSubDeviceListKey,
         kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
         kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID,
+        kAudioDevicePropertyNominalSampleRate,
         kAudioHardwarePropertyDefaultSystemOutputDevice,
         kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioSubDeviceUIDKey,
         kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
@@ -545,8 +546,10 @@ mod imp {
 
     /// The device- and format-dependent inputs baked into a live capture: the
     /// UID is the aggregate device's clock sub-device, the rate is what the
-    /// resampler converts from. Neither can be changed in place, so capture is
-    /// rebuilt whenever the current values stop matching these.
+    /// resampler converts from. Both are read from the default output device —
+    /// see `device_nominal_rate` for why the rate cannot come from the tap.
+    /// Neither can be changed in place, so capture is rebuilt whenever the
+    /// current values stop matching these.
     #[derive(Clone, Debug)]
     struct TapConfig {
         output_uid: String,
@@ -569,7 +572,7 @@ mod imp {
     #[derive(Clone, Copy)]
     struct Listeners {
         default_output: bool,
-        tap_format: bool,
+        output_rate: bool,
     }
 
     /// Live capture resources, torn down in reverse creation order on stop.
@@ -582,6 +585,10 @@ mod imp {
     struct CaptureState {
         tap_id: AudioObjectID,
         aggregate_id: AudioObjectID,
+        /// The output device the rate listener is registered on. Kept so
+        /// teardown removes it from the same object it was added to, even
+        /// after the system default has moved on to another device.
+        output_id: AudioObjectID,
         proc_id: AudioDeviceIOProcID,
         config: TapConfig,
         listeners: Listeners,
@@ -687,18 +694,47 @@ mod imp {
         Ok(())
     }
 
-    /// The default output device's UID paired with the rate `tap_id` is
-    /// currently delivering — the live counterpart of `CaptureState::config`.
-    unsafe fn current_config(tap_id: AudioObjectID) -> Result<TapConfig, String> {
+    /// The default output device's UID paired with the rate a tap on it
+    /// currently delivers — the live counterpart of `CaptureState::config`.
+    unsafe fn current_config() -> Result<TapConfig, String> {
         let output_id = unsafe { default_output_device()? };
         let output_uid = unsafe { device_uid(output_id)? };
-        let asbd: AudioStreamBasicDescription = unsafe {
-            get_property(tap_id, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal)?
-        };
+        let src_rate = unsafe { device_nominal_rate(output_id)? };
         Ok(TapConfig {
             output_uid,
-            src_rate: asbd.mSampleRate,
+            src_rate,
         })
+    }
+
+    /// The rate a process tap on `device_id` actually delivers.
+    ///
+    /// This must come from the output device, *not* from
+    /// `kAudioTapPropertyFormat`: that property reports a fixed 48 kHz no
+    /// matter what hardware is behind it, while the tap really runs at the
+    /// device's nominal rate. Measured on this hardware — built-in speakers
+    /// (44.1 kHz) delivered ~44032 frames/s and a 48 kHz display delivered
+    /// ~48128 frames/s, both against a declared 48000.
+    ///
+    /// Resampling from the declared rate instead of the real one stretches
+    /// system audio by their ratio: 8% slow on a 44.1 kHz output, and 3x slow
+    /// on a Bluetooth headset that has dropped to 16 kHz HFP because the
+    /// meeting opened its microphone — which is what made captured meeting
+    /// audio unintelligible.
+    unsafe fn device_nominal_rate(device_id: AudioObjectID) -> Result<f64, String> {
+        let rate: f64 = unsafe {
+            get_property(
+                device_id,
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            )?
+        };
+        if rate > 0.0 {
+            Ok(rate)
+        } else {
+            // A non-positive rate would make Resampler::step 0.0 and stall the
+            // IO block in a loop that never advances.
+            Err(format!("output device reported a {rate} Hz sample rate"))
+        }
     }
 
     unsafe fn default_output_device() -> Result<AudioObjectID, String> {
@@ -815,16 +851,19 @@ mod imp {
             }
 
             // 2. Default output device + its UID (the aggregate's clock source).
-            let output_uid_str = match default_output_device().and_then(|id| device_uid(id)) {
-                Ok(uid) => uid,
-                Err(e) => {
-                    AudioHardwareDestroyProcessTap(tap_id);
-                    return Err(e);
-                }
-            };
+            let (output_id, output_uid_str) =
+                match default_output_device().and_then(|id| device_uid(id).map(|uid| (id, uid))) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        AudioHardwareDestroyProcessTap(tap_id);
+                        return Err(e);
+                    }
+                };
             let output_uid = NSString::from_str(&output_uid_str);
 
-            // 3. Tap stream format → native sample rate for the resampler.
+            // 3. Tap stream format → sample layout check only. Its sample rate
+            // is not usable; the resampler's source rate comes from the output
+            // device in step 3b (see `device_nominal_rate`).
             let asbd: AudioStreamBasicDescription =
                 match get_property(tap_id, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal) {
                     Ok(v) => v,
@@ -844,7 +883,14 @@ mod imp {
                     asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel
                 ));
             }
-            let src_rate = asbd.mSampleRate;
+            // 3b. Source rate for the resampler, from the device the tap runs on.
+            let src_rate = match device_nominal_rate(output_id) {
+                Ok(rate) => rate,
+                Err(e) => {
+                    AudioHardwareDestroyProcessTap(tap_id);
+                    return Err(e);
+                }
+            };
 
             // 4. Private aggregate device wrapping the tap.
             let agg_uid = format!("ai.ariso.oats.tap.{tap_uuid}");
@@ -915,22 +961,25 @@ mod imp {
 
             // 6. Follow the device. Both the aggregate's clock sub-device and
             // the resampler's source rate are fixed at this point, so a later
-            // output switch (earbuds → speakers) or format switch (a headset
-            // dropping to HFP when another app takes the mic) is only
-            // recoverable by rebuilding. Start the watcher before registering,
-            // so the first notification already has somewhere to go.
+            // output switch (earbuds → speakers) or rate switch (a headset
+            // dropping to 16 kHz HFP when another app takes the mic) is only
+            // recoverable by rebuilding. The rate is watched on the output
+            // device rather than on the tap, whose format never changes.
+            // Start the watcher before registering, so the first notification
+            // already has somewhere to go.
             let _ = change_signaler();
             let listeners = Listeners {
                 default_output: add_listener(
                     kAudioObjectSystemObject as AudioObjectID,
                     kAudioHardwarePropertyDefaultSystemOutputDevice,
                 ),
-                tap_format: add_listener(tap_id, kAudioTapPropertyFormat),
+                output_rate: add_listener(output_id, kAudioDevicePropertyNominalSampleRate),
             };
 
             Ok(CaptureState {
                 tap_id,
                 aggregate_id,
+                output_id,
                 proc_id,
                 config: TapConfig {
                     output_uid: output_uid_str,
@@ -958,8 +1007,10 @@ mod imp {
                     errors.push(e);
                 }
             }
-            if state.listeners.tap_format {
-                if let Err(e) = remove_listener(state.tap_id, kAudioTapPropertyFormat) {
+            if state.listeners.output_rate {
+                if let Err(e) =
+                    remove_listener(state.output_id, kAudioDevicePropertyNominalSampleRate)
+                {
                     errors.push(e);
                 }
             }
@@ -995,10 +1046,10 @@ mod imp {
         };
         // Notifications fire for reasons that don't concern this capture —
         // including the rebuilds it performs itself — so act only on a binding
-        // that has genuinely changed. A tap whose format can no longer be read
-        // is broken and rebuilt regardless.
+        // that has genuinely changed. An output device that can no longer be
+        // read leaves the capture unbindable and is rebuilt regardless.
         let (app, change) = match guard.as_ref() {
-            Some(state) => match unsafe { current_config(state.tap_id) } {
+            Some(state) => match unsafe { current_config() } {
                 Ok(latest) if !latest.differs_from(&state.config) => return,
                 Ok(latest) => (
                     state.app.clone(),
@@ -1010,7 +1061,7 @@ mod imp {
                         latest.src_rate
                     ),
                 ),
-                Err(e) => (state.app.clone(), format!("tap format unreadable ({e})")),
+                Err(e) => (state.app.clone(), format!("output device unreadable ({e})")),
             },
             // `CAPTURE` is empty either because nothing is recording, or
             // because a previous rebuild exhausted its retries while one
@@ -1145,9 +1196,20 @@ mod imp {
         }
 
         #[test]
-        fn rebuilds_when_the_tap_sample_rate_changes() {
-            // A Bluetooth headset dropping from A2DP to HFP: same device, new rate.
+        fn rebuilds_when_the_output_device_sample_rate_changes() {
+            // A Bluetooth headset dropping from A2DP to HFP: same device, new
+            // rate. The rate is the output device's, since a tap always
+            // declares 48 kHz however the hardware behind it is running.
             assert!(config("BT-headset", 16_000.0).differs_from(&config("BT-headset", 48_000.0)));
+        }
+
+        #[test]
+        fn rebuilds_across_the_common_44_1_to_48_khz_step() {
+            // Not just the dramatic HFP drop: swapping a 44.1 kHz output for a
+            // 48 kHz one is an 8% resampling error if it goes unnoticed.
+            assert!(
+                config("BuiltInSpeaker", 44_100.0).differs_from(&config("BuiltInSpeaker", 48_000.0))
+            );
         }
 
         #[test]
