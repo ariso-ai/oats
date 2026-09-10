@@ -9,6 +9,7 @@ const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const getMeetingAudio = vi.fn();
 const deleteMeetingClip = vi.fn();
+const deleteMeeting = vi.fn();
 const getMeetingPrep = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
@@ -137,6 +138,7 @@ beforeEach(() => {
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
     getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
     deleteMeetingClip: (...a: [MeetingListItem, string]) => deleteMeetingClip(...a),
+    deleteMeeting: (...a: [MeetingListItem]) => deleteMeeting(...a),
     getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
   });
   notesCanEdit.mockReturnValue(false);
@@ -162,6 +164,7 @@ beforeEach(() => {
   copyRecordingFile.mockResolvedValue(undefined);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
+  deleteMeeting.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
   apiRequest.mockReset();
   apiRequest.mockResolvedValue({ status: 200, data: {} });
@@ -1312,6 +1315,118 @@ describe('MeetingDetailView per-clip delete', () => {
     // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
     expect(wrapper.text()).toContain('from clip two');
     expect(wrapper.text()).not.toContain('from clip one');
+  });
+});
+
+describe('MeetingDetailView whole-note delete', () => {
+  const localDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
+    detail({ isLocal: true, hasTranscript: true, note: '# notes', ...over });
+
+  it('offers no delete action for an Ariso meeting', async () => {
+    const wrapper = await mountWith(detail());
+    expect(wrapper.find('.note-del-btn').exists()).toBe(false);
+  });
+
+  it('deletes the note on confirm and tells the parent', async () => {
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    // Nothing happens until the confirmation is accepted.
+    expect(deleteMeeting).not.toHaveBeenCalled();
+
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeeting).toHaveBeenCalledWith(item);
+    expect(wrapper.emitted('deleted')).toEqual([[{ id: '7' }]]);
+  });
+
+  it('names the note in the confirmation so the right one is deleted', async () => {
+    const wrapper = await mountWith(localDetail({ title: 'Budget review' }));
+    await wrapper.find('.note-del-btn').trigger('click');
+
+    const dialog = wrapper.find('[role="dialog"]');
+    expect(dialog.text()).toContain('Budget review');
+    // The vault note and audio go too — the copy has to say so.
+    expect(dialog.text()).toMatch(/Obsidian vault/i);
+  });
+
+  it('leaves the note alone when the confirmation is canceled', async () => {
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    await wrapper.find('.secondary-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeeting).not.toHaveBeenCalled();
+    expect(wrapper.emitted('deleted')).toBeUndefined();
+    expect(wrapper.find('.note-del-btn').exists()).toBe(true);
+  });
+
+  it('disables delete while the recording is still being captured', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'recording',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+    const wrapper = await mountWith(localDetail({ hasTranscript: false, note: undefined }));
+
+    expect(wrapper.find('.note-del-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('disables delete while AI notes are still generating', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done',
+      hasTranscript: true,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+    const wrapper = await mountWith(localDetail({ note: undefined }));
+
+    expect(wrapper.find('.note-del-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('allows delete for a recording whose transcription failed', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'failed',
+    });
+    const wrapper = await mountWith(localDetail({ hasTranscript: false, note: undefined }));
+
+    expect(wrapper.find('.note-del-btn').attributes('disabled')).toBeUndefined();
+  });
+
+  it('keeps the note and shows an error when the delete fails', async () => {
+    deleteMeeting.mockRejectedValue(new Error('disk on fire'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.emitted('deleted')).toBeUndefined();
+    expect(wrapper.find('.note-del-btn').exists()).toBe(true);
+    expect(wrapper.find('.note-delete-error').text()).toContain('Could not delete this note');
+  });
+
+  it('stops autosaving notes into a deleted recording', async () => {
+    notesCanEdit.mockReturnValue(true);
+    loadNote.mockResolvedValue({ content: 'draft', title: 'T' });
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    // The parent calls this while clearing its selection; the recording's
+    // folder is gone, so the save must not be attempted.
+    saveNote.mockClear();
+    await (wrapper.vm as unknown as { saveNotesNow: () => Promise<void> }).saveNotesNow();
+    expect(saveNote).not.toHaveBeenCalled();
   });
 });
 

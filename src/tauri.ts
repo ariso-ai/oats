@@ -446,6 +446,12 @@ export const local = {
   renameRecording(id: string, title: string): Promise<void> {
     return invoke('rename_local_recording', { id, title });
   },
+  /** Permanently delete a local recording: its vault note + audio attachment
+   *  and its whole `~/.ariso/recordings/<id>/` directory. Rejects while the
+   *  recording is still recording or transcribing. */
+  deleteRecording(id: string): Promise<void> {
+    return invoke('delete_local_recording', { id });
+  },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
   },
