@@ -295,7 +295,7 @@ pub fn render_action_items(notes_md: &str, date: &str) -> String {
         }
         match split_list_item(line) {
             Some((indent, content)) if checkbox_state(content).is_none() => {
-                if is_placeholder_item(content) {
+                if is_placeholder_item(content) || content.trim().is_empty() {
                     continue; // drop the line entirely
                 }
                 out.push(format!("{indent}- [ ] {content} ➕ {date}"));
@@ -360,6 +360,8 @@ pub fn note_body(contents: &str) -> String {
 /// Obsidian Tasks emoji signifiers: created, start, scheduled, due, done,
 /// cancelled, the five priorities, recurrence, on-completion, id, dependsOn.
 /// Everything from the first one onward is metadata, not task text.
+///
+/// Mirrors TASK_SIGNIFIERS in src/utils/markdown.ts — keep the two in sync.
 const TASK_SIGNIFIERS: [char; 15] = [
     '➕', '🛫', '⏳', '📅', '✅', '❌', '🔺', '⏫', '🔼', '🔽', '⏬', '🔁', '🏁', '🆔', '⛔',
 ];
@@ -437,7 +439,11 @@ pub fn open_tasks(note_contents: &str) -> Vec<String> {
         if state != ' ' {
             continue;
         }
-        let text = strip_task_metadata(&content[3..]);
+        let raw = &content[3..];
+        if is_placeholder_item(raw) {
+            continue;
+        }
+        let text = strip_task_metadata(raw);
         if !text.is_empty() {
             tasks.push(text);
         }
@@ -1191,6 +1197,16 @@ mod tests {
     }
 
     #[test]
+    fn render_action_items_drops_empty_list_items() {
+        // A textless bullet would otherwise write a permanent blank checkbox
+        // into the user's vault, which oats can never remove.
+        let notes = "## Action Items\n- \n*   \n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(!out.contains("- [ ]  "));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
     fn render_action_items_keeps_a_real_task_that_starts_with_none() {
         // Dropping this would be invisible data loss; a leaked placeholder is
         // only a visible row the user deletes.
@@ -1248,6 +1264,18 @@ mod tests {
             "## Action Items\n- [ ] Ship the RFC ➕ 2026-06-02\n- [x] Already done ➕ 2026-06-02\n- [-] Dropped\n- [ ] Email legal ➕ 2026-06-02\n",
         );
         assert_eq!(open_tasks(&note), vec!["Ship the RFC", "Email legal"]);
+    }
+
+    #[test]
+    fn open_tasks_skips_a_placeholder_checkbox() {
+        // The model occasionally emits a checkbox directly; render_action_items
+        // passes existing checkboxes through, so the read side must filter too.
+        let note = render_note(
+            &meta_for_note(),
+            "a.mp3",
+            "## Action Items\n- [ ] None explicitly stated in the transcript.\n- [ ] Real task\n",
+        );
+        assert_eq!(open_tasks(&note), vec!["Real task"]);
     }
 
     #[test]

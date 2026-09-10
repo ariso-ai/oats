@@ -314,30 +314,38 @@ describe('ArisoBackend', () => {
   });
 
   it('finalizeRecording still uploads when buffering itself fails', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    bufferPendingAudio.mockRejectedValue(new Error('disk full'));
-    uploadAudio.mockResolvedValue({ meetingId: 7 });
-    discardPendingAudio.mockResolvedValue(undefined);
-    const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
-      startAt: '2026-06-02T14:30:05.000Z',
-      endAt: '2026-06-02T15:10:00.000Z',
-      durationSeconds: 10,
-    });
-    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
-    expect(uploadAudio).toHaveBeenCalled();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      bufferPendingAudio.mockRejectedValue(new Error('disk full'));
+      uploadAudio.mockResolvedValue({ meetingId: 7 });
+      discardPendingAudio.mockResolvedValue(undefined);
+      const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+        startAt: '2026-06-02T14:30:05.000Z',
+        endAt: '2026-06-02T15:10:00.000Z',
+        durationSeconds: 10,
+      });
+      expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+      expect(uploadAudio).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('finalizeRecording succeeds even when the post-upload discard fails', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    bufferPendingAudio.mockResolvedValue('id');
-    uploadAudio.mockResolvedValue({ meetingId: 7 });
-    discardPendingAudio.mockRejectedValue(new Error('locked'));
-    const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
-      startAt: '2026-06-02T14:30:05.000Z',
-      endAt: '2026-06-02T15:10:00.000Z',
-      durationSeconds: 10,
-    });
-    expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      bufferPendingAudio.mockResolvedValue('id');
+      uploadAudio.mockResolvedValue({ meetingId: 7 });
+      discardPendingAudio.mockRejectedValue(new Error('locked'));
+      const res = await new ArisoBackend().finalizeRecording(new Blob(['x']), {
+        startAt: '2026-06-02T14:30:05.000Z',
+        endAt: '2026-06-02T15:10:00.000Z',
+        durationSeconds: 10,
+      });
+      expect(res).toEqual({ backend: 'ariso', meetingId: 7 });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('getMeetingAudio returns bytes, maps 404 to null, and rethrows other errors', async () => {
@@ -697,7 +705,6 @@ describe('recentDayKeys', () => {
 
 describe('action items', () => {
   it('Ariso fans out over the last two weeks and maps rows', async () => {
-    listActionItemsByDay.mockResolvedValue([]);
     const today = recentDayKeys(new Date(), 14)[0];
     listActionItemsByDay.mockImplementation((day: string) =>
       Promise.resolve(
@@ -744,31 +751,41 @@ describe('action items', () => {
   });
 
   it('Ariso returns the days that loaded when one day fails', async () => {
-    const days = recentDayKeys(new Date(), 14);
-    listActionItemsByDay.mockImplementation((day: string) => {
-      if (day === days[0]) return Promise.reject(new Error('500'));
-      if (day === days[1]) {
-        return Promise.resolve([
-          {
-            meetingId: 7,
-            meetingTitle: 'Platform Sync',
-            startAt: '2026-08-30T09:00:00Z',
-            actionItems: [{ item: 'Draft migration plan' }],
-          },
-        ]);
-      }
-      return Promise.resolve([]);
-    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const days = recentDayKeys(new Date(), 14);
+      listActionItemsByDay.mockImplementation((day: string) => {
+        if (day === days[0]) return Promise.reject(new Error('500'));
+        if (day === days[1]) {
+          return Promise.resolve([
+            {
+              meetingId: 7,
+              meetingTitle: 'Platform Sync',
+              startAt: '2026-08-30T09:00:00Z',
+              actionItems: [{ item: 'Draft migration plan' }],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      });
 
-    const entries = await new ArisoBackend().listActionItems();
+      const entries = await new ArisoBackend().listActionItems();
 
-    expect(entries).toHaveLength(1);
-    expect(entries[0].items[0].item).toBe('Draft migration plan');
+      expect(entries).toHaveLength(1);
+      expect(entries[0].items[0].item).toBe('Draft migration plan');
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('Ariso throws when every day fails', async () => {
-    listActionItemsByDay.mockRejectedValue(new Error('offline'));
-    await expect(new ArisoBackend().listActionItems()).rejects.toThrow();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      listActionItemsByDay.mockRejectedValue(new Error('offline'));
+      await expect(new ArisoBackend().listActionItems()).rejects.toThrow();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('local advertises action items', () => {
@@ -805,6 +822,47 @@ describe('action items', () => {
       hasTranscript: true,
     });
     expect(entries[0].items).toEqual([{ item: 'Ship the RFC' }, { item: 'Email legal' }]);
+  });
+
+  it('local trims whitespace-only tasks out of a group', async () => {
+    listVaultTasks.mockResolvedValue([
+      { oatsId: '2026-06-02T14-30-05Z', tasks: ['  ', 'Real task'] },
+    ]);
+    listRecordings.mockResolvedValue([
+      {
+        id: '2026-06-02T14-30-05Z',
+        title: 'Standup',
+        createdAt: '2026-06-02T14:30:05Z',
+        durationSeconds: 42,
+        status: 'done',
+        hasAudio: true,
+        hasNote: true,
+        hasTranscript: true,
+      },
+    ]);
+
+    const entries = await new LocalBackend().listActionItems();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].items).toEqual([{ item: 'Real task' }]);
+  });
+
+  it('local drops a group whose tasks are all whitespace', async () => {
+    listVaultTasks.mockResolvedValue([{ oatsId: '2026-06-02T14-30-05Z', tasks: ['  ', '\t'] }]);
+    listRecordings.mockResolvedValue([
+      {
+        id: '2026-06-02T14-30-05Z',
+        title: 'Standup',
+        createdAt: '2026-06-02T14:30:05Z',
+        durationSeconds: 42,
+        status: 'done',
+        hasAudio: true,
+        hasNote: true,
+        hasTranscript: true,
+      },
+    ]);
+
+    await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
   });
 
   it('local skips vault notes whose recording is gone', async () => {

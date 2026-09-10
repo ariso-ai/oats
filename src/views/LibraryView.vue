@@ -510,6 +510,8 @@ watch(
     todoError.value = null;
     if (activeView.value === 'todo' && !activeBackend.value?.supportsActionItems) {
       activeView.value = 'meetings';
+    } else if (activeView.value === 'todo') {
+      void loadActionItems();
     }
   }
 );

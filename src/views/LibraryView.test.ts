@@ -2156,4 +2156,39 @@ describe('LibraryView Todo tab', () => {
     expect(wrapper.text()).toContain('Local recording');
     expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
   });
+
+  it('reloads the Todo tab when switching to a backend that also supports action items', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+        'Send pricing deck'
+      )
+    );
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Send pricing deck');
+
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
+        'Ship the RFC'
+      )
+    );
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    expect(todoButton(wrapper).classes()).toContain('nav-tab--active');
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Ship the RFC');
+    expect(wrapper.text()).not.toContain('Send pricing deck');
+  });
 });

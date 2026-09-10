@@ -444,7 +444,9 @@ export class ArisoBackend implements Backend {
         });
       }
     }
-    if (failures === results.length) throw new Error('Could not load action items.');
+    if (results.length > 0 && failures === results.length) {
+      throw new Error('Could not load action items.');
+    }
     return entries;
   }
 
