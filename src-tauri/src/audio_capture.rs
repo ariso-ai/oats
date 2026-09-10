@@ -566,6 +566,18 @@ mod imp {
         }
     }
 
+    /// Whether a capture built from `snapshot` is already out of date.
+    ///
+    /// A configuration that cannot be read counts as stale: the binding it
+    /// describes can no longer be confirmed, and rebuilding is the recoverable
+    /// answer — the alternative is running on a snapshot nothing can verify.
+    fn config_went_stale(snapshot: &TapConfig, latest: Result<TapConfig, String>) -> bool {
+        match latest {
+            Ok(latest) => latest.differs_from(snapshot),
+            Err(_) => true,
+        }
+    }
+
     /// Which Core Audio property listeners a capture actually registered, so
     /// teardown removes exactly those. Registration is best-effort: losing a
     /// listener costs the follow-the-device behaviour, not the recording.
@@ -976,15 +988,29 @@ mod imp {
                 output_rate: add_listener(output_id, kAudioDevicePropertyNominalSampleRate),
             };
 
+            // The snapshot taken in steps 2 and 3b predates those listeners,
+            // and the gap between them spans aggregate creation and
+            // AudioDeviceStart. That window is genuinely live: opening the
+            // microphone moments earlier is what pushes a Bluetooth headset
+            // to 16 kHz HFP, and the transition settles asynchronously. So
+            // re-read now that notifications are being delivered — a change
+            // from here on wakes the watcher, and one that landed before this
+            // point is caught by the comparison. Without it a capture can run
+            // to the end of the recording on a rate the device already left.
+            let config = TapConfig {
+                output_uid: output_uid_str,
+                src_rate,
+            };
+            if config_went_stale(&config, current_config()) {
+                let _ = change_signaler().send(());
+            }
+
             Ok(CaptureState {
                 tap_id,
                 aggregate_id,
                 output_id,
                 proc_id,
-                config: TapConfig {
-                    output_uid: output_uid_str,
-                    src_rate,
-                },
+                config,
                 listeners,
                 app,
             })
@@ -1221,6 +1247,48 @@ mod imp {
         #[test]
         fn does_not_rebuild_when_the_configuration_is_unchanged() {
             assert!(!config("BT-headset", 48_000.0).differs_from(&config("BT-headset", 48_000.0)));
+        }
+
+        #[test]
+        fn treats_an_unchanged_configuration_as_fresh() {
+            let snapshot = config("BT-headset", 48_000.0);
+            assert!(!config_went_stale(
+                &snapshot,
+                Ok(config("BT-headset", 48_000.0))
+            ));
+        }
+
+        #[test]
+        fn catches_a_rate_change_that_landed_before_the_listeners_did() {
+            // The A2DP → HFP drop is triggered by the microphone opening just
+            // before this capture is built, so it can land while the aggregate
+            // device is still being created — with no listener registered yet
+            // to report it, and nothing afterwards that would notice.
+            let snapshot = config("BT-headset", 48_000.0);
+            assert!(config_went_stale(
+                &snapshot,
+                Ok(config("BT-headset", 16_000.0))
+            ));
+        }
+
+        #[test]
+        fn catches_an_output_switch_that_landed_before_the_listeners_did() {
+            let snapshot = config("BuiltInSpeaker", 48_000.0);
+            assert!(config_went_stale(
+                &snapshot,
+                Ok(config("BT-headset", 48_000.0))
+            ));
+        }
+
+        #[test]
+        fn treats_an_unreadable_configuration_as_stale() {
+            // Nothing can confirm the snapshot, so hand it to the watcher
+            // rather than record audio against a binding we can't verify.
+            let snapshot = config("BT-headset", 48_000.0);
+            assert!(config_went_stale(
+                &snapshot,
+                Err("default output device has no UID".into())
+            ));
         }
 
         #[test]
