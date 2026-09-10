@@ -213,20 +213,31 @@ pub async fn is_session_valid(app: &tauri::AppHandle) -> bool {
     false
 }
 
-// Both writers redraw the tray: its idle menu offers sign-in only while no
-// session is stored, and the token also changes from native code (a server
-// rejection clears it) that no window hears about.
+/// Broadcast to every window whenever the stored session changes. Carries no
+/// payload: the token stays scoped to the webview that signed in, so listeners
+/// re-read state through `check_session`.
+pub(crate) const AUTH_CHANGED_EVENT: &str = "auth://changed";
+
+// Both writers go through here. The tray's idle menu offers sign-in only while
+// no session is stored, and every window's account UI follows the session too.
+// The token also changes from native code (a server rejection clears it) that
+// no window hears about otherwise.
+fn on_session_changed(app: &tauri::AppHandle) {
+    crate::tray::refresh(app, true);
+    let _ = app.emit(AUTH_CHANGED_EVENT, ());
+}
+
 fn set_session_token(app: &tauri::AppHandle, token: &str) -> Result<(), String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     store.set(SESSION_KEY, serde_json::json!(token));
-    crate::tray::refresh(app, true);
+    on_session_changed(app);
     store.save().map_err(|e| e.to_string())
 }
 
 pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     store.delete(SESSION_KEY);
-    crate::tray::refresh(app, true);
+    on_session_changed(app);
     store.save().map_err(|e| e.to_string())
 }
 
@@ -346,17 +357,22 @@ fn attach_sign_in_handle(id: u64, handle: tauri::async_runtime::JoinHandle<()>) 
     }
 }
 
-/// Cancel whatever browser attempt is pending, if any. Returns the flow that
-/// was cancelled so the caller emits on the event its waiter is listening to —
-/// cancelling a calendar connect with an `oauth-result` would leave the
-/// frontend promise hanging until the timeout — and the owner, so the cancel
-/// reaches the window that is waiting rather than the one that asked.
-fn abort_pending_sign_in() -> Option<(BrowserFlow, String)> {
-    let p = PENDING_SIGN_IN.lock().unwrap().take()?;
+/// Cancel the pending browser attempt if the webview labeled `owner` started
+/// it. Another window's attempt is left alone: a stale Cancel click, or a
+/// window cleaning up after itself, must not abort a flow someone else is
+/// waiting on. Returns the flow that was cancelled so the caller emits on the
+/// event its waiter is listening to — cancelling a calendar connect with an
+/// `oauth-result` would leave the frontend promise hanging until the timeout.
+fn abort_pending_sign_in(owner: &str) -> Option<BrowserFlow> {
+    let mut slot = PENDING_SIGN_IN.lock().unwrap();
+    if !matches!(slot.as_ref(), Some(p) if p.owner == owner) {
+        return None;
+    }
+    let p = slot.take()?;
     if let Some(handle) = p.handle {
         abort_pending_handle(handle);
     }
-    Some((p.flow, p.owner))
+    Some(p.flow)
 }
 
 /// Atomically retire attempt `id` — clear the slot only if it still holds
@@ -824,14 +840,15 @@ pub async fn microsoft_sign_in(window: tauri::WebviewWindow) -> Result<SignInRes
     browser_oauth_sign_in(window, SignInProvider::Microsoft).await
 }
 
-/// Abort a pending browser flow (the user gave up waiting): a sign-in with
-/// either provider, or the Calendar connect hop. Resolves the pending wait
-/// with the silent-cancel error, in the window that started the attempt
-/// (which need not be the one invoking cancel).
+/// Abort the calling window's pending browser flow (the user gave up
+/// waiting): a sign-in with either provider, or the Calendar connect hop.
+/// Resolves that window's pending wait with the silent-cancel error. A flow
+/// another window started is not this window's to cancel, so it keeps running.
 #[tauri::command]
 pub async fn cancel_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
-    if let Some((flow, owner)) = abort_pending_sign_in() {
-        emit_flow_canceled(&window, &owner, flow);
+    let owner = window.label();
+    if let Some(flow) = abort_pending_sign_in(owner) {
+        emit_flow_canceled(&window, owner, flow);
     }
     Ok(())
 }
@@ -2519,6 +2536,11 @@ pub fn share_text_native(_text: String, _anchor: ShareAnchor) -> Result<(), Stri
 mod tests {
     use super::*;
 
+    /// Empty the process-wide sign-in slot, whoever owns the attempt in it.
+    fn clear_sign_in_slot() {
+        PENDING_SIGN_IN.lock().unwrap().take();
+    }
+
     // A recording requested while the pill still holds the window slot is
     // dropped after the yield timeout. What the user is told about it must match
     // the state the pill is actually in (#320).
@@ -2606,11 +2628,11 @@ mod tests {
         // Cancel arrives before the loopback listener task exists (still
         // awaiting prepare-state) — it must still find something to cancel
         // instead of silently no-oping.
-        assert!(abort_pending_sign_in().is_some());
+        assert!(abort_pending_sign_in("settings").is_some());
         assert!(!sign_in_attempt_active(id));
 
         // A cancel with nothing pending is a no-op, not an error.
-        assert!(abort_pending_sign_in().is_none());
+        assert!(abort_pending_sign_in("settings").is_none());
     }
 
     #[test]
@@ -2619,15 +2641,12 @@ mod tests {
         // flows listen on different events, so emitting an oauth-result over a
         // pending calendar connect would hang the frontend until the timeout.
         begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
-        assert_eq!(
-            abort_pending_sign_in(),
-            Some((BrowserFlow::SignIn, "settings".to_string()))
-        );
+        assert_eq!(abort_pending_sign_in("settings"), Some(BrowserFlow::SignIn));
 
         begin_sign_in_attempt(BrowserFlow::CalendarConnect, "settings");
         assert_eq!(
-            abort_pending_sign_in(),
-            Some((BrowserFlow::CalendarConnect, "settings".to_string()))
+            abort_pending_sign_in("settings"),
+            Some(BrowserFlow::CalendarConnect)
         );
 
         assert_eq!(BrowserFlow::SignIn.result_event(), "oauth-result");
@@ -2669,7 +2688,7 @@ mod tests {
             id // guard drops here, as it would on an early `?` return
         };
         assert!(!sign_in_attempt_active(id));
-        assert!(abort_pending_sign_in().is_none());
+        assert!(abort_pending_sign_in("settings").is_none());
     }
 
     #[test]
@@ -2681,10 +2700,7 @@ mod tests {
             attempt.release()
         };
         assert!(sign_in_attempt_active(id));
-        assert_eq!(
-            abort_pending_sign_in(),
-            Some((BrowserFlow::SignIn, "onboarding".to_string()))
-        );
+        assert_eq!(abort_pending_sign_in("onboarding"), Some(BrowserFlow::SignIn));
     }
 
     #[test]
@@ -2700,7 +2716,7 @@ mod tests {
     #[test]
     fn begin_sign_in_attempt_reports_the_attempt_it_supersedes() {
         // Start from an empty slot: the slot is process-wide.
-        abort_pending_sign_in();
+        clear_sign_in_slot();
 
         let (_, prev) = begin_sign_in_attempt(BrowserFlow::SignIn, "onboarding");
         assert_eq!(prev, None);
@@ -2710,22 +2726,39 @@ mod tests {
         let (_, prev) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
         assert_eq!(prev, Some((BrowserFlow::SignIn, "onboarding".to_string())));
 
-        let (attempt, prev) = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect, "onboarding");
+        // The Meetings window's popover can supersede Settings the same way.
+        let (_, prev) = begin_sign_in_attempt(BrowserFlow::SignIn, "library");
         assert_eq!(prev, Some((BrowserFlow::SignIn, "settings".to_string())));
+
+        let (attempt, prev) = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect, "onboarding");
+        assert_eq!(prev, Some((BrowserFlow::SignIn, "library".to_string())));
         drop(attempt);
-        assert_eq!(abort_pending_sign_in(), None);
+        assert_eq!(abort_pending_sign_in("onboarding"), None);
     }
 
     #[test]
-    fn abort_pending_sign_in_reports_the_owner_of_the_attempt() {
-        // Cancel resolves the owner's waiter, not the window that invoked it.
-        abort_pending_sign_in();
-        begin_sign_in_attempt(BrowserFlow::CalendarConnect, "onboarding");
+    fn abort_pending_sign_in_cancels_the_owners_attempt() {
+        clear_sign_in_slot();
+        let (id, _) = begin_sign_in_attempt(BrowserFlow::CalendarConnect, "settings");
         assert_eq!(
-            abort_pending_sign_in(),
-            Some((BrowserFlow::CalendarConnect, "onboarding".to_string()))
+            abort_pending_sign_in("settings"),
+            Some(BrowserFlow::CalendarConnect)
         );
-        assert_eq!(abort_pending_sign_in(), None);
+        assert!(!sign_in_attempt_active(id));
+        assert_eq!(abort_pending_sign_in("settings"), None);
+    }
+
+    #[test]
+    fn abort_pending_sign_in_leaves_another_windows_attempt_running() {
+        // Settings' stale Cancel must not abort the attempt the Meetings
+        // window's popover started after superseding it.
+        clear_sign_in_slot();
+        let (id, _) = begin_sign_in_attempt(BrowserFlow::SignIn, "library");
+        assert_eq!(abort_pending_sign_in("settings"), None);
+        assert!(sign_in_attempt_active(id));
+
+        assert_eq!(abort_pending_sign_in("library"), Some(BrowserFlow::SignIn));
+        assert!(!sign_in_attempt_active(id));
     }
 
     #[test]
@@ -2805,7 +2838,7 @@ mod tests {
         attach_sign_in_handle(second_id, handle);
         assert!(sign_in_attempt_active(second_id));
 
-        assert!(abort_pending_sign_in().is_some());
+        assert!(abort_pending_sign_in("settings").is_some());
         assert!(!sign_in_attempt_active(second_id));
     }
 
