@@ -215,16 +215,30 @@
           <button
             :disabled="isSigningIn"
             class="google-btn"
-            @click="handleGoogleSignIn"
+            @click="handleSignIn('google')"
           >
-            <svg class="google-icon" viewBox="0 0 24 24">
+            <svg class="google-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
               <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
               <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
             </svg>
-            <span v-if="!isSigningIn">Sign in with Google</span>
-            <span v-else>Continue in your browser…</span>
+            <span v-if="signingInWith === 'google'">Continue in your browser…</span>
+            <span v-else>Sign in with Google</span>
+          </button>
+          <button
+            :disabled="isSigningIn"
+            class="microsoft-btn"
+            @click="handleSignIn('microsoft')"
+          >
+            <svg class="microsoft-icon" viewBox="0 0 21 21" aria-hidden="true">
+              <path fill="#F25022" d="M0 0h10v10H0z" />
+              <path fill="#7FBA00" d="M11 0h10v10H11z" />
+              <path fill="#00A4EF" d="M0 11h10v10H0z" />
+              <path fill="#FFB900" d="M11 11h10v10H11z" />
+            </svg>
+            <span v-if="signingInWith === 'microsoft'">Continue in your browser…</span>
+            <span v-else>Sign in with Microsoft</span>
           </button>
           <button
             v-if="isSigningIn"
@@ -490,7 +504,11 @@ import {
 } from '../composables/useMeetingEndReminder';
 
 const isSignedIn = ref(false);
-const isSigningIn = ref(false);
+type SignInProvider = 'google' | 'microsoft';
+// The provider whose browser flow is pending. Both buttons disable while
+// either is pending; only the clicked one reads "Continue in your browser…".
+const signingInWith = ref<SignInProvider | null>(null);
+const isSigningIn = computed(() => signingInWith.value !== null);
 const isConnectingCalendar = ref(false);
 // null = not checked this session; false = checked and missing.
 const calendarConnected = ref<boolean | null>(null);
@@ -996,18 +1014,27 @@ async function fetchUserProfile() {
   }
   // Avatar is fetched separately and is non-critical: a failure here must not
   // disturb the name/email above, and the UI falls back to initials.
-  try {
-    const res = await api.request('GET', '/users/google-avatar');
-    const data = res.data as { avatar?: string | null };
-    // Preload before binding to the <img>: WKWebView drops the very first
-    // request for a freshly-rendered <img> during the post-sign-in churn and
-    // never retries it, leaving a broken "?". Loading it through a detached
-    // Image first (which is not affected) warms the cache, so the bound <img>
-    // resolves instantly. Falls back to initials if it truly can't load.
-    avatarUrl.value = data.avatar ? await preloadAvatar(data.avatar) : '';
-  } catch {
-    avatarUrl.value = '';
+  avatarUrl.value = await fetchAvatar();
+}
+
+// Which provider the user signed in with isn't recorded, so ask Google first
+// and fall back to Microsoft: an account has no avatar on the other provider.
+async function fetchAvatar(): Promise<string> {
+  for (const path of ['/users/google-avatar', '/users/microsoft-avatar']) {
+    try {
+      const res = await api.request('GET', path);
+      const avatar = (res.data as { avatar?: string | null } | null)?.avatar;
+      // Preload before binding to the <img>: WKWebView drops the very first
+      // request for a freshly-rendered <img> during the post-sign-in churn and
+      // never retries it, leaving a broken "?". Loading it through a detached
+      // Image first (which is not affected) warms the cache, so the bound <img>
+      // resolves instantly. Falls back to initials if it truly can't load.
+      if (avatar) return await preloadAvatar(avatar);
+    } catch {
+      // Try the next provider.
+    }
   }
+  return '';
 }
 
 // Resolves to `url` once it loads in a detached Image (retrying a few times for
@@ -1052,12 +1079,14 @@ async function refreshSignedInAccount() {
       displayName.value = '';
       email.value = '';
       avatarUrl.value = '';
+      calendarConnected.value = null;
     }
   } catch (e) {
     isSignedIn.value = false;
     displayName.value = '';
     email.value = '';
     avatarUrl.value = '';
+    calendarConnected.value = null;
     console.warn('Failed to refresh signed-in account', e);
   }
 }
@@ -1171,11 +1200,12 @@ onUnmounted(() => {
   window.removeEventListener('focus', onWindowFocus);
 });
 
-async function handleGoogleSignIn() {
-  isSigningIn.value = true;
+async function handleSignIn(provider: SignInProvider) {
+  signingInWith.value = provider;
   errorMessage.value = '';
   try {
-    const result = await auth.googleSignIn();
+    const result =
+      provider === 'google' ? await auth.googleSignIn() : await auth.microsoftSignIn();
     if (result.error) {
       if (result.error !== SIGN_IN_CANCELED_ERROR) {
         errorMessage.value = result.error;
@@ -1188,13 +1218,20 @@ async function handleGoogleSignIn() {
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync notifications after sign-in', err);
     });
-    // Sign-in may not carry Calendar — a user who already granted Google
-    // Workspace keeps their broader grant, which might not cover it.
-    await refreshCalendarAccess();
+    if (provider === 'google') {
+      // Sign-in may not carry Calendar — a user who already granted Google
+      // Workspace keeps their broader grant, which might not cover it.
+      await refreshCalendarAccess();
+    } else {
+      // Calendar comes from Google only, and the Connect Calendar nudge opens
+      // Google's consent page. Clear any verdict left by an earlier Google
+      // session in this window so the nudge stays hidden.
+      calendarConnected.value = null;
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
   } finally {
-    isSigningIn.value = false;
+    signingInWith.value = null;
   }
 }
 
@@ -1218,7 +1255,7 @@ async function refreshCalendarAccess() {
 }
 
 // Abort a pending browser sign-in. The backend resolves the waiting
-// googleSignIn() call with the silent-cancel error, which resets the UI.
+// sign-in call with the silent-cancel error, which resets the UI.
 async function handleCancelSignIn() {
   try {
     await auth.cancelSignIn();
@@ -1233,6 +1270,10 @@ async function handleSignOut() {
   displayName.value = '';
   email.value = '';
   avatarUrl.value = '';
+  // The Calendar verdict belongs to the session that just ended. The next one
+  // may be a Microsoft sign-in finished in another window, which reaches this
+  // window only through the signed-in refresh, and that keeps the verdict.
+  calendarConnected.value = null;
   void emitNotificationsSync().catch((err) => {
     console.warn('Failed to sync notifications after sign-out', err);
   });
@@ -1392,7 +1433,8 @@ async function handleSignOut() {
   text-align: center;
 }
 
-.google-btn {
+.google-btn,
+.microsoft-btn {
   width: 100%;
   display: flex;
   align-items: center;
@@ -1410,17 +1452,24 @@ async function handleSignOut() {
   transition: transform 0.1s, box-shadow 0.1s;
 }
 
-.google-btn:hover:not(:disabled) {
+.microsoft-btn {
+  margin-top: 8px;
+}
+
+.google-btn:hover:not(:disabled),
+.microsoft-btn:hover:not(:disabled) {
   box-shadow: 1px 1px 0 #e7e5e2;
   transform: translate(1px, 1px);
 }
 
-.google-btn:disabled {
+.google-btn:disabled,
+.microsoft-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.google-icon {
+.google-icon,
+.microsoft-icon {
   width: 20px;
   height: 20px;
   flex-shrink: 0;

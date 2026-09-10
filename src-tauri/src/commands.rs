@@ -233,15 +233,9 @@ pub(crate) const SIGN_IN_CANCELED: &str = "Sign-in canceled";
 /// magic-link token before the flow fails with a retryable error.
 const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// At most one browser sign-in flow is pending at a time; starting a new one
-/// (or canceling) aborts the previous listener task. The attempt is tracked
-/// from the moment `google_sign_in` is invoked — before the prepare-state
-/// request, not just once the loopback listener task exists — so a cancel
-/// that arrives while prepare-state is in flight still has something to
-/// cancel instead of being silently dropped.
 /// Which browser flow owns the slot. Cancel must resolve the frontend promise
 /// that is actually waiting, and the two flows listen on different events.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum BrowserFlow {
     SignIn,
     CalendarConnect,
@@ -270,10 +264,21 @@ impl BrowserFlow {
 struct PendingSignIn {
     id: u64,
     flow: BrowserFlow,
+    /// Label of the webview that started the attempt. Its results, and the
+    /// silent cancel when it is canceled or superseded, go to this webview
+    /// only: a sign-in result carries the session token.
+    owner: String,
     handle: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 static SIGN_IN_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// At most one browser sign-in flow is pending at a time; starting a new one
+/// (or canceling) aborts the previous listener task. The attempt is tracked
+/// from the moment a sign-in command is invoked — before the prepare-state
+/// request, not just once the loopback listener task exists — so a cancel
+/// that arrives while prepare-state is in flight still has something to
+/// cancel instead of being silently dropped.
 static PENDING_SIGN_IN: std::sync::Mutex<Option<PendingSignIn>> = std::sync::Mutex::new(None);
 
 fn abort_pending_handle(handle: tauri::async_runtime::JoinHandle<()>) {
@@ -282,27 +287,45 @@ fn abort_pending_handle(handle: tauri::async_runtime::JoinHandle<()>) {
     }
 }
 
-/// Register a new attempt and take the slot, aborting whatever attempt (with
-/// or without a listener task yet) was previously in it. Returns the new
-/// attempt's id, checked at each subsequent await via `sign_in_attempt_active`.
-fn begin_sign_in_attempt(flow: BrowserFlow) -> u64 {
+/// Register a new attempt owned by the webview labeled `owner` and take the
+/// slot, aborting whatever attempt (with or without a listener task yet) was
+/// previously in it. Returns the new attempt's id, checked at each subsequent
+/// await via `sign_in_attempt_active`, and the superseded attempt's flow and
+/// owner so the caller can tell that window it was canceled (see
+/// `superseded_notice`).
+fn begin_sign_in_attempt(flow: BrowserFlow, owner: &str) -> (u64, Option<(BrowserFlow, String)>) {
     let id = SIGN_IN_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let mut slot = PENDING_SIGN_IN.lock().unwrap();
-    if let Some(prev) = slot.take() {
+    let superseded = slot.take().map(|prev| {
         if let Some(handle) = prev.handle {
             abort_pending_handle(handle);
         }
-    }
+        (prev.flow, prev.owner)
+    });
     *slot = Some(PendingSignIn {
         id,
         flow,
+        owner: owner.to_string(),
         handle: None,
     });
-    id
+    (id, superseded)
+}
+
+/// Which superseded attempt, if any, must be told it was canceled when `owner`
+/// starts `flow`. Without the notice, a window whose attempt was replaced by
+/// another window's stays on "Continue in your browser…" forever. Skipped when
+/// the same window restarts the same flow: its new invocation already listens
+/// on that event, so the cancel would resolve the new attempt's promise.
+fn superseded_notice(
+    prev: Option<(BrowserFlow, String)>,
+    flow: BrowserFlow,
+    owner: &str,
+) -> Option<(BrowserFlow, String)> {
+    prev.filter(|(prev_flow, prev_owner)| !(*prev_flow == flow && prev_owner == owner))
 }
 
 /// Whether `id` is still the active attempt, i.e. it hasn't been superseded
-/// by a newer `google_sign_in` call or dropped by `cancel_google_sign_in`.
+/// by a newer sign-in call or dropped by `cancel_sign_in`.
 fn sign_in_attempt_active(id: u64) -> bool {
     matches!(&*PENDING_SIGN_IN.lock().unwrap(), Some(p) if p.id == id)
 }
@@ -321,17 +344,14 @@ fn attach_sign_in_handle(id: u64, handle: tauri::async_runtime::JoinHandle<()>) 
 /// Cancel whatever browser attempt is pending, if any. Returns the flow that
 /// was cancelled so the caller emits on the event its waiter is listening to —
 /// cancelling a calendar connect with an `oauth-result` would leave the
-/// frontend promise hanging until the timeout.
-fn abort_pending_sign_in() -> Option<BrowserFlow> {
-    match PENDING_SIGN_IN.lock().unwrap().take() {
-        Some(p) => {
-            if let Some(handle) = p.handle {
-                abort_pending_handle(handle);
-            }
-            Some(p.flow)
-        }
-        None => None,
+/// frontend promise hanging until the timeout — and the owner, so the cancel
+/// reaches the window that is waiting rather than the one that asked.
+fn abort_pending_sign_in() -> Option<(BrowserFlow, String)> {
+    let p = PENDING_SIGN_IN.lock().unwrap().take()?;
+    if let Some(handle) = p.handle {
+        abort_pending_handle(handle);
     }
+    Some((p.flow, p.owner))
 }
 
 /// Atomically retire attempt `id` — clear the slot only if it still holds
@@ -340,7 +360,7 @@ fn abort_pending_sign_in() -> Option<BrowserFlow> {
 /// `JoinHandle::abort` to stop, since abort only takes effect at an await
 /// point) still prevents the stale result from being published, and so a
 /// naturally completed attempt doesn't linger in the slot for a later
-/// `cancel_google_sign_in` to emit a bogus cancellation over.
+/// `cancel_sign_in` to emit a bogus cancellation over.
 fn retire_sign_in_attempt(id: u64) -> bool {
     let mut slot = PENDING_SIGN_IN.lock().unwrap();
     match slot.as_ref() {
@@ -356,14 +376,16 @@ fn retire_sign_in_attempt(id: u64) -> bool {
 /// moment the loopback listener task takes over. Every fallible step in that
 /// prologue — bind, prepare-state, URL validation, opening the browser — would
 /// otherwise leave the attempt parked in the slot on the way out, and a later
-/// `cancel_google_sign_in` would emit a result for a flow that already died.
+/// `cancel_sign_in` would emit a result for a flow that already died.
 /// Call `release` once the listener task exists; until then, any early return
 /// retires the attempt on drop.
 struct SignInAttemptGuard(Option<u64>);
 
 impl SignInAttemptGuard {
-    fn begin(flow: BrowserFlow) -> Self {
-        Self(Some(begin_sign_in_attempt(flow)))
+    /// See `begin_sign_in_attempt`; also returns the attempt it superseded.
+    fn begin(flow: BrowserFlow, owner: &str) -> (Self, Option<(BrowserFlow, String)>) {
+        let (id, superseded) = begin_sign_in_attempt(flow, owner);
+        (Self(Some(id)), superseded)
     }
 
     fn id(&self) -> u64 {
@@ -383,6 +405,58 @@ impl Drop for SignInAttemptGuard {
             retire_sign_in_attempt(id);
         }
     }
+}
+
+/// Deliver a browser-flow result to the webview labeled `owner`, and only to
+/// it. `Emitter::emit` on a window broadcasts to every webview, so every
+/// window waiting on the same event would resolve with this result — and a
+/// sign-in result carries the session token.
+fn emit_flow_result<S: Serialize + Clone>(
+    window: &tauri::WebviewWindow,
+    owner: &str,
+    flow: BrowserFlow,
+    payload: S,
+) {
+    let _ = window.emit_to(
+        tauri::EventTarget::webview_window(owner),
+        flow.result_event(),
+        payload,
+    );
+}
+
+/// Resolve `owner`'s pending wait for `flow` with the silent-cancel result.
+fn emit_flow_canceled(window: &tauri::WebviewWindow, owner: &str, flow: BrowserFlow) {
+    match flow {
+        BrowserFlow::SignIn => emit_flow_result(
+            window,
+            owner,
+            flow,
+            SignInResult {
+                success: None,
+                session_token: None,
+                error: Some(SIGN_IN_CANCELED.into()),
+            },
+        ),
+        BrowserFlow::CalendarConnect => emit_flow_result(
+            window,
+            owner,
+            flow,
+            calendar_connect_error(SIGN_IN_CANCELED),
+        ),
+    }
+}
+
+/// Take the slot for a new attempt by `window` and tell the attempt it
+/// superseded, if another window (or another flow) owned it, that it was
+/// canceled. Runs before the command's first await, so the notice always
+/// follows the slot swap.
+fn begin_owned_attempt(window: &tauri::WebviewWindow, flow: BrowserFlow) -> SignInAttemptGuard {
+    let owner = window.label();
+    let (attempt, superseded) = SignInAttemptGuard::begin(flow, owner);
+    if let Some((prev_flow, prev_owner)) = superseded_notice(superseded, flow, owner) {
+        emit_flow_canceled(window, &prev_owner, prev_flow);
+    }
+    attempt
 }
 
 /// Constant-time-ish nonce check: comparing SHA-256 digests instead of the
@@ -409,10 +483,10 @@ fn desktop_auth_redirect(port: u16, nonce: &str) -> String {
 }
 
 /// The auth URL handed to the default browser comes from server data (the
-/// identity provider's own consent URL, e.g. accounts.google.com — its host
-/// isn't known ahead of time, so https is allowed generally). The plain-http
-/// loopback exception is for local dev API builds only; production must
-/// never open a local HTTP auth URL.
+/// identity provider's own consent URL, e.g. accounts.google.com or
+/// login.microsoftonline.com — its host isn't known ahead of time, so https is
+/// allowed generally). The plain-http loopback exception is for local dev API
+/// builds only; production must never open a local HTTP auth URL.
 fn validate_browser_auth_url(url: &Url) -> Result<(), String> {
     match url.scheme() {
         "https" => Ok(()),
@@ -553,13 +627,48 @@ async fn accept_loopback_callback(
     }
 }
 
+/// Which identity provider a browser sign-in goes through. The frontend picks
+/// a command, not a provider string, so it can never send an arbitrary
+/// `integration` to prepare-state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SignInProvider {
+    Google,
+    Microsoft,
+}
+
+impl SignInProvider {
+    /// The `/oauth2/prepare-state` body for this provider. `redirect` tells
+    /// the API's sign-in callback to deliver the magic-link token to our
+    /// loopback listener instead of the web app.
+    fn prepare_state_body(self, redirect: &str) -> serde_json::Value {
+        match self {
+            // The backend expands these service names into Google scopes and
+            // owns credential persistence.
+            SignInProvider::Google => serde_json::json!({
+                "integration": "google-signin",
+                "scopes": ["calendar-readonly"],
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            }),
+            // Identity-only: the server ignores `scopes` here, and Microsoft
+            // 365 data access is a separate connect flow.
+            SignInProvider::Microsoft => serde_json::json!({
+                "integration": "microsoft-signin",
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            }),
+        }
+    }
+}
+
 /// Drive the post-browser half of sign-in: wait for the loopback callback,
 /// exchange the magic-link token for a session, and report via `oauth-result`.
-/// Emits on `window` (the webview that started this attempt) rather than
-/// broadcasting the session token to every window. Retires `attempt_id`
-/// immediately before emitting so a cancel that arrives too late to abort
-/// this task (abort only takes effect at an await point, and there are none
-/// left after the callback resolves) still suppresses the stale result.
+/// Delivers the result only to `window` (the webview that started this
+/// attempt), never to other windows: it carries the session token. Retires
+/// `attempt_id` immediately before emitting so a cancel that arrives too late
+/// to abort this task (abort only takes effect at an await point, and there
+/// are none left after the callback resolves) still suppresses the stale
+/// result.
 async fn run_browser_sign_in(
     attempt_id: u64,
     window: tauri::WebviewWindow,
@@ -594,16 +703,19 @@ async fn run_browser_sign_in(
         },
     };
     if retire_sign_in_attempt(attempt_id) {
-        let _ = window.emit(BrowserFlow::SignIn.result_event(), result);
+        emit_flow_result(&window, window.label(), BrowserFlow::SignIn, result);
     }
 }
 
-/// Initiates Google OAuth sign-in in the user's default browser (native
-/// webviews break passkeys and are blocked by identity providers). A loopback
-/// listener bound before the flow starts receives the magic-link token from
-/// the API's desktop redirect, and the token is exchanged for a session.
-#[tauri::command]
-pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+/// Browser OAuth sign-in through `provider`, in the user's default browser
+/// (native webviews break passkeys and are blocked by identity providers). A
+/// loopback listener bound before the flow starts receives the magic-link
+/// token from the API's desktop redirect, and the token is exchanged for a
+/// session. Only the prepare-state body depends on the provider.
+async fn browser_oauth_sign_in(
+    window: tauri::WebviewWindow,
+    provider: SignInProvider,
+) -> Result<SignInResult, String> {
     use tauri_plugin_opener::OpenerExt;
 
     // Register this attempt before any await — a cancel that arrives while
@@ -611,8 +723,10 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     // instead of being silently dropped because no listener task exists yet.
     // This also supersedes any still-pending attempt (e.g. the user closed
     // the browser tab and clicked Sign in again). The guard retires it again
-    // if any step below fails before the listener task takes ownership.
-    let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+    // if any step below fails before the listener task takes ownership. The
+    // superseded attempt's window is told it was canceled (see
+    // `superseded_notice`).
+    let attempt = begin_owned_attempt(&window, BrowserFlow::SignIn);
     let attempt_id = attempt.id();
 
     // Bind before prepare-state so the advertised port is already ours.
@@ -622,20 +736,12 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let nonce = random_nonce()?;
 
-    // Step 1: Get the OAuth redirect URL from the API. The backend expands
-    // these service names into Google scopes and owns credential persistence;
-    // `redirect` tells its sign-in callback to deliver the magic-link token to
-    // our loopback listener instead of the web app.
+    // Step 1: Get the OAuth redirect URL from the API.
     let client = http_client();
     let response = client
         .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
-        .json(&serde_json::json!({
-            "integration": "google-signin",
-            "scopes": ["calendar-readonly"],
-            "newUserSignupIntent": "personal_unless_domain_autojoin",
-            "redirect": desktop_auth_redirect(port, &nonce),
-        }))
+        .json(&provider.prepare_state_body(&desktop_auth_redirect(port, &nonce)))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -700,28 +806,27 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     })
 }
 
-/// Abort a pending browser sign-in (the user gave up waiting). Resolves the
-/// frontend's pending `oauth-result` wait with the silent-cancel error.
+/// Sign in with Google. See `browser_oauth_sign_in`.
 #[tauri::command]
-pub async fn cancel_google_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
-    match abort_pending_sign_in() {
-        Some(BrowserFlow::SignIn) => {
-            let _ = window.emit(
-                BrowserFlow::SignIn.result_event(),
-                SignInResult {
-                    success: None,
-                    session_token: None,
-                    error: Some(SIGN_IN_CANCELED.into()),
-                },
-            );
-        }
-        Some(BrowserFlow::CalendarConnect) => {
-            let _ = window.emit(
-                BrowserFlow::CalendarConnect.result_event(),
-                calendar_connect_error(SIGN_IN_CANCELED),
-            );
-        }
-        None => {}
+pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+    browser_oauth_sign_in(window, SignInProvider::Google).await
+}
+
+/// Sign in with Microsoft (Entra ID). Identity only: it grants no Calendar
+/// access. See `browser_oauth_sign_in`.
+#[tauri::command]
+pub async fn microsoft_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+    browser_oauth_sign_in(window, SignInProvider::Microsoft).await
+}
+
+/// Abort a pending browser flow (the user gave up waiting): a sign-in with
+/// either provider, or the Calendar connect hop. Resolves the pending wait
+/// with the silent-cancel error, in the window that started the attempt
+/// (which need not be the one invoking cancel).
+#[tauri::command]
+pub async fn cancel_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
+    if let Some((flow, owner)) = abort_pending_sign_in() {
+        emit_flow_canceled(&window, &owner, flow);
     }
     Ok(())
 }
@@ -771,7 +876,12 @@ async fn run_calendar_connect(
         Err(_) => calendar_connect_error("Connecting Calendar timed out — please try again"),
     };
     if retire_sign_in_attempt(attempt_id) {
-        let _ = window.emit(BrowserFlow::CalendarConnect.result_event(), result);
+        emit_flow_result(
+            &window,
+            window.label(),
+            BrowserFlow::CalendarConnect,
+            result,
+        );
     }
 }
 
@@ -798,9 +908,10 @@ pub async fn connect_google_calendar(
         return Err("Not signed in".into());
     };
 
-    // As in `google_sign_in`: the guard hands the slot back if any step below
-    // fails before the listener task takes ownership of the attempt.
-    let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+    // As in `browser_oauth_sign_in`: the guard hands the slot back if any step below
+    // fails before the listener task takes ownership of the attempt, and the
+    // superseded attempt's window is told it was canceled.
+    let attempt = begin_owned_attempt(&window, BrowserFlow::CalendarConnect);
     let attempt_id = attempt.id();
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -2417,6 +2528,37 @@ mod tests {
     }
 
     #[test]
+    fn google_prepare_state_body_is_unchanged() {
+        let redirect = "/desktop-auth?callback_port=51234&nonce=abc123";
+        assert_eq!(
+            SignInProvider::Google.prepare_state_body(redirect),
+            serde_json::json!({
+                "integration": "google-signin",
+                "scopes": ["calendar-readonly"],
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            })
+        );
+    }
+
+    #[test]
+    fn microsoft_prepare_state_body_is_identity_only() {
+        // The server ignores `scopes` for Microsoft sign-in; sending one would
+        // suggest a Calendar grant that never happens.
+        let redirect = "/desktop-auth?callback_port=51234&nonce=abc123";
+        let body = SignInProvider::Microsoft.prepare_state_body(redirect);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "integration": "microsoft-signin",
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            })
+        );
+        assert!(body.get("scopes").is_none());
+    }
+
+    #[test]
     fn random_nonce_is_32_hex_chars_and_unique() {
         let a = random_nonce().unwrap();
         let b = random_nonce().unwrap();
@@ -2437,7 +2579,7 @@ mod tests {
 
     #[test]
     fn sign_in_attempt_cancel_during_prepare_is_not_dropped() {
-        let id = begin_sign_in_attempt(BrowserFlow::SignIn);
+        let (id, _) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
         assert!(sign_in_attempt_active(id));
 
         // Cancel arrives before the loopback listener task exists (still
@@ -2455,11 +2597,17 @@ mod tests {
         // Cancel must resolve the promise that is actually waiting: the two
         // flows listen on different events, so emitting an oauth-result over a
         // pending calendar connect would hang the frontend until the timeout.
-        begin_sign_in_attempt(BrowserFlow::SignIn);
-        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+        begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
+        assert_eq!(
+            abort_pending_sign_in(),
+            Some((BrowserFlow::SignIn, "settings".to_string()))
+        );
 
-        begin_sign_in_attempt(BrowserFlow::CalendarConnect);
-        assert!(abort_pending_sign_in() == Some(BrowserFlow::CalendarConnect));
+        begin_sign_in_attempt(BrowserFlow::CalendarConnect, "settings");
+        assert_eq!(
+            abort_pending_sign_in(),
+            Some((BrowserFlow::CalendarConnect, "settings".to_string()))
+        );
 
         assert_eq!(BrowserFlow::SignIn.result_event(), "oauth-result");
         assert_eq!(
@@ -2470,12 +2618,12 @@ mod tests {
 
     #[test]
     fn retire_sign_in_attempt_only_clears_the_matching_slot() {
-        let id = begin_sign_in_attempt(BrowserFlow::SignIn);
+        let (id, _) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
 
         // A superseded attempt's retire is a no-op — its slot is already gone
         // (or belongs to a newer attempt), so it must not clear the winner's
         // state or report success.
-        let superseded_id = begin_sign_in_attempt(BrowserFlow::SignIn);
+        let (superseded_id, _) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
         assert!(!retire_sign_in_attempt(id));
         assert!(sign_in_attempt_active(superseded_id));
 
@@ -2494,7 +2642,7 @@ mod tests {
         // attempt parked in the slot, so a later cancel emitted a result for
         // a flow that had already failed.
         let id = {
-            let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
+            let (attempt, _) = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect, "settings");
             let id = attempt.id();
             assert!(sign_in_attempt_active(id));
             id // guard drops here, as it would on an early `?` return
@@ -2508,30 +2656,116 @@ mod tests {
         // Once the listener task owns the attempt, the guard must keep its
         // hands off: retiring here would strand the frontend's waiter.
         let id = {
-            let attempt = SignInAttemptGuard::begin(BrowserFlow::SignIn);
+            let (attempt, _) = SignInAttemptGuard::begin(BrowserFlow::SignIn, "onboarding");
             attempt.release()
         };
         assert!(sign_in_attempt_active(id));
-        assert!(abort_pending_sign_in() == Some(BrowserFlow::SignIn));
+        assert_eq!(
+            abort_pending_sign_in(),
+            Some((BrowserFlow::SignIn, "onboarding".to_string()))
+        );
     }
 
     #[test]
     fn attempt_guard_drop_never_retires_a_newer_attempt() {
         // A superseded prologue failing late must not clear the winner's slot.
-        let stale = SignInAttemptGuard::begin(BrowserFlow::SignIn);
-        let winner = begin_sign_in_attempt(BrowserFlow::CalendarConnect);
+        let (stale, _) = SignInAttemptGuard::begin(BrowserFlow::SignIn, "onboarding");
+        let (winner, _) = begin_sign_in_attempt(BrowserFlow::CalendarConnect, "settings");
         drop(stale);
         assert!(sign_in_attempt_active(winner));
         assert!(retire_sign_in_attempt(winner));
     }
 
+    #[test]
+    fn begin_sign_in_attempt_reports_the_attempt_it_supersedes() {
+        // Start from an empty slot: the slot is process-wide.
+        abort_pending_sign_in();
+
+        let (_, prev) = begin_sign_in_attempt(BrowserFlow::SignIn, "onboarding");
+        assert_eq!(prev, None);
+
+        // Settings supersedes Onboarding's abandoned attempt. The caller needs
+        // the previous flow and owner to tell that window it was canceled.
+        let (_, prev) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
+        assert_eq!(prev, Some((BrowserFlow::SignIn, "onboarding".to_string())));
+
+        let (attempt, prev) = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect, "onboarding");
+        assert_eq!(prev, Some((BrowserFlow::SignIn, "settings".to_string())));
+        drop(attempt);
+        assert_eq!(abort_pending_sign_in(), None);
+    }
+
+    #[test]
+    fn abort_pending_sign_in_reports_the_owner_of_the_attempt() {
+        // Cancel resolves the owner's waiter, not the window that invoked it.
+        abort_pending_sign_in();
+        begin_sign_in_attempt(BrowserFlow::CalendarConnect, "onboarding");
+        assert_eq!(
+            abort_pending_sign_in(),
+            Some((BrowserFlow::CalendarConnect, "onboarding".to_string()))
+        );
+        assert_eq!(abort_pending_sign_in(), None);
+    }
+
+    #[test]
+    fn superseded_notice_goes_to_a_different_owner() {
+        assert_eq!(
+            superseded_notice(
+                Some((BrowserFlow::SignIn, "onboarding".to_string())),
+                BrowserFlow::SignIn,
+                "settings",
+            ),
+            Some((BrowserFlow::SignIn, "onboarding".to_string()))
+        );
+        assert_eq!(
+            superseded_notice(
+                Some((BrowserFlow::CalendarConnect, "onboarding".to_string())),
+                BrowserFlow::SignIn,
+                "settings",
+            ),
+            Some((BrowserFlow::CalendarConnect, "onboarding".to_string()))
+        );
+    }
+
+    #[test]
+    fn superseded_notice_goes_to_the_same_owner_for_a_different_flow() {
+        // The previous flow listens on a different event, so the notice can't
+        // reach the new attempt's listener.
+        assert_eq!(
+            superseded_notice(
+                Some((BrowserFlow::CalendarConnect, "settings".to_string())),
+                BrowserFlow::SignIn,
+                "settings",
+            ),
+            Some((BrowserFlow::CalendarConnect, "settings".to_string()))
+        );
+    }
+
+    #[test]
+    fn superseded_notice_is_skipped_for_the_same_owner_and_flow() {
+        // The window's new invocation already listens on the same event, so a
+        // cancel there would resolve the new attempt's promise.
+        assert_eq!(
+            superseded_notice(
+                Some((BrowserFlow::SignIn, "settings".to_string())),
+                BrowserFlow::SignIn,
+                "settings",
+            ),
+            None
+        );
+        assert_eq!(
+            superseded_notice(None, BrowserFlow::SignIn, "settings"),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn sign_in_attempt_out_of_order_completion_supersedes_cleanly() {
-        let first_id = begin_sign_in_attempt(BrowserFlow::SignIn);
+        let (first_id, _) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
         // A second attempt starts (e.g. the user retried) before the first's
         // prepare-state call returned, superseding it before it ever got a
         // listener handle.
-        let second_id = begin_sign_in_attempt(BrowserFlow::SignIn);
+        let (second_id, _) = begin_sign_in_attempt(BrowserFlow::SignIn, "settings");
         assert!(!sign_in_attempt_active(first_id));
         assert!(sign_in_attempt_active(second_id));
 

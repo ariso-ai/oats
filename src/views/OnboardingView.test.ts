@@ -4,6 +4,8 @@ import { mount, flushPromises } from '@vue/test-utils';
 
 const googleSignIn = vi.fn();
 const cancelSignIn = vi.fn();
+const microsoftSignIn = vi.fn();
+const ensureCalendarAccess = vi.fn();
 const setOnboarded = vi.fn();
 const openSettingsWindow = vi.fn();
 const emitNotificationsSync = vi.fn();
@@ -13,7 +15,12 @@ const close = vi.fn();
 vi.mock('../tauri', () => ({
   AUTH_SIGNED_IN_EVENT: 'auth://signed-in',
   SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
-  auth: { googleSignIn: () => googleSignIn(), cancelSignIn: () => cancelSignIn() },
+  auth: {
+    googleSignIn: () => googleSignIn(),
+    microsoftSignIn: () => microsoftSignIn(),
+    cancelSignIn: () => cancelSignIn(),
+    ensureCalendarAccess: () => ensureCalendarAccess(),
+  },
   openSettingsWindow: () => openSettingsWindow(),
   setOnboarded: (v: boolean) => setOnboarded(v),
 }));
@@ -35,6 +42,7 @@ beforeEach(() => {
   openSettingsWindow.mockResolvedValue(undefined);
   emitNotificationsSync.mockResolvedValue(undefined);
   emit.mockResolvedValue(undefined);
+  ensureCalendarAccess.mockResolvedValue({ connected: true });
 });
 
 describe('OnboardingView', () => {
@@ -116,5 +124,59 @@ describe('OnboardingView', () => {
     expect(setOnboarded).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
     expect(wrapper.find('.google-btn').exists()).toBe(true);
+  });
+
+  it('offers Microsoft sign-in next to Google', () => {
+    const wrapper = mount(OnboardingView);
+    expect(wrapper.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+  });
+
+  it('Microsoft sign-in broadcasts, skips the calendar hop, and finishes onboarding', async () => {
+    microsoftSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
+    const wrapper = mount(OnboardingView);
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(emitNotificationsSync).toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith('auth://signed-in');
+    // ensureCalendarAccess opens Google's Workspace consent page.
+    expect(ensureCalendarAccess).not.toHaveBeenCalled();
+    expect(setOnboarded).toHaveBeenCalledWith(true);
+    expect(openSettingsWindow).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('Google sign-in still runs the calendar hop', async () => {
+    googleSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
+    const wrapper = mount(OnboardingView);
+    await wrapper.get('.google-btn').trigger('click');
+    await flushPromises();
+
+    expect(ensureCalendarAccess).toHaveBeenCalledTimes(1);
+    expect(setOnboarded).toHaveBeenCalledWith(true);
+  });
+
+  it('disables both buttons while either flow is pending and relabels only the clicked one', async () => {
+    googleSignIn.mockReturnValue(new Promise(() => {}));
+    const wrapper = mount(OnboardingView);
+    await wrapper.get('.google-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('.google-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.get('.microsoft-btn').attributes('disabled')).toBeDefined();
+    expect(wrapper.get('.google-btn').text()).toContain('Continue in your browser…');
+    expect(wrapper.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+  });
+
+  it('Microsoft sign-in error stays on the step and shows the message', async () => {
+    microsoftSignIn.mockResolvedValue({ error: 'API returned 500' });
+    const wrapper = mount(OnboardingView);
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('.error').text()).toBe('API returned 500');
+    expect(setOnboarded).not.toHaveBeenCalled();
+    expect(wrapper.get('.microsoft-btn').attributes('disabled')).toBeUndefined();
   });
 });

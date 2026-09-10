@@ -24,6 +24,15 @@ const setVaultDir = vi.fn((_path: string) => Promise.resolve());
 const pickVaultFolder = vi.fn(
   (_current?: string): Promise<string | null> => Promise.resolve(null)
 );
+type SignInResult = { success?: boolean; sessionToken?: string; error?: string };
+const googleSignIn = vi.fn((): Promise<SignInResult> => Promise.resolve({ success: true, sessionToken: 't' }));
+const microsoftSignIn = vi.fn((): Promise<SignInResult> => Promise.resolve({ success: true, sessionToken: 't' }));
+const cancelSignIn = vi.fn(() => Promise.resolve());
+const ensureCalendarAccess = vi.fn(
+  (): Promise<{ connected: boolean; reason?: string }> => Promise.resolve({ connected: true })
+);
+const signOut = vi.fn(() => Promise.resolve());
+const emitNotificationsSync = vi.fn(() => Promise.resolve());
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -43,9 +52,11 @@ vi.mock('../tauri', () => ({
   SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
   auth: {
     checkSession: () => checkSession(),
-    googleSignIn: vi.fn(),
-    cancelSignIn: vi.fn(),
-    signOut: vi.fn(),
+    googleSignIn: () => googleSignIn(),
+    microsoftSignIn: () => microsoftSignIn(),
+    cancelSignIn: () => cancelSignIn(),
+    ensureCalendarAccess: () => ensureCalendarAccess(),
+    signOut: () => signOut(),
   },
   api: {
     request: (method: string, path: string, body?: unknown) =>
@@ -90,7 +101,7 @@ vi.mock('../composables/useMeetingNotifications', () => ({
   setMeetingNotificationsEnabled: vi.fn(),
   ensureNotificationPermission: vi.fn(),
   openNotificationSettings: vi.fn(),
-  emitNotificationsSync: vi.fn(() => Promise.resolve()),
+  emitNotificationsSync: () => emitNotificationsSync(),
 }));
 vi.mock('../composables/useAutoRecord', () => ({
   isAutoRecordEnabled: () => Promise.resolve(false),
@@ -151,6 +162,11 @@ beforeEach(() => {
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
+  googleSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
+  microsoftSignIn.mockResolvedValue({ success: true, sessionToken: 't' });
+  cancelSignIn.mockResolvedValue(undefined);
+  ensureCalendarAccess.mockResolvedValue({ connected: true });
+  signOut.mockResolvedValue(undefined);
 });
 
 function fireRecordingState(active: boolean) {
@@ -333,8 +349,8 @@ describe('SettingsView account avatar', () => {
     vi.unstubAllGlobals();
   });
 
-  // Sign the user in and route the two profile calls fetchUserProfile makes.
-  function mockSignedIn(avatar: string | null) {
+  // Sign the user in and route the profile calls fetchUserProfile makes.
+  function mockSignedIn(avatar: string | null, microsoftAvatar: string | null = null) {
     checkSession.mockResolvedValue({ token: 'session' });
     apiRequest.mockImplementation((_method: string, path: string) => {
       if (path === '/auth/me') {
@@ -349,9 +365,35 @@ describe('SettingsView account avatar', () => {
           data: { avatar, connected: avatar != null },
         });
       }
+      if (path === '/users/microsoft-avatar') {
+        return Promise.resolve({
+          status: 200,
+          data: { avatar: microsoftAvatar, connected: microsoftAvatar != null },
+        });
+      }
       return Promise.resolve({ status: 200, data: {} });
     });
   }
+
+  it('falls back to the Microsoft avatar when there is no Google avatar', async () => {
+    mockSignedIn(null, 'https://example.com/microsoft-photo.png');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const img = wrapper.find('img.avatar');
+    expect(img.exists()).toBe(true);
+    expect(img.attributes('src')).toBe('https://example.com/microsoft-photo.png');
+  });
+
+  it('does not ask for the Microsoft avatar when a Google avatar exists', async () => {
+    mockSignedIn('https://lh3.googleusercontent.com/a/photo.png');
+    mount(SettingsView);
+    await flushPromises();
+
+    const paths = apiRequest.mock.calls.map((call) => call[1]);
+    expect(paths).toContain('/users/google-avatar');
+    expect(paths).not.toContain('/users/microsoft-avatar');
+  });
 
   it('renders the Google avatar image when one is available', async () => {
     mockSignedIn('https://lh3.googleusercontent.com/a/photo.png');
@@ -377,6 +419,7 @@ describe('SettingsView account avatar', () => {
 
     expect(wrapper.find('.sign-in-container').exists()).toBe(false);
     expect(wrapper.text()).not.toContain('Sign in with Google');
+    expect(wrapper.text()).not.toContain('Sign in with Microsoft');
     expect(wrapper.text()).toContain('Sign Out');
   });
 
@@ -437,6 +480,122 @@ describe('SettingsView account avatar', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SettingsView sign-in providers', () => {
+  async function mountSignedOut() {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('offers Google and Microsoft sign-in when signed out', async () => {
+    const wrapper = await mountSignedOut();
+    expect(wrapper.get('.google-btn').text()).toContain('Sign in with Google');
+    expect(wrapper.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+  });
+
+  it('Microsoft sign-in syncs notifications and never runs the Google calendar hop', async () => {
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(microsoftSignIn).toHaveBeenCalledTimes(1);
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(emitNotificationsSync).toHaveBeenCalled();
+    // ensureCalendarAccess opens Google's Workspace consent page.
+    expect(ensureCalendarAccess).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('Sign Out');
+    expect(wrapper.find('.calendar-connect').exists()).toBe(false);
+  });
+
+  it('Google sign-in still runs the calendar hop', async () => {
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.google-btn').trigger('click');
+    await flushPromises();
+
+    expect(googleSignIn).toHaveBeenCalledTimes(1);
+    expect(ensureCalendarAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables both buttons while either flow is pending and relabels only the clicked one', async () => {
+    microsoftSignIn.mockReturnValue(new Promise(() => {}));
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    const google = wrapper.get('.google-btn');
+    const microsoft = wrapper.get('.microsoft-btn');
+    expect(google.attributes('disabled')).toBeDefined();
+    expect(microsoft.attributes('disabled')).toBeDefined();
+    expect(microsoft.text()).toContain('Continue in your browser…');
+    expect(google.text()).toContain('Sign in with Google');
+
+    // One Cancel covers both providers.
+    await wrapper.get('.sign-in-container .sign-out-btn').trigger('click');
+    expect(cancelSignIn).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets both buttons silently when a Microsoft sign-in is canceled', async () => {
+    microsoftSignIn.mockResolvedValue({ error: 'Sign-in canceled' });
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.sign-in-container .error').exists()).toBe(false);
+    expect(wrapper.get('.google-btn').attributes('disabled')).toBeUndefined();
+    expect(wrapper.get('.microsoft-btn').attributes('disabled')).toBeUndefined();
+    expect(wrapper.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+  });
+
+  it('shows a Microsoft sign-in error under the buttons', async () => {
+    microsoftSignIn.mockResolvedValue({ error: 'API returned 500' });
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('.sign-in-container .error').text()).toBe('API returned 500');
+  });
+
+  it('never shows a Microsoft user the Google calendar nudge left over from a Google session', async () => {
+    // The settings window outlives sign-outs, so calendarConnected=false from a
+    // Google user must not leak into the next (Microsoft) session.
+    ensureCalendarAccess.mockResolvedValue({ connected: false, reason: 'no_calendar_scope' });
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.google-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.calendar-connect').exists()).toBe(true);
+
+    await wrapper.get('.account-info .sign-out-btn').trigger('click');
+    await flushPromises();
+    await wrapper.get('.microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Sign Out');
+    expect(wrapper.find('.calendar-connect').exists()).toBe(false);
+  });
+
+  it('drops the Google calendar nudge on sign-out even when the next sign-in happens in another window', async () => {
+    ensureCalendarAccess.mockResolvedValue({ connected: false, reason: 'no_calendar_scope' });
+    const wrapper = await mountSignedOut();
+    await wrapper.get('.google-btn').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.calendar-connect').exists()).toBe(true);
+
+    await wrapper.get('.account-info .sign-out-btn').trigger('click');
+    await flushPromises();
+
+    // A Microsoft sign-in completed in Onboarding: this window only hears the
+    // broadcast and refreshes, so handleSignIn's reset never runs here.
+    checkSession.mockResolvedValue({ token: 'session' });
+    const onSignedIn = listeners.get('auth://signed-in');
+    expect(onSignedIn).toBeDefined();
+    onSignedIn!({ payload: null });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Sign Out');
+    expect(wrapper.find('.calendar-connect').exists()).toBe(false);
   });
 });
 
