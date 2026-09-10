@@ -1251,8 +1251,9 @@ async function handleTraySignIn(provider: unknown) {
   if (backend.value !== 'ariso' || isSigningIn.value) return;
   await refreshSignedInAccount();
   // Checked again after the await: a second tray click may have started a
-  // flow meanwhile (handleSignIn marks it pending synchronously).
-  if (isSignedIn.value || isSigningIn.value) return;
+  // flow meanwhile (handleSignIn marks it pending synchronously), or the
+  // backend may have switched to Local while this await was pending.
+  if (backend.value !== 'ariso' || isSignedIn.value || isSigningIn.value) return;
   await handleSignIn(provider);
 }
 
