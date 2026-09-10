@@ -144,6 +144,24 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
     refresh_tray_title(app);
 }
 
+/// Redraw the tray on the main thread (muda menus are main-thread on macOS).
+/// While recording, the recording menu owns the tray — only the title is
+/// refreshed (which clears it). `rebuild_menu` skips a full idle-menu rebuild
+/// on countdown-only ticks so an open tray menu isn't yanked shut.
+pub fn refresh(app: &AppHandle, rebuild_menu: bool) {
+    let app_for_menu = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let recording = app_for_menu
+            .state::<crate::recording_state::RecordingState>()
+            .is_active();
+        if rebuild_menu && !recording {
+            set_menu(&app_for_menu, false, false);
+        } else {
+            refresh_tray_title(&app_for_menu);
+        }
+    });
+}
+
 /// Render or clear the menu-bar text next to the tray icon. Shows the
 /// featured meeting's countdown only when idle; recording (or no upcoming
 /// meeting / Local backend / signed out) clears it. macOS-only effect —
@@ -185,6 +203,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
+                "sign_in_google" => request_sign_in(app, "google"),
+                "sign_in_microsoft" => request_sign_in(app, "microsoft"),
                 "start_recording" => start_recording(app),
                 "record_featured" => {
                     let app_async = app.clone();
@@ -294,6 +314,26 @@ pub fn open_library(app: &AppHandle) {
     });
 }
 
+/// Whether the idle menu leads with the "Sign in with …" rows: on the Ariso
+/// backend with no stored session, whichever provider it came from. Local
+/// mode never signs in, so it never offers to.
+fn offers_sign_in(backend: &str, has_session: bool) -> bool {
+    backend == "ariso" && !has_session
+}
+
+/// Start a browser sign-in from the tray. The flow runs in Settings, not here:
+/// its result is delivered only to the webview that started it, and Settings
+/// owns the follow-up (profile, notification sync, the Calendar hop) and shows
+/// the pending state with its Cancel button. Settings is pre-created and hides
+/// on close, so its `tray://sign-in` listener is already mounted.
+fn request_sign_in(app: &AppHandle, provider: &str) {
+    if let Err(error) = crate::commands::open_settings_window(app) {
+        eprintln!("Failed to open Settings for tray sign-in: {error}");
+        return;
+    }
+    app.emit("tray://sign-in", provider).ok();
+}
+
 pub fn build_idle_menu(
     app: &AppHandle,
     featured: Option<&crate::tray_meeting::FeaturedMeeting>,
@@ -318,6 +358,16 @@ pub fn build_idle_menu(
             .enabled(false)
             .build(app)?;
         builder = builder.item(&record_featured).item(&time_row).separator();
+    }
+
+    if offers_sign_in(
+        &crate::commands::active_backend(app),
+        crate::commands::get_session_token(app).is_some(),
+    ) {
+        let google = MenuItemBuilder::with_id("sign_in_google", "Sign in with Google").build(app)?;
+        let microsoft =
+            MenuItemBuilder::with_id("sign_in_microsoft", "Sign in with Microsoft").build(app)?;
+        builder = builder.item(&google).item(&microsoft).separator();
     }
 
     let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
@@ -402,6 +452,14 @@ mod tests {
                 assert_eq!((icon.width(), icon.height()), expected);
             }
         }
+    }
+
+    #[test]
+    fn sign_in_is_offered_only_on_ariso_without_a_session() {
+        assert!(offers_sign_in("ariso", false));
+        assert!(!offers_sign_in("ariso", true));
+        assert!(!offers_sign_in("local", false));
+        assert!(!offers_sign_in("local", true));
     }
 
     #[test]

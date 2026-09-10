@@ -599,6 +599,114 @@ describe('SettingsView sign-in providers', () => {
   });
 });
 
+describe('SettingsView tray sign-in', () => {
+  function fireTraySignIn(payload: unknown) {
+    const cb = listeners.get('tray://sign-in');
+    expect(cb).toBeDefined();
+    cb!({ payload });
+  }
+
+  it('starts the requested provider flow like a button click', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    fireTraySignIn('microsoft');
+    await flushPromises();
+    expect(microsoftSignIn).toHaveBeenCalledTimes(1);
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('Sign Out');
+
+    await wrapper.get('.account-info .sign-out-btn').trigger('click');
+    await flushPromises();
+    fireTraySignIn('google');
+    await flushPromises();
+    expect(googleSignIn).toHaveBeenCalledTimes(1);
+    // Same post-sign-in path as the button: Google still runs the calendar hop.
+    expect(ensureCalendarAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the pending flow so it can be canceled from Settings', async () => {
+    googleSignIn.mockReturnValue(new Promise(() => {}));
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    fireTraySignIn('google');
+    await flushPromises();
+
+    expect(wrapper.get('.google-btn').text()).toContain('Continue in your browser…');
+    expect(wrapper.find('.sign-in-container .sign-out-btn').exists()).toBe(true);
+  });
+
+  it('ignores a request while a flow is already pending', async () => {
+    microsoftSignIn.mockReturnValue(new Promise(() => {}));
+    mount(SettingsView);
+    await flushPromises();
+
+    // Two tray clicks landing back to back must not start two flows.
+    fireTraySignIn('microsoft');
+    fireTraySignIn('google');
+    await flushPromises();
+    fireTraySignIn('google');
+    await flushPromises();
+
+    expect(microsoftSignIn).toHaveBeenCalledTimes(1);
+    expect(googleSignIn).not.toHaveBeenCalled();
+  });
+
+  it('does not sign in again when the session turns out to be valid', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    // Signed in elsewhere since this window last looked.
+    checkSession.mockResolvedValue({ sessionToken: 'session' });
+    fireTraySignIn('google');
+    await flushPromises();
+
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('Sign Out');
+  });
+
+  it('re-reads a stale signed-in state before starting the flow', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 'session' });
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Sign Out');
+
+    // The server rejected the session and native code cleared it without
+    // telling this window; the tray offers sign-in again.
+    checkSession.mockResolvedValue(null);
+    fireTraySignIn('microsoft');
+    await flushPromises();
+
+    expect(microsoftSignIn).toHaveBeenCalledTimes(1);
+  });
+
+  it('never signs in on the Local backend', async () => {
+    // Offline mode makes no network calls; a request that raced a switch to
+    // Local must not start one.
+    getBackendSetting.mockResolvedValue('local' as never);
+    mount(SettingsView);
+    await flushPromises();
+
+    fireTraySignIn('google');
+    await flushPromises();
+
+    expect(checkSession).toHaveBeenCalledTimes(1); // mount only
+    expect(googleSignIn).not.toHaveBeenCalled();
+  });
+
+  it('ignores an unknown provider', async () => {
+    mount(SettingsView);
+    await flushPromises();
+
+    fireTraySignIn('github');
+    await flushPromises();
+
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(microsoftSignIn).not.toHaveBeenCalled();
+  });
+});
+
 describe('SettingsView silence detection toggle', () => {
   // Find the checkbox in the setting-row whose label is `label`.
   function toggleFor(wrapper: ReturnType<typeof mount>, label: string) {
