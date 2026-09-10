@@ -1156,15 +1156,18 @@ async function load(item: MeetingListItem | null): Promise<void> {
 
 // Watch stable detail fields only. User-note autosaves must not reload the
 // whole pane or change AI Notes tab visibility while the user switches tabs.
+// One source per field, so Vue compares the values: a list refresh swaps in a
+// fresh row object with the same fields, and reloading on that would restart
+// the progress poll and re-emit `contentReady` into another refresh — a loop.
 watch(
-  () => [
-    props.item?.id,
-    props.item?.timestamp,
-    props.item?.durationSeconds,
-    props.item?.files?.hasTranscript,
+  [
+    () => props.item?.id,
+    () => props.item?.timestamp,
+    () => props.item?.durationSeconds,
+    () => props.item?.files?.hasTranscript,
     // The detail carries prepId from the row, so a row that gains one (a prep
     // created after the list loaded) must reload for its Prep tab to appear.
-    props.item?.prepId,
+    () => props.item?.prepId,
   ],
   () => load(props.item),
   { immediate: true }

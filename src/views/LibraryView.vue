@@ -579,11 +579,17 @@ function rowProcessingLabel(m: MeetingListItem): string | null {
     // a lie.
     if (m.status === 'recording' || m.status === 'transcribing') return PROCESSING_LABEL;
     // "Has a transcript but no note" is an *inference* that notes are still
-    // generating, and it can't tell a running pipeline from one that never
-    // finished (telling notes-pending from notes-failed needs the per-recording
-    // status view, which the list payload doesn't carry). Generation runs for
-    // minutes, so bound it: an old recording with no note is stuck, not busy.
-    if (m.status === 'done' && m.files?.hasTranscript && !m.files?.hasNote) {
+    // generating. It holds only while the notes are still pending: a recording
+    // that settled without a note (nothing was said, or generation failed) is
+    // done, and its detail panel names why. Even pending can't tell a running
+    // pipeline from one that died mid-generation, so bound it: generation runs
+    // for minutes, and an old recording with no note is stuck, not busy.
+    if (
+      m.status === 'done' &&
+      m.files?.hasTranscript &&
+      !m.files.hasNote &&
+      (m.files.notesStatus ?? 'pending') === 'pending'
+    ) {
       return finishedRecently(m) ? PROCESSING_LABEL : null;
     }
     return null;

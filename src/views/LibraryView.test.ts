@@ -718,6 +718,25 @@ describe('LibraryView', () => {
       expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
     });
 
+    // A missing note only implies "still generating" while the list can't say
+    // otherwise. Once it reports the notes settled without one — nothing was
+    // said, or generation failed — a spinning row would be a lie, and it would
+    // make every content-ready report from the open detail reload the list.
+    it.each(['empty-transcript', 'failed'])(
+      'shows the normal sub-line for a recent recording whose notes settled as %s',
+      async (notesStatus) => {
+        const wrapper = await mountWithRows([
+          item({
+            id: 'a',
+            timestamp: new Date(Date.now() - 60_000).toISOString(),
+            status: 'done',
+            files: { hasAudio: true, hasTranscript: true, hasNote: false, notesStatus },
+          }),
+        ]);
+        expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
+      }
+    );
+
     // The window is measured from the end, so a long recording isn't already
     // stale the moment it stops.
     it('measures the window from the end of a long recording, not its start', async () => {

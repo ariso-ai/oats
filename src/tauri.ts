@@ -334,6 +334,7 @@ export interface RecordingSummary {
   hasAudio: boolean;
   hasNote: boolean;
   hasTranscript: boolean;
+  notesStatus: NotesStatus;
 }
 
 /** `empty-transcript`: nothing was said, so notes were deliberately skipped —
