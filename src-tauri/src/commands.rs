@@ -213,15 +213,20 @@ pub async fn is_session_valid(app: &tauri::AppHandle) -> bool {
     false
 }
 
+// Both writers redraw the tray: its idle menu offers sign-in only while no
+// session is stored, and the token also changes from native code (a server
+// rejection clears it) that no window hears about.
 fn set_session_token(app: &tauri::AppHandle, token: &str) -> Result<(), String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     store.set(SESSION_KEY, serde_json::json!(token));
+    crate::tray::refresh(app, true);
     store.save().map_err(|e| e.to_string())
 }
 
 pub(crate) fn clear_session_token(app: &tauri::AppHandle) -> Result<(), String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     store.delete(SESSION_KEY);
+    crate::tray::refresh(app, true);
     store.save().map_err(|e| e.to_string())
 }
 

@@ -1133,6 +1133,9 @@ onMounted(async () => {
   unlistenSignInPrompt = await listen('tray://show-sign-in-prompt', () => {
     signInPrompt.value = true;
   });
+  const unTraySignIn = await listen<unknown>('tray://sign-in', (e) => {
+    void handleTraySignIn(e.payload);
+  });
   const unSignedIn = await listen(AUTH_SIGNED_IN_EVENT, async () => {
     await refreshSignedInAccount();
     signInPrompt.value = false;
@@ -1155,7 +1158,7 @@ onMounted(async () => {
     checking.value = false;
   });
 
-  unlistenUpdates.push(unSignedIn, unAvail, unNone, unChecking, unError);
+  unlistenUpdates.push(unTraySignIn, unSignedIn, unAvail, unNone, unChecking, unError);
 
   try {
     backend.value = await getBackendSetting();
@@ -1233,6 +1236,25 @@ async function handleSignIn(provider: SignInProvider) {
   } finally {
     signingInWith.value = null;
   }
+}
+
+/**
+ * A "Sign in with …" row in the tray, which surfaces this window first. The
+ * tray offers them only while no session is stored, but this window's account
+ * state can lag — a session the server rejected is cleared natively without
+ * telling it — so re-read it before starting. Dropped while a flow is pending
+ * (Cancel here is the way to switch providers) and on Local, which must make no
+ * network calls even if the request raced a backend switch.
+ */
+async function handleTraySignIn(provider: unknown) {
+  if (provider !== 'google' && provider !== 'microsoft') return;
+  if (backend.value !== 'ariso' || isSigningIn.value) return;
+  await refreshSignedInAccount();
+  // Checked again after the await: a second tray click may have started a
+  // flow meanwhile (handleSignIn marks it pending synchronously), or the
+  // backend may have switched to Local while this await was pending.
+  if (backend.value !== 'ariso' || isSignedIn.value || isSigningIn.value) return;
+  await handleSignIn(provider);
 }
 
 /**
