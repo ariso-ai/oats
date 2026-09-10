@@ -1085,6 +1085,7 @@ describe('WaveformView tray identity (#355)', () => {
     backendKind.value = 'ariso';
     routeQuery = { meetingId: '42' };
     getMeeting.mockRejectedValueOnce(new Error('offline'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     mount(WaveformView);
     await flushPromises();
@@ -1093,6 +1094,7 @@ describe('WaveformView tray identity (#355)', () => {
       meetingId: 42,
       title: null,
     });
+    expect(err).toHaveBeenCalled();
   });
 
   it('registers nothing while the recording has no identity', async () => {
