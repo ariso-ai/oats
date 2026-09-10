@@ -20,7 +20,13 @@ vi.mock('./useMeetingApi', () => ({
   useMeetingApi: () => ({ uploadAudio: (...a: unknown[]) => uploadAudio(...a) }),
 }));
 
-import { mergedMeta, groupByMeetingId, combineAndUpload, discardAll } from './usePendingUploads';
+import {
+  mergedMeta,
+  groupByMeetingId,
+  combineAndUpload,
+  discardAll,
+  PartialUploadError,
+} from './usePendingUploads';
 
 const items = [
   { createdAt: '2026-06-12T09:00:00Z', startAt: '2026-06-12T09:00:00Z', endAt: '2026-06-12T09:05:00Z', durationSeconds: 300 },
@@ -135,6 +141,24 @@ describe('combineAndUpload', () => {
     expect(discardAudio).not.toHaveBeenCalledWith('d');
   });
 
+  // The caller only learns about the failed group via the throw, so the
+  // succeeded group's meeting id must ride along on the error or it's lost.
+  it('carries the succeeded meeting ids on a PartialUploadError when one group fails', async () => {
+    const a = { ...items[0], createdAt: 'a', durationSeconds: 300, meetingId: 5 };
+    const d = { ...items[0], createdAt: 'd', durationSeconds: 90, meetingId: 9 };
+
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockImplementation((_blob: unknown, meta: { meetingId?: number }) =>
+      meta.meetingId === 9 ? Promise.reject(new Error('offline')) : Promise.resolve({ meetingId: 5 })
+    );
+    discardAudio.mockResolvedValue(undefined);
+
+    const error = await combineAndUpload([a, d]).catch((e) => e);
+    expect(error).toBeInstanceOf(PartialUploadError);
+    expect((error as PartialUploadError).uploadedMeetingIds).toEqual([5]);
+    expect((error as PartialUploadError).message).toBe('offline');
+  });
+
   it('does not discard when the upload fails', async () => {
     combine.mockResolvedValue(new ArrayBuffer(4));
     uploadAudio.mockRejectedValue(new Error('offline'));
@@ -163,9 +187,23 @@ describe('combineAndUpload', () => {
   });
 
   it('is a no-op for an empty list', async () => {
-    await combineAndUpload([]);
+    await expect(combineAndUpload([])).resolves.toEqual([]);
     expect(combine).not.toHaveBeenCalled();
     expect(uploadAudio).not.toHaveBeenCalled();
+  });
+
+  // The caller shows each uploaded meeting as "processing" until the server has
+  // a transcript for it, so the ids have to survive the upload.
+  it('returns the meeting id each group uploaded to', async () => {
+    const a = { ...items[0], createdAt: 'a', meetingId: 5 };
+    const d = { ...items[0], createdAt: 'd', meetingId: 9 };
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockImplementation((_blob: unknown, meta: { meetingId?: number }) =>
+      Promise.resolve({ meetingId: meta.meetingId ?? 77 })
+    );
+    discardAudio.mockResolvedValue(undefined);
+
+    await expect(combineAndUpload([a, d, items[0]])).resolves.toEqual([5, 9, 77]);
   });
 });
 

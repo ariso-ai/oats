@@ -39,8 +39,10 @@ export function groupByMeetingId(items: PendingUploadMeta[]): PendingUploadMeta[
 }
 
 /** Concatenate one meetingId group server-side, upload it (to its existing
- *  meeting when it has an id, else a fresh one), then discard its buffers. */
-async function uploadGroup(group: PendingUploadMeta[]): Promise<void> {
+ *  meeting when it has an id, else a fresh one), then discard its buffers.
+ *  Resolves to the meeting the audio landed on, so the caller can show it as
+ *  "processing" until the server produces a transcript/notes. */
+async function uploadGroup(group: PendingUploadMeta[]): Promise<number> {
   const keys = group.map((i) => i.createdAt);
   const meta = mergedMeta(group);
 
@@ -62,8 +64,9 @@ async function uploadGroup(group: PendingUploadMeta[]): Promise<void> {
   }
 
   const blob = new Blob([buf], { type: 'audio/mpeg' });
+  let meetingId: number;
   try {
-    await useMeetingApi().uploadAudio(blob, meta);
+    ({ meetingId } = await useMeetingApi().uploadAudio(blob, meta));
   } catch (e) {
     await reportUploadFailure(e, {
       attempt: 'retry',
@@ -82,18 +85,41 @@ async function uploadGroup(group: PendingUploadMeta[]): Promise<void> {
   if (failed > 0) {
     console.error(`Uploaded combined audio, but failed to discard ${failed} buffered item(s)`);
   }
+  return meetingId;
+}
+
+/** Thrown by {@link combineAndUpload} when at least one group fails but
+ *  others succeeded. Carries the succeeded groups' meeting ids so the caller
+ *  can still track them as processing instead of losing them to the throw. */
+export class PartialUploadError extends Error {
+  constructor(public readonly uploadedMeetingIds: number[], cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'PartialUploadError';
+    this.cause = cause;
+  }
 }
 
 /** Resume pending uploads: group by meeting so each meeting's audio re-attaches
  *  to that meeting (preserving its id), then upload each group. A group that
  *  fails is left buffered for a later retry while the others still upload and
  *  discard; the first failure is re-thrown so the caller surfaces an error.
- *  `items` must be chronological (as `pending.list()` returns). */
-export async function combineAndUpload(items: PendingUploadMeta[]): Promise<void> {
-  if (items.length === 0) return;
+ *  `items` must be chronological (as `pending.list()` returns).
+ *
+ *  Resolves to the ids of the meetings that did upload. On a full failure the
+ *  throw carries no ids; on a partial failure (some groups succeeded, one
+ *  failed) it throws a {@link PartialUploadError} carrying the succeeded
+ *  groups' ids so the caller can still track them as processing. */
+export async function combineAndUpload(items: PendingUploadMeta[]): Promise<number[]> {
+  if (items.length === 0) return [];
   const results = await Promise.allSettled(groupByMeetingId(items).map(uploadGroup));
   const firstFailure = results.find((r) => r.status === 'rejected');
-  if (firstFailure) throw (firstFailure as PromiseRejectedResult).reason;
+  if (firstFailure) {
+    const uploadedMeetingIds = results
+      .filter((r): r is PromiseFulfilledResult<number> => r.status === 'fulfilled')
+      .map((r) => r.value);
+    throw new PartialUploadError(uploadedMeetingIds, (firstFailure as PromiseRejectedResult).reason);
+  }
+  return results.map((r) => (r as PromiseFulfilledResult<number>).value);
 }
 
 /** Discard every pending upload (the "Discard all" action). */

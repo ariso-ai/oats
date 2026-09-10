@@ -160,8 +160,11 @@
         @close="closeSpeakers"
       />
 
-      <!-- Tabs + generation status -->
-      <div v-if="availableTabs.length" class="card-tabs">
+      <!-- Tabs + generation status. The row also carries the status chip on its
+           own: a cloud meeting still being processed has no tabs yet, and the
+           chip is the only thing that tells it apart from one that will never
+           have notes. -->
+      <div v-if="availableTabs.length || showStatusChip" class="card-tabs">
         <div class="segment">
           <button
             v-for="t in availableTabs"
@@ -429,7 +432,11 @@ import { composeLocalShareText } from './meetingShareText';
 import { transcriptFilename } from './transcriptDownloadName';
 import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
 import { ariJoinChip } from '../composables/meetingStatus';
-import { useLocalRecordingProgress } from '../composables/useLocalRecordingProgress';
+import {
+  useLocalRecordingProgress,
+  type LocalProgressStage,
+} from '../composables/useLocalRecordingProgress';
+import { useMeetingProcessing } from '../composables/useMeetingProcessing';
 import { loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 
 // `now` is the parent's ticking clock — it lets the Ari chip retire itself when
@@ -438,6 +445,10 @@ const props = defineProps<{ item: MeetingListItem | null; now?: Date }>();
 const emit = defineEmits<{
   close: [];
   titleUpdated: [payload: { id: string; title: string }];
+  /** A local recording's generation pipeline reached a terminal state while this
+   *  panel was open. The Library reloads its list so the row drops its
+   *  "Processing…" sub-line and picks up the finished content. */
+  contentReady: [payload: { id: string }];
 }>();
 
 const loading = ref(false);
@@ -696,15 +707,32 @@ let detailBackend: Backend | null = null;
 // recording stops. This poller drives the inline status chip and tab enabling.
 const progress = useLocalRecordingProgress(() => (detail.value?.isLocal ? detail.value.id : null));
 
+// Cloud meetings have no server-side "processing" status to read, so the chip
+// keys off this session's own upload tracking instead (useMeetingProcessing).
+// A meeting nobody uploaded this session is never tracked and falls through to
+// the plain empty state, unchanged.
+const processingMeetings = useMeetingProcessing();
+const cloudProcessing = computed(
+  () => !!detail.value && !detail.value.isLocal && processingMeetings.isProcessing(detail.value.id)
+);
+
 const showStatusChip = computed(
   () =>
-    !!detail.value?.isLocal &&
-    ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed'].includes(progress.stage.value)
+    cloudProcessing.value ||
+    (!!detail.value?.isLocal &&
+      ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed'].includes(progress.stage.value))
 );
+// Cloud has no post-upload failure signal, so its chip is always the spinner
+// variant — there is nothing to offer a Retry for.
 const statusGenerating = computed(
-  () => progress.stage.value === 'transcribing' || progress.stage.value === 'notes-pending'
+  () =>
+    cloudProcessing.value ||
+    progress.stage.value === 'transcribing' ||
+    progress.stage.value === 'notes-pending'
 );
 const statusLabel = computed(() => {
+  // One combined stage server-side: no transcript/notes split like local's.
+  if (cloudProcessing.value) return 'Uploaded — processing transcript & notes…';
   switch (progress.stage.value) {
     case 'transcribing':
       return 'Generating Transcript';
@@ -722,6 +750,30 @@ function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
   else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
 }
+
+// A cloud meeting we were tracking just gained content. Nothing about the list
+// row changes when a transcript lands (same id, timestamp, prepId), so the
+// load() watcher below can't see it — refetch the detail here or the pane keeps
+// showing its empty state after the chip goes away.
+watch(cloudProcessing, (isProcessing, was) => {
+  if (!was || isProcessing) return;
+  // It also goes false when load() clears `detail` for a *different* meeting;
+  // only the still-open one deserves a refetch.
+  const item = props.item;
+  if (item && detail.value?.id === item.id) void load(item);
+});
+
+const TERMINAL_STAGES: LocalProgressStage[] = ['ready', 'transcript-failed', 'notes-failed'];
+
+// The Library row reads its "Processing…" state from the list payload, which is
+// only refetched on a reload. Tell the parent the moment this recording's
+// pipeline settles so the row it is showing stops claiming to be in flight.
+watch(progress.stage, (next, prev) => {
+  const d = detail.value;
+  if (!d?.isLocal) return;
+  if (!TERMINAL_STAGES.includes(next) || TERMINAL_STAGES.includes(prev)) return;
+  emit('contentReady', { id: d.id });
+});
 
 // Local AI Notes can be regenerated from the transcript on demand. Shown only on
 // the AI Notes tab once a note already exists and nothing is in flight (the

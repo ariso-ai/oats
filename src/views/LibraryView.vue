@@ -182,7 +182,15 @@
                 <span class="mi-title" :class="{ 'mi-title--canceled': m.canceled }">{{ m.title }}</span>
                 <span v-if="relLabel(m)" class="mi-rel" :class="{ 'mi-rel--now': isNextNow(m) }">{{ relLabel(m) }}</span>
               </span>
-              <span class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
+              <!-- While a recording is still being turned into a transcript/notes,
+                   the row says so instead of showing its time/duration — that
+                   line is the only place the sidebar can tell "still working" and
+                   "this meeting will never have notes" apart. -->
+              <span v-if="rowProcessingLabel(m)" class="mi-sub mi-sub--processing">
+                <span class="mi-spinner" aria-hidden="true" />
+                {{ rowProcessingLabel(m) }}
+              </span>
+              <span v-else class="mi-sub" :class="{ 'mi-sub--now': isNextNow(m) }">{{ subFor(m) }}</span>
             </button>
           </template>
           <p v-if="displayedSections.length === 0" class="hint">{{ emptyListHint }}</p>
@@ -226,6 +234,7 @@
           :now="now"
           @close="clearSelection"
           @title-updated="onTitleUpdated"
+          @content-ready="onContentReady"
         />
         <UpNextCard
           v-else
@@ -296,6 +305,7 @@ import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
 import PendingUploads from './PendingUploads.vue';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
+import { useMeetingProcessing } from '../composables/useMeetingProcessing';
 import { shouldConfirmAriJoin } from '../composables/autoJoin';
 import { useAriJoinConfirm } from '../composables/useAriJoinConfirm';
 import AriJoinConfirmDialog from './AriJoinConfirmDialog.vue';
@@ -330,6 +340,11 @@ const ariConfirm = useAriJoinConfirm();
 const recordingStartChoice = useRecordingStartChoice();
 const activeBackend = ref<Backend | null>(null);
 const searchPaletteOpen = ref(false);
+// Cloud meetings uploaded in this session that the server hasn't produced a
+// transcript or notes for yet. Local recordings carry their own on-disk state on
+// the list row instead, so they never enter this set.
+const processingMeetings = useMeetingProcessing();
+const PROCESSING_LABEL = 'Processing…';
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
   openPrepTab?: () => void;
@@ -552,6 +567,43 @@ function subFor(m: MeetingListItem): string {
   return itemSub(m);
 }
 
+// A recording whose transcript/notes are still being produced. Local reads the
+// on-disk pipeline state the list row already carries; cloud has no such signal,
+// so it falls back to this session's upload tracking (see useMeetingProcessing).
+// Returns the label to show, or null when the row's normal sub-line applies.
+function rowProcessingLabel(m: MeetingListItem): string | null {
+  if (activeBackend.value?.id === 'local') {
+    // `recording`/`transcribing` are authoritative live states from disk.
+    // `failed` is deliberately excluded — the failure is reported by the detail
+    // panel's chip with a Retry, and a row that kept spinning forever would be
+    // a lie.
+    if (m.status === 'recording' || m.status === 'transcribing') return PROCESSING_LABEL;
+    // "Has a transcript but no note" is an *inference* that notes are still
+    // generating, and it can't tell a running pipeline from one that never
+    // finished (telling notes-pending from notes-failed needs the per-recording
+    // status view, which the list payload doesn't carry). Generation runs for
+    // minutes, so bound it: an old recording with no note is stuck, not busy.
+    if (m.status === 'done' && m.files?.hasTranscript && !m.files?.hasNote) {
+      return finishedRecently(m) ? PROCESSING_LABEL : null;
+    }
+    return null;
+  }
+  return processingMeetings.isProcessing(m.id) ? PROCESSING_LABEL : null;
+}
+
+// How long after a recording ends its missing note still reads as "generating".
+const NOTES_PENDING_WINDOW_MS = 60 * 60 * 1000;
+
+// Measured from the recording's end (start + duration), so a long recording
+// isn't already "old" the moment it stops. Reads the ticking `now`, so a row
+// that crosses the line drops the indicator on its own.
+function finishedRecently(m: MeetingListItem): boolean {
+  const start = new Date(m.timestamp).getTime();
+  if (Number.isNaN(start)) return false;
+  const end = start + (m.durationSeconds ?? 0) * 1000;
+  return now.value.getTime() - end < NOTES_PENDING_WINDOW_MS;
+}
+
 function itemSub(m: MeetingListItem): string {
   const d = new Date(m.timestamp);
   const time = Number.isNaN(d.getTime())
@@ -627,6 +679,22 @@ function onTitleUpdated(payload: { id: string; title: string }): void {
     selectedItem.value = { ...selectedItem.value, title: payload.title };
   }
 }
+
+// The open local recording finished generating. Its row still shows the stale
+// "Processing…" sub-line the list payload described, so pull fresh list data —
+// but only when the row actually claims to be processing, so simply opening an
+// already-finished recording doesn't cost a list round trip.
+async function onContentReady(payload: { id: string }): Promise<void> {
+  const row = displayMeetings.value.find((m) => m.id === payload.id);
+  if (row && rowProcessingLabel(row)) await loadMeetings();
+}
+
+// A tracked cloud meeting's transcript/notes just landed. Reload so its row
+// swaps "Processing…" back for its normal sub-line and the detail panel picks up
+// the content. The tracked set is normally 0-1 items, so this is cheap.
+watch(processingMeetings.version, () => {
+  void loadMeetings();
+});
 
 function toggleLeftPanel(): void {
   leftPanelVisible.value = !leftPanelVisible.value;
@@ -882,6 +950,13 @@ async function onRecorderPhase(phase: RecorderPhase | null): Promise<void> {
   if (phase === 'failed') {
     if (pendingWasMounted) await pendingUploads.value?.refresh();
   } else if (phase === 'success') {
+    // The upload landed but the server still has to transcribe it. RecorderStrip
+    // clears recordingMeetingId only *after* this callback (see the comment on
+    // the 'closed' branch), so the id is still readable here — track it so the
+    // row and detail panel say "processing" once the pill's checkmark closes.
+    if (activeBackend.value?.id === 'ariso' && recordingMeetingId.value) {
+      processingMeetings.markUploaded(recordingMeetingId.value);
+    }
     await Promise.all([
       loadMeetings(),
       pendingWasMounted ? pendingUploads.value?.refresh() : Promise.resolve(),
@@ -1173,6 +1248,9 @@ onMounted(() => {
     selectedItem.value = null;
     userSelectedMeetingId.value = null;
     pinnedMeetings.value = new Map();
+    // The tracked ids are Ariso's; keeping them alive would keep polling its
+    // API from offline mode and re-show "Processing…" on a later switch back.
+    processingMeetings.reset();
     void loadMeetings();
   }).then((un) => {
     unlistenBackendChanged = un;
@@ -1586,6 +1664,23 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .mi-sub--now { color: #2e8b4f; font-weight: 500; }
+/* Sits where the time/duration sub-line normally does, so a processing row is
+   the same height as every other one. */
+.mi-sub--processing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mi-spinner {
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid #dedbd6;
+  border-bottom-color: #6f6f6f;
+  border-radius: 50%;
+  animation: mi-spin 0.7s linear infinite;
+}
+@keyframes mi-spin { to { transform: rotate(360deg); } }
 
 /* Bottom nav */
 .bottom-nav {

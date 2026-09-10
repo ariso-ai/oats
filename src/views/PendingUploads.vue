@@ -52,8 +52,11 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { auth, pending, type PendingUploadMeta } from '../tauri';
-import { combineAndUpload, discardAll } from '../composables/usePendingUploads';
+import { combineAndUpload, discardAll, PartialUploadError } from '../composables/usePendingUploads';
+import { useMeetingProcessing } from '../composables/useMeetingProcessing';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
+
+const processing = useMeetingProcessing();
 
 const emit = defineEmits<{ uploaded: [] }>();
 
@@ -129,11 +132,22 @@ async function onUpload(): Promise<void> {
       error.value = 'Upload failed — sign in to Ari again, then retry.';
       return;
     }
-    await combineAndUpload(items.value);
+    const meetingIds = await combineAndUpload(items.value);
+    // The audio is in, but the server still has to transcribe it. Track each
+    // meeting so its Library row and detail panel say "processing" instead of
+    // showing the same empty state as a meeting that will never have notes.
+    for (const id of meetingIds) processing.markUploaded(id);
     await refresh();
     emit('uploaded');
   } catch (e) {
     console.error('Pending upload failed', e);
+    // A partial failure still uploaded some groups — track those as processing
+    // and refresh so they drop off the pending list, even though we surface
+    // the failure for the group that didn't make it.
+    if (e instanceof PartialUploadError && e.uploadedMeetingIds.length > 0) {
+      for (const id of e.uploadedMeetingIds) processing.markUploaded(id);
+      await refresh();
+    }
     error.value = uploadErrorMessage(e);
   } finally {
     busy.value = false;

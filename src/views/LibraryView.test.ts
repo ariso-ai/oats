@@ -83,6 +83,45 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
 vi.mock('../composables/useMeetingNotifications', () => ({
   emitNotificationsSync: () => emitNotificationsSync(),
 }));
+// A miniature stand-in for the session-scoped cloud tracker: `markUploaded`
+// records the id the way the real one does, and `resolveProcessing` is the
+// test's hand on "the poll found content for this meeting".
+// Hoisted so the (also hoisted) mock factory can reach it — the refs themselves
+// are created inside the factory, which is the first place `vue` is loadable.
+const processingMock = vi.hoisted(() => ({
+  markUploaded: vi.fn(),
+  tracked: null as null | import('vue').Ref<Set<string>>,
+  version: null as null | import('vue').Ref<number>,
+}));
+const markUploaded = processingMock.markUploaded;
+vi.mock('../composables/useMeetingProcessing', async () => {
+  const { ref } = await import('vue');
+  const tracked = ref(new Set<string>());
+  const version = ref(0);
+  processingMock.tracked = tracked;
+  processingMock.version = version;
+  return {
+    useMeetingProcessing: () => ({
+      markUploaded: (id: string | number) => {
+        processingMock.markUploaded(id);
+        tracked.value = new Set(tracked.value).add(String(id));
+      },
+      isProcessing: (id: string | number) => tracked.value.has(String(id)),
+      version,
+      reset: () => {
+        tracked.value = new Set();
+      },
+    }),
+  };
+});
+// The test's hand on "the poll found content for this meeting".
+function resolveProcessing(id: string): void {
+  const tracked = processingMock.tracked!;
+  const next = new Set(tracked.value);
+  next.delete(id);
+  tracked.value = next;
+  processingMock.version!.value++;
+}
 // RecordingAudioPlayer (rendered for local rows) and openNote/openTranscript go
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
 // pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
@@ -118,7 +157,7 @@ function item(over: Record<string, unknown>) {
 // chrome (selection, the recorder strip, the titlebar button).
 const detailStub = {
   name: 'MeetingDetailView',
-  emits: ['close', 'title-updated'],
+  emits: ['close', 'title-updated', 'content-ready'],
   props: ['item'],
   methods: {
     openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
@@ -164,6 +203,8 @@ beforeEach(() => {
   supportsActionItems.mockReturnValue(false);
   listActionItems.mockResolvedValue([]);
   searchMeetings.mockResolvedValue([]);
+  processingMock.tracked!.value = new Set();
+  processingMock.version!.value = 0;
 });
 afterEach(() => {
   // Restore real timers even if a fake-timer test failed before its own
@@ -630,6 +671,163 @@ describe('LibraryView', () => {
     const row = wrapper.find('.meeting-item');
     expect(row.find('.mi-title').text()).toBe('Morning Sync');
     expect(row.find('.mi-sub').text()).toContain('min');
+  });
+
+  // Between the recorder pill's checkmark and the notes actually landing, the
+  // row is the only place the sidebar can say a meeting is still being worked
+  // on rather than permanently empty (#315).
+  describe('processing rows', () => {
+    async function mountWithRows(rows: Record<string, unknown>[]) {
+      listMeetings.mockResolvedValue(rows);
+      const wrapper = mountWithDetailStub();
+      await flushPromises();
+      return wrapper;
+    }
+
+    it('shows a spinner and "Processing…" while a local recording transcribes', async () => {
+      const wrapper = await mountWithRows([item({ id: 'a', status: 'transcribing' })]);
+      const row = wrapper.get('.meeting-item');
+      expect(row.find('.mi-sub--processing').text()).toContain('Processing');
+      expect(row.find('.mi-spinner').exists()).toBe(true);
+    });
+
+    it('keeps showing "Processing…" while a transcribed local recording awaits its notes', async () => {
+      const wrapper = await mountWithRows([
+        item({
+          id: 'a',
+          timestamp: new Date(Date.now() - 60_000).toISOString(),
+          status: 'done',
+          files: { hasAudio: true, hasTranscript: true, hasNote: false },
+        }),
+      ]);
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(true);
+    });
+
+    // Notes generation runs for minutes. A recording that ended long ago and
+    // still has no note is stuck, not busy — a real vault had 18 such rows from
+    // three months back, every one of them spinning forever.
+    it('stops inferring "Processing…" for a recording that ended long ago', async () => {
+      const wrapper = await mountWithRows([
+        item({
+          id: 'a',
+          timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+          status: 'done',
+          files: { hasAudio: true, hasTranscript: true, hasNote: false },
+        }),
+      ]);
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
+    });
+
+    // The window is measured from the end, so a long recording isn't already
+    // stale the moment it stops.
+    it('measures the window from the end of a long recording, not its start', async () => {
+      const wrapper = await mountWithRows([
+        item({
+          id: 'a',
+          timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+          durationSeconds: 3 * 60 * 60 - 60,
+          status: 'done',
+          files: { hasAudio: true, hasTranscript: true, hasNote: false },
+        }),
+      ]);
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(true);
+    });
+
+    // An age bound must never suppress a live state the backend reports directly.
+    it('still shows "Processing…" for an old recording that is actively transcribing', async () => {
+      const wrapper = await mountWithRows([
+        item({
+          id: 'a',
+          timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+          status: 'transcribing',
+        }),
+      ]);
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(true);
+    });
+
+    it('shows the normal sub-line once a local recording has its notes', async () => {
+      const wrapper = await mountWithRows([
+        item({ id: 'a', status: 'done', files: { hasAudio: true, hasTranscript: true, hasNote: true } }),
+      ]);
+      const row = wrapper.get('.meeting-item');
+      expect(row.find('.mi-sub--processing').exists()).toBe(false);
+      expect(row.find('.mi-sub').text()).toContain('min');
+    });
+
+    // A failed transcription is reported by the detail panel's chip with a Retry;
+    // a row that kept spinning forever would be a lie.
+    it('shows the normal sub-line for a failed local recording', async () => {
+      const wrapper = await mountWithRows([
+        item({ id: 'a', status: 'failed', files: { hasAudio: true, hasTranscript: false, hasNote: false } }),
+      ]);
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
+    });
+
+    it('marks the recorded cloud meeting as processing when the upload succeeds', async () => {
+      backendId.mockReturnValue('ariso');
+      const wrapper = await mountWithRows([item({ id: '42', status: undefined, files: undefined })]);
+
+      const strip = wrapper.findComponent({ name: 'RecorderStrip' });
+      strip.vm.$emit('recording-change', '42');
+      strip.vm.$emit('recording-phase', 'success');
+      await flushPromises();
+
+      expect(markUploaded).toHaveBeenCalledWith('42');
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').text()).toContain('Processing');
+    });
+
+    it('does not track a local recording as a cloud upload', async () => {
+      const wrapper = await mountWithRows([item({ id: 'a' })]);
+
+      const strip = wrapper.findComponent({ name: 'RecorderStrip' });
+      strip.vm.$emit('recording-change', 'a');
+      strip.vm.$emit('recording-phase', 'success');
+      await flushPromises();
+
+      expect(markUploaded).not.toHaveBeenCalled();
+    });
+
+    it('reloads the list and drops the indicator once the cloud meeting has content', async () => {
+      backendId.mockReturnValue('ariso');
+      const wrapper = await mountWithRows([item({ id: '42', status: undefined, files: undefined })]);
+      const strip = wrapper.findComponent({ name: 'RecorderStrip' });
+      strip.vm.$emit('recording-change', '42');
+      strip.vm.$emit('recording-phase', 'success');
+      await flushPromises();
+      listMeetings.mockClear();
+
+      resolveProcessing('42');
+      await flushPromises();
+
+      expect(listMeetings).toHaveBeenCalled();
+      expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
+    });
+
+    // The detail panel owns the only live poll of a local recording's pipeline,
+    // so it is what tells the list its row went stale.
+    it('reloads the list when the open local recording reports its content is ready', async () => {
+      const wrapper = await mountWithRows([item({ id: 'a', status: 'transcribing' })]);
+      await wrapper.get('.meeting-item').trigger('click');
+      await flushPromises();
+      listMeetings.mockClear();
+
+      wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('content-ready', { id: 'a' });
+      await flushPromises();
+
+      expect(listMeetings).toHaveBeenCalled();
+    });
+
+    it('does not reload when a row that was never processing reports content ready', async () => {
+      const wrapper = await mountWithRows([item({ id: 'a', status: 'done' })]);
+      await wrapper.get('.meeting-item').trigger('click');
+      await flushPromises();
+      listMeetings.mockClear();
+
+      wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('content-ready', { id: 'a' });
+      await flushPromises();
+
+      expect(listMeetings).not.toHaveBeenCalled();
+    });
   });
 
   it('strikes through the title of a canceled meeting only', async () => {
