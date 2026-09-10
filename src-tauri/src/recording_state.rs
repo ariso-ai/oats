@@ -35,10 +35,20 @@ pub struct RecordingState {
     /// can re-select the attached meeting without relying on the one-shot
     /// `recording://started` event.
     meeting_id: Mutex<Option<i64>>,
+    /// Human-readable name of what is being recorded, for the tray's recording
+    /// menu. Set by the recorder window once the meeting (or the local
+    /// recording's default label) is known, so it lags `meeting_id` by however
+    /// long resolution takes. `None` until then, and for the whole session if
+    /// resolution fails.
+    recording_title: Mutex<Option<String>>,
     /// Whether audio capture has actually started (getUserMedia resolved) —
     /// set via `set_tray_recording` from the recorder window. The pill
     /// visibility watcher must not hide the window before this point.
     capture: AtomicBool,
+    /// Last pause state pushed by `set_tray_recording`. Cached so a menu
+    /// rebuild triggered by anything *other* than pause/resume (a late-arriving
+    /// title, say) does not flip a paused recording's menu back to "Pause".
+    paused: AtomicBool,
     /// Process-wide ownership of the recorder pill window. Acquired before
     /// native window construction and released only after destruction.
     window_claimed: AtomicBool,
@@ -57,13 +67,17 @@ impl RecordingState {
     pub fn set(&self, source: RecordingSource, meeting_id: Option<i64>) {
         *self.inner.lock().unwrap() = Some(source);
         *self.meeting_id.lock().unwrap() = meeting_id;
+        *self.recording_title.lock().unwrap() = None;
         self.capture.store(false, Ordering::Relaxed);
+        self.paused.store(false, Ordering::Relaxed);
     }
 
     pub fn clear(&self) {
         *self.inner.lock().unwrap() = None;
         *self.meeting_id.lock().unwrap() = None;
+        *self.recording_title.lock().unwrap() = None;
         self.capture.store(false, Ordering::Relaxed);
+        self.paused.store(false, Ordering::Relaxed);
     }
 
     pub fn is_active(&self) -> bool {
@@ -72,6 +86,27 @@ impl RecordingState {
 
     pub fn active_meeting_id(&self) -> Option<i64> {
         *self.meeting_id.lock().unwrap()
+    }
+
+    /// Record what the active recording is attached to, once the recorder
+    /// window knows. Local recordings pass `meeting_id: None` with a title —
+    /// they have no server-side meeting, and the tray routes their click
+    /// through the same `recording://reveal` broadcast either way.
+    pub fn set_recording_meeting(&self, meeting_id: Option<i64>, title: Option<String>) {
+        *self.meeting_id.lock().unwrap() = meeting_id;
+        *self.recording_title.lock().unwrap() = title.filter(|t| !t.trim().is_empty());
+    }
+
+    pub fn active_recording_title(&self) -> Option<String> {
+        self.recording_title.lock().unwrap().clone()
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
     }
 
     pub fn mark_capture_active(&self) {
@@ -181,6 +216,62 @@ mod tests {
         s.set(RecordingSource::Manual, Some(7));
         s.clear();
         assert_eq!(s.active_meeting_id(), None);
+    }
+
+    #[test]
+    fn recording_meeting_and_title_round_trip_and_clear() {
+        let s = RecordingState::new();
+        assert_eq!(s.active_meeting_id(), None);
+        assert_eq!(s.active_recording_title(), None);
+
+        s.set(RecordingSource::Auto, None);
+        // An auto-triggered recording that matched no calendar meeting learns
+        // its identity later, once the ad-hoc meeting exists.
+        s.set_recording_meeting(Some(42), Some("Budget sync".into()));
+        assert_eq!(s.active_meeting_id(), Some(42));
+        assert_eq!(s.active_recording_title().as_deref(), Some("Budget sync"));
+
+        // A local recording has a title but no server-side meeting to route to.
+        s.set_recording_meeting(None, Some("Tue Jun 2 @ 2:30PM".into()));
+        assert_eq!(s.active_meeting_id(), None);
+        assert_eq!(s.active_recording_title().as_deref(), Some("Tue Jun 2 @ 2:30PM"));
+
+        s.clear();
+        assert_eq!(s.active_meeting_id(), None);
+        assert_eq!(s.active_recording_title(), None);
+    }
+
+    /// A new recording must never inherit the previous one's title.
+    #[test]
+    fn starting_a_recording_drops_the_previous_title() {
+        let s = RecordingState::new();
+        s.set(RecordingSource::Manual, Some(1));
+        s.set_recording_meeting(Some(1), Some("Standup".into()));
+
+        s.set(RecordingSource::Auto, None);
+        assert_eq!(s.active_recording_title(), None);
+        assert_eq!(s.active_meeting_id(), None);
+    }
+
+    #[test]
+    fn paused_flag_round_trips_and_resets_per_recording() {
+        let s = RecordingState::new();
+        assert!(!s.is_paused());
+
+        s.set(RecordingSource::Manual, None);
+        s.set_paused(true);
+        assert!(s.is_paused());
+        s.set_paused(false);
+        assert!(!s.is_paused());
+
+        s.set_paused(true);
+        // A fresh recording always starts running.
+        s.set(RecordingSource::Auto, None);
+        assert!(!s.is_paused());
+
+        s.set_paused(true);
+        s.clear();
+        assert!(!s.is_paused());
     }
 
     #[test]
