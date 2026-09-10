@@ -56,7 +56,8 @@ type SignInCommand = 'google_sign_in' | 'microsoft_sign_in';
 
 /**
  * Run a browser sign-in command and wait for its "oauth-result". The providers
- * share the event name because at most one sign-in attempt is live at a time.
+ * share the event name because the backend delivers results only to the window
+ * that started the attempt, and tells a superseded attempt it was canceled.
  */
 async function browserSignIn(command: SignInCommand): Promise<SignInResult> {
   let resolveResult: (result: SignInResult) => void;
@@ -64,11 +65,11 @@ async function browserSignIn(command: SignInCommand): Promise<SignInResult> {
     resolveResult = resolve;
   });
 
-  // Await listener setup before triggering the flow. The backend scopes
-  // its "oauth-result" emit to this webview (it carries the session
-  // token), so listen on the current webview window too. If setup fails,
-  // let it throw here rather than starting a sign-in that can never
-  // resolve resultPromise.
+  // Await listener setup before triggering the flow. The backend's
+  // "oauth-result" emit is scoped to this webview (it carries the session
+  // token), so listen on the current webview window. If setup fails, let
+  // it throw here rather than starting a sign-in that can never resolve
+  // resultPromise.
   const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
     'oauth-result',
     (event) => {
