@@ -314,7 +314,7 @@ pub fn open_library(app: &AppHandle) {
     });
 }
 
-/// Whether the idle menu leads with the "Sign in with …" rows: on the Ariso
+/// Whether the idle menu offers the "Sign in with …" rows: on the Ariso
 /// backend with no stored session, whichever provider it came from. Local
 /// mode never signs in, so it never offers to.
 fn offers_sign_in(backend: &str, has_session: bool) -> bool {
@@ -360,6 +360,21 @@ pub fn build_idle_menu(
         builder = builder.item(&record_featured).item(&time_row).separator();
     }
 
+    let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
+    let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
+    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit oats").build(app)?;
+
+    builder = builder
+        .item(&start)
+        .separator()
+        .item(&settings)
+        .item(&library)
+        .item(&check_updates)
+        .separator();
+
+    // Account actions share Quit's section, directly above it.
     if offers_sign_in(
         &crate::commands::active_backend(app),
         crate::commands::get_session_token(app).is_some(),
@@ -367,22 +382,10 @@ pub fn build_idle_menu(
         let google = MenuItemBuilder::with_id("sign_in_google", "Sign in with Google").build(app)?;
         let microsoft =
             MenuItemBuilder::with_id("sign_in_microsoft", "Sign in with Microsoft").build(app)?;
-        builder = builder.item(&google).item(&microsoft).separator();
+        builder = builder.item(&google).item(&microsoft);
     }
 
-    let start = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
-    let settings = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
-    let library = MenuItemBuilder::with_id("library", "Meetings...").build(app)?;
-    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit oats").build(app)?;
-
     builder
-        .item(&start)
-        .separator()
-        .item(&settings)
-        .item(&library)
-        .item(&check_updates)
-        .separator()
         .item(&quit)
         .build()
 }
