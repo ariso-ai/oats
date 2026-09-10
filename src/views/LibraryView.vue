@@ -1584,7 +1584,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.hint { font-size: 14px; color: #6f6f6f; padding: 0 6px; }
+.hint { flex: 1; font-size: 14px; color: #6f6f6f; padding: 0 6px; }
 
 /* Meeting list with top/bottom fade so the first/last rows dissolve into the
    backdrop on scroll, matching the design. */
