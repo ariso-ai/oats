@@ -247,6 +247,43 @@ watch(
 );
 // Re-resolve the scheduled end whenever the attached meeting changes.
 watch(effectiveMeetingId, () => void resolveMeetingEnd());
+// Tell the native side what is being recorded, so the tray's recording menu can
+// name it and open it (#355). Fires whenever an identity becomes known: an
+// Ariso meeting (calendar-matched, picker-selected, or the ad-hoc one created
+// for an unmatched auto-trigger) or a local recording's resolved id. Local
+// passes no meeting id — it has no server-side meeting — and the tray routes
+// its click through the same `recording://reveal` broadcast either way.
+let trayIdentityToken = 0;
+async function registerTrayIdentity(): Promise<void> {
+  const token = ++trayIdentityToken;
+  const meetingId = effectiveMeetingId.value;
+  const localId = effectiveLocalRecordingId.value;
+  if (meetingId === null && localId === null) return;
+
+  let title: string | null = null;
+  if (meetingId !== null) {
+    try {
+      const { meeting } = await useMeetingApi().getMeeting(meetingId);
+      title = meeting.title ?? null;
+    } catch (e) {
+      // The row still needs to exist and be clickable; only its label suffers.
+      console.error('Failed to resolve the recording title for the tray', e);
+    }
+  } else if (recorder.startedAt.value) {
+    title = timestampTitle(recorder.startedAt.value);
+  }
+  if (token !== trayIdentityToken) return;
+  try {
+    await invoke('set_recording_meeting', { meetingId, title });
+  } catch (e) {
+    console.error('Failed to register the recording with the tray', e);
+  }
+}
+watch(
+  [effectiveMeetingId, effectiveLocalRecordingId],
+  () => void registerTrayIdentity(),
+  { immediate: true },
+);
 // When a local recording starts, ask Rust which recording it will finalize into
 // (append target vs. new) and broadcast that id. Resolving once here — rather
 // than deriving a fresh id from the start time on every heartbeat — is what

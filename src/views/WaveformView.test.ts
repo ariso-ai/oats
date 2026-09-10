@@ -86,8 +86,14 @@ vi.mock('../composables/useSilenceDetection', () => ({
 }));
 
 const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
+const getMeeting = vi.fn(() => Promise.resolve({ meeting: { title: 'Budget sync' } }));
+const createAudioMeeting = vi.fn(() => Promise.resolve({ meetingId: 77 }));
 vi.mock('../composables/useMeetingApi', () => ({
-  useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
+  useMeetingApi: () => ({
+    listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a),
+    getMeeting: (...a: unknown[]) => getMeeting(...a),
+    createAudioMeeting: (...a: unknown[]) => createAudioMeeting(...a),
+  }),
 }));
 
 // vi.mock is hoisted before top-level consts, so shared mock handles that the
@@ -143,6 +149,9 @@ beforeEach(() => {
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
+  listScheduledMeetings.mockResolvedValue([]);
+  getMeeting.mockResolvedValue({ meeting: { title: 'Budget sync' } });
+  createAudioMeeting.mockResolvedValue({ meetingId: 77 });
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -1039,5 +1048,63 @@ describe('WaveformView local recording identity (#355)', () => {
     expect(startRecording).toHaveBeenCalled();
     expect(closeWin).not.toHaveBeenCalled();
     expect(err).toHaveBeenCalled();
+  });
+});
+
+describe('WaveformView tray identity (#355)', () => {
+  it('tells the tray which Ariso meeting is recording', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { meetingId: '42' };
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(getMeeting).toHaveBeenCalledWith(42);
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 42,
+      title: 'Budget sync',
+    });
+  });
+
+  it('sends a local recording its label with no meeting id', async () => {
+    backendKind.value = 'local';
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: null,
+      title: timestampTitle('2026-06-09T10:00:00.000Z'),
+    });
+  });
+
+  // A meeting whose title can't be fetched still names the tray row, so the
+  // click-through exists — the label just falls back.
+  it('still registers the meeting when its title lookup fails', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { meetingId: '42' };
+    getMeeting.mockRejectedValueOnce(new Error('offline'));
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 42,
+      title: null,
+    });
+  });
+
+  it('registers nothing while the recording has no identity', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = {};
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      'set_recording_meeting',
+      expect.anything(),
+    );
   });
 });
