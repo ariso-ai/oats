@@ -36,27 +36,34 @@ mod imp {
     use crate::audio_util::{
         Resampler, base64_encode, downmix_interleaved_f32,
     };
+    use std::ffi::c_void;
     use std::ptr;
     use std::slice;
-    use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
     use std::sync::Mutex;
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tauri::Emitter;
     use wasapi::{SampleType, WaveFormat, deinitialize, initialize_mta};
     use windows::Win32::Foundation::{
         CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows::Win32::Media::Audio::{
-        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole,
-        eRender,
+        IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+        eConsole, eRender,
     };
-    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
     use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject};
     use windows::core::PCSTR;
+
+    /// How often the capture loop re-checks which endpoint Windows considers
+    /// the default. A shared-mode loopback client stays bound to the endpoint
+    /// it was activated on, so this poll is what makes capture follow a switch
+    /// (default output changed, headset connected) mid-recording.
+    const ENDPOINT_POLL: Duration = Duration::from_secs(1);
 
     /// The capture thread owns every COM/WASAPI object. Stop communicates over
     /// a channel and joins that thread so no endpoint handle survives a retry.
@@ -99,6 +106,172 @@ mod imp {
         }
     }
 
+    /// One activated loopback stream, bound to the endpoint that was default
+    /// when it was opened. Recreated whenever that stops being the default or
+    /// the endpoint is invalidated underneath us.
+    struct Loopback {
+        client: IAudioClient,
+        capture: IAudioCaptureClient,
+        event: EventHandle,
+        bytes_per_frame: usize,
+        endpoint_id: String,
+    }
+
+    impl Drop for Loopback {
+        fn drop(&mut self) {
+            // Best-effort: an endpoint that was invalidated (unplugged, or
+            // disabled) fails here and there is nothing left to do about it.
+            // Fields drop afterwards, so the event handle outlives this stop.
+            let _ = unsafe { self.client.Stop() };
+        }
+    }
+
+    /// Why reading packets ended. A lost endpoint is recoverable by reopening;
+    /// anything else ends the capture and is reported to the recorder.
+    enum PacketError {
+        Invalidated,
+        Fatal(String),
+    }
+
+    fn classify(error: windows::core::Error, context: &str) -> PacketError {
+        if error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
+            PacketError::Invalidated
+        } else {
+            PacketError::Fatal(format!("{context}: {error}"))
+        }
+    }
+
+    /// The endpoint's stable id string. `GetId` hands back a COM allocation the
+    /// caller owns, so free it rather than leaking one string per poll.
+    fn endpoint_id(device: &IMMDevice) -> Result<String, String> {
+        let raw = unsafe { device.GetId() }.map_err(|e| e.to_string())?;
+        let id = unsafe { raw.to_string() }.map_err(|e| e.to_string());
+        unsafe { CoTaskMemFree(Some(raw.0 as *const c_void)) };
+        id
+    }
+
+    fn default_endpoint(enumerator: &IMMDeviceEnumerator) -> Result<(IMMDevice, String), String> {
+        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+            .map_err(|e| format!("no default Windows output device: {e}"))?;
+        let id = endpoint_id(&device)?;
+        Ok((device, id))
+    }
+
+    /// Activate loopback capture on whatever endpoint is default right now.
+    fn open_default_loopback(
+        enumerator: &IMMDeviceEnumerator,
+        source_rate: u32,
+        channels: usize,
+    ) -> Result<Loopback, String> {
+        let (device, endpoint_id) = default_endpoint(enumerator)?;
+        let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
+            .map_err(|e| e.to_string())?;
+
+        // Ask the Windows audio engine for a predictable interleaved Float32
+        // layout. Shared-mode autoconversion handles the endpoint's native
+        // rate/format, keeping the conversion contract hardware-independent —
+        // which is also why a new endpoint needs no new resampler rate.
+        let format = WaveFormat::new(
+            32,
+            32,
+            &SampleType::Float,
+            source_rate as usize,
+            channels,
+            None,
+        );
+        let mut min_period = 0_i64;
+        unsafe { client.GetDevicePeriod(None, Some(&mut min_period)) }
+            .map_err(|e| e.to_string())?;
+        let stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK
+            | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+            | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+            | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        // Shared-mode conversion gives every endpoint the same Float32
+        // format while LOOPBACK selects rendered output instead of a mic.
+        unsafe {
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                stream_flags,
+                min_period,
+                0,
+                ptr::addr_of!(format.wave_fmt.Format),
+                None,
+            )
+        }
+        .map_err(|e| format!("initialize WASAPI loopback: {e}"))?;
+        let event = EventHandle(
+            unsafe { CreateEventA(None, false, false, PCSTR::null()) }
+                .map_err(|e| e.to_string())?,
+        );
+        unsafe { client.SetEventHandle(event.0) }.map_err(|e| e.to_string())?;
+        let capture: IAudioCaptureClient = unsafe { client.GetService() }
+            .map_err(|e| e.to_string())?;
+        let bytes_per_frame = format.get_blockalign() as usize;
+
+        unsafe { client.Start() }.map_err(|e| format!("start WASAPI loopback: {e}"))?;
+        Ok(Loopback {
+            client,
+            capture,
+            event,
+            bytes_per_frame,
+            endpoint_id,
+        })
+    }
+
+    /// Drain every packet the endpoint currently holds, emitting 16 kHz PCM.
+    fn drain_packets(
+        stream: &Loopback,
+        channels: usize,
+        resampler: &mut Resampler,
+        app: &tauri::AppHandle,
+    ) -> Result<(), PacketError> {
+        loop {
+            let frames = unsafe { stream.capture.GetNextPacketSize() }
+                .map_err(|e| classify(e, "size WASAPI loopback packet"))?;
+            if frames == 0 {
+                return Ok(());
+            }
+
+            let mut data = ptr::null_mut();
+            let mut read_frames = 0_u32;
+            let mut flags = 0_u32;
+            unsafe {
+                stream
+                    .capture
+                    .GetBuffer(&mut data, &mut read_frames, &mut flags, None, None)
+            }
+            .map_err(|e| classify(e, "read WASAPI loopback packet"))?;
+
+            // Windows may return a null data pointer for SILENT packets. Build
+            // the mono data before releasing the packet, but never form a slice
+            // from that null pointer.
+            let mono_result = if read_frames == 0 {
+                Ok(Vec::new())
+            } else if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                Ok(vec![0.0; read_frames as usize])
+            } else if data.is_null() {
+                Err("WASAPI returned a null non-silent buffer".into())
+            } else {
+                match (read_frames as usize).checked_mul(stream.bytes_per_frame) {
+                    Some(byte_len) => {
+                        let bytes = unsafe { slice::from_raw_parts(data, byte_len) };
+                        downmix_interleaved_f32(bytes, channels)
+                    }
+                    None => Err("WASAPI packet size overflow".into()),
+                }
+            };
+            unsafe { stream.capture.ReleaseBuffer(read_frames) }
+                .map_err(|e| classify(e, "release WASAPI loopback packet"))?;
+            let mono = mono_result.map_err(PacketError::Fatal)?;
+
+            let mut pcm = Vec::with_capacity(mono.len() * 2);
+            resampler.process(&mono, &mut pcm);
+            if !pcm.is_empty() {
+                let _ = app.emit("system-audio-data", base64_encode(&pcm));
+            }
+        }
+    }
+
     fn run_capture(
         app: tauri::AppHandle,
         ready: Sender<Result<(), String>>,
@@ -115,138 +288,99 @@ mod imp {
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
             }
             .map_err(|e| e.to_string())?;
-            let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
-                .map_err(|e| format!("no default Windows output device: {e}"))?;
-            let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
-                .map_err(|e| e.to_string())?;
 
-            // Ask the Windows audio engine for a predictable interleaved Float32
-            // layout. Shared-mode autoconversion handles the endpoint's native
-            // rate/format, keeping the conversion contract hardware-independent.
             let source_rate = 48_000_u32;
             let channels = 2_usize;
-            let format = WaveFormat::new(
-                32,
-                32,
-                &SampleType::Float,
-                source_rate as usize,
-                channels,
-                None,
-            );
-            let mut min_period = 0_i64;
-            unsafe { client.GetDevicePeriod(None, Some(&mut min_period)) }
-                .map_err(|e| e.to_string())?;
-            let stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK
-                | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-                | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-            // Shared-mode conversion gives every endpoint the same Float32
-            // format while LOOPBACK selects rendered output instead of a mic.
-            unsafe {
-                client.Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    stream_flags,
-                    min_period,
-                    0,
-                    ptr::addr_of!(format.wave_fmt.Format),
-                    None,
-                )
-            }
-            .map_err(|e| format!("initialize WASAPI loopback: {e}"))?;
-            let event = EventHandle(
-                unsafe { CreateEventA(None, false, false, PCSTR::null()) }
-                    .map_err(|e| e.to_string())?,
-            );
-            unsafe { client.SetEventHandle(event.0) }.map_err(|e| e.to_string())?;
-            let capture: IAudioCaptureClient = unsafe { client.GetService() }
-                .map_err(|e| e.to_string())?;
-            let bytes_per_frame = format.get_blockalign() as usize;
+            // Only the first open reports failure to the recorder: once
+            // recording is under way, a device that briefly cannot be opened is
+            // retried rather than treated as the end of system audio.
+            let mut stream = Some(open_default_loopback(&enumerator, source_rate, channels)?);
             let mut resampler = Resampler::new(source_rate as f64, 16_000.0);
 
-            unsafe { client.Start() }
-                .map_err(|e| format!("start WASAPI loopback: {e}"))?;
             if ready.send(Ok(())).is_err() {
-                let _ = unsafe { client.Stop() };
                 return Ok(());
             }
 
-            let capture_result = (|| -> Result<(), String> {
-                loop {
-                    match stop.try_recv() {
-                        Ok(()) | Err(TryRecvError::Disconnected) => break,
-                        Err(TryRecvError::Empty) => {}
-                    }
+            let mut next_endpoint_check = Instant::now() + ENDPOINT_POLL;
+            loop {
+                match stop.try_recv() {
+                    Ok(()) | Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) => {}
+                }
 
-                    // Timeouts are expected while the render endpoint is quiet;
-                    // the Vue mixer fills those spans with zeroes.
-                    match unsafe { WaitForSingleObject(event.0, 200) } {
-                        WAIT_OBJECT_0 => {}
-                        WAIT_TIMEOUT => continue,
-                        WAIT_FAILED => return Err("wait for WASAPI loopback packet failed".into()),
-                        status => {
-                            return Err(format!(
-                                "unexpected WASAPI loopback wait status: {}",
-                                status.0
-                            ));
-                        }
-                    }
-
-                    loop {
-                        let frames = unsafe { capture.GetNextPacketSize() }
-                            .map_err(|e| e.to_string())?;
-                        if frames == 0 {
-                            break;
-                        }
-
-                        let mut data = ptr::null_mut();
-                        let mut read_frames = 0_u32;
-                        let mut flags = 0_u32;
-                        unsafe {
-                            capture.GetBuffer(
-                                &mut data,
-                                &mut read_frames,
-                                &mut flags,
-                                None,
-                                None,
-                            )
-                        }
-                        .map_err(|e| format!("read WASAPI loopback packet: {e}"))?;
-
-                        // Windows may return a null data pointer for SILENT
-                        // packets. Build the mono data before releasing the
-                        // packet, but never form a slice from that null pointer.
-                        let mono_result = if read_frames == 0 {
-                            Ok(Vec::new())
-                        } else if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
-                            Ok(vec![0.0; read_frames as usize])
-                        } else if data.is_null() {
-                            Err("WASAPI returned a null non-silent buffer".into())
-                        } else {
-                            match (read_frames as usize).checked_mul(bytes_per_frame) {
-                                Some(byte_len) => {
-                                    let bytes = unsafe { slice::from_raw_parts(data, byte_len) };
-                                    downmix_interleaved_f32(bytes, channels)
-                                }
-                                None => Err("WASAPI packet size overflow".into()),
+                // Follow the default render endpoint. The activated client stays
+                // bound to the device it was opened on, so an output switch
+                // mid-recording is only picked up by re-reading it here.
+                if Instant::now() >= next_endpoint_check {
+                    next_endpoint_check = Instant::now() + ENDPOINT_POLL;
+                    let current = default_endpoint(&enumerator).ok().map(|(_, id)| id);
+                    let stale = match (stream.as_ref(), current.as_ref()) {
+                        (Some(active), Some(id)) => *id != active.endpoint_id,
+                        (None, Some(_)) => true,
+                        // No usable endpoint at all (every output removed):
+                        // keep what we have and look again on the next poll.
+                        (_, None) => false,
+                    };
+                    if stale {
+                        // Stop the old stream before activating the new one.
+                        drop(stream.take());
+                        match open_default_loopback(&enumerator, source_rate, channels) {
+                            Ok(fresh) => {
+                                // The engine converts every endpoint to
+                                // `source_rate`, so the rate is unchanged; the
+                                // resampler is still replaced so the new device
+                                // doesn't interpolate from the old one's last
+                                // sample.
+                                resampler = Resampler::new(source_rate as f64, 16_000.0);
+                                stream = Some(fresh);
                             }
-                        };
-                        unsafe { capture.ReleaseBuffer(read_frames) }
-                            .map_err(|e| format!("release WASAPI loopback packet: {e}"))?;
-                        let mono = mono_result?;
-
-                        let mut pcm = Vec::with_capacity(mono.len() * 2);
-                        resampler.process(&mono, &mut pcm);
-                        if !pcm.is_empty() {
-                            let _ = app.emit("system-audio-data", base64_encode(&pcm));
+                            Err(e) => {
+                                eprintln!(
+                                    "windows system-audio: reopening the default output failed: {e}"
+                                );
+                            }
                         }
                     }
                 }
-                Ok(())
-            })();
 
-            let stop_result = unsafe { client.Stop() }
-                .map_err(|e| format!("stop WASAPI loopback: {e}"));
-            capture_result.and(stop_result)
+                let Some(active) = stream.as_ref() else {
+                    // Nothing to read until a reopen succeeds. The Vue mixer
+                    // zero-fills this span, as it does for a quiet device. Wait
+                    // on the stop channel so stopping stays immediate.
+                    match stop.recv_timeout(ENDPOINT_POLL) {
+                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                    }
+                };
+
+                // Timeouts are expected while the render endpoint is quiet;
+                // the Vue mixer fills those spans with zeroes.
+                match unsafe { WaitForSingleObject(active.event.0, 200) } {
+                    WAIT_OBJECT_0 => {}
+                    WAIT_TIMEOUT => continue,
+                    WAIT_FAILED => return Err("wait for WASAPI loopback packet failed".into()),
+                    status => {
+                        return Err(format!(
+                            "unexpected WASAPI loopback wait status: {}",
+                            status.0
+                        ));
+                    }
+                }
+
+                match drain_packets(active, channels, &mut resampler, &app) {
+                    Ok(()) => {}
+                    // The endpoint went away underneath us. Drop it and reopen
+                    // on the next pass instead of ending system audio for the
+                    // rest of the recording.
+                    Err(PacketError::Invalidated) => {
+                        eprintln!("windows system-audio: endpoint invalidated; reopening");
+                        drop(stream.take());
+                        next_endpoint_check = Instant::now();
+                    }
+                    Err(PacketError::Fatal(e)) => return Err(e),
+                }
+            }
+            Ok(())
         })();
 
         if let Err(error) = result {
@@ -358,7 +492,7 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use crate::audio_util::{
-        base64_encode, downmix_to_mono, get_property, is_supported_pcm_format, ns,
+        base64_encode, downmix_to_mono, get_property, is_supported_pcm_format, ns, prop_address,
         AudioObjectID, Resampler,
     };
     use block2::RcBlock;
@@ -369,13 +503,15 @@ mod imp {
         kAudioAggregateDeviceNameKey, kAudioAggregateDeviceSubDeviceListKey,
         kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
         kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID,
+        kAudioDevicePropertyNominalSampleRate,
         kAudioHardwarePropertyDefaultSystemOutputDevice,
         kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioSubDeviceUIDKey,
         kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
         AudioDeviceCreateIOProcIDWithBlock, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
         AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
         AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
-        AudioHardwareDestroyProcessTap,
+        AudioHardwareDestroyProcessTap, AudioObjectAddPropertyListener,
+        AudioObjectPropertyAddress, AudioObjectRemovePropertyListener,
         CATapDescription, CATapMuteBehavior,
     };
     use objc2_core_audio_types::{
@@ -384,22 +520,263 @@ mod imp {
     };
     use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
-    use std::ptr::NonNull;
-    use std::sync::{Arc, Mutex};
+    use std::ffi::c_void;
+    use std::ptr::{self, NonNull};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
     use tauri::Emitter;
 
+    /// How long to let Core Audio settle after a change notification. One
+    /// headset transition fires a burst of them, and rebuilding on the first
+    /// would race the HAL while it is still re-publishing the new device.
+    const SETTLE: Duration = Duration::from_millis(250);
+    /// A device that is mid-transition can refuse a fresh tap for a moment.
+    /// Failing outright would silently drop system audio for the rest of the
+    /// meeting, so retry a couple of times before giving up.
+    const REBUILD_ATTEMPTS: u32 = 3;
+    const REBUILD_BACKOFF: Duration = Duration::from_millis(300);
+    /// How long to wait before re-signaling the watcher after every
+    /// `build_capture` attempt in a rebuild has failed. Without this, the
+    /// listeners that would report the *next* device change were already
+    /// torn down with the broken capture, so nothing would ever wake the
+    /// watcher again and system audio would be lost for the rest of the
+    /// recording.
+    const REARM_DELAY: Duration = Duration::from_secs(5);
+
+    /// The device- and format-dependent inputs baked into a live capture: the
+    /// UID is the aggregate device's clock sub-device, the rate is what the
+    /// resampler converts from. Both are read from the default output device —
+    /// see `device_nominal_rate` for why the rate cannot come from the tap.
+    /// Neither can be changed in place, so capture is rebuilt whenever the
+    /// current values stop matching these.
+    #[derive(Clone, Debug)]
+    struct TapConfig {
+        output_uid: String,
+        src_rate: f64,
+    }
+
+    impl TapConfig {
+        /// Sample rates are compared with a 1 Hz tolerance. Real transitions
+        /// move in kilohertz (48 kHz A2DP → 16/24 kHz HFP); a last-bit
+        /// difference is not a transition, and acting on one would matter
+        /// because each rebuild itself re-fires these notifications.
+        fn differs_from(&self, other: &TapConfig) -> bool {
+            self.output_uid != other.output_uid || (self.src_rate - other.src_rate).abs() >= 1.0
+        }
+    }
+
+    /// Whether a capture built from `snapshot` is already out of date.
+    ///
+    /// A configuration that cannot be read counts as stale: the binding it
+    /// describes can no longer be confirmed, and rebuilding is the recoverable
+    /// answer — the alternative is running on a snapshot nothing can verify.
+    fn config_went_stale(snapshot: &TapConfig, latest: Result<TapConfig, String>) -> bool {
+        match latest {
+            Ok(latest) => latest.differs_from(snapshot),
+            Err(_) => true,
+        }
+    }
+
+    /// Which Core Audio property listeners a capture actually registered, so
+    /// teardown removes exactly those. Registration is best-effort: losing a
+    /// listener costs the follow-the-device behaviour, not the recording.
+    #[derive(Clone, Copy)]
+    struct Listeners {
+        default_output: bool,
+        output_rate: bool,
+    }
+
     /// Live capture resources, torn down in reverse creation order on stop.
-    /// All fields are plain integers; the IO block is owned by Core Audio
-    /// (retained via `Block_copy` inside `AudioDeviceCreateIOProcIDWithBlock`
-    /// and released by `AudioDeviceDestroyIOProcID`), so we don't need to
-    /// keep a !Send `RcBlock` in this cross-thread state.
+    /// The Core Audio handles are plain integers; the IO block is owned by
+    /// Core Audio (retained via `Block_copy` inside
+    /// `AudioDeviceCreateIOProcIDWithBlock` and released by
+    /// `AudioDeviceDestroyIOProcID`), so we don't need to keep a !Send
+    /// `RcBlock` in this cross-thread state. The `AppHandle` is kept so the
+    /// watcher thread can rebuild capture without the frontend re-invoking.
     struct CaptureState {
         tap_id: AudioObjectID,
         aggregate_id: AudioObjectID,
+        /// The output device the rate listener is registered on. Kept so
+        /// teardown removes it from the same object it was added to, even
+        /// after the system default has moved on to another device.
+        output_id: AudioObjectID,
         proc_id: AudioDeviceIOProcID,
+        config: TapConfig,
+        listeners: Listeners,
+        app: tauri::AppHandle,
     }
 
     static CAPTURE: Mutex<Option<CaptureState>> = Mutex::new(None);
+
+    /// Set when a rebuild exhausted every `build_capture` attempt while a
+    /// recording was still in progress: `CAPTURE` is `None` but that means
+    /// "capture is down and needs retrying", not "nothing is recording".
+    /// `stop()` clears this so a stale retry can't resurrect capture after
+    /// the user has already ended the recording.
+    static REBUILD_PENDING: Mutex<Option<tauri::AppHandle>> = Mutex::new(None);
+
+    /// Wakes the watcher thread. Held in a `OnceLock` rather than in
+    /// `CaptureState` so the listener callback never touches the `CAPTURE`
+    /// mutex: `AudioObjectRemovePropertyListener` blocks until an in-flight
+    /// callback returns, and teardown calls it while holding that lock.
+    static CHANGE_TX: OnceLock<Sender<()>> = OnceLock::new();
+
+    /// Core Audio property listener. Runs on a HAL notification thread, where
+    /// tearing down a tap or aggregate device would deadlock against the very
+    /// reconfiguration that triggered it — so this only signals the watcher.
+    unsafe extern "C-unwind" fn on_audio_change(
+        _object: AudioObjectID,
+        _address_count: u32,
+        _addresses: NonNull<AudioObjectPropertyAddress>,
+        _client_data: *mut c_void,
+    ) -> i32 {
+        if let Some(tx) = CHANGE_TX.get() {
+            let _ = tx.send(());
+        }
+        0
+    }
+
+    /// Start (once) the thread that rebuilds capture after a device change and
+    /// return the sender the listeners signal on.
+    fn change_signaler() -> &'static Sender<()> {
+        CHANGE_TX.get_or_init(|| {
+            let (tx, rx) = mpsc::channel();
+            if let Err(e) = std::thread::Builder::new()
+                .name("oats-system-audio-watch".into())
+                .spawn(move || {
+                    while wait_for_change(&rx, SETTLE) {
+                        rebuild_capture();
+                    }
+                })
+            {
+                // The receiver is dropped with the failed spawn, so signals
+                // become no-ops: capture still works, it just stops following
+                // the output device.
+                eprintln!("system-audio device watcher unavailable: {e}");
+            }
+            tx
+        })
+    }
+
+    /// Block until a change notification arrives, then swallow the burst behind
+    /// it so one device transition causes one rebuild. Returns `false` when the
+    /// sender is gone, which ends the watcher loop.
+    fn wait_for_change(rx: &Receiver<()>, settle: Duration) -> bool {
+        if rx.recv().is_err() {
+            return false;
+        }
+        std::thread::sleep(settle);
+        while rx.try_recv().is_ok() {}
+        true
+    }
+
+    /// Register `on_audio_change` for one property. Returns whether it took.
+    unsafe fn add_listener(object: AudioObjectID, selector: u32) -> bool {
+        let addr = prop_address(selector, kAudioObjectPropertyScopeGlobal);
+        let status = unsafe {
+            AudioObjectAddPropertyListener(
+                object,
+                NonNull::from(&addr),
+                Some(on_audio_change),
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            eprintln!("AudioObjectAddPropertyListener({selector}) failed: {status}");
+        }
+        status == 0
+    }
+
+    unsafe fn remove_listener(object: AudioObjectID, selector: u32) -> Result<(), String> {
+        let addr = prop_address(selector, kAudioObjectPropertyScopeGlobal);
+        let status = unsafe {
+            AudioObjectRemovePropertyListener(
+                object,
+                NonNull::from(&addr),
+                Some(on_audio_change),
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(format!(
+                "AudioObjectRemovePropertyListener({selector}) failed: {status}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The default output device's UID paired with the rate a tap on it
+    /// currently delivers — the live counterpart of `CaptureState::config`.
+    unsafe fn current_config() -> Result<TapConfig, String> {
+        let output_id = unsafe { default_output_device()? };
+        let output_uid = unsafe { device_uid(output_id)? };
+        let src_rate = unsafe { device_nominal_rate(output_id)? };
+        Ok(TapConfig {
+            output_uid,
+            src_rate,
+        })
+    }
+
+    /// The rate a process tap on `device_id` actually delivers.
+    ///
+    /// This must come from the output device, *not* from
+    /// `kAudioTapPropertyFormat`: that property reports a fixed 48 kHz no
+    /// matter what hardware is behind it, while the tap really runs at the
+    /// device's nominal rate. Measured on this hardware — built-in speakers
+    /// (44.1 kHz) delivered ~44032 frames/s and a 48 kHz display delivered
+    /// ~48128 frames/s, both against a declared 48000.
+    ///
+    /// Resampling from the declared rate instead of the real one stretches
+    /// system audio by their ratio: 8% slow on a 44.1 kHz output, and 3x slow
+    /// on a Bluetooth headset that has dropped to 16 kHz HFP because the
+    /// meeting opened its microphone — which is what made captured meeting
+    /// audio unintelligible.
+    unsafe fn device_nominal_rate(device_id: AudioObjectID) -> Result<f64, String> {
+        let rate: f64 = unsafe {
+            get_property(
+                device_id,
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            )?
+        };
+        if rate > 0.0 {
+            Ok(rate)
+        } else {
+            // A non-positive rate would make Resampler::step 0.0 and stall the
+            // IO block in a loop that never advances.
+            Err(format!("output device reported a {rate} Hz sample rate"))
+        }
+    }
+
+    unsafe fn default_output_device() -> Result<AudioObjectID, String> {
+        unsafe {
+            get_property(
+                kAudioObjectSystemObject as AudioObjectID,
+                kAudioHardwarePropertyDefaultSystemOutputDevice,
+                kAudioObjectPropertyScopeGlobal,
+            )
+        }
+    }
+
+    unsafe fn device_uid(device_id: AudioObjectID) -> Result<String, String> {
+        // Core Audio can return status 0 with a null/absent UID for some
+        // virtual or aggregate output devices. Guard the pointer instead of
+        // unwrapping: a null here would panic, and handing a non-owned null to
+        // `CFRetained::from_raw` (which assumes a +1 retained object) is the
+        // start of a refcount/UAF bug, not just a crash.
+        let ptr = unsafe {
+            get_property::<*const CFString>(
+                device_id,
+                kAudioDevicePropertyDeviceUID,
+                kAudioObjectPropertyScopeGlobal,
+            )?
+        };
+        match NonNull::new(ptr as *mut CFString) {
+            Some(nn) => Ok(unsafe { CFRetained::from_raw(nn) }.to_string()),
+            None => Err("default output device has no UID".into()),
+        }
+    }
 
     /// Build the aggregate-device description dictionary (toll-free bridged to
     /// CFDictionary). Keys are the Core Audio C-string constants; values upcast
@@ -459,7 +836,14 @@ mod imp {
         if guard.is_some() {
             return Err("System audio capture already running".into());
         }
+        *guard = Some(unsafe { build_capture(app) }?);
+        Ok(())
+    }
 
+    /// Build a live capture bound to whatever output device is current: tap →
+    /// aggregate device → IO proc, plus the listeners that report when that
+    /// binding goes stale.
+    unsafe fn build_capture(app: tauri::AppHandle) -> Result<CaptureState, String> {
         unsafe {
             // 1. Mono global tap over the whole system (exclude nothing).
             let exclude: Retained<NSArray<NSNumber>> = NSArray::new();
@@ -479,39 +863,19 @@ mod imp {
             }
 
             // 2. Default output device + its UID (the aggregate's clock source).
-            let output_id: AudioObjectID = match get_property(
-                kAudioObjectSystemObject as AudioObjectID,
-                kAudioHardwarePropertyDefaultSystemOutputDevice,
-                kAudioObjectPropertyScopeGlobal,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    AudioHardwareDestroyProcessTap(tap_id);
-                    return Err(e);
-                }
-            };
-            let output_uid_cf: CFRetained<CFString> =
-                match get_property::<*const CFString>(output_id, kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal) {
-                    // Core Audio can return status 0 with a null/absent UID for some
-                    // virtual or aggregate output devices. Guard the pointer instead of
-                    // unwrapping: a null here would panic, and handing a non-owned null to
-                    // `CFRetained::from_raw` (which assumes a +1 retained object) is the
-                    // start of a refcount/UAF bug, not just a crash.
-                    Ok(ptr) => match NonNull::new(ptr as *mut CFString) {
-                        Some(nn) => CFRetained::from_raw(nn),
-                        None => {
-                            AudioHardwareDestroyProcessTap(tap_id);
-                            return Err("default output device has no UID".into());
-                        }
-                    },
+            let (output_id, output_uid_str) =
+                match default_output_device().and_then(|id| device_uid(id).map(|uid| (id, uid))) {
+                    Ok(v) => v,
                     Err(e) => {
                         AudioHardwareDestroyProcessTap(tap_id);
                         return Err(e);
                     }
                 };
-            let output_uid = NSString::from_str(&output_uid_cf.to_string());
+            let output_uid = NSString::from_str(&output_uid_str);
 
-            // 3. Tap stream format → native sample rate for the resampler.
+            // 3. Tap stream format → sample layout check only. Its sample rate
+            // is not usable; the resampler's source rate comes from the output
+            // device in step 3b (see `device_nominal_rate`).
             let asbd: AudioStreamBasicDescription =
                 match get_property(tap_id, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal) {
                     Ok(v) => v,
@@ -531,7 +895,14 @@ mod imp {
                     asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel
                 ));
             }
-            let src_rate = asbd.mSampleRate;
+            // 3b. Source rate for the resampler, from the device the tap runs on.
+            let src_rate = match device_nominal_rate(output_id) {
+                Ok(rate) => rate,
+                Err(e) => {
+                    AudioHardwareDestroyProcessTap(tap_id);
+                    return Err(e);
+                }
+            };
 
             // 4. Private aggregate device wrapping the tap.
             let agg_uid = format!("ai.ariso.oats.tap.{tap_uuid}");
@@ -546,8 +917,9 @@ mod imp {
                 return Err(format!("AudioHardwareCreateAggregateDevice failed: {status}"));
             }
 
-            // 5. IO block: downmix → resample → emit.
-            let app = Arc::new(app);
+            // 5. IO block: downmix → resample → emit. The resampler is built
+            // from the rate read above and is discarded with this capture, so a
+            // later rate change never converts from a stale source rate.
             let resampler = Arc::new(Mutex::new(Resampler::new(src_rate, 16_000.0)));
             let app_cb = app.clone();
             let block = RcBlock::new(
@@ -599,40 +971,204 @@ mod imp {
             // in CAPTURE).
             drop(block);
 
-            *guard = Some(CaptureState {
+            // 6. Follow the device. Both the aggregate's clock sub-device and
+            // the resampler's source rate are fixed at this point, so a later
+            // output switch (earbuds → speakers) or rate switch (a headset
+            // dropping to 16 kHz HFP when another app takes the mic) is only
+            // recoverable by rebuilding. The rate is watched on the output
+            // device rather than on the tap, whose format never changes.
+            // Start the watcher before registering, so the first notification
+            // already has somewhere to go.
+            let _ = change_signaler();
+            let listeners = Listeners {
+                default_output: add_listener(
+                    kAudioObjectSystemObject as AudioObjectID,
+                    kAudioHardwarePropertyDefaultSystemOutputDevice,
+                ),
+                output_rate: add_listener(output_id, kAudioDevicePropertyNominalSampleRate),
+            };
+
+            // The snapshot taken in steps 2 and 3b predates those listeners,
+            // and the gap between them spans aggregate creation and
+            // AudioDeviceStart. That window is genuinely live: opening the
+            // microphone moments earlier is what pushes a Bluetooth headset
+            // to 16 kHz HFP, and the transition settles asynchronously. So
+            // re-read now that notifications are being delivered — a change
+            // from here on wakes the watcher, and one that landed before this
+            // point is caught by the comparison. Without it a capture can run
+            // to the end of the recording on a rate the device already left.
+            let config = TapConfig {
+                output_uid: output_uid_str,
+                src_rate,
+            };
+            if config_went_stale(&config, current_config()) {
+                let _ = change_signaler().send(());
+            }
+
+            Ok(CaptureState {
                 tap_id,
                 aggregate_id,
+                output_id,
                 proc_id,
-            });
+                config,
+                listeners,
+                app,
+            })
         }
-        Ok(())
+    }
+
+    /// Tear down in reverse creation order. Every step is attempted even if an
+    /// earlier one fails, so a single failure doesn't leak the remaining
+    /// resources; the collected statuses are returned for the caller to report.
+    unsafe fn teardown(state: CaptureState) -> Vec<String> {
+        let mut errors: Vec<String> = Vec::new();
+        unsafe {
+            // Listeners first, so nothing can signal a rebuild of the capture
+            // that this teardown is dismantling.
+            if state.listeners.default_output {
+                if let Err(e) = remove_listener(
+                    kAudioObjectSystemObject as AudioObjectID,
+                    kAudioHardwarePropertyDefaultSystemOutputDevice,
+                ) {
+                    errors.push(e);
+                }
+            }
+            if state.listeners.output_rate {
+                if let Err(e) =
+                    remove_listener(state.output_id, kAudioDevicePropertyNominalSampleRate)
+                {
+                    errors.push(e);
+                }
+            }
+            let status = AudioDeviceStop(state.aggregate_id, state.proc_id);
+            if status != 0 {
+                errors.push(format!("AudioDeviceStop failed: {status}"));
+            }
+            let status = AudioDeviceDestroyIOProcID(state.aggregate_id, state.proc_id);
+            if status != 0 {
+                errors.push(format!("AudioDeviceDestroyIOProcID failed: {status}"));
+            }
+            let status = AudioHardwareDestroyAggregateDevice(state.aggregate_id);
+            if status != 0 {
+                errors.push(format!("AudioHardwareDestroyAggregateDevice failed: {status}"));
+            }
+            let status = AudioHardwareDestroyProcessTap(state.tap_id);
+            if status != 0 {
+                errors.push(format!("AudioHardwareDestroyProcessTap failed: {status}"));
+            }
+        }
+        errors
+    }
+
+    /// Rebind capture to the current output device, on the watcher thread.
+    ///
+    /// The resampler is deliberately not carried over: its filter state belongs
+    /// to the old source rate. The recording keeps its timeline — the frontend
+    /// zero-fills the short gap this leaves, which is what a device switch
+    /// sounds like anyway.
+    fn rebuild_capture() {
+        let Ok(mut guard) = CAPTURE.lock() else {
+            return;
+        };
+        // Notifications fire for reasons that don't concern this capture —
+        // including the rebuilds it performs itself — so act only on a binding
+        // that has genuinely changed. An output device that can no longer be
+        // read leaves the capture unbindable and is rebuilt regardless.
+        let (app, change) = match guard.as_ref() {
+            Some(state) => match unsafe { current_config() } {
+                Ok(latest) if !latest.differs_from(&state.config) => return,
+                Ok(latest) => (
+                    state.app.clone(),
+                    format!(
+                        "{} @ {} Hz -> {} @ {} Hz",
+                        state.config.output_uid,
+                        state.config.src_rate,
+                        latest.output_uid,
+                        latest.src_rate
+                    ),
+                ),
+                Err(e) => (state.app.clone(), format!("output device unreadable ({e})")),
+            },
+            // `CAPTURE` is empty either because nothing is recording, or
+            // because a previous rebuild exhausted its retries while one
+            // was in progress — `REBUILD_PENDING` tells the two apart.
+            None => {
+                let Ok(mut pending) = REBUILD_PENDING.lock() else {
+                    return;
+                };
+                match pending.take() {
+                    Some(app) => (app, "retrying after a previous rebuild failure".to_string()),
+                    None => return,
+                }
+            }
+        };
+        if let Some(state) = guard.take() {
+            let errors = unsafe { teardown(state) };
+            if !errors.is_empty() {
+                eprintln!("system-audio teardown before rebuild: {}", errors.join("; "));
+            }
+        }
+
+        eprintln!("system-audio: output changed, rebuilding capture ({change})");
+
+        for attempt in 1..=REBUILD_ATTEMPTS {
+            match unsafe { build_capture(app.clone()) } {
+                Ok(rebuilt) => {
+                    *guard = Some(rebuilt);
+                    if let Ok(mut pending) = REBUILD_PENDING.lock() {
+                        *pending = None;
+                    }
+                    return;
+                }
+                Err(e) if attempt == REBUILD_ATTEMPTS => {
+                    eprintln!(
+                        "system-audio rebuild attempt {attempt} failed, will retry in {REARM_DELAY:?}: {e}"
+                    );
+                    if let Ok(mut pending) = REBUILD_PENDING.lock() {
+                        *pending = Some(app.clone());
+                    }
+                    rearm_after_delay();
+                }
+                Err(e) => {
+                    eprintln!("system-audio rebuild attempt {attempt} failed: {e}");
+                    std::thread::sleep(REBUILD_BACKOFF);
+                }
+            }
+        }
+    }
+
+    /// Wake the watcher again after `REARM_DELAY`, so an exhausted rebuild
+    /// keeps retrying instead of leaving system audio down for the rest of
+    /// the recording. Runs on its own thread so it doesn't block the caller,
+    /// which is itself running on the watcher thread it will go on to wake.
+    fn rearm_after_delay() {
+        let Some(tx) = CHANGE_TX.get() else {
+            return;
+        };
+        let tx = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("oats-system-audio-rearm".into())
+            .spawn(move || {
+                std::thread::sleep(REARM_DELAY);
+                let _ = tx.send(());
+            });
+        if let Err(e) = spawned {
+            eprintln!("system-audio rearm thread unavailable: {e}");
+        }
     }
 
     pub fn stop() -> Result<(), String> {
+        // Locked in the same order as `rebuild_capture` (`CAPTURE` before
+        // `REBUILD_PENDING`) to avoid a lock-order inversion between the two.
         let mut guard = CAPTURE.lock().map_err(|e| e.to_string())?;
+        // Clear a pending rebuild too: without this, a rearm signal that
+        // fires after `stop()` would find `REBUILD_PENDING` still set and
+        // resurrect capture for a recording that has already ended.
+        if let Ok(mut pending) = REBUILD_PENDING.lock() {
+            *pending = None;
+        }
         if let Some(state) = guard.take() {
-            let mut errors: Vec<String> = Vec::new();
-            unsafe {
-                // Tear down in reverse creation order. Attempt every step even
-                // if an earlier one fails, so a single failure doesn't leak the
-                // remaining resources; collect statuses and report at the end.
-                let status = AudioDeviceStop(state.aggregate_id, state.proc_id);
-                if status != 0 {
-                    errors.push(format!("AudioDeviceStop failed: {status}"));
-                }
-                let status = AudioDeviceDestroyIOProcID(state.aggregate_id, state.proc_id);
-                if status != 0 {
-                    errors.push(format!("AudioDeviceDestroyIOProcID failed: {status}"));
-                }
-                let status = AudioHardwareDestroyAggregateDevice(state.aggregate_id);
-                if status != 0 {
-                    errors.push(format!("AudioHardwareDestroyAggregateDevice failed: {status}"));
-                }
-                let status = AudioHardwareDestroyProcessTap(state.tap_id);
-                if status != 0 {
-                    errors.push(format!("AudioHardwareDestroyProcessTap failed: {status}"));
-                }
-            }
+            let errors = unsafe { teardown(state) };
             if !errors.is_empty() {
                 return Err(errors.join("; "));
             }
@@ -673,6 +1209,117 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::mpsc;
+
+        fn config(uid: &str, rate: f64) -> TapConfig {
+            TapConfig {
+                output_uid: uid.to_string(),
+                src_rate: rate,
+            }
+        }
+
+        #[test]
+        fn rebuilds_when_the_output_device_sample_rate_changes() {
+            // A Bluetooth headset dropping from A2DP to HFP: same device, new
+            // rate. The rate is the output device's, since a tap always
+            // declares 48 kHz however the hardware behind it is running.
+            assert!(config("BT-headset", 16_000.0).differs_from(&config("BT-headset", 48_000.0)));
+        }
+
+        #[test]
+        fn rebuilds_across_the_common_44_1_to_48_khz_step() {
+            // Not just the dramatic HFP drop: swapping a 44.1 kHz output for a
+            // 48 kHz one is an 8% resampling error if it goes unnoticed.
+            assert!(
+                config("BuiltInSpeaker", 44_100.0).differs_from(&config("BuiltInSpeaker", 48_000.0))
+            );
+        }
+
+        #[test]
+        fn rebuilds_when_the_default_output_device_changes() {
+            // Earbuds → speakers: the aggregate's clock sub-device is now stale.
+            assert!(config("BuiltInSpeaker", 48_000.0).differs_from(&config("BT-headset", 48_000.0)));
+        }
+
+        #[test]
+        fn does_not_rebuild_when_the_configuration_is_unchanged() {
+            assert!(!config("BT-headset", 48_000.0).differs_from(&config("BT-headset", 48_000.0)));
+        }
+
+        #[test]
+        fn treats_an_unchanged_configuration_as_fresh() {
+            let snapshot = config("BT-headset", 48_000.0);
+            assert!(!config_went_stale(
+                &snapshot,
+                Ok(config("BT-headset", 48_000.0))
+            ));
+        }
+
+        #[test]
+        fn catches_a_rate_change_that_landed_before_the_listeners_did() {
+            // The A2DP → HFP drop is triggered by the microphone opening just
+            // before this capture is built, so it can land while the aggregate
+            // device is still being created — with no listener registered yet
+            // to report it, and nothing afterwards that would notice.
+            let snapshot = config("BT-headset", 48_000.0);
+            assert!(config_went_stale(
+                &snapshot,
+                Ok(config("BT-headset", 16_000.0))
+            ));
+        }
+
+        #[test]
+        fn catches_an_output_switch_that_landed_before_the_listeners_did() {
+            let snapshot = config("BuiltInSpeaker", 48_000.0);
+            assert!(config_went_stale(
+                &snapshot,
+                Ok(config("BT-headset", 48_000.0))
+            ));
+        }
+
+        #[test]
+        fn treats_an_unreadable_configuration_as_stale() {
+            // Nothing can confirm the snapshot, so hand it to the watcher
+            // rather than record audio against a binding we can't verify.
+            let snapshot = config("BT-headset", 48_000.0);
+            assert!(config_went_stale(
+                &snapshot,
+                Err("default output device has no UID".into())
+            ));
+        }
+
+        #[test]
+        fn does_not_rebuild_on_sub_hertz_sample_rate_jitter() {
+            // Every rebuild re-notifies, so treating a last-bit difference as a
+            // real change would tear the tap down in a loop.
+            assert!(!config("BT-headset", 48_000.000_000_1)
+                .differs_from(&config("BT-headset", 48_000.0)));
+        }
+
+        #[test]
+        fn coalesces_a_burst_of_notifications_into_one_rebuild() {
+            // One headset transition fires several Core Audio notifications.
+            let (tx, rx) = mpsc::channel();
+            for _ in 0..5 {
+                tx.send(()).unwrap();
+            }
+            assert!(wait_for_change(&rx, Duration::from_millis(10)));
+            assert!(
+                rx.try_recv().is_err(),
+                "the burst queued behind the first signal should be drained"
+            );
+        }
+
+        #[test]
+        fn stops_waiting_when_the_signal_sender_is_gone() {
+            let (tx, rx) = mpsc::channel::<()>();
+            drop(tx);
+            assert!(!wait_for_change(&rx, Duration::from_millis(10)));
+        }
+    }
 }
 
 /// Start capturing system audio. Emits `system-audio-data` events carrying
