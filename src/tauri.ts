@@ -52,43 +52,58 @@ interface ApiResponse {
 // up waiting on the browser). Views treat it as a silent cancel, not a failure.
 export const SIGN_IN_CANCELED_ERROR = 'Sign-in canceled';
 
-export const auth = {
-  async googleSignIn(): Promise<{ success?: boolean; sessionToken?: string; error?: string }> {
-    let resolveResult: (result: SignInResult) => void;
-    const resultPromise = new Promise<SignInResult>((resolve) => {
-      resolveResult = resolve;
-    });
+type SignInCommand = 'google_sign_in' | 'microsoft_sign_in';
 
-    // Await listener setup before triggering the flow. The backend scopes
-    // its "oauth-result" emit to this webview (it carries the session
-    // token), so listen on the current webview window too. If setup fails,
-    // let it throw here rather than starting a sign-in that can never
-    // resolve resultPromise.
-    const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
-      'oauth-result',
-      (event) => {
-        resolveResult(event.payload);
-      }
-    );
+/**
+ * Run a browser sign-in command and wait for its "oauth-result". The providers
+ * share the event name because at most one sign-in attempt is live at a time.
+ */
+async function browserSignIn(command: SignInCommand): Promise<SignInResult> {
+  let resolveResult: (result: SignInResult) => void;
+  const resultPromise = new Promise<SignInResult>((resolve) => {
+    resolveResult = resolve;
+  });
 
-    try {
-      // Trigger the OAuth flow — opens the sign-in page in the default browser
-      const immediate = await invoke<SignInResult>('google_sign_in');
-
-      // If the command itself returned an error (e.g. prepare-state failed), return it
-      if (immediate.error) {
-        return { error: immediate.error };
-      }
-
-      // Wait for the browser flow to hit the loopback callback and complete
-      return await resultPromise;
-    } finally {
-      unlisten();
+  // Await listener setup before triggering the flow. The backend scopes
+  // its "oauth-result" emit to this webview (it carries the session
+  // token), so listen on the current webview window too. If setup fails,
+  // let it throw here rather than starting a sign-in that can never
+  // resolve resultPromise.
+  const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
+    'oauth-result',
+    (event) => {
+      resolveResult(event.payload);
     }
+  );
+
+  try {
+    // Trigger the OAuth flow — opens the sign-in page in the default browser
+    const immediate = await invoke<SignInResult>(command);
+
+    // If the command itself returned an error (e.g. prepare-state failed), return it
+    if (immediate.error) {
+      return { error: immediate.error };
+    }
+
+    // Wait for the browser flow to hit the loopback callback and complete
+    return await resultPromise;
+  } finally {
+    unlisten();
+  }
+}
+
+export const auth = {
+  googleSignIn(): Promise<SignInResult> {
+    return browserSignIn('google_sign_in');
   },
 
+  microsoftSignIn(): Promise<SignInResult> {
+    return browserSignIn('microsoft_sign_in');
+  },
+
+  /** Abort whichever browser flow is pending: either sign-in, or Calendar connect. */
   async cancelSignIn(): Promise<void> {
-    await invoke('cancel_google_sign_in');
+    await invoke('cancel_sign_in');
   },
 
   /** Whether the API already holds Calendar read access for this user. */
@@ -109,7 +124,7 @@ export const auth = {
   /**
    * Second hop of desktop Google auth. Sign-in cannot widen an existing grant
    * without dropping the scopes already on file, so Calendar is acquired here
-   * through the additive Workspace connect flow. Mirrors googleSignIn(), but
+   * through the additive Workspace connect flow. Mirrors browserSignIn(), but
    * the loopback carries no token — only a status marker.
    */
   async connectGoogleCalendar(): Promise<CalendarConnectResult> {

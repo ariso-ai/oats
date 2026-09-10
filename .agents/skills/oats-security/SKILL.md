@@ -21,7 +21,7 @@ walk its checklist before opening the PR.
    `create_dir_all`. **Path-traversal risk**: a malicious id (`../../`) could escape
    `~/.ariso/recordings/`. Confirm ids are validated and paths are built from
    `storage::recordings_dir(...)`, never concatenated from caller-supplied absolute paths.
-3. **Auth / OAuth** — `auth.googleSignIn` → `/oauth2/prepare-state` (CSRF state) →
+3. **Auth / OAuth** — `auth.googleSignIn` / `auth.microsoftSignIn` → `/oauth2/prepare-state` (CSRF state) →
    the default **browser** (system opener), with the magic-link token returned to a
    `127.0.0.1` loopback listener (RFC 8252) and the result delivered via the
    `oauth-result` event. Verify: state is generated server-side and checked; the

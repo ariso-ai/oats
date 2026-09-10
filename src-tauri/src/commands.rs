@@ -235,7 +235,7 @@ const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300)
 
 /// At most one browser sign-in flow is pending at a time; starting a new one
 /// (or canceling) aborts the previous listener task. The attempt is tracked
-/// from the moment `google_sign_in` is invoked — before the prepare-state
+/// from the moment a sign-in command is invoked — before the prepare-state
 /// request, not just once the loopback listener task exists — so a cancel
 /// that arrives while prepare-state is in flight still has something to
 /// cancel instead of being silently dropped.
@@ -302,7 +302,7 @@ fn begin_sign_in_attempt(flow: BrowserFlow) -> u64 {
 }
 
 /// Whether `id` is still the active attempt, i.e. it hasn't been superseded
-/// by a newer `google_sign_in` call or dropped by `cancel_google_sign_in`.
+/// by a newer sign-in call or dropped by `cancel_sign_in`.
 fn sign_in_attempt_active(id: u64) -> bool {
     matches!(&*PENDING_SIGN_IN.lock().unwrap(), Some(p) if p.id == id)
 }
@@ -340,7 +340,7 @@ fn abort_pending_sign_in() -> Option<BrowserFlow> {
 /// `JoinHandle::abort` to stop, since abort only takes effect at an await
 /// point) still prevents the stale result from being published, and so a
 /// naturally completed attempt doesn't linger in the slot for a later
-/// `cancel_google_sign_in` to emit a bogus cancellation over.
+/// `cancel_sign_in` to emit a bogus cancellation over.
 fn retire_sign_in_attempt(id: u64) -> bool {
     let mut slot = PENDING_SIGN_IN.lock().unwrap();
     match slot.as_ref() {
@@ -356,7 +356,7 @@ fn retire_sign_in_attempt(id: u64) -> bool {
 /// moment the loopback listener task takes over. Every fallible step in that
 /// prologue — bind, prepare-state, URL validation, opening the browser — would
 /// otherwise leave the attempt parked in the slot on the way out, and a later
-/// `cancel_google_sign_in` would emit a result for a flow that already died.
+/// `cancel_sign_in` would emit a result for a flow that already died.
 /// Call `release` once the listener task exists; until then, any early return
 /// retires the attempt on drop.
 struct SignInAttemptGuard(Option<u64>);
@@ -553,6 +553,40 @@ async fn accept_loopback_callback(
     }
 }
 
+/// Which identity provider a browser sign-in goes through. The frontend picks
+/// a command, not a provider string, so it can never send an arbitrary
+/// `integration` to prepare-state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SignInProvider {
+    Google,
+    Microsoft,
+}
+
+impl SignInProvider {
+    /// The `/oauth2/prepare-state` body for this provider. `redirect` tells
+    /// the API's sign-in callback to deliver the magic-link token to our
+    /// loopback listener instead of the web app.
+    fn prepare_state_body(self, redirect: &str) -> serde_json::Value {
+        match self {
+            // The backend expands these service names into Google scopes and
+            // owns credential persistence.
+            SignInProvider::Google => serde_json::json!({
+                "integration": "google-signin",
+                "scopes": ["calendar-readonly"],
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            }),
+            // Identity-only: the server ignores `scopes` here, and Microsoft
+            // 365 data access is a separate connect flow.
+            SignInProvider::Microsoft => serde_json::json!({
+                "integration": "microsoft-signin",
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            }),
+        }
+    }
+}
+
 /// Drive the post-browser half of sign-in: wait for the loopback callback,
 /// exchange the magic-link token for a session, and report via `oauth-result`.
 /// Emits on `window` (the webview that started this attempt) rather than
@@ -598,12 +632,15 @@ async fn run_browser_sign_in(
     }
 }
 
-/// Initiates Google OAuth sign-in in the user's default browser (native
-/// webviews break passkeys and are blocked by identity providers). A loopback
-/// listener bound before the flow starts receives the magic-link token from
-/// the API's desktop redirect, and the token is exchanged for a session.
-#[tauri::command]
-pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+/// Browser OAuth sign-in through `provider`, in the user's default browser
+/// (native webviews break passkeys and are blocked by identity providers). A
+/// loopback listener bound before the flow starts receives the magic-link
+/// token from the API's desktop redirect, and the token is exchanged for a
+/// session. Only the prepare-state body depends on the provider.
+async fn browser_oauth_sign_in(
+    window: tauri::WebviewWindow,
+    provider: SignInProvider,
+) -> Result<SignInResult, String> {
     use tauri_plugin_opener::OpenerExt;
 
     // Register this attempt before any await — a cancel that arrives while
@@ -622,20 +659,12 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let nonce = random_nonce()?;
 
-    // Step 1: Get the OAuth redirect URL from the API. The backend expands
-    // these service names into Google scopes and owns credential persistence;
-    // `redirect` tells its sign-in callback to deliver the magic-link token to
-    // our loopback listener instead of the web app.
+    // Step 1: Get the OAuth redirect URL from the API.
     let client = http_client();
     let response = client
         .post(format!("{}/oauth2/prepare-state", api_base_url()))
         .header(CONTENT_TYPE, "application/json")
-        .json(&serde_json::json!({
-            "integration": "google-signin",
-            "scopes": ["calendar-readonly"],
-            "newUserSignupIntent": "personal_unless_domain_autojoin",
-            "redirect": desktop_auth_redirect(port, &nonce),
-        }))
+        .json(&provider.prepare_state_body(&desktop_auth_redirect(port, &nonce)))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -700,10 +729,24 @@ pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult
     })
 }
 
-/// Abort a pending browser sign-in (the user gave up waiting). Resolves the
-/// frontend's pending `oauth-result` wait with the silent-cancel error.
+/// Sign in with Google. See `browser_oauth_sign_in`.
 #[tauri::command]
-pub async fn cancel_google_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
+pub async fn google_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+    browser_oauth_sign_in(window, SignInProvider::Google).await
+}
+
+/// Sign in with Microsoft (Entra ID). Identity only: it grants no Calendar
+/// access. See `browser_oauth_sign_in`.
+#[tauri::command]
+pub async fn microsoft_sign_in(window: tauri::WebviewWindow) -> Result<SignInResult, String> {
+    browser_oauth_sign_in(window, SignInProvider::Microsoft).await
+}
+
+/// Abort a pending browser flow (the user gave up waiting): a sign-in with
+/// either provider, or the Calendar connect hop. Resolves the frontend's
+/// pending wait with the silent-cancel error.
+#[tauri::command]
+pub async fn cancel_sign_in(window: tauri::WebviewWindow) -> Result<(), String> {
     match abort_pending_sign_in() {
         Some(BrowserFlow::SignIn) => {
             let _ = window.emit(
@@ -798,7 +841,7 @@ pub async fn connect_google_calendar(
         return Err("Not signed in".into());
     };
 
-    // As in `google_sign_in`: the guard hands the slot back if any step below
+    // As in `browser_oauth_sign_in`: the guard hands the slot back if any step below
     // fails before the listener task takes ownership of the attempt.
     let attempt = SignInAttemptGuard::begin(BrowserFlow::CalendarConnect);
     let attempt_id = attempt.id();
@@ -2365,6 +2408,37 @@ mod tests {
             desktop_auth_redirect(51234, "abc123"),
             "/desktop-auth?callback_port=51234&nonce=abc123"
         );
+    }
+
+    #[test]
+    fn google_prepare_state_body_is_unchanged() {
+        let redirect = "/desktop-auth?callback_port=51234&nonce=abc123";
+        assert_eq!(
+            SignInProvider::Google.prepare_state_body(redirect),
+            serde_json::json!({
+                "integration": "google-signin",
+                "scopes": ["calendar-readonly"],
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            })
+        );
+    }
+
+    #[test]
+    fn microsoft_prepare_state_body_is_identity_only() {
+        // The server ignores `scopes` for Microsoft sign-in; sending one would
+        // suggest a Calendar grant that never happens.
+        let redirect = "/desktop-auth?callback_port=51234&nonce=abc123";
+        let body = SignInProvider::Microsoft.prepare_state_body(redirect);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "integration": "microsoft-signin",
+                "newUserSignupIntent": "personal_unless_domain_autojoin",
+                "redirect": redirect,
+            })
+        );
+        assert!(body.get("scopes").is_none());
     }
 
     #[test]
