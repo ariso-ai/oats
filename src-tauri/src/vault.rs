@@ -122,14 +122,22 @@ fn sanitize_component(s: &str) -> String {
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The `YYYY-MM-DD` date a note is filed under, derived from an RFC3339
+/// `created_at`. Falls back to the first 10 characters when `created_at` is not
+/// RFC3339. `note_basename` and the `➕` stamp on generated tasks both call
+/// this, so a note's filename date and its task dates can never disagree.
+pub fn note_date(created_at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(created_at) {
+        Ok(dt) => dt.format("%Y-%m-%d").to_string(),
+        Err(_) => sanitize_component(&created_at.chars().take(10).collect::<String>()),
+    }
+}
+
 /// Derive a human note basename: `YYYY-MM-DD <title>`. Falls back to the first
 /// 10 chars of `created_at` if it is not RFC3339, and to `id` if the sanitized
 /// title is empty.
 pub fn note_basename(created_at: &str, title: &str, id: &str) -> String {
-    let date = match chrono::DateTime::parse_from_rfc3339(created_at) {
-        Ok(dt) => dt.format("%Y-%m-%d").to_string(),
-        Err(_) => sanitize_component(&created_at.chars().take(10).collect::<String>()),
-    };
+    let date = note_date(created_at);
     let mut name = sanitize_component(title);
     if name.is_empty() {
         name = sanitize_component(id);
@@ -156,6 +164,118 @@ pub fn unique_basename(root: &Path, base: &str) -> String {
     }
 }
 
+/// Split a Markdown list item into its leading whitespace and its content.
+/// Recognizes `-`, `*`, `+`, `1.` and `2)` markers — the same set the Obsidian
+/// Tasks plugin accepts. Returns None for anything that is not a list item.
+fn split_list_item(line: &str) -> Option<(&str, &str)> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, rest) = line.split_at(indent_len);
+    for marker in ['-', '*', '+'] {
+        if let Some(after) = rest.strip_prefix(marker) {
+            if after.starts_with(' ') || after.starts_with('\t') {
+                return Some((indent, after.trim_start()));
+            }
+        }
+    }
+    // Ordered markers: one or more digits, then `.` or `)`.
+    let digit_len = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_len > 0 {
+        let after_digits = &rest[digit_len..];
+        for marker in ['.', ')'] {
+            if let Some(after) = after_digits.strip_prefix(marker) {
+                if after.starts_with(' ') || after.starts_with('\t') {
+                    return Some((indent, after.trim_start()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The state character of a list item that is already a checkbox: `[ ]` → ' ',
+/// `[x]` → 'x', `[-]` → '-'. None for a plain bullet. The closing bracket must
+/// end the item or be followed by a space, so a `[label](url)` link at the
+/// start of a bullet is not mistaken for a checkbox.
+fn checkbox_state(content: &str) -> Option<char> {
+    let b = content.as_bytes();
+    if b.len() >= 3 && b[0] == b'[' && b[2] == b']' && (b.len() == 3 || b[3] == b' ') {
+        return Some(b[1] as char);
+    }
+    None
+}
+
+/// True for an ATX heading line (`#` … `######` followed by a space or EOL).
+/// Guards against treating a bare `#tag` as a heading.
+fn is_heading(trimmed: &str) -> bool {
+    let after = trimmed.trim_start_matches('#');
+    after.len() < trimmed.len() && (after.is_empty() || after.starts_with(' '))
+}
+
+/// True for an `Action Items` heading at any level, tolerating a trailing colon
+/// and any case — the sidecar prompt asks for `## Action Items`, but the model
+/// occasionally varies it.
+fn is_action_items_heading(trimmed: &str) -> bool {
+    let text = trimmed.trim_start_matches('#').trim();
+    text.trim_end_matches(':').trim().eq_ignore_ascii_case("action items")
+}
+
+/// True for an item that is a "nothing here" placeholder rather than a task.
+/// The 1B notes model fills empty sections with lines like "None explicitly
+/// stated in the transcript." despite the prompt forbidding it; turning those
+/// into todos would be worse than dropping them.
+fn is_placeholder_item(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    let core = lower.trim_end_matches(['.', ' ']);
+    core == "none" || core == "n/a" || core == "na" || lower.starts_with("none ")
+}
+
+/// Rewrite the `## Action Items` section's bullets as Obsidian Tasks
+/// checkboxes stamped with the meeting's date: `- [ ] <task> ➕ YYYY-MM-DD`.
+/// `➕` (created) is the only signifier we can populate truthfully — a meeting
+/// gives us no due date, priority, or recurrence.
+///
+/// Idempotent: an item that is already a checkbox is passed through untouched,
+/// so regenerating notes after an append never double-stamps. Lines inside
+/// fenced code blocks are never rewritten (Tasks ignores those anyway).
+pub fn render_action_items(notes_md: &str, date: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_section = false;
+    let mut in_fence = false;
+    for line in notes_md.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push(line.to_string());
+            continue;
+        }
+        if !in_fence && is_heading(trimmed) {
+            in_section = is_action_items_heading(trimmed);
+            out.push(line.to_string());
+            continue;
+        }
+        if in_fence || !in_section {
+            out.push(line.to_string());
+            continue;
+        }
+        match split_list_item(line) {
+            Some((indent, content)) if checkbox_state(content).is_none() => {
+                if is_placeholder_item(content) {
+                    continue; // drop the line entirely
+                }
+                out.push(format!("{indent}- [ ] {content} ➕ {date}"));
+            }
+            _ => out.push(line.to_string()),
+        }
+    }
+    let mut joined = out.join("\n");
+    // `lines()` drops the trailing newline; restore it so the note body's
+    // shape is unchanged for input that had one.
+    if notes_md.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Render a vault note: YAML front-matter, the audio embed, then the notes body.
 pub fn render_note(meta: &RecordingMeta, audio_file: &str, notes_md: &str) -> String {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
@@ -174,7 +294,7 @@ pub fn render_note(meta: &RecordingMeta, audio_file: &str, notes_md: &str) -> St
     out.push_str(&format!("participants: [{participants}]\n"));
     out.push_str("---\n");
     out.push_str(&format!("![[Attachments/{audio_file}]]\n\n"));
-    out.push_str(notes_md);
+    out.push_str(&render_action_items(notes_md, &note_date(&meta.created_at)));
     out
 }
 
@@ -874,5 +994,102 @@ mod tests {
         unsafe {
             std::env::remove_var("ARISO_ROOT");
         }
+    }
+
+    #[test]
+    fn note_date_matches_the_basename_date_prefix() {
+        assert_eq!(note_date("2026-06-02T14:30:05Z"), "2026-06-02");
+        assert_eq!(note_date("2026-06-02T14:30:05.168Z"), "2026-06-02");
+        // Not RFC3339: fall back to the first 10 characters, exactly as
+        // note_basename does, so the two can never disagree.
+        assert_eq!(note_date("2026-06-02 oops"), "2026-06-02");
+        assert!(note_basename("2026-06-02T14:30:05Z", "Standup", "id")
+            .starts_with(&note_date("2026-06-02T14:30:05Z")));
+    }
+
+    #[test]
+    fn render_action_items_rewrites_bullets_as_tasks() {
+        let notes = "## Summary\nWe met.\n\n## Action Items\n*   Ship the RFC\n- Sam: email legal\n+ Book the room\n1. Update the deck\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert_eq!(
+            out,
+            "## Summary\nWe met.\n\n## Action Items\n- [ ] Ship the RFC ➕ 2026-09-09\n- [ ] Sam: email legal ➕ 2026-09-09\n- [ ] Book the room ➕ 2026-09-09\n- [ ] Update the deck ➕ 2026-09-09\n"
+        );
+    }
+
+    #[test]
+    fn render_action_items_leaves_other_sections_alone() {
+        let notes = "## Key Points\n*   A point\n\n## Action Items\n*   Do the thing\n\n## Decisions\n*   Ship on Friday\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("## Key Points\n*   A point"));
+        assert!(out.contains("## Decisions\n*   Ship on Friday"));
+        assert!(out.contains("- [ ] Do the thing ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_is_idempotent() {
+        let notes = "## Action Items\n*   Ship the RFC\n";
+        let once = render_action_items(notes, "2026-09-09");
+        // Re-rendering after an append must not double-stamp or re-checkbox.
+        assert_eq!(render_action_items(&once, "2026-09-10"), once);
+    }
+
+    #[test]
+    fn render_action_items_preserves_completed_and_cancelled_items() {
+        let notes = "## Action Items\n- [x] Already done ➕ 2026-09-01\n- [-] Dropped\n- Still open\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("- [x] Already done ➕ 2026-09-01"));
+        assert!(out.contains("- [-] Dropped"));
+        assert!(out.contains("- [ ] Still open ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_preserves_indentation() {
+        let notes = "## Action Items\n*   Parent task\n    *   Child task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("\n- [ ] Parent task ➕ 2026-09-09\n"));
+        assert!(out.contains("\n    - [ ] Child task ➕ 2026-09-09\n"));
+    }
+
+    #[test]
+    fn render_action_items_drops_placeholder_items() {
+        // The 1B model fills empty sections despite the prompt forbidding it.
+        // "None explicitly stated" must never become a todo.
+        let notes = "## Action Items\n*   None explicitly stated in the transcript.\n*   None\n*   N/A\n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(!out.contains("None"));
+        assert!(!out.contains("N/A"));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_ignores_fenced_code_blocks() {
+        let notes = "## Action Items\n```\n- not a task\n```\n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("\n- not a task\n"));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_passes_through_notes_without_the_section() {
+        let notes = "## Summary\nWe met.\n\n## Key Points\n*   A point\n";
+        assert_eq!(render_action_items(notes, "2026-09-09"), notes);
+    }
+
+    #[test]
+    fn render_action_items_tolerates_heading_case_and_trailing_colon() {
+        let notes = "## Action items:\n*   Ship it\n";
+        assert!(render_action_items(notes, "2026-09-09").contains("- [ ] Ship it ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_note_emits_tasks_stamped_with_the_meeting_date() {
+        let md = render_note(
+            &meta_for_note(),
+            "2026-06-02 Team Standup.mp3",
+            "## Action Items\n*   Ship the RFC\n",
+        );
+        // meta_for_note()'s created_at is 2026-06-02T14:30:05Z.
+        assert!(md.contains("- [ ] Ship the RFC ➕ 2026-06-02"));
     }
 }
