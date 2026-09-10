@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.22.0](https://github.com/ariso-ai/oats/compare/v0.21.0...v0.22.0) (2026-09-10)
+
+
+### Features
+
+* **library:** list meeting action items in the Todos tab ([dd2ab37](https://github.com/ariso-ai/oats/commit/dd2ab3741fc4e6397be83370728d03a593b9ba5b))
+
+
+### Bug Fixes
+
+* close the device-change gap while capture is being built ([182b0a4](https://github.com/ariso-ai/oats/commit/182b0a4260fdfe9d40a38233134520a14905de73))
+* follow output device and format changes mid-recording ([8fe864b](https://github.com/ariso-ai/oats/commit/8fe864b75bbb0b76042bc0f118c11776ab17d3f4))
+* resample system audio from the output device's real rate ([15a6351](https://github.com/ariso-ai/oats/commit/15a6351cf412a5dc356d728f60abe77ff9222037))
+
 ## [0.21.0](https://github.com/ariso-ai/oats/compare/v0.20.0...v0.21.0) (2026-09-03)
 
 
