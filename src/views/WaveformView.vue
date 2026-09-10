@@ -539,7 +539,7 @@ async function startRecording() {
 
 // True once an Ariso auto-trigger has run and found no calendar meeting to
 // attach to. Such a session has no identity at all today, so nothing can
-// surface it while it runs; `awaitAdHocMeeting` gives it one.
+// surface it while it runs; `createAdHocMeeting` gives it one.
 const needsAdHocMeeting = ref(false);
 let adHocMeetingRequested = false;
 
