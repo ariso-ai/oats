@@ -401,15 +401,20 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
     // Only once the recorder window has told us what it is recording. Until
     // then the menu is exactly what it is today — a row reading "Untitled
     // meeting" for the first second of every recording would be noise.
-    if let Some(title) = app
-        .state::<crate::recording_state::RecordingState>()
-        .active_recording_title()
-    {
-        let show = MenuItemBuilder::with_id("show_recording", truncate_menu_title(Some(&title)))
+    //
+    // An identity is enough; a title is not required. An ad-hoc Ariso meeting
+    // is genuinely untitled until the user renames it, and that is the very
+    // case this row exists for: the id is known and routable, so the row falls
+    // back to "Untitled meeting" rather than disappearing.
+    let state = app.state::<crate::recording_state::RecordingState>();
+    let title = state.active_recording_title();
+    if title.is_some() || state.active_meeting_id().is_some() {
+        let show = MenuItemBuilder::with_id("show_recording", truncate_menu_title(title.as_deref()))
             .build(app)?;
         // muda has no per-item font control, so a disabled item is the closest
         // native "subtitle" — same trick as build_idle_menu's time row.
-        let status_row = MenuItemBuilder::with_id("recording_status", "Recording")
+        let status_label = if is_paused { "Paused" } else { "Recording" };
+        let status_row = MenuItemBuilder::with_id("recording_status", status_label)
             .enabled(false)
             .build(app)?;
         builder = builder.item(&show).item(&status_row).separator();
