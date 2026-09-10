@@ -221,12 +221,34 @@ fn is_action_items_heading(trimmed: &str) -> bool {
 
 /// True for an item that is a "nothing here" placeholder rather than a task.
 /// The 1B notes model fills empty sections with lines like "None explicitly
-/// stated in the transcript." despite the prompt forbidding it; turning those
-/// into todos would be worse than dropping them.
+/// stated in the transcript." despite the prompt forbidding it.
+///
+/// Deliberately narrow: a real action item can legitimately begin with "None"
+/// ("None of the vendors confirmed — follow up Monday"), and silently dropping
+/// one is invisible data loss, whereas a leaked placeholder is a visible row
+/// the user deletes. So only a bare placeholder, or one that names the
+/// transcript the way this model does, is dropped.
 fn is_placeholder_item(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     let core = lower.trim_end_matches(['.', ' ']);
-    core == "none" || core == "n/a" || core == "na" || lower.starts_with("none ")
+    core == "none"
+        || core == "n/a"
+        || core == "na"
+        || (lower.starts_with("none") && lower.contains("transcript"))
+}
+
+/// The delimiter character of a fenced-code-block marker line, if the line is
+/// one. CommonMark closes a fence only with its own delimiter, so callers must
+/// remember which one opened the block: a literal `~~~` inside a ```-fence is
+/// text, not a close.
+fn fence_delimiter(trimmed: &str) -> Option<char> {
+    if trimmed.starts_with("```") {
+        Some('`')
+    } else if trimmed.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
+    }
 }
 
 /// Rewrite the `## Action Items` section's bullets as Obsidian Tasks
@@ -240,20 +262,25 @@ fn is_placeholder_item(text: &str) -> bool {
 pub fn render_action_items(notes_md: &str, date: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut in_section = false;
-    let mut in_fence = false;
+    let mut fence: Option<char> = None;
     for line in notes_md.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+        if let Some(delim) = fence_delimiter(trimmed) {
+            match fence {
+                None => fence = Some(delim),
+                Some(open) if open == delim => fence = None,
+                // A different delimiter inside an open fence is literal text.
+                Some(_) => {}
+            }
             out.push(line.to_string());
             continue;
         }
-        if !in_fence && is_heading(trimmed) {
+        if fence.is_none() && is_heading(trimmed) {
             in_section = is_action_items_heading(trimmed);
             out.push(line.to_string());
             continue;
         }
-        if in_fence || !in_section {
+        if fence.is_some() || !in_section {
             out.push(line.to_string());
             continue;
         }
@@ -1054,12 +1081,22 @@ mod tests {
     #[test]
     fn render_action_items_drops_placeholder_items() {
         // The 1B model fills empty sections despite the prompt forbidding it.
-        // "None explicitly stated" must never become a todo.
+        // "None explicitly stated in the transcript." must never become a todo.
         let notes = "## Action Items\n*   None explicitly stated in the transcript.\n*   None\n*   N/A\n*   Real task\n";
         let out = render_action_items(notes, "2026-09-09");
-        assert!(!out.contains("None"));
+        assert!(!out.contains("None explicitly stated"));
+        assert!(!out.contains("- [ ] None ➕"));
         assert!(!out.contains("N/A"));
         assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_keeps_a_real_task_that_starts_with_none() {
+        // Dropping this would be invisible data loss; a leaked placeholder is
+        // only a visible row the user deletes.
+        let notes = "## Action Items\n*   None of the vendors confirmed pricing — follow up Monday\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("- [ ] None of the vendors confirmed pricing — follow up Monday ➕ 2026-09-09"));
     }
 
     #[test]
@@ -1067,6 +1104,16 @@ mod tests {
         let notes = "## Action Items\n```\n- not a task\n```\n*   Real task\n";
         let out = render_action_items(notes, "2026-09-09");
         assert!(out.contains("\n- not a task\n"));
+        assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
+    }
+
+    #[test]
+    fn render_action_items_keeps_a_backtick_fence_open_across_a_tilde_line() {
+        // CommonMark closes a fence only with its own delimiter, so the `~~~`
+        // here is literal text and everything up to the closing ``` stays code.
+        let notes = "## Action Items\n```\n~~~\n- still inside the fence\n```\n*   Real task\n";
+        let out = render_action_items(notes, "2026-09-09");
+        assert!(out.contains("\n- still inside the fence\n"));
         assert!(out.contains("- [ ] Real task ➕ 2026-09-09"));
     }
 
