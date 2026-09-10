@@ -1161,8 +1161,9 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
 
 /// Build the waveform window's route, appending the optional `localAppendId`
 /// value, the `forceNew` flag, plus the `auto` and `pillHidden` query flags.
-/// Kept pure so the wiring is unit-testable.
-fn waveform_url(
+/// Kept pure so the wiring is unit-testable — `mic_monitor` composes its launch
+/// parameters through it to assert what the auto path actually opens.
+pub(crate) fn waveform_url(
     meeting_id: Option<i64>,
     auto: bool,
     pill_hidden: bool,

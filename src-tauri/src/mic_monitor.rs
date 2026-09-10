@@ -112,12 +112,69 @@ impl Machine {
     }
 }
 
+/// Waveform-window launch parameters for a mic-monitor detection.
+pub(crate) struct AutoRecordLaunch {
+    pub meeting_id: Option<i64>,
+    pub local_append_id: Option<String>,
+    pub force_new: bool,
+    pub auto: bool,
+}
+
+/// A detection means a *new* call just started, so the recorder always opens a
+/// brand-new recording: no meeting attachment, no append target, and `force_new`
+/// set so the local backend's 5-minute auto-append window can't silently merge
+/// this call into an earlier one — including whichever meeting the user happens
+/// to have open in the detail pane. Pure so the contract is unit-tested without
+/// a running app. `force_new` is a no-op on the Ariso path (only the local
+/// backend reads it), so this is effectively a local-mode guarantee.
+fn auto_record_launch() -> AutoRecordLaunch {
+    AutoRecordLaunch {
+        meeting_id: None,
+        local_append_id: None,
+        force_new: true,
+        auto: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn pids(list: &[i32]) -> HashSet<i32> {
         list.iter().copied().collect()
+    }
+
+    #[test]
+    fn auto_record_launches_a_brand_new_recording() {
+        let launch = auto_record_launch();
+        assert_eq!(
+            launch.meeting_id, None,
+            "a detection never attaches to a meeting"
+        );
+        assert_eq!(
+            launch.local_append_id, None,
+            "a detection has no explicit append target"
+        );
+        assert!(
+            launch.auto,
+            "the recorder must know this start was automatic"
+        );
+        assert!(
+            launch.force_new,
+            "a detection is a new call: it must never auto-append into an earlier recording"
+        );
+        // Compose through the real URL builder so a regression at the decision
+        // point fails here, not just a re-read of the struct field.
+        assert_eq!(
+            crate::commands::waveform_url(
+                launch.meeting_id,
+                launch.auto,
+                false,
+                launch.local_append_id.as_deref(),
+                launch.force_new,
+            ),
+            "/#/waveform?forceNew=1&auto=1"
+        );
     }
 
     #[test]
@@ -339,12 +396,15 @@ async fn run_loop(app: AppHandle) {
                                 .is_active()
                         {
                             let app_main = app2.clone();
+                            let launch = auto_record_launch();
                             let _ = app2.run_on_main_thread(move || {
-                                if let Err(e) =
-                                    crate::commands::open_waveform_window(
-                                        &app_main, None, None, false, true,
-                                    )
-                                {
+                                if let Err(e) = crate::commands::open_waveform_window(
+                                    &app_main,
+                                    launch.meeting_id,
+                                    launch.local_append_id,
+                                    launch.force_new,
+                                    launch.auto,
+                                ) {
                                     eprintln!("mic-monitor: failed to open recorder window: {e}");
                                 }
                             });
