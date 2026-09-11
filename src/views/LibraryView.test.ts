@@ -2386,7 +2386,7 @@ describe('LibraryView backend indicator', () => {
   }
 
   function pill(wrapper: ReturnType<typeof mount>) {
-    return wrapper.get('.sidebar .account-pill');
+    return wrapper.get('.account-pill-wrap .account-pill');
   }
 
   // Every ariso.ai state carries the same label, so tell them apart by shape.
@@ -2396,13 +2396,24 @@ describe('LibraryView backend indicator', () => {
     return el.classes('account-pill--signed-out') ? 'signed-out' : 'signed-in';
   }
 
-  it('sits at the bottom-left, under the sidebar nav, not in the titlebar', async () => {
+  it('sits in the window corner, outside the titlebar and the sidebar', async () => {
     const wrapper = await mountOn('local');
 
+    const wrap = wrapper.get('.account-pill-wrap').element;
+    expect(wrap.parentElement?.classList.contains('library')).toBe(true);
     expect(wrapper.find('.titlebar .account-pill').exists()).toBe(false);
-    const wrap = wrapper.get('.sidebar .account-pill-wrap').element;
-    expect(wrap.previousElementSibling?.classList.contains('bottom-nav')).toBe(true);
-    expect(wrap.nextElementSibling).toBeNull();
+    expect(wrapper.find('.sidebar .account-pill').exists()).toBe(false);
+    expect(wrapper.find('.detail-wrap--clear-corner').exists()).toBe(false);
+  });
+
+  it('stays visible with the sidebar hidden, and keeps the detail card clear of it', async () => {
+    const wrapper = await mountOn('local');
+
+    await wrapper.get('.panel-toggle').trigger('click');
+
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(pill(wrapper).text()).toBe('Local');
+    expect(wrapper.find('.detail-wrap').classes()).toContain('detail-wrap--clear-corner');
   });
 
   it('shows a static Local badge and never checks the session, even on an auth broadcast', async () => {
