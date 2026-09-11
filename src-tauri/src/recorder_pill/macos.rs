@@ -28,10 +28,9 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 static ABI_OK: OnceLock<bool> = OnceLock::new();
 
 /// Whether the linked Swift library speaks this ABI. Cheap and side-effect
-/// free beyond the one-time FFI call, so callers can check it before any
-/// `AppHandle` exists yet (e.g. to decide whether to fall back to the
-/// webview pill).
-pub(super) fn is_available() -> bool {
+/// free beyond the one-time FFI call, so every entry point can re-check it
+/// rather than depending on `create` having run first.
+fn is_available() -> bool {
     *ABI_OK.get_or_init(|| {
         let version = unsafe { oats_pill_abi_version() };
         let ok = version == ABI_VERSION;

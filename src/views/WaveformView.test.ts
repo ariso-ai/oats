@@ -5,15 +5,11 @@ import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 const startRecording = vi.fn();
 const stopRecording = vi.fn();
 const getAnalyser = vi.fn(() => null);
-const waveformStart = vi.fn();
-const waveformStop = vi.fn();
 const finalizeRecording = vi.fn();
 const loadRecordingEnabled = vi.fn();
 const closeWin = vi.fn(() => Promise.resolve());
 const setIgnoreCursorEvents = vi.fn(() => Promise.resolve());
 const showWin = vi.fn(() => Promise.resolve());
-const startDragging = vi.fn(() => Promise.resolve());
-const setPosition = vi.fn(() => Promise.resolve());
 const invoke = vi.fn(() => Promise.resolve());
 const backendKind = vi.hoisted(() => ({ value: 'local' as 'local' | 'ariso' }));
 
@@ -31,8 +27,6 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({
     close: closeWin,
     show: showWin,
-    startDragging,
-    setPosition: (...a: unknown[]) => setPosition(...a),
     setIgnoreCursorEvents: (...a: unknown[]) => setIgnoreCursorEvents(...a),
   }),
 }));
@@ -55,13 +49,6 @@ vi.mock('../composables/useRecorder', () => ({
     stopRecording: () => stopRecording(),
     pauseRecording: vi.fn(),
     resumeRecording: vi.fn(),
-  }),
-}));
-vi.mock('../composables/useWaveform', () => ({
-  useWaveform: () => ({
-    levels: { value: new Array(32).fill(0.5) },
-    start: (...a: unknown[]) => waveformStart(...a),
-    stop: () => waveformStop(),
   }),
 }));
 vi.mock('../composables/useBackend', () => ({
@@ -102,17 +89,16 @@ import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch
 // Recorder views own native listeners and timers, so every test must exercise
 // their unmount cleanup before another wrapper can observe those side effects.
 enableAutoUnmount(afterEach);
-function dispatchPointer(
-  target: EventTarget,
-  type: string,
-  init: MouseEventInit & { pointerId: number; isPrimary: boolean },
-) {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
-  Object.defineProperties(event, {
-    pointerId: { value: init.pointerId },
-    isPrimary: { value: init.isPrimary },
-  });
-  target.dispatchEvent(event);
+
+/** The phase in the latest recorder://state broadcast: what the native pill
+ *  and the Meetings strip render. */
+function phases(): string[] {
+  return emitEvent.mock.calls
+    .filter(([name]) => name === 'recorder://state')
+    .map(([, payload]) => (payload as { phase: string }).phase);
+}
+function lastPhase(): string | undefined {
+  return phases().at(-1);
 }
 
 beforeEach(() => {
@@ -132,13 +118,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('WaveformView vertical pill', () => {
-  it('starts recording on mount and renders 3 waveform bars + 6 drag dots', async () => {
-    const wrapper = mount(WaveformView);
+describe('WaveformView recorder host', () => {
+  it('starts recording on mount and keeps the window open', async () => {
+    mount(WaveformView);
     await flushPromises();
     expect(startRecording).toHaveBeenCalledWith('mic');
-    expect(wrapper.findAll('.bar')).toHaveLength(3);
-    expect(wrapper.findAll('.dot')).toHaveLength(6);
+    expect(emitEvent).not.toHaveBeenCalledWith('recording://start-failed', expect.anything());
+    expect(closeWin).not.toHaveBeenCalled();
   });
 
   it('reports an actionable startup failure before closing the recorder window', async () => {
@@ -153,143 +139,18 @@ describe('WaveformView vertical pill', () => {
     expect(closeWin).toHaveBeenCalled();
   });
 
-  it('starts native window dragging from the handle on non-Windows platforms', async () => {
+  it('paints nothing and lets clicks through while it records', async () => {
     const wrapper = mount(WaveformView);
     await flushPromises();
-
-    // A real click commonly lands on a child dot rather than the handle div.
-    // The event must bubble into the explicit native drag handler either way.
-    dispatchPointer(wrapper.find('.dot').element, 'pointerdown', {
-      button: 0,
-      buttons: 1,
-      pointerId: 1,
-      isPrimary: true,
-    });
-
-    expect(startDragging).toHaveBeenCalledTimes(1);
-    expect(invoke).not.toHaveBeenCalledWith('create_library_window');
-  });
-
-  it('does not start dragging for a non-primary pointer button', async () => {
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-
-    dispatchPointer(wrapper.find('.dot').element, 'pointerdown', {
-      button: 2,
-      buttons: 2,
-      pointerId: 1,
-      isPrimary: true,
-    });
-
-    expect(startDragging).not.toHaveBeenCalled();
-  });
-
-  it('moves the Windows pill on the first pointer move and stops after pointerup', async () => {
-    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Windows');
-    vi.spyOn(window, 'screenX', 'get').mockReturnValue(100);
-    vi.spyOn(window, 'screenY', 'get').mockReturnValue(200);
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-
-    dispatchPointer(wrapper.find('.dot').element, 'pointerdown', {
-      button: 0,
-      buttons: 1,
-      pointerId: 7,
-      isPrimary: true,
-      screenX: 400,
-      screenY: 500,
-    });
-    dispatchPointer(window, 'pointermove', {
-      button: 0,
-      buttons: 1,
-      pointerId: 7,
-      isPrimary: true,
-      screenX: 350,
-      screenY: 460,
-    });
-    await flushPromises();
-
-    expect(setPosition).toHaveBeenCalledTimes(1);
-    expect(setPosition.mock.calls[0][0]).toMatchObject({ x: 50, y: 160 });
-    expect(startDragging).not.toHaveBeenCalled();
-
-    dispatchPointer(window, 'pointerup', {
-      button: 0,
-      buttons: 0,
-      pointerId: 7,
-      isPrimary: true,
-    });
-    dispatchPointer(window, 'pointermove', {
-      button: 0,
-      buttons: 1,
-      pointerId: 7,
-      isPrimary: true,
-      screenX: 300,
-      screenY: 420,
-    });
-    expect(setPosition).toHaveBeenCalledTimes(1);
-  });
-
-  it('uses the white logo in the dark recorder pill', async () => {
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    expect(wrapper.find('.logo').attributes('src')).toContain('oats-tray-white.svg');
-  });
-
-  it('adds tooltip titles to active recording controls', async () => {
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.pill').trigger('mouseenter');
-    await flushPromises();
-
-    const pause = wrapper.find('.pause-btn');
-    const stop = wrapper.find('.stop-btn');
-    expect(pause.attributes('title')).toBe('Pause recording');
-    expect(pause.attributes('aria-label')).toBe('Pause recording');
-    expect(stop.attributes('title')).toBe('Stop and save recording');
-    expect(stop.attributes('aria-label')).toBe('Stop and save recording');
-  });
-
-  it('keeps the pause/resume tooltip in sync with paused state', async () => {
-    recorderIsPaused.value = true;
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.pill').trigger('mouseenter');
-    await flushPromises();
-
-    const pause = wrapper.find('.pause-btn');
-    expect(pause.attributes('title')).toBe('Resume recording');
-    expect(pause.attributes('aria-label')).toBe('Resume recording');
-  });
-
-  it('does not paint the pill when launched with pillHidden=1, but still records', async () => {
-    routeQuery = { pillHidden: '1' };
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    // Recording must start regardless — the window is born visible for getUserMedia.
     expect(startRecording).toHaveBeenCalledWith('mic');
-    // Nothing painted: no flash while the meetings window owns the UI.
-    expect(wrapper.find('.pill').exists()).toBe(false);
-    // The empty transparent window must not swallow clicks underneath it.
+    // The pill is drawn natively; this window must not paint or swallow clicks.
+    expect(wrapper.element.nodeType).toBe(Node.COMMENT_NODE);
     expect(setIgnoreCursorEvents).toHaveBeenCalledWith(true);
   });
 
-  it('paints the pill when a pill-visible event reveals it (library minimized)', async () => {
-    routeQuery = { pillHidden: '1' };
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    expect(wrapper.find('.pill').exists()).toBe(false);
-
-    await eventHandlers['recorder://pill-visible']?.({ payload: true });
-    await flushPromises();
-    expect(wrapper.find('.pill').exists()).toBe(true);
-    expect(setIgnoreCursorEvents).toHaveBeenLastCalledWith(false);
-  });
-
   it('shows the recorder window before starting capture so getUserMedia can resolve', async () => {
-    // WebKit never resolves getUserMedia for a window that isn't actually
-    // visible. The pill is hidden behind the library's embedded strip, so it
-    // must be shown before capture starts (the watcher re-hides it after).
+    // Webviews don't reliably resolve getUserMedia for a window that isn't on
+    // screen, so it is shown before capture starts (the watcher re-hides it).
     mount(WaveformView);
     await flushPromises();
     expect(showWin).toHaveBeenCalled();
@@ -303,67 +164,21 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
 
     showWin.mockClear();
     startRecording.mockClear();
-    await wrapper.find('.resume-btn').trigger('click');
+    eventHandlers['recorder://continue-recording']?.({ payload: undefined });
     await flushPromises();
 
-    // The pill was hidden during the failed state; resuming must re-show it
-    // before getUserMedia, or capture hangs and the strip/dot never appear.
+    // The window was hidden during the failed state; resuming must re-show it
+    // before getUserMedia, or capture hangs and the strip/pill never appear.
     expect(showWin).toHaveBeenCalled();
     expect(showWin.mock.invocationCallOrder[0]).toBeLessThan(
       startRecording.mock.invocationCallOrder[0],
     );
-  });
-
-  it('reveals timer/controls on hover (open class) while keeping the drag handle', async () => {
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    expect(wrapper.find('.expanded-area').classes()).not.toContain('open');
-    expect(wrapper.find('.drag-handle').exists()).toBe(true);
-
-    await wrapper.find('.pill').trigger('mouseenter');
-    await flushPromises();
-    expect(wrapper.find('.expanded-area').classes()).toContain('open');
-    expect(wrapper.find('.timer').text()).toBe('00:05');
-    expect(wrapper.find('.stop-btn').exists()).toBe(true);
-    expect(wrapper.find('.drag-handle').exists()).toBe(true);
-  });
-
-  it('collapses (removes open) on mouseleave', async () => {
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.pill').trigger('mouseenter');
-    await flushPromises();
-    expect(wrapper.find('.expanded-area').classes()).toContain('open');
-
-    await wrapper.find('.pill').trigger('mouseleave');
-    await flushPromises();
-    expect(wrapper.find('.expanded-area').classes()).not.toContain('open');
-  });
-
-  it('opens the meetings window when the pill body is clicked', async () => {
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.pill').trigger('click');
-    expect(invoke).toHaveBeenCalledWith('create_library_window');
-  });
-
-  it('clicking Stop does not open the meetings window', async () => {
-    stopRecording.mockResolvedValue(new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }));
-    finalizeRecording.mockResolvedValue({ backend: 'local' });
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.pill').trigger('mouseenter');
-    await flushPromises();
-    invoke.mockClear();
-    await wrapper.find('.stop-btn').trigger('click');
-    await flushPromises();
-    expect(invoke).not.toHaveBeenCalledWith('create_library_window');
   });
 
   it('stops, finalizes, shows ✓, and auto-closes on success', async () => {
@@ -373,10 +188,10 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await vi.runOnlyPendingTimersAsync();
     expect(finalizeRecording).toHaveBeenCalledTimes(1);
-    expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
+    expect(phases()).toContain('success');
     await vi.advanceTimersByTimeAsync(2000);
     expect(closeWin).toHaveBeenCalled();
     vi.useRealTimers();
@@ -387,9 +202,9 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
     expect(closeWin).not.toHaveBeenCalled();
   });
 
@@ -398,7 +213,7 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockRejectedValue(new Error('offline'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
 
     const phases = emitEvent.mock.calls
@@ -406,8 +221,6 @@ describe('WaveformView vertical pill', () => {
       .map(([, payload]) => (payload as { phase: string }).phase);
     expect(phases).toContain('failed');
     expect(phases).not.toContain('success');
-    // And the pill shows the error state, not a "saved" ✓.
-    expect(wrapper.find('.status-icon.ok').exists()).toBe(false);
   });
 
   it('shows the silence prompt after 10 min of silence', async () => {
@@ -542,7 +355,7 @@ describe('WaveformView vertical pill', () => {
 
     const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await vi.runOnlyPendingTimersAsync();
 
     const success = emitEvent.mock.calls
@@ -561,7 +374,7 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await vi.runOnlyPendingTimersAsync();
 
     const states = emitEvent.mock.calls
@@ -627,7 +440,7 @@ describe('WaveformView vertical pill', () => {
     // must be asked for a brand-new id, never an append target.
     expect(recordingIdForStart).toHaveBeenCalledWith('2026-06-09T10:00:00Z', true);
 
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await vi.runOnlyPendingTimersAsync();
 
     const meta = finalizeRecording.mock.calls[0][1] as { forceNew?: boolean };
@@ -636,16 +449,14 @@ describe('WaveformView vertical pill', () => {
     vi.useRealTimers();
   });
 
-  it('auto mode records immediately with no in-pill confirm overlay', async () => {
-    // Confirmation now happens before the window opens (the notification
-    // prompt), so the pill itself never shows a keep/discard overlay.
+  it('auto mode records immediately with no confirmation step', async () => {
+    // Confirmation happens before the window opens (the notification prompt).
     routeQuery = { auto: '1' };
     listScheduledMeetings.mockResolvedValue([]);
     const wrapper = mount(WaveformView);
     await flushPromises();
-    expect(wrapper.find('.confirm').exists()).toBe(false);
     expect(startRecording).toHaveBeenCalledWith('mic');
-    expect(wrapper.findAll('.bar')).toHaveLength(3);
+    expect(closeWin).not.toHaveBeenCalled();
     routeQuery = {};
     wrapper.unmount();
   });
@@ -669,55 +480,23 @@ describe('WaveformView vertical pill', () => {
     wrapper.unmount();
   });
 
-  it('failed upload shows Retry, Resume, and Discard controls', async () => {
-    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
-    finalizeRecording.mockRejectedValue(new Error('boom'));
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
-    await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
-    expect(wrapper.find('.retry-btn').exists()).toBe(true);
-    expect(wrapper.find('.resume-btn').exists()).toBe(true);
-    expect(wrapper.find('.dismiss-btn').exists()).toBe(true);
-  });
-
-  it('adds tooltip titles to failed-upload controls', async () => {
-    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
-    finalizeRecording.mockRejectedValue(new Error('boom'));
-    const wrapper = mount(WaveformView);
-    await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
-    await flushPromises();
-
-    const retry = wrapper.find('.retry-btn');
-    const resume = wrapper.find('.resume-btn');
-    const dismiss = wrapper.find('.dismiss-btn');
-    expect(retry.attributes('title')).toBe('Retry upload');
-    expect(retry.attributes('aria-label')).toBe('Retry upload');
-    expect(resume.attributes('title')).toBe('Continue recording');
-    expect(resume.attributes('aria-label')).toBe('Continue recording');
-    expect(dismiss.attributes('title')).toBe('Discard recording');
-    expect(dismiss.attributes('aria-label')).toBe('Discard recording');
-  });
-
   it('Resume clears the failed state, restarts recording, and keeps the blob', async () => {
     stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
 
     startRecording.mockClear();
-    await wrapper.find('.resume-btn').trigger('click');
+    eventHandlers['recorder://continue-recording']?.({ payload: undefined });
     await flushPromises();
 
     // Back in the live recording view, mic restarted, nothing discarded/closed.
     expect(startRecording).toHaveBeenCalledTimes(1);
-    expect(wrapper.find('.status-icon.err').exists()).toBe(false);
-    expect(wrapper.find('.bars').exists()).toBe(true);
+    expect(lastPhase()).not.toBe('failed');
+    expect(lastPhase()).toBe('recording');
     expect(discardPendingAudio).not.toHaveBeenCalled();
     expect(closeWin).not.toHaveBeenCalled();
 
@@ -726,7 +505,7 @@ describe('WaveformView vertical pill', () => {
     stopRecording.mockResolvedValue(new Blob(['y'], { type: 'audio/mpeg' }));
     finalizeRecording.mockReset();
     finalizeRecording.mockResolvedValue({ backend: 'local' });
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
     expect(finalizeRecording).toHaveBeenCalled();
   });
@@ -736,11 +515,11 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
 
     emitEvent.mockClear();
-    await wrapper.find('.resume-btn').trigger('click');
+    eventHandlers['recorder://continue-recording']?.({ payload: undefined });
     await flushPromises();
 
     const phases = emitEvent.mock.calls
@@ -761,9 +540,9 @@ describe('WaveformView vertical pill', () => {
     );
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
     const firstMeta = finalizeRecording.mock.calls[0][1] as {
       startAt: string | null;
       durationSeconds: number;
@@ -771,13 +550,13 @@ describe('WaveformView vertical pill', () => {
     expect(firstMeta.durationSeconds).toBe(5);
 
     // Resume; second segment: 2 bytes, 7s.
-    await wrapper.find('.resume-btn').trigger('click');
+    eventHandlers['recorder://continue-recording']?.({ payload: undefined });
     await flushPromises();
     recorderDuration.value = 7;
     stopRecording.mockResolvedValueOnce(
       new Blob([new Uint8Array([9, 9])], { type: 'audio/mpeg' }),
     );
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
 
     expect(finalizeRecording).toHaveBeenCalledTimes(2);
@@ -789,7 +568,7 @@ describe('WaveformView vertical pill', () => {
     expect(combinedBlob.size).toBe(5);               // 3 + 2 bytes concatenated
     expect(combinedMeta.startAt).toBe('2026-06-09T10:00:00Z'); // original start kept
     expect(combinedMeta.durationSeconds).toBe(12);   // 5 + 7 summed
-    expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
+    expect(phases()).toContain('success');
   });
 
   it('Retry re-runs finalize with the same blob and meta, then succeeds', async () => {
@@ -801,18 +580,18 @@ describe('WaveformView vertical pill', () => {
       .mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await vi.runOnlyPendingTimersAsync();
-    expect(wrapper.find('.retry-btn').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
 
-    await wrapper.find('.retry-btn').trigger('click');
+    eventHandlers['recorder://retry-upload']?.({ payload: undefined });
     await vi.runOnlyPendingTimersAsync();
 
     expect(finalizeRecording).toHaveBeenCalledTimes(2);
     // Same blob and meta on both attempts — retry must not re-derive anything.
     expect(finalizeRecording.mock.calls[1][0]).toBe(finalizeRecording.mock.calls[0][0]);
     expect(finalizeRecording.mock.calls[1][1]).toEqual(finalizeRecording.mock.calls[0][1]);
-    expect(wrapper.find('.status-icon.ok').exists()).toBe(true);
+    expect(phases()).toContain('success');
     await vi.advanceTimersByTimeAsync(2000);
     expect(closeWin).toHaveBeenCalled();
     vi.useRealTimers();
@@ -827,11 +606,11 @@ describe('WaveformView vertical pill', () => {
       .mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
     await vi.runOnlyPendingTimersAsync();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await vi.runOnlyPendingTimersAsync();
     emitEvent.mockClear();
 
-    await wrapper.find('.retry-btn').trigger('click');
+    eventHandlers['recorder://retry-upload']?.({ payload: undefined });
     await vi.runOnlyPendingTimersAsync();
 
     const phases = emitEvent.mock.calls
@@ -847,10 +626,10 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
 
-    await wrapper.find('.dismiss-btn').trigger('click');
+    eventHandlers['recorder://discard-recording']?.({ payload: undefined });
     await flushPromises();
 
     // Keyed by the recording's start timestamp (mocked recorder.startedAt).
@@ -865,9 +644,9 @@ describe('WaveformView vertical pill', () => {
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
 
     // The Pending-uploads retry uploaded and discarded this same buffer: the
     // stale failed pill must go away (window closes → broadcasts 'closed'), and
@@ -894,12 +673,9 @@ describe('WaveformView vertical pill', () => {
   });
 });
 
-// Where the pill is drawn natively, the webview is launched painted-empty and
-// the native pill drives the failed-upload controls through events instead of
-// DOM clicks.
+// The native pill drives the failed-upload controls through events.
 describe('WaveformView native pill controls', () => {
   async function mountFailedUpload() {
-    routeQuery = { pillHidden: '1' };
     stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
     finalizeRecording.mockRejectedValueOnce(new Error('boom'));
     const wrapper = mount(WaveformView);
@@ -907,7 +683,7 @@ describe('WaveformView native pill controls', () => {
     await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
     expect(finalizeRecording).toHaveBeenCalledTimes(1);
-    expect(wrapper.find('.pill').exists()).toBe(false);
+    expect(lastPhase()).toBe('failed');
     return wrapper;
   }
 
@@ -950,7 +726,6 @@ describe('WaveformView native pill controls', () => {
   });
 
   it('ignores the failed-upload events while recording', async () => {
-    routeQuery = { pillHidden: '1' };
     mount(WaveformView);
     await flushPromises();
     startRecording.mockClear();
@@ -976,9 +751,9 @@ describe('WaveformView recorder://yield handshake', () => {
     finalizeRecording.mockRejectedValue(new Error('boom'));
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
-    expect(wrapper.find('.status-icon.err').exists()).toBe(true);
+    expect(lastPhase()).toBe('failed');
 
     emitEvent.mockClear();
     eventHandlers['recorder://yield']?.({ payload: undefined });
@@ -997,7 +772,7 @@ describe('WaveformView recorder://yield handshake', () => {
     finalizeRecording.mockResolvedValue({ backend: 'local' });
     const wrapper = mount(WaveformView);
     await flushPromises();
-    await wrapper.find('.stop-btn').trigger('click');
+    await eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
 
     eventHandlers['recorder://yield']?.({ payload: undefined });
@@ -1029,7 +804,7 @@ describe('WaveformView recorder://yield handshake', () => {
     );
     const wrapper = mount(WaveformView);
     await flushPromises();
-    void wrapper.find('.stop-btn').trigger('click');
+    void eventHandlers['tray://stop-recording']?.({});
     await flushPromises();
 
     eventHandlers['recorder://yield']?.({ payload: undefined });

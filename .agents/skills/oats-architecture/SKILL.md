@@ -38,8 +38,12 @@ All windows load one Vue bundle and render a hash route (`src/main.ts`):
 - plus `waveform`, `update`, `meeting-picker`, `onboarding`, and the borderless prompt
   windows `meeting-prompt`, `silence-prompt`, `meeting-end-prompt`.
 
-The tray (`tray.rs`, `tray_meeting.rs`) and recorder pill (`recorder_pill.rs`) are the
-menu-bar surface.
+`waveform` is a headless recorder host. It runs the recording session and paints
+nothing. The floating recorder pill is drawn natively: Swift/SwiftUI on macOS
+(`src-tauri/recorder-pill/macos`, linked by `build.rs`) and Win32/Direct2D on Windows
+(`src-tauri/src/recorder_pill/win32.rs`). Both render `recorder://state` through
+`src-tauri/src/recorder_pill/`. That module, plus the tray (`tray.rs`,
+`tray_meeting.rs`), makes up the menu-bar surface.
 
 ## Where things live
 
