@@ -214,6 +214,50 @@ describe('UpNextCard', () => {
   });
 });
 
+describe('UpNextCard organization branding', () => {
+  const LOGO = 'data:image/png;base64,iVBORw0KGgo=';
+
+  function mountBranded(props: Record<string, unknown>) {
+    return mount(UpNextCard, { props: { meetings: [meeting({})], now: NOW, ...props } });
+  }
+
+  it('greets with the org name and moves the date/time to a smaller line', async () => {
+    const wrapper = mountBranded({ orgName: 'Acme' });
+    await flushPromises();
+    expect(wrapper.find('.greeting').text()).toBe("Acme's Notetaker");
+    const time = wrapper.find('.greeting-time');
+    expect(time.exists()).toBe(true);
+    expect(time.text()).toMatch(/\d{1,2}:\d{2}(AM|PM)/i);
+  });
+
+  it('shows the org logo above the heading and keeps the oats mark in the prompt', async () => {
+    const wrapper = mountBranded({ orgName: 'Acme', orgLogo: LOGO });
+    await flushPromises();
+    const logo = wrapper.find('.org-logo');
+    expect(logo.attributes('src')).toBe(LOGO);
+    expect(logo.attributes('alt')).toBe('Acme');
+    // The logo sits directly before the heading.
+    expect(logo.element.nextElementSibling).toBe(wrapper.find('.greeting').element);
+    expect(wrapper.find('.prompt-logo').attributes('alt')).toBe('oats');
+  });
+
+  it('omits the org logo when the org has none', async () => {
+    const wrapper = mountBranded({ orgName: 'Acme', orgLogo: '' });
+    await flushPromises();
+    expect(wrapper.find('.org-logo').exists()).toBe(false);
+    expect(wrapper.find('.prompt-logo').attributes('alt')).toBe('oats');
+  });
+
+  it('keeps the plain date/time greeting without an org', async () => {
+    const wrapper = mountBranded({});
+    await flushPromises();
+    expect(wrapper.find('.greeting').text()).toMatch(/\d{1,2}:\d{2}(AM|PM)/i);
+    expect(wrapper.find('.greeting-time').exists()).toBe(false);
+    expect(wrapper.find('.org-logo').exists()).toBe(false);
+    expect(wrapper.find('.prompt-logo').attributes('alt')).toBe('oats');
+  });
+});
+
 describe('UpNextCard Ari chip', () => {
   // In progress at NOW (12:00Z), so the "started but not ended" branch applies.
   const running = {

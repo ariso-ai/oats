@@ -346,6 +346,8 @@
           v-else
           :meetings="displayMeetings"
           :now="now"
+          :org-name="orgName"
+          :org-logo="orgLogo"
           @select="(m) => selectMeeting(m, { userSelected: true })"
           @start="startRecordingFor"
           @record="startRecording"
@@ -423,6 +425,7 @@ import {
   recordingStartErrorMessage,
 } from '../composables/recordingStartError';
 import { useAccountState } from '../composables/useAccountState';
+import { useOrganizationInfo } from '../composables/useOrganizationInfo';
 import { AUTH_CHANGED_EVENT, local, setBackendSetting } from '../tauri';
 import { Cog6ToothIcon } from '@heroicons/vue/24/outline';
 import SignInButtons from './SignInButtons.vue';
@@ -827,6 +830,19 @@ watch(
   }
 );
 
+// The signed-in user's Ariso org brands the Up Next greeting. Fetched only on
+// Ariso with a session — Local mode never asks — and refetched when the account
+// changes (the email tells one user from the next).
+const organization = useOrganizationInfo();
+const { name: orgName, logo: orgLogo } = organization;
+watch(
+  () => [activeBackend.value?.id, accountSignedIn.value, accountEmail.value] as const,
+  ([id, signedIn]) => {
+    organization.reset();
+    if (id === 'ariso' && signedIn) void organization.refresh();
+  }
+);
+
 // Switching backends changes the whole meeting corpus. Close any meeting held
 // open from the previous backend — returning the detail to the neutral Up Next
 // state — and reload against the new backend.
@@ -840,6 +856,9 @@ async function onBackendChanged(): Promise<void> {
   await loadMeetings();
 }
 
+// The organization follows the account watcher above, which resets it on any
+// change of account. Resetting here too would blank it for good whenever the
+// session changes without the account changing.
 function onAuthChanged(): void {
   if (activeBackend.value?.id === 'ariso') void account.refresh(true);
 }
@@ -1774,6 +1793,9 @@ onUnmounted(() => {
 }
 
 /* Sidebar */
+/* The top padding matches the detail pane's, so the search box lines up with
+   the detail card. The search box, meeting rows and nav pill all span the
+   sidebar's content width, 18px in from each side. */
 .sidebar {
   width: 300px;
   flex-shrink: 0;
@@ -2004,9 +2026,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 9px;
-  width: calc(100% - 12px);
+  width: 100%;
   min-height: 42px;
-  margin: 0 6px 10px;
+  margin: 0 0 10px;
   padding: 0 12px;
   border: 1px solid #d7d6d2;
   border-radius: 999px;
@@ -2049,7 +2071,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 6px;
+  /* No left padding: rows start flush with the search box and nav pill. */
+  padding: 6px 6px 6px 0;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
 }
@@ -2162,6 +2185,10 @@ onUnmounted(() => {
   gap: 8px;
   padding-top: 24px;
 }
+.nav-pill {
+  flex: 1;
+  min-width: 0;
+}
 .nav-pill,
 .nav-circle {
   display: flex;
@@ -2174,10 +2201,13 @@ onUnmounted(() => {
   padding: 5px;
 }
 .nav-tab {
+  /* Share the pill's width, so the tabs fill it edge to edge. */
+  flex: 1 1 auto;
+  justify-content: center;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 6px;
   border: none;
   border-radius: 999px;
   background: transparent;
