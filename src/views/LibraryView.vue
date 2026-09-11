@@ -856,8 +856,10 @@ async function onBackendChanged(): Promise<void> {
   await loadMeetings();
 }
 
+// The organization follows the account watcher above, which resets it on any
+// change of account. Resetting here too would blank it for good whenever the
+// session changes without the account changing.
 function onAuthChanged(): void {
-  organization.reset();
   if (activeBackend.value?.id === 'ariso') void account.refresh(true);
 }
 

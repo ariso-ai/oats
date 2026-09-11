@@ -2458,6 +2458,18 @@ describe('LibraryView organization branding', () => {
     await flushPromises();
     expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
   });
+
+  it('keeps the org when an auth change leaves the same account signed in', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+    expect(wrapper.findComponent(UpNextCard).props('orgLogo')).toBe(LOGO);
+  });
 });
 
 describe('LibraryView backend indicator', () => {
