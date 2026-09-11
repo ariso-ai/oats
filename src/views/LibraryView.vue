@@ -71,8 +71,13 @@
               type="button"
               role="menuitemradio"
               class="backend-menu-item"
-              :class="{ 'backend-menu-item--active': activeBackend?.id === 'ariso' }"
+              :class="{
+                'backend-menu-item--active': activeBackend?.id === 'ariso',
+                'backend-menu-item--signed-out': !accountSignedIn,
+              }"
               :aria-checked="activeBackend?.id === 'ariso'"
+              :aria-label="accountSignedIn ? undefined : 'ariso.ai, not signed in'"
+              :title="accountSignedIn ? undefined : 'Not signed in — click to sign in'"
               :disabled="recording"
               tabindex="-1"
               @click="chooseAriso"
@@ -1937,6 +1942,16 @@ onUnmounted(() => {
   color: #ffffff;
 }
 .backend-menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
+/* ariso.ai without a session: grayed, but still clickable, since it leads to
+   the sign-in box. Local never checks the session, so it reads as signed out
+   there too. When it's the active backend, a light fill still marks it. */
+.backend-menu-item--signed-out { color: #8a8a86; }
+.backend-menu-item--signed-out.backend-menu-item--active,
+.backend-menu-item--signed-out.backend-menu-item--active:hover:not(:disabled),
+.backend-menu-item--signed-out.backend-menu-item--active:focus-visible {
+  background: #efeeeb;
+  color: #8a8a86;
+}
 .backend-menu-hint {
   margin: 4px 10px;
   font-size: 11px;

@@ -2467,6 +2467,40 @@ describe('LibraryView backend indicator', () => {
     expect(document.activeElement).toBe(menuItem(wrapper, 'Local').element);
   });
 
+  it('grays the ariso.ai option while not signed in, but keeps it clickable', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    const ariso = menuItem(wrapper, 'ariso.ai');
+    expect(ariso.classes()).toContain('backend-menu-item--signed-out');
+    expect(ariso.attributes('disabled')).toBeUndefined();
+    expect(ariso.attributes('aria-label')).toBe('ariso.ai, not signed in');
+    expect(menuItem(wrapper, 'Local').classes()).not.toContain('backend-menu-item--signed-out');
+
+    await ariso.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+  });
+
+  it('shows the ariso.ai option normally once signed in', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    const ariso = menuItem(wrapper, 'ariso.ai');
+    expect(ariso.classes()).not.toContain('backend-menu-item--signed-out');
+    expect(ariso.attributes('aria-label')).toBeUndefined();
+  });
+
+  it('grays the ariso.ai option on Local, which never checks the session', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+
+    expect(menuItem(wrapper, 'ariso.ai').classes()).toContain('backend-menu-item--signed-out');
+    expect(checkSession).not.toHaveBeenCalled();
+  });
+
   it('opening the menu on Local asks nothing of the network', async () => {
     const wrapper = await mountOn('local');
     await openMenu(wrapper);
