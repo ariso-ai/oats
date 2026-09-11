@@ -679,18 +679,43 @@ async function selectBackend(next: 'ariso' | 'local') {
   void emitNotificationsSync().catch((err) => {
     console.warn('Failed to broadcast sync after backend change', err);
   });
+  if (next === 'local') await afterSwitchToLocal();
+}
+
+async function afterSwitchToLocal() {
+  await refreshModelStatus();
+  // First time only: ask before fetching the (large) on-device models.
+  const prompted = await hasPromptedLocalModels().catch(() => true);
+  if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
+    showDownloadConfirm.value = true;
+  } else {
+    // Already confirmed once before (or STT already installed): skip the
+    // modal and start any still-missing downloads right away, so the models
+    // are ready by the time the user records.
+    startMissingDownloads();
+  }
+}
+
+// Another window (the Meetings window's backend menu) switched the backend.
+// This window is pre-created and outlives that, so follow it, and treat a
+// switch to Local the way a switch made here is treated. Its own switches
+// come back here too, already applied, so an unchanged backend is a no-op.
+async function onBackendChangedElsewhere() {
+  let next: 'ariso' | 'local';
+  try {
+    next = await getBackendSetting();
+  } catch (e) {
+    console.warn('Failed to re-read backend setting', e);
+    return;
+  }
+  if (next === backend.value) return;
+  backend.value = next;
+  backendOpen.value = false;
   if (next === 'local') {
-    await refreshModelStatus();
-    // First time only: ask before fetching the (large) on-device models.
-    const prompted = await hasPromptedLocalModels().catch(() => true);
-    if (shouldPromptDownload(next, prompted, modelStatus.value.state)) {
-      showDownloadConfirm.value = true;
-    } else {
-      // Already confirmed once before (or STT already installed): skip the
-      // modal and start any still-missing downloads right away, so the models
-      // are ready by the time the user records.
-      startMissingDownloads();
-    }
+    await afterSwitchToLocal();
+  } else {
+    // Nothing left to confirm: the switch the modal was about is undone.
+    showDownloadConfirm.value = false;
   }
 }
 
@@ -1073,6 +1098,9 @@ onMounted(async () => {
   const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
     llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
+  const unBackendChanged = await listen(BACKEND_CHANGED_EVENT, () => {
+    void onBackendChangedElsewhere();
+  });
   const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
     // The recording gate fired because a model isn't ready — auto-start the
@@ -1080,7 +1108,7 @@ onMounted(async () => {
     await refreshModelStatus();
     startMissingDownloads();
   });
-  unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
+  unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt, unBackendChanged);
 });
 
 // Registered as its own hook so a failure in the main bootstrap above can't

@@ -613,6 +613,79 @@ describe('SettingsView sign-in providers', () => {
   });
 });
 
+describe('SettingsView backend switched elsewhere', () => {
+  function fireBackendChanged() {
+    const cb = listeners.get('backend://changed');
+    expect(cb).toBeDefined();
+    cb!({ payload: { source: 'library-x' } });
+  }
+
+  it('follows a switch to Local and asks before the first model download', async () => {
+    hasPromptedLocalModels.mockResolvedValue(false);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(wrapper.get('.backend-trigger').text()).toContain('ariso.ai');
+
+    getBackendSetting.mockResolvedValue('local' as never);
+    fireBackendChanged();
+    await flushPromises();
+
+    expect(wrapper.get('.backend-trigger').text()).toContain('Local');
+    expect(wrapper.find('.download-confirm').exists()).toBe(true);
+    expect(downloadStt).not.toHaveBeenCalled();
+    // Following a switch doesn't make one of its own.
+    expect(setBackendSetting).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith('backend://changed');
+  });
+
+  it('starts missing downloads right away when already prompted once', async () => {
+    hasPromptedLocalModels.mockResolvedValue(true);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    getBackendSetting.mockResolvedValue('local' as never);
+    fireBackendChanged();
+    await flushPromises();
+
+    expect(wrapper.find('.download-confirm').exists()).toBe(false);
+    expect(downloadStt).toHaveBeenCalledTimes(1);
+    expect(downloadLlm).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats its own switch coming back as already applied', async () => {
+    hasPromptedLocalModels.mockResolvedValue(true);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    await wrapper.get('.backend-trigger').trigger('click');
+    await wrapper.findAll('.backend-option')[1].trigger('mousedown');
+    await flushPromises();
+    expect(downloadStt).toHaveBeenCalledTimes(1);
+
+    getBackendSetting.mockResolvedValue('local' as never);
+    fireBackendChanged();
+    await flushPromises();
+
+    expect(downloadStt).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the download confirmation when switched back to ariso.ai elsewhere', async () => {
+    hasPromptedLocalModels.mockResolvedValue(false);
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    getBackendSetting.mockResolvedValue('local' as never);
+    fireBackendChanged();
+    await flushPromises();
+    expect(wrapper.find('.download-confirm').exists()).toBe(true);
+
+    getBackendSetting.mockResolvedValue('ariso');
+    fireBackendChanged();
+    await flushPromises();
+
+    expect(wrapper.find('.download-confirm').exists()).toBe(false);
+    expect(wrapper.get('.backend-trigger').text()).toContain('ariso.ai');
+  });
+});
+
 describe('SettingsView auth broadcast', () => {
   it('clears the account card when the session ends elsewhere', async () => {
     checkSession.mockResolvedValue({ sessionToken: 'session' });

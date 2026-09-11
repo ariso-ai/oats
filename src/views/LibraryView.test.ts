@@ -36,6 +36,10 @@ const apiRequest = vi.fn(
   (_method: string, _path: string): Promise<{ status: number; data: unknown }> =>
     Promise.resolve({ status: 200, data: {} })
 );
+const setBackendSetting = vi.fn((_backend: string) => Promise.resolve());
+const localModelStatus = vi.fn(
+  (): Promise<{ state: string; llmReady?: boolean }> => Promise.resolve({ state: 'ready', llmReady: true })
+);
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -149,7 +153,9 @@ vi.mock('../tauri', () => ({
   api: {
     request: (method: string, path: string) => apiRequest(method, path),
   },
+  setBackendSetting: (backend: string) => setBackendSetting(backend),
   local: {
+    modelStatus: () => localModelStatus(),
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
     readRecordingNote: (id: string) => readRecordingNote(id),
@@ -233,6 +239,8 @@ beforeEach(() => {
   microsoftSignIn.mockResolvedValue({ success: true });
   cancelSignIn.mockResolvedValue(undefined);
   apiRequest.mockResolvedValue({ status: 200, data: {} });
+  setBackendSetting.mockResolvedValue(undefined);
+  localModelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
 });
 afterEach(() => {
   // Restore real timers even if a fake-timer test failed before its own
@@ -2389,11 +2397,17 @@ describe('LibraryView backend indicator', () => {
     return wrapper.get('.account-pill-wrap .account-pill');
   }
 
-  // Every ariso.ai state carries the same label, so tell them apart by shape.
-  function pillState(wrapper: ReturnType<typeof mount>) {
-    const el = pill(wrapper);
-    if (el.element.tagName === 'SPAN') return el.text() === 'Local' ? 'local' : 'checking';
-    return el.classes('account-pill--signed-out') ? 'signed-out' : 'signed-in';
+  function menuItem(wrapper: ReturnType<typeof mount>, label: string) {
+    const item = wrapper
+      .findAll('.backend-menu [role^="menuitem"]')
+      .find((el) => el.text() === label);
+    expect(item, `menu item "${label}"`).toBeDefined();
+    return item!;
+  }
+
+  async function openMenu(wrapper: ReturnType<typeof mount>) {
+    await pill(wrapper).trigger('click');
+    await flushPromises();
   }
 
   it('sits in the titlebar, right after the sidebar toggle', async () => {
@@ -2413,101 +2427,218 @@ describe('LibraryView backend indicator', () => {
     expect(pill(wrapper).text()).toBe('Local');
   });
 
-  it('shows a static Local badge and never checks the session, even on an auth broadcast', async () => {
+  it('names the backend, with its icon after the name', async () => {
+    const local = await mountOn('local');
+    expect(pill(local).text()).toBe('Local');
+    expect(pill(local).attributes('title')).toContain('Local mode');
+    expect(pill(local).element.lastElementChild?.tagName.toLowerCase()).toBe('svg');
+    local.unmount();
+
+    const ariso = await mountOn('ariso');
+    expect(pill(ariso).text()).toBe('ariso.ai');
+    expect(pill(ariso).attributes('title')).toBe('ariso.ai — not signed in');
+    expect(pill(ariso).element.lastElementChild?.tagName.toLowerCase()).toBe('svg');
+  });
+
+  it('carries the signed-in account in the tooltip', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+
+    expect(pill(wrapper).text()).toBe('ariso.ai');
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
+  });
+
+  it('opens a menu of ariso.ai, Local, and Settings, each with its icon', async () => {
     const wrapper = await mountOn('local');
+    expect(pill(wrapper).attributes('aria-expanded')).toBe('false');
 
-    expect(pill(wrapper).element.tagName).toBe('SPAN');
-    expect(pill(wrapper).text()).toBe('Local');
-    expect(pill(wrapper).attributes('title')).toContain('Local mode');
+    await openMenu(wrapper);
 
+    const menu = wrapper.get('.backend-menu');
+    expect(menu.attributes('role')).toBe('menu');
+    const items = menu.findAll('[role^="menuitem"]');
+    expect(items.map((el) => el.text())).toEqual(['ariso.ai', 'Local', 'Settings']);
+    for (const el of items) expect(el.find('svg').exists()).toBe(true);
+    expect(pill(wrapper).attributes('aria-expanded')).toBe('true');
+    // The active backend is checked, and focus lands on it.
+    expect(menuItem(wrapper, 'Local').attributes('aria-checked')).toBe('true');
+    expect(menuItem(wrapper, 'ariso.ai').attributes('aria-checked')).toBe('false');
+    expect(document.activeElement).toBe(menuItem(wrapper, 'Local').element);
+  });
+
+  it('opening the menu on Local asks nothing of the network', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
     emitEvent('auth://changed', null);
     await flushPromises();
 
     expect(checkSession).not.toHaveBeenCalled();
     expect(apiRequest).not.toHaveBeenCalled();
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
   });
 
-  it('shows Ariso, not yet clickable, until the first session check lands', async () => {
-    let resolveCheck!: (v: unknown) => void;
-    checkSession.mockReturnValue(new Promise((resolve) => (resolveCheck = resolve)));
-    const wrapper = await mountOn('ariso');
+  it('moves through the menu with the arrow keys', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    const menu = wrapper.get('.backend-menu');
 
-    expect(pill(wrapper).element.tagName).toBe('SPAN');
-    expect(pill(wrapper).text()).toBe('ariso.ai');
-
-    resolveCheck(null);
-    await flushPromises();
-    expect(pillState(wrapper)).toBe('signed-out');
+    await menu.trigger('keydown', { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(menuItem(wrapper, 'Settings').element);
+    await menu.trigger('keydown', { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(menuItem(wrapper, 'ariso.ai').element);
+    await menu.trigger('keydown', { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(menuItem(wrapper, 'Settings').element);
   });
 
-  it('offers both providers from the Sign in pill when signed out', async () => {
+  it('Settings opens the Settings window', async () => {
     const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
 
-    const signIn = pill(wrapper);
-    expect(signIn.element.tagName).toBe('BUTTON');
-    // Named after the backend; the tooltip and accessible name carry the state.
-    expect(signIn.text()).toBe('ariso.ai');
-    expect(signIn.attributes('title')).toContain('Not signed in');
-    expect(signIn.attributes('aria-label')).toContain('not signed in');
-    expect(signIn.attributes('aria-expanded')).toBe('false');
-
-    await signIn.trigger('click');
+    await menuItem(wrapper, 'Settings').trigger('click');
     await flushPromises();
 
-    const popover = wrapper.get('.sign-in-popover');
-    expect(popover.attributes('role')).toBe('dialog');
-    expect(popover.get('.google-btn').text()).toContain('Sign in with Google');
-    expect(popover.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
-    expect(pill(wrapper).attributes('aria-expanded')).toBe('true');
-    // Focus moves into the popover so the keyboard can pick a provider.
-    expect(document.activeElement).toBe(popover.get('.google-btn').element);
+    expect(invoke).toHaveBeenCalledWith('create_settings_window', {});
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
   });
 
-  it('shows initials when signed in, and opens Settings on click', async () => {
+  it('Local switches the backend and reloads against it', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    listMeetings.mockClear();
+    checkSession.mockClear();
+    backendId.mockReturnValue('local');
+
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('local');
+    expect(emitAppEvent).toHaveBeenCalledWith(
+      'backend://changed',
+      expect.objectContaining({ source: expect.any(String) })
+    );
+    expect(emitNotificationsSync).toHaveBeenCalled();
+    expect(listMeetings).toHaveBeenCalled();
+    expect(pill(wrapper).text()).toBe('Local');
+    expect(checkSession).not.toHaveBeenCalled();
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    // Models are ready, so there's nothing for Settings to show.
+    expect(invoke).not.toHaveBeenCalledWith('create_settings_window', {});
+  });
+
+  it('Local brings up Settings when the on-device models still need downloading', async () => {
+    localModelStatus.mockResolvedValue({ state: 'not_downloaded' });
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('local');
+
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('local');
+    expect(invoke).toHaveBeenCalledWith('create_settings_window', {});
+  });
+
+  it('Local does nothing when it is already the backend', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+  });
+
+  it('ignores its own backend broadcast when it comes back', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('local');
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+    listMeetings.mockClear();
+
+    const [, payload] = emitAppEvent.mock.calls.find((call) => call[0] === 'backend://changed')!;
+    emitEvent('backend://changed', payload);
+    await flushPromises();
+
+    expect(listMeetings).not.toHaveBeenCalled();
+  });
+
+  it('ariso.ai while signed out shows the sign-in box', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('.backend-menu').exists()).toBe(false);
+    const box = wrapper.get('.sign-in-popover');
+    expect(box.attributes('role')).toBe('dialog');
+    expect(box.text()).toContain('Sign in to ariso.ai');
+    expect(box.get('.google-btn').text()).toContain('Sign in with Google');
+    expect(box.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+    expect(document.activeElement).toBe(box.get('.google-btn').element);
+  });
+
+  it('ariso.ai while signed in just closes the menu', async () => {
     checkSession.mockResolvedValue({ sessionToken: 't' });
     mockProfile();
     const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
 
-    expect(pill(wrapper).element.tagName).toBe('BUTTON');
-    expect(pillState(wrapper)).toBe('signed-in');
-    expect(pill(wrapper).text()).toContain('ariso.ai');
-    expect(pill(wrapper).get('.account-pill-avatar').text()).toBe('AD');
-    expect(pill(wrapper).attributes('title')).toBe('ada@example.com');
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
 
-    await pill(wrapper).trigger('click');
-    expect(invoke).toHaveBeenCalledWith('create_settings_window', {});
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(document.activeElement).toBe(pill(wrapper).element);
   });
 
-  it('shows the avatar image when the account has one', async () => {
-    class FakeImage {
-      referrerPolicy = '';
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      set src(_v: string) {
-        queueMicrotask(() => this.onload?.());
-      }
-    }
-    vi.stubGlobal('Image', FakeImage);
+  it('ariso.ai from Local switches, then offers sign-in when there is no session', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('ariso');
+
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('ariso');
+    expect(pill(wrapper).text()).toBe('ariso.ai');
+    expect(checkSession).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+  });
+
+  it('ariso.ai from Local closes the menu when a session already exists', async () => {
     checkSession.mockResolvedValue({ sessionToken: 't' });
-    apiRequest.mockImplementation((_method: string, path: string) =>
-      Promise.resolve(
-        path === '/users/google-avatar'
-          ? { status: 200, data: { avatar: 'https://example.com/a.png' } }
-          : { status: 200, data: { email: 'ada@example.com' } }
-      )
-    );
-    const wrapper = await mountOn('ariso');
+    mockProfile();
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('ariso');
 
-    expect(pill(wrapper).get('img.account-pill-avatar').attributes('src')).toBe(
-      'https://example.com/a.png'
-    );
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('ariso');
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
   });
 
-  it('signs in from the popover and switches to the signed-in pill', async () => {
+  it('cannot switch backend while recording', async () => {
+    getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
+    await openMenu(wrapper);
+
+    expect(menuItem(wrapper, 'ariso.ai').attributes('disabled')).toBeDefined();
+    expect(menuItem(wrapper, 'Local').attributes('disabled')).toBeDefined();
+    expect(menuItem(wrapper, 'Settings').attributes('disabled')).toBeUndefined();
+    expect(wrapper.get('.backend-menu').text()).toContain("Backend can't be changed while recording.");
+  });
+
+  it('signs in from the sign-in box and closes it', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
 
     microsoftSignIn.mockImplementation(() => {
       checkSession.mockResolvedValue({ sessionToken: 't' });
@@ -2520,16 +2651,17 @@ describe('LibraryView backend indicator', () => {
     expect(microsoftSignIn).toHaveBeenCalledTimes(1);
     expect(googleSignIn).not.toHaveBeenCalled();
     expect(emitNotificationsSync).toHaveBeenCalled();
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
-    expect(pillState(wrapper)).toBe('signed-in');
-    expect(pill(wrapper).attributes('title')).toBe('ada@example.com');
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
   });
 
   it('shows the pending flow with a Cancel, and a failure inline', async () => {
     let resolveSignIn!: (r: SignInResult) => void;
     googleSignIn.mockReturnValue(new Promise((resolve) => (resolveSignIn = resolve)));
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
     await wrapper.get('.sign-in-popover .google-btn').trigger('click');
     await flushPromises();
 
@@ -2542,69 +2674,68 @@ describe('LibraryView backend indicator', () => {
     expect(wrapper.get('.sign-in-popover .sign-in-error').text()).toBe('API returned 500');
   });
 
-  it('closes the popover on Escape and returns focus to the pill', async () => {
+  it('closes on Escape and returns focus to the pill', async () => {
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
-    await flushPromises();
+    await openMenu(wrapper);
 
-    await wrapper.get('.sign-in-popover .google-btn').trigger('keydown', { key: 'Escape' });
+    await menuItem(wrapper, 'Local').trigger('keydown', { key: 'Escape' });
 
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
     expect(document.activeElement).toBe(pill(wrapper).element);
   });
 
-  it('closes the popover on an outside click, unless a flow is pending', async () => {
+  it('closes on an outside click while idle', async () => {
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
-    await flushPromises();
+    await openMenu(wrapper);
 
-    // A click inside keeps it open.
-    wrapper.get('.sign-in-popover').element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    wrapper.get('.backend-menu').element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     await flushPromises();
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+    expect(wrapper.find('.backend-popover').exists()).toBe(true);
 
-    googleSignIn.mockReturnValue(new Promise(() => {}));
-    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     await flushPromises();
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
   });
 
-  it('closes the popover on an outside click while idle', async () => {
+  it('keeps the sign-in box open on an outside click while a flow is pending', async () => {
+    googleSignIn.mockReturnValue(new Promise(() => {}));
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
     await flushPromises();
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
 
     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     await flushPromises();
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
   });
 
   it('follows an auth broadcast without a remount', async () => {
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
-    expect(pillState(wrapper)).toBe('signed-out');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
 
     // Signed in from Settings or a tray row.
     checkSession.mockResolvedValue({ sessionToken: 't' });
     mockProfile();
     emitEvent('auth://changed', null);
     await flushPromises();
-    expect(pillState(wrapper)).toBe('signed-in');
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
     expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
 
     // Then signed out elsewhere.
     checkSession.mockResolvedValue(null);
     emitEvent('auth://changed', null);
     await flushPromises();
-    expect(pillState(wrapper)).toBe('signed-out');
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — not signed in');
   });
 
-  it('follows a backend switch without a remount, and asks nothing on Local', async () => {
+  it('follows a backend switch made elsewhere, and asks nothing on Local', async () => {
     checkSession.mockResolvedValue({ sessionToken: 't' });
     mockProfile();
     const wrapper = await mountOn('ariso');
-    expect(pillState(wrapper)).toBe('signed-in');
 
     backendId.mockReturnValue('local');
     checkSession.mockClear();
@@ -2621,13 +2752,15 @@ describe('LibraryView backend indicator', () => {
     emitEvent('backend://changed', null);
     await flushPromises();
     expect(checkSession).toHaveBeenCalledTimes(1);
-    expect(pillState(wrapper)).toBe('signed-out');
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — not signed in');
   });
 
-  it('hides the popover and cancels its pending flow on a switch to Local', async () => {
+  it('closes the sign-in box and cancels its pending flow on a switch to Local', async () => {
     googleSignIn.mockReturnValue(new Promise(() => {}));
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
     await wrapper.get('.sign-in-popover .google-btn').trigger('click');
     await flushPromises();
 
@@ -2642,7 +2775,6 @@ describe('LibraryView backend indicator', () => {
 
   it('does not cancel on a switch to Local when this window has no flow pending', async () => {
     const wrapper = await mountOn('ariso');
-    await pill(wrapper).trigger('click');
 
     backendId.mockReturnValue('local');
     emitEvent('backend://changed', null);
@@ -2650,6 +2782,5 @@ describe('LibraryView backend indicator', () => {
 
     // Another window's flow is not this window's to cancel.
     expect(cancelSignIn).not.toHaveBeenCalled();
-    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
   });
 });
