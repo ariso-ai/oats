@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, WebviewWindow};
 
+#[cfg(any(target_os = "windows", test))]
+mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
