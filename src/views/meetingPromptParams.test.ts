@@ -8,6 +8,7 @@ describe('parsePromptParams', () => {
       title: 'Meeting started',
       subtitle: 'oats can take notes for you.',
       mode: 'start',
+      defaultAction: 'record',
     });
   });
 
@@ -37,6 +38,7 @@ describe('parsePromptParams mode', () => {
       title: 'Meeting started',
       subtitle: 'oats can take notes for you.',
       mode: 'start',
+      defaultAction: 'record',
     });
   });
 
@@ -46,6 +48,7 @@ describe('parsePromptParams mode', () => {
       title: 'Meeting started',
       subtitle: '',
       mode: 'switch',
+      defaultAction: 'record',
     });
   });
 
@@ -55,11 +58,23 @@ describe('parsePromptParams mode', () => {
       title: 'Meeting started',
       subtitle: 'Weekly sync',
       mode: 'switch',
+      defaultAction: 'record',
     });
   });
 
   it('treats an unknown mode as start', () => {
     expect(parsePromptParams('?mode=bogus').mode).toBe('start');
+  });
+});
+
+describe('parsePromptParams defaultAction', () => {
+  it('defaults to record when the query does not say otherwise', () => {
+    expect(parsePromptParams('?seconds=10').defaultAction).toBe('record');
+    expect(parsePromptParams('?default=bogus').defaultAction).toBe('record');
+  });
+
+  it('reads default=dismiss (auto-record off)', () => {
+    expect(parsePromptParams('?seconds=10&default=dismiss').defaultAction).toBe('dismiss');
   });
 });
 
