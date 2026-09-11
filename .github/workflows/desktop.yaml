@@ -264,6 +264,12 @@ jobs:
           Import-WindowsBuildEnvironment
           cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 
+      # The Swift recorder pill is linked into the app by build.rs; its view
+      # model and geometry have their own XCTest suite.
+      - name: Test Swift recorder pill
+        if: runner.os == 'macOS'
+        run: swift test --package-path src-tauri/recorder-pill/macos
+
       - name: Build Rust
         if: runner.os == 'macOS'
         working-directory: src-tauri

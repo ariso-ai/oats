@@ -311,6 +311,10 @@ fn main() {
 
             tray::create_tray(app.handle())?;
 
+            // Feed recorder broadcasts to the native recorder pill, where the
+            // platform has one.
+            recorder_pill::install(app.handle());
+
             // Native next-meeting tray orchestrator. Self-gates on Ariso
             // backend + session; re-synced from BootstrapView on SYNC_EVENT.
             tray_meeting::sync(app.handle());
