@@ -4,10 +4,10 @@ This is a guide for whoever is steering the product. It assumes you live in the
 issue tracker, not in the codebase, and that your job is deciding *what* gets
 built and whether the result is right — not writing the diff.
 
-Three GitHub Actions workflows watch this repo's issues. They classify every new
-issue, and on your say-so they either attempt a bug fix or turn a feature
-discussion into a design spec. Both produce a pull request. Neither merges
-anything.
+Four GitHub Actions workflows watch this repo's issues. They classify every new
+issue, and on your say-so they attempt a bug fix, implement a task end to end,
+or turn a feature discussion into a design spec. Each produces a pull request.
+None merges anything.
 
 Your whole surface area is **one label and one comment**. Everything else is
 either automatic or still a human's job.
@@ -27,18 +27,19 @@ either automatic or still a human's job.
               ▼                       ▼                       ▼
             Bug                    Feature                  Task
               │                       │                       │
-   you add `autofix:approved`   discussion happens         (nothing —
-              │                       │                    type only)
-              │              you comment `/shape`
-              ▼                       ▼
-        fix PR opens            spec PR opens
-              │                       │
-   CodeRabbit reviews it,             │
-   apply-fixes.yml applies            │
-   the findings, CI runs              │
-              │                       │
-              ▼                       ▼
-         ═══════════ you review and merge ═══════════
+   you add `autofix:approved`   discussion happens   you add `autofix:approved`
+              │                       │                       │
+              │              you comment `/shape`             │
+              ▼                       ▼                       ▼
+        fix PR opens            spec PR opens     autopilot: spec → plan →
+              │                       │           implement → PR opens
+              │                       │                       │
+   CodeRabbit reviews it,             │          CodeRabbit reviews it,
+   apply-fixes.yml applies            │          apply-fixes.yml applies
+   the findings, CI runs              │          the findings, CI runs
+              │                       │                       │
+              ▼                       ▼                       ▼
+         ═══════════════════ you review and merge ═══════════════════
 ```
 
 Two decisions per item. Both are judgment calls — "is this worth an attempt?"
@@ -49,9 +50,13 @@ and "is this result good?" — which is the part that should stay with you.
 | Lever | What it does | Works on |
 |---|---|---|
 | `autofix:approved` label | Starts a fix attempt, opens a PR | Issues typed **Bug** |
+| `autofix:approved` label | Runs autopilot — spec, plan, implementation — opens a PR | Issues typed **Task** |
 | `/shape` comment | Writes a design spec, opens a PR | Issues typed **Feature** |
 
-**Only `shawnzhu` can pull either lever.** The workflows check who applied the
+The label routes on the issue's type: the same `autofix:approved` starts the
+bug-fix workflow on a Bug and autopilot on a Task.
+
+**Only `shawnzhu` can pull any lever.** The workflows check who applied the
 label and who wrote the comment. The same label added by anyone else — or by
 another bot — does nothing at all. This is deliberate: the repo is public, so
 anyone can file an issue or comment, and an agent with commit access should not
@@ -150,15 +155,59 @@ is not automated.
 **If the request is too vague to design**, you get a comment listing what it
 needs instead of a spec. Answer and comment `/shape` again.
 
-## Path 3 — Tasks
+## Path 3 — A task comes in
 
-Chores, dependency bumps, refactors, docs, and anything too vague to be a bug or
-a feature get typed `Task` and nothing else. No comment, no automation. They sit
-in the tracker as normal work.
+**What happens without you.** Chores, refactors, docs, and anything too vague to
+be a bug or a feature get typed `Task`, usually with no comment. They sit in the
+tracker as normal work until you decide otherwise.
 
-If something lands as `Task` that you think deserves a fix attempt or a spec,
-just change the issue type by hand — the type is what routes it, so a `Bug` will
-accept `autofix:approved` and a `Feature` will accept `/shape`.
+**Your decision.** Add `autofix:approved` and the task goes to **autopilot**:
+the same superpowers pipeline you'd run by hand, end to end, with no approval
+pauses. Applying the label *is* your approval of the design, spec, and plan it
+produces — so this is the lever where the issue text matters most. Write the
+task, or restate it in your own comment, as the implementation request you want
+built.
+
+**What runs.** In order, in a worktree under `.worktrees/` on
+`autopilot/issue-<N>`:
+
+1. **Clarify** — it reads the codebase and picks up to five questions whose
+   answers change the implementation, each with a recommended default. Nobody is
+   there to answer, so it takes the defaults — except where *your* comments on
+   the issue already answer a question, which wins. To steer it, answer the
+   likely questions in a comment before you apply the label.
+2. **Enrich** — rewrites the request and answers into a full spec (goal,
+   non-goals, constraints, interfaces, acceptance criteria, test strategy),
+   committed to `docs/superpowers/specs/`.
+3. **Plan** — an implementation plan from that spec (local to the run; plans are
+   not committed).
+4. **Implement** — subagent-driven development: a fresh implementer per plan
+   task, a review after each, and a final whole-branch review. Plan conflicts
+   it resolves itself, and it lists every such ruling for you.
+
+**What you get back**, one of three things:
+
+- **A pull request.** Non-draft, so CodeRabbit and `apply-fixes.yml` pick it up
+  like any other. The body leads with **Decisions** (every question and whether
+  it took the default or your answer) and **Rulings I made** (every conflict it
+  resolved on your behalf, with what it costs if wrong). Read those two first —
+  they are where it guessed. Merging closes the task.
+- **A "stopped" comment.** Autopilot stops only for a blocked task it can't
+  resolve, a failing test baseline, or the review circuit breaker (a task still
+  failing review after five fix rounds). The comment says where and why. Partial
+  work is pushed to `autopilot/issue-<N>` for you to inspect — no PR.
+- **A failure notice** with a link to the run log, if the machinery broke.
+
+**Re-running** works like the bug path: the label clears after every run, a
+re-apply starts over from `main` (overwriting a stopped run's branch), and an
+open PR for the task blocks a second attempt.
+
+**Expect it to be slow.** Every plan step gets its own implementer and reviewer
+subagents, so a run can take hours; the job times out at five.
+
+If something lands as `Task` that you think is really a bug or a feature,
+change the issue type by hand — the type is what routes it, so a `Bug` sends
+`autofix:approved` to the bug-fix workflow and a `Feature` accepts `/shape`.
 
 ## Writing issues the agent can act on
 
@@ -188,7 +237,7 @@ ceiling — the free-text fields are what get read most closely.
 
 | Label | Meaning |
 |---|---|
-| `autofix:approved` | **You set this.** Starts a fix attempt. Cleared automatically after every run, so re-applying is always a clean retry. |
+| `autofix:approved` | **You set this.** Starts a fix attempt on a Bug, autopilot on a Task. Cleared automatically after every run, so re-applying is always a clean retry. |
 | `autofix:working` | Set by the workflow while a run is in flight. Cleared on every outcome, including a crash. Purely informational. |
 | `skip-ai-triage` | Set it *before* filing, or on an issue you don't want touched, to opt out of automatic triage entirely. |
 | `ai-failed` | The machinery broke. Comes with a comment linking the run log. Remove it once handled. |
@@ -210,27 +259,35 @@ crashed run is never silent. The common cases:
   issue isn't typed `Feature`. You'll get a comment saying so.
 - **The label did nothing.** Confirm you applied it and not someone else, and
   that the issue is open.
+- **The label started the wrong workflow.** The type decides: check it was
+  `Task` (autopilot) or `Bug` (fix attempt) *before* you applied the label.
+  Changing the type afterwards doesn't redirect a run that already started.
 
 ## What it will never do
 
 Worth knowing so you don't wait for something that isn't coming:
 
 - **Merge anything.** Every PR waits for a human.
-- **Close an issue.** A merged fix PR closes its issue via `Fixes #N`; nothing
-  else does.
-- **Implement a merged spec.** Shaping stops at the design.
-- **Change its own configuration.** Both workflows refuse to commit changes to
-  `.github/`, `.claude/`, `.agents/`, the Tauri capability allowlist, signing
-  config, or dependency files. A fix that genuinely needs one of those comes
-  back as "no confident fix" with the reason.
+- **Close an issue.** A merged PR closes its issue via `Fixes #N` or
+  `Closes #N`; nothing else does.
+- **Implement a merged spec from `/shape`.** Shaping stops at the design. To
+  have autopilot build it, file a Task that points at the spec.
+- **Change its own configuration.** The workflows that write code refuse to
+  push changes to `.github/`, `.claude/`, `.agents/`, the Tauri capability
+  allowlist, signing config, or dependency files. Work that genuinely needs one
+  of those comes back as "no confident fix" or a stop, with the reason.
 - **Act on anyone else's instructions.** Including instructions embedded in an
-  issue body. That's what the two-lever design is for.
+  issue body. That's what gating every lever on you is for.
 
 ## Related
 
 - `docs/superpowers/specs/2026-08-03-issue-automation-design.md` — the design
   behind these workflows, including the trust model and its residual risks.
 - `.github/workflows/issue-triage.yml`, `issue-autofix.yml`,
-  `feature-shaping.yml` — the implementations.
+  `issue-autopilot.yml`, `feature-shaping.yml` — the implementations.
+  `issue-autopilot.yml`'s header states its own, wider trust model: its agent
+  has a full shell, so its defenses are structural.
+- `.agents/skills/autopilot/SKILL.md` — the autopilot skill. You can also run
+  it locally with `/autopilot <request>`, where it asks its questions for real.
 - `.github/*-prompt.md` — what each agent is actually told to do. Worth reading
   if the output is consistently off in some way; these are the knobs.

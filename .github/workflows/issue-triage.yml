@@ -4,7 +4,9 @@ name: Triage new issues
 # and the codebase to classify it as Bug / Feature / Task, sets the GitHub
 # issue type, and posts a first-pass analysis. Bugs get a note that shawnzhu
 # can apply `autofix:approved` (see issue-autofix.yml); features get a note
-# that shawnzhu can comment `/shape` (see feature-shaping.yml).
+# that shawnzhu can comment `/shape` (see feature-shaping.yml); tasks, when
+# they get a comment at all, a note that the same label starts autopilot (see
+# issue-autopilot.yml).
 #
 # SECURITY: this repo is public, so the issue body is attacker-controlled, and
 # this job PUBLISHES the model's output back to a public issue. Two things
@@ -167,6 +169,9 @@ jobs:
                 ;;
               Feature)
                 echo "🤖 Automated triage. Replies here help shape this. @shawnzhu can comment \`/shape\` to turn the discussion into a design spec PR."
+                ;;
+              Task)
+                echo "🤖 Automated triage. @shawnzhu can add the \`autofix:approved\` label to have autopilot implement this task and open a PR."
                 ;;
               *)
                 echo "🤖 Automated triage."
