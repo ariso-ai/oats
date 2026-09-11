@@ -1059,7 +1059,7 @@ onMounted(async () => {
   // elsewhere (Onboarding, the Meetings popover, a rejected session cleared
   // natively), so follow the backend's broadcast rather than its own mount.
   const unAuthChanged = await listen(AUTH_CHANGED_EVENT, async () => {
-    await refreshSignedInAccount();
+    await refreshSignedInAccount(true);
     if (isSignedIn.value) signInPrompt.value = false;
   });
 

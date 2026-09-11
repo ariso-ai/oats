@@ -841,7 +841,7 @@ async function onBackendChanged(): Promise<void> {
 }
 
 function onAuthChanged(): void {
-  if (activeBackend.value?.id === 'ariso') void account.refresh();
+  if (activeBackend.value?.id === 'ariso') void account.refresh(true);
 }
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a

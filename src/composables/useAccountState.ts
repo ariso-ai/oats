@@ -53,12 +53,16 @@ async function fetchAvatar(): Promise<string> {
 function preloadAvatar(url: string): Promise<string> {
   return new Promise((resolve) => {
     const MAX_ATTEMPTS = 4;
+    const ATTEMPT_TIMEOUT_MS = 3000;
     let attempts = 0;
     const attempt = () => {
       const img = new Image();
       img.referrerPolicy = 'no-referrer';
-      img.onload = () => resolve(url);
-      img.onerror = () => {
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         attempts += 1;
         if (attempts >= MAX_ATTEMPTS) {
           resolve('');
@@ -66,6 +70,16 @@ function preloadAvatar(url: string): Promise<string> {
           setTimeout(attempt, 300 * attempts);
         }
       };
+      // Neither `load` nor `error` fires for some webview hangs; bound the
+      // wait so the attempt still settles and the retry sequence continues.
+      const timeoutId = setTimeout(fail, ATTEMPT_TIMEOUT_MS);
+      img.onload = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(url);
+      };
+      img.onerror = fail;
       img.src = url;
     };
     attempt();
@@ -105,9 +119,13 @@ export function useAccountState() {
   // Bumped whenever this window learns the session ended, so a refresh that
   // started before then can't land its stale signed-in result afterwards.
   let epoch = 0;
+  // Bumped on every load(), so a superseded in-flight request (e.g. one an
+  // authentication-change refresh raced past) can't land its result after a
+  // fresher one has already started or finished.
+  let requestId = 0;
   let inFlight: { epoch: number; promise: Promise<void> } | null = null;
 
-  async function load(mine: number) {
+  async function load(mine: number, myRequest: number) {
     let signedIn = false;
     let profile = EMPTY_PROFILE;
     try {
@@ -117,7 +135,7 @@ export function useAccountState() {
       signedIn = false;
       console.warn('Failed to refresh signed-in account', e);
     }
-    if (mine !== epoch) return;
+    if (mine !== epoch || myRequest !== requestId) return;
     isSignedIn.value = signedIn;
     applyProfile(profile);
     checked.value = true;
@@ -127,12 +145,15 @@ export function useAccountState() {
    * Re-read the session and, when signed in, the profile. Never throws: a
    * failure reads as signed out. Calls made while one is in flight share it,
    * so a window's own sign-in and the AUTH_CHANGED_EVENT it triggers fetch the
-   * profile once.
+   * profile once. Pass `force` for a refresh that must reflect the latest
+   * session rather than an older request's result — e.g. one triggered by an
+   * AUTH_CHANGED_EVENT that may have fired after another window's sign-out.
    */
-  function refresh(): Promise<void> {
-    if (inFlight && inFlight.epoch === epoch) return inFlight.promise;
+  function refresh(force = false): Promise<void> {
+    if (!force && inFlight && inFlight.epoch === epoch) return inFlight.promise;
     const mine = epoch;
-    const promise = load(mine).finally(() => {
+    const myRequest = ++requestId;
+    const promise = load(mine, myRequest).finally(() => {
       if (inFlight?.promise === promise) inFlight = null;
     });
     inFlight = { epoch: mine, promise };
