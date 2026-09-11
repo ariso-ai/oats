@@ -1422,7 +1422,8 @@ pub(crate) fn open_waveform_window(
     // created visible for getUserMedia; only its painting is suppressed.
     // Where the pill is drawn natively the webview never paints it at all.
     let show_pill = crate::recorder_pill::should_show_now(app);
-    let pill_hidden = crate::recorder_pill::NATIVE || !show_pill;
+    let native_pill = crate::recorder_pill::native_available();
+    let pill_hidden = native_pill || !show_pill;
     let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref(), force_new);
     let win = match WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
@@ -1546,7 +1547,7 @@ pub(crate) fn open_waveform_window(
 
     // Show the pill only while the library window (with its embedded
     // recorder strip) can't be seen — minimized or closed.
-    if crate::recorder_pill::NATIVE {
+    if native_pill {
         crate::recorder_pill::create_native(app, show_pill);
     }
     crate::recorder_pill::spawn_watcher(app, show_pill);

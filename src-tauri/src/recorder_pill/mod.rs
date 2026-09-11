@@ -12,7 +12,7 @@
 //! capture starts; a native pill renders its `recorder://state` broadcasts and
 //! turns clicks back into the events the webview pill used to handle.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, WebviewWindow};
 
@@ -28,17 +28,34 @@ mod native {
     pub(super) fn update(_app: &tauri::AppHandle, _state: super::PillState) {}
     pub(super) fn set_visible(_app: &tauri::AppHandle, _visible: bool) {}
     pub(super) fn destroy(_app: &tauri::AppHandle) {}
+    pub(super) fn is_available() -> bool {
+        false
+    }
 }
 
 /// Whether this platform draws the pill natively, leaving the "waveform"
 /// webview as a headless recorder host.
 pub(crate) const NATIVE: bool = cfg!(target_os = "macos");
 
+/// Whether the native pill is actually usable right now: the platform draws
+/// it natively *and* the linked native library speaks the expected ABI. Falls
+/// back to [`NATIVE`] = `false` behavior (the webview paints the pill itself)
+/// when a mismatched build leaves the native side unable to draw anything.
+pub(crate) fn native_available() -> bool {
+    NATIVE && native::is_available()
+}
+
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Set once the recorder broadcasts `closed`, so the watcher can't re-reveal a
 /// pill whose recording is over while its window is still being torn down.
 static NATIVE_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Bumped every time [`spawn_watcher`] starts a new watcher, so a stale
+/// watcher whose "waveform" window was replaced by a queued reopen between
+/// polls (same label, new window) recognizes it's no longer current and
+/// exits instead of running forever alongside the new one.
+static WATCHER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// The recorder's lifecycle; discriminants are the native ABI's phase codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,6 +282,10 @@ fn visibility_action(should_show: bool, capture_active: bool, is_visible: bool) 
 /// lifetime of the recording. Spawned when the waveform window is created.
 pub(crate) fn spawn_watcher(app: &AppHandle, initially_shown: bool) {
     let app = app.clone();
+    let generation = WATCHER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    // Native availability can't change mid-process (it's a one-time ABI
+    // check), so snapshot it once rather than re-checking every poll.
+    let native = native_available();
     // The waveform window was born painting itself iff it should show (see
     // `waveform_url`'s pillHidden flag), and `create_native` showed or hid the
     // native pill the same way; mirror that so we only push changes when the
@@ -274,6 +295,12 @@ pub(crate) fn spawn_watcher(app: &AppHandle, initially_shown: bool) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
+            // A queued reopen replaced this watcher's window with a new one
+            // under the same label between polls; a newer watcher now owns
+            // it, so stand down instead of fighting it over visibility.
+            if WATCHER_GENERATION.load(Ordering::SeqCst) != generation {
+                return;
+            }
             // Recording over (window closed/destroyed) — watcher is done.
             let Some(wave) = app.get_webview_window("waveform") else {
                 return;
@@ -282,11 +309,11 @@ pub(crate) fn spawn_watcher(app: &AppHandle, initially_shown: bool) {
                 .state::<crate::recording_state::RecordingState>()
                 .capture_active();
             let desired = should_show_now(&app);
-            if NATIVE {
-                let native = native_should_show(desired, NATIVE_CLOSED.load(Ordering::SeqCst));
-                if native != last_native {
-                    native::set_visible(&app, native);
-                    last_native = native;
+            if native {
+                let native_visible = native_should_show(desired, NATIVE_CLOSED.load(Ordering::SeqCst));
+                if native_visible != last_native {
+                    native::set_visible(&app, native_visible);
+                    last_native = native_visible;
                 }
             } else if desired != last_desired {
                 // Tell the waveform window whether to paint the pill. Decoupled
@@ -298,7 +325,7 @@ pub(crate) fn spawn_watcher(app: &AppHandle, initially_shown: bool) {
                 last_desired = desired;
             }
             let visible = wave.is_visible().unwrap_or(desired);
-            match visibility_action(webview_should_show(desired, NATIVE), capture, visible) {
+            match visibility_action(webview_should_show(desired, native), capture, visible) {
                 Some(true) => {
                     // Re-dock to the right edge before revealing: the pill was
                     // born at the OS default spot when the meetings window owned

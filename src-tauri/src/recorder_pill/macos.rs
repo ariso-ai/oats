@@ -2,7 +2,6 @@
 //! as a static library by `build.rs`. AppKit is main-thread only, so every
 //! call hops onto the main thread first.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use tauri::AppHandle;
@@ -24,8 +23,24 @@ unsafe extern "C" {
 
 /// The app the Swift callback dispatches into. Set on first create.
 static APP: OnceLock<AppHandle> = OnceLock::new();
-/// False when the linked library speaks another ABI; the pill then stays off.
-static ABI_OK: AtomicBool = AtomicBool::new(false);
+/// Cached result of the ABI check: `false` when the linked library speaks
+/// another ABI, so the pill then stays off.
+static ABI_OK: OnceLock<bool> = OnceLock::new();
+
+/// Whether the linked Swift library speaks this ABI. Cheap and side-effect
+/// free beyond the one-time FFI call, so callers can check it before any
+/// `AppHandle` exists yet (e.g. to decide whether to fall back to the
+/// webview pill).
+pub(super) fn is_available() -> bool {
+    *ABI_OK.get_or_init(|| {
+        let version = unsafe { oats_pill_abi_version() };
+        let ok = version == ABI_VERSION;
+        if !ok {
+            eprintln!("recorder pill: Swift ABI {version} != expected {ABI_VERSION}; pill disabled");
+        }
+        ok
+    })
+}
 
 extern "C" fn on_action(code: i32) {
     let (Some(app), Some(action)) = (APP.get(), PillAction::from_code(code)) else {
@@ -35,7 +50,7 @@ extern "C" fn on_action(code: i32) {
 }
 
 fn on_main(app: &AppHandle, f: impl FnOnce() + Send + 'static) {
-    if !ABI_OK.load(Ordering::SeqCst) {
+    if !is_available() {
         return;
     }
     if let Err(error) = app.run_on_main_thread(f) {
@@ -45,12 +60,9 @@ fn on_main(app: &AppHandle, f: impl FnOnce() + Send + 'static) {
 
 pub(super) fn create(app: &AppHandle) {
     APP.get_or_init(|| app.clone());
-    let version = unsafe { oats_pill_abi_version() };
-    if version != ABI_VERSION {
-        eprintln!("recorder pill: Swift ABI {version} != expected {ABI_VERSION}; pill disabled");
+    if !is_available() {
         return;
     }
-    ABI_OK.store(true, Ordering::SeqCst);
     on_main(app, || unsafe { oats_pill_create(on_action) });
 }
 
