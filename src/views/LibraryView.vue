@@ -1790,6 +1790,9 @@ onUnmounted(() => {
 }
 
 /* Sidebar */
+/* The top padding matches the detail pane's, so the search box lines up with
+   the detail card. The search box, meeting rows and nav pill all span the
+   sidebar's content width, 18px in from each side. */
 .sidebar {
   width: 300px;
   flex-shrink: 0;
@@ -2020,9 +2023,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 9px;
-  width: calc(100% - 12px);
+  width: 100%;
   min-height: 42px;
-  margin: 0 6px 10px;
+  margin: 0 0 10px;
   padding: 0 12px;
   border: 1px solid #d7d6d2;
   border-radius: 999px;
@@ -2065,7 +2068,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 6px;
+  /* No left padding: rows start flush with the search box and nav pill. */
+  padding: 6px 6px 6px 0;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
 }
@@ -2178,6 +2182,10 @@ onUnmounted(() => {
   gap: 8px;
   padding-top: 24px;
 }
+.nav-pill {
+  flex: 1;
+  min-width: 0;
+}
 .nav-pill,
 .nav-circle {
   display: flex;
@@ -2190,10 +2198,13 @@ onUnmounted(() => {
   padding: 5px;
 }
 .nav-tab {
+  /* Share the pill's width, so the tabs fill it edge to edge. */
+  flex: 1 1 auto;
+  justify-content: center;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 6px;
   border: none;
   border-radius: 999px;
   background: transparent;
