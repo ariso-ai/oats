@@ -100,7 +100,6 @@
             <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
           </svg>
           <span class="account-pill-label">ariso.ai</span>
-          <span class="account-pill-dot" aria-hidden="true" />
         </button>
         <div
           v-if="signInPopoverOpen && accountPill === 'signed-out'"
@@ -1787,14 +1786,6 @@ button.account-pill:focus-visible {
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
-}
-/* Signed out: the label stays the backend's name, so a dot carries the state. */
-.account-pill-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: #d97706;
 }
 .sign-in-popover {
   position: absolute;

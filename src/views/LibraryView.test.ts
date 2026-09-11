@@ -2446,9 +2446,9 @@ describe('LibraryView backend indicator', () => {
 
     const signIn = pill(wrapper);
     expect(signIn.element.tagName).toBe('BUTTON');
-    // Named after the backend; the dot and the accessible name carry the state.
+    // Named after the backend; the tooltip and accessible name carry the state.
     expect(signIn.text()).toBe('ariso.ai');
-    expect(signIn.find('.account-pill-dot').exists()).toBe(true);
+    expect(signIn.attributes('title')).toContain('Not signed in');
     expect(signIn.attributes('aria-label')).toContain('not signed in');
     expect(signIn.attributes('aria-expanded')).toBe('false');
 
