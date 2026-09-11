@@ -178,6 +178,19 @@ mod tests {
     }
 
     #[test]
+    fn monitor_runs_only_when_supported_and_the_microphone_is_enabled() {
+        use serde_json::Value;
+        // Mic on (explicitly, or the unset first-run default) → detect.
+        assert!(monitor_desired(true, Some(&Value::Bool(true))));
+        assert!(monitor_desired(true, None));
+        // Mic toggled off in Settings → no detection, so no prompt.
+        assert!(!monitor_desired(true, Some(&Value::Bool(false))));
+        // Unsupported OS never runs, whatever the setting.
+        assert!(!monitor_desired(false, Some(&Value::Bool(true))));
+        assert!(!monitor_desired(false, None));
+    }
+
+    #[test]
     fn brief_blip_does_not_start() {
         let mut m = Machine::new();
         assert_eq!(m.tick(0, &pids(&[42]), false), None); // -> Arming
@@ -280,6 +293,8 @@ pub fn is_supported() -> bool {
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SETTINGS_PATH: &str = "settings.json";
 const ENABLED_KEY: &str = "autoRecordEnabled";
+/// Settings → Microphone. Shared with the frontend's recording-source toggles.
+const MIC_KEY: &str = "recordMicEnabled";
 
 /// Holds the running monitor task (if any) plus a re-arm request flag. The flag
 /// is set by `request_mic_monitor_rearm` and consumed by `run_loop` to reset the
@@ -298,11 +313,11 @@ impl MicMonitorManager {
     }
 }
 
-/// Whether auto-record is enabled (defaults to true). The monitor now runs
-/// regardless — on detection it always prompts — so this only decides the
-/// no-response default: enabled → start recording when the prompt times out;
-/// disabled → skip. Read fresh per detection so a settings toggle takes effect
-/// without restarting the monitor.
+/// Whether auto-record is enabled (defaults to true). It doesn't gate the
+/// monitor — on detection it always prompts — so this only decides the
+/// no-response default (and the prompt's primary button): enabled → start
+/// recording when the prompt times out; disabled → skip. Read fresh per
+/// detection so a settings toggle takes effect without restarting the monitor.
 fn enabled(app: &AppHandle) -> bool {
     use tauri_plugin_store::StoreExt;
     match app.store(SETTINGS_PATH) {
@@ -311,12 +326,26 @@ fn enabled(app: &AppHandle) -> bool {
     }
 }
 
-/// Start the monitor if the OS supports per-process input detection; otherwise
-/// stop it. The enabled setting no longer gates the monitor (it only sets the
-/// prompt's timeout default), so the prompt fires in both modes. Safe to call
-/// repeatedly (startup, settings toggle).
+/// Whether the monitor should run: the OS must support per-process input
+/// detection and Settings → Microphone must be on. An unset value counts as on,
+/// matching the frontend's first-run default. Pure so it's unit-tested.
+fn monitor_desired(supported: bool, mic_setting: Option<&serde_json::Value>) -> bool {
+    supported && !matches!(mic_setting, Some(serde_json::Value::Bool(false)))
+}
+
+/// The raw Settings → Microphone value, or `None` if unset / the store is
+/// unreadable (both treated as on).
+fn mic_setting(app: &AppHandle) -> Option<serde_json::Value> {
+    use tauri_plugin_store::StoreExt;
+    app.store(SETTINGS_PATH).ok().and_then(|store| store.get(MIC_KEY))
+}
+
+/// Start the monitor when `monitor_desired` holds; otherwise stop it. The
+/// Microphone toggle gates detection (mic off → no prompt); the auto-record
+/// setting only sets the prompt's timeout default. Safe to call repeatedly
+/// (startup, settings toggle).
 pub async fn sync(app: &AppHandle) {
-    let desired = is_supported();
+    let desired = monitor_desired(is_supported(), mic_setting(app).as_ref());
     let mgr = app.state::<MicMonitorManager>();
     let mut guard = mgr.handle.lock().unwrap();
     if !desired {
@@ -389,8 +418,12 @@ async fn run_loop(app: AppHandle) {
                             crate::meeting_notifications::prompt_auto_record(&app2, default_record)
                                 .await;
                         // A manual recording may have started during the prompt;
-                        // don't stack a second recorder on top of it.
+                        // don't stack a second recorder on top of it. Also bail if
+                        // Settings → Microphone was disabled while the prompt was
+                        // showing — this detached task outlives run_loop, which is
+                        // what `sync` aborts on toggle-off.
                         if record
+                            && monitor_desired(is_supported(), mic_setting(&app2).as_ref())
                             && !app2
                                 .state::<crate::recording_state::RecordingState>()
                                 .is_active()

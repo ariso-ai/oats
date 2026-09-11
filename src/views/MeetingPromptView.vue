@@ -11,16 +11,21 @@ import oatsLogo from '../assets/oats-light.svg';
 const search = window.location.hash.includes('?')
   ? window.location.hash.slice(window.location.hash.indexOf('?'))
   : '';
-const { seconds, title, subtitle, mode } = parsePromptParams(search);
+const { seconds, title, subtitle, mode, defaultAction } = parsePromptParams(search);
 // Switch mode = the next calendar meeting started while we were already
 // recording: same card, but the choice is "switch to it" vs "keep recording",
 // and it is resolved by the recorder window's own prompt window/commands.
 const isSwitch = mode === 'switch';
+// With auto-record off the countdown ends in a no-op, so the primary button is
+// Dismiss and Take notes moves behind the chevron. Switch mode never swaps.
+const dismissFirst = !isSwitch && defaultAction === 'dismiss';
+const primaryLabel = dismissFirst ? 'Dismiss' : 'Take notes';
+const menuLabel = isSwitch ? 'Keep recording' : dismissFirst ? 'Take notes' : 'Dismiss';
 
-// Whether the "more options" menu below the Take notes button is open. Rust
+// Whether the "more options" menu below the primary button is open. Rust
 // grows the (fixed-size, overflow-hidden) window so the menu has room to show.
 const menuOpen = ref(false);
-// The split button, measured so the Dismiss button can match its width.
+// The split button, measured so the menu item can match its width.
 const splitEl = ref<HTMLElement | null>(null);
 const menuWidth = ref('auto');
 
@@ -77,9 +82,11 @@ async function resolve(yes: boolean) {
           <div v-if="subtitle" data-test="subtitle" class="subtitle">{{ subtitle }}</div>
         </div>
 
-        <!-- Split button: Take notes + a chevron that reveals more options. -->
+        <!-- Split button: the default action + a chevron that reveals the other. -->
         <div ref="splitEl" class="split">
-          <button class="primary-btn split-main" @click="resolve(true)">Take notes</button>
+          <button class="primary-btn split-main" @click="resolve(!dismissFirst)">
+            {{ primaryLabel }}
+          </button>
           <button
             data-test="more-options"
             class="primary-btn split-chevron"
@@ -96,16 +103,16 @@ async function resolve(yes: boolean) {
       </div>
     </div>
 
-    <!-- Dismiss, revealed under the Take notes button by the chevron. Same
-         shape/size as Take notes, secondary styling. -->
+    <!-- The non-default action, revealed under the primary button by the
+         chevron. Same shape/size as the primary, secondary styling. -->
     <button
       v-if="menuOpen"
-      data-test="menu-dismiss"
+      data-test="menu-item"
       class="secondary-btn"
       :style="{ width: menuWidth }"
-      @click="resolve(false)"
+      @click="resolve(dismissFirst)"
     >
-      {{ isSwitch ? 'Keep recording' : 'Dismiss' }}
+      {{ menuLabel }}
     </button>
   </div>
 </template>
