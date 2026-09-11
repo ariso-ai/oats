@@ -14,9 +14,9 @@
 [![Desktop App](https://github.com/ariso-ai/oats/actions/workflows/desktop.yaml/badge.svg)](https://github.com/ariso-ai/oats/actions/workflows/desktop.yaml)
 [![Release](https://github.com/ariso-ai/oats/actions/workflows/release.yaml/badge.svg)](https://github.com/ariso-ai/oats/actions/workflows/release.yaml)
 [![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&logo=apple&color=000000)](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats.dmg)
+[![Latest Release](https://img.shields.io/github/v/release/ariso-ai/oats?label=download&color=0078D4&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAgMGgxMS4zNzd2MTEuMzcySDB6bTEyLjYyMyAwSDI0djExLjM3MkgxMi42MjN6TTAgMTIuNjIzaDExLjM3N1YyNEgwem0xMi42MjMgMEgyNFYyNEgxMi42MjN6Ii8%2BPC9zdmc%2B)](https://pub-dd2807d512d34e55b8a863f675ea8e6e.r2.dev/desktop/oats-windows-x86_64.exe)
 
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](https://github.com/ariso-ai/oats/releases/latest)
-[![Windows release preview](https://img.shields.io/badge/Windows-11%20release%20preview-0078D4?logo=windows&logoColor=white)](CONTRIBUTING.md#local-backend-on-device-transcription)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-D97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
