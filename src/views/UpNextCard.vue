@@ -1,13 +1,22 @@
 <template>
   <div class="up-next">
-    <!-- Big serif date/time heading for the empty home state. -->
-    <p class="greeting">{{ greeting }}</p>
+    <!-- Big serif heading for the empty home state: on Ariso, the org's logo
+         centered above "<org>'s Notetaker" with the date/time beneath it;
+         without an org, just the date/time. -->
+    <img
+      v-if="orgLogo"
+      class="org-logo"
+      :src="orgLogo"
+      :alt="orgName || 'Organization logo'"
+    />
+    <p class="greeting" :class="{ 'greeting--org': orgName, 'greeting--below-logo': orgLogo }">{{ orgName ? `${orgName}'s Notetaker` : dateTime }}</p>
+    <p v-if="orgName" class="greeting-time">{{ dateTime }}</p>
     <!-- Greeting prompt: oats mark + chat bubble, with the new-meeting CTA
          tucked under the bubble's bottom-right corner. -->
     <div class="prompt">
       <img class="prompt-logo" :src="oatsLogo" alt="oats" />
       <div class="prompt-body">
-        <p class="prompt-bubble">Ready for the next meet? Or do you want to spin up a new meeting?</p>
+        <p class="prompt-bubble">Ready for the next meet? Or a new one?</p>
         <button class="new-meeting-btn" type="button" title="Start a new recording" @click="$emit('record')">
           <span class="new-meeting-label">New Meeting</span>
           <span class="new-meeting-icon" aria-hidden="true">
@@ -164,6 +173,10 @@ import oatsLogo from '../assets/oats-light.svg';
 const props = defineProps<{
   meetings: MeetingListItem[];
   now: Date;
+  /** Ariso organization name; brands the heading. Empty/absent in Local mode. */
+  orgName?: string;
+  /** Ariso organization logo as a `data:image/...` URL; shown above the heading. */
+  orgLogo?: string;
 }>();
 
 defineEmits<{
@@ -188,7 +201,7 @@ function initials(name?: string): string {
 
 // "Tuesday June 9 1:42PM" — weekday, month, day, and the current clock with no
 // space before AM/PM, matching the Figma heading.
-const greeting = computed(() => {
+const dateTime = computed(() => {
   const d = props.now;
   const weekday = d.toLocaleDateString(undefined, { weekday: 'long' });
   const month = d.toLocaleDateString(undefined, { month: 'long' });
@@ -356,32 +369,66 @@ function rowSub(m: MeetingListItem): string {
   padding: 14px 16px 8px;
   flex-shrink: 0;
 }
+/* Org logo centered above the heading, in the heading's top spot. Logos come
+   in any aspect ratio; fit them inside the square. */
+.org-logo {
+  align-self: center;
+  width: 56px;
+  height: 56px;
+  margin-top: 14px;
+  object-fit: contain;
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+.greeting--below-logo {
+  padding-top: 10px;
+}
+/* With an org, the date/time drops to its own smaller line underneath. */
+.greeting--org {
+  padding-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+.greeting-time {
+  font-size: 15px;
+  line-height: 1.3;
+  color: #6f6f6f;
+  text-align: center;
+  padding: 0 16px 10px;
+  flex-shrink: 0;
+}
 
 /* Prompt sitting between the date heading and the Up Next card: oats mark on
    the left, a chat bubble, and the record CTA tucked under it. */
 .prompt {
   display: flex;
   align-items: flex-start;
-  gap: 14px;
   padding: 6px 2px 26px;
   flex-shrink: 0;
 }
+/* The oats mark overlaps the bubble: its center sits on the bubble's top-left
+   corner. The negative right margin and the body's top offset are both half the
+   mark's size (26px), and the body's offset is measured from the mark's top. */
 .prompt-logo {
+  position: relative;
+  z-index: 2;
   width: 52px;
   height: 52px;
   flex-shrink: 0;
-  margin-top: 2px;
+  margin-top: -10px;
+  margin-right: -26px;
 }
 .prompt-body {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  margin-top: 16px; /* -10px (mark's top) + 26px (half the mark) */
 }
 .prompt-bubble {
   background: #ecebe8;
   border-radius: 8px 20px 20px 20px;
-  padding: 14px 20px;
+  /* Extra left padding so the text clears the mark's overlapping corner. */
+  padding: 14px 20px 14px 38px;
   font-size: 15px;
   line-height: 1.4;
   color: #1c1c1c;

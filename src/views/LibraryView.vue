@@ -346,6 +346,8 @@
           v-else
           :meetings="displayMeetings"
           :now="now"
+          :org-name="orgName"
+          :org-logo="orgLogo"
           @select="(m) => selectMeeting(m, { userSelected: true })"
           @start="startRecordingFor"
           @record="startRecording"
@@ -423,6 +425,7 @@ import {
   recordingStartErrorMessage,
 } from '../composables/recordingStartError';
 import { useAccountState } from '../composables/useAccountState';
+import { useOrganizationInfo } from '../composables/useOrganizationInfo';
 import { AUTH_CHANGED_EVENT, local, setBackendSetting } from '../tauri';
 import { Cog6ToothIcon } from '@heroicons/vue/24/outline';
 import SignInButtons from './SignInButtons.vue';
@@ -824,6 +827,19 @@ watch(
       if (accountSigningInWith.value) void account.cancelSignIn();
       account.reset();
     }
+  }
+);
+
+// The signed-in user's Ariso org brands the Up Next greeting. Fetched only on
+// Ariso with a session — Local mode never asks — and refetched when the account
+// changes (the email tells one user from the next).
+const organization = useOrganizationInfo();
+const { name: orgName, logo: orgLogo } = organization;
+watch(
+  () => [activeBackend.value?.id, accountSignedIn.value, accountEmail.value] as const,
+  ([id, signedIn]) => {
+    if (id === 'ariso' && signedIn) void organization.refresh();
+    else organization.reset();
   }
 );
 

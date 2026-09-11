@@ -2374,6 +2374,92 @@ describe('LibraryView Todo tab', () => {
   });
 });
 
+describe('LibraryView organization branding', () => {
+  const LOGO = 'data:image/png;base64,iVBORw0KGgo=';
+
+  function mockOrg() {
+    apiRequest.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(
+        path === '/auth/me'
+          ? { status: 200, data: { full_name: 'Ada Lovelace', email: 'ada@example.com' } }
+          : path === '/organizations/info'
+            ? { status: 200, data: { organization: { id: 1, name: 'Acme', logo_data: LOGO } } }
+            : { status: 200, data: {} }
+      )
+    );
+  }
+
+  async function mountOn(backend: 'ariso' | 'local') {
+    backendId.mockReturnValue(backend);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  function orgRequests() {
+    return apiRequest.mock.calls.filter(([, path]) => path === '/organizations/info');
+  }
+
+  it('brands Up Next with the signed-in Ariso org', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+
+    expect(orgRequests()).toHaveLength(1);
+    const upNext = wrapper.findComponent(UpNextCard);
+    expect(upNext.props('orgName')).toBe('Acme');
+    expect(upNext.props('orgLogo')).toBe(LOGO);
+  });
+
+  it('asks for no org while signed out', async () => {
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+
+    expect(orgRequests()).toHaveLength(0);
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+  });
+
+  it('never asks for the org on Local', async () => {
+    mockOrg();
+    const wrapper = await mountOn('local');
+
+    expect(orgRequests()).toHaveLength(0);
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+  });
+
+  it('drops the org on a switch to Local and refetches on the way back', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+    expect(wrapper.findComponent(UpNextCard).props('orgLogo')).toBe('');
+
+    backendId.mockReturnValue('ariso');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(orgRequests()).toHaveLength(2);
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+  });
+
+  it('drops the org when the session ends elsewhere', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+
+    checkSession.mockResolvedValue(null);
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+  });
+});
+
 describe('LibraryView backend indicator', () => {
   function mockProfile() {
     apiRequest.mockImplementation((_method: string, path: string) =>
