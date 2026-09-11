@@ -418,8 +418,12 @@ async fn run_loop(app: AppHandle) {
                             crate::meeting_notifications::prompt_auto_record(&app2, default_record)
                                 .await;
                         // A manual recording may have started during the prompt;
-                        // don't stack a second recorder on top of it.
+                        // don't stack a second recorder on top of it. Also bail if
+                        // Settings → Microphone was disabled while the prompt was
+                        // showing — this detached task outlives run_loop, which is
+                        // what `sync` aborts on toggle-off.
                         if record
+                            && monitor_desired(is_supported(), mic_setting(&app2).as_ref())
                             && !app2
                                 .state::<crate::recording_state::RecordingState>()
                                 .is_active()
