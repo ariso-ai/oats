@@ -58,6 +58,7 @@ impl Rect {
     pub(crate) fn contains(&self, (px, py): (f32, f32)) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
+    #[cfg(test)]
     pub(crate) fn offset(&self, dx: f32, dy: f32) -> Self {
         Self::new(self.x + dx, self.y + dy, self.w, self.h)
     }
@@ -318,12 +319,17 @@ impl HeightAnimation {
         self.start_ms = now_ms;
     }
 
+    #[cfg(test)]
     pub(crate) fn target(&self) -> f32 {
         self.to
     }
 
     pub(crate) fn height_at(&self, now_ms: f32) -> f32 {
         let t = (now_ms - self.start_ms) / ANIMATION_MS;
+        if t >= 1.0 {
+            // Exact, not interpolated: hit-testing compares against `to`.
+            return self.to;
+        }
         self.from + (self.to - self.from) * ease_out(t)
     }
 
@@ -571,6 +577,14 @@ mod tests {
         assert!(mid > 140.0 && mid < 190.0, "ease-out is past halfway at half time: {mid}");
         assert!(close(a.height_at(1180.0), 190.0));
         assert!(!a.is_running(1180.0));
+        // Exactly the target once finished: the buttons go live on `>=`, and
+        // f32 interpolation can land a hair under it.
+        let collapsed = capsule_height(PillPhase::Recording, false);
+        let expanded = capsule_height(PillPhase::Recording, true);
+        let mut grow = HeightAnimation::settled(collapsed);
+        grow.retarget(expanded, 0.0);
+        assert_eq!(grow.height_at(ANIMATION_MS), expanded);
+        assert_eq!(grow.height_at(ANIMATION_MS * 3.0), expanded);
         // Retargeting mid-flight starts from the current height.
         a.retarget(90.0, 1090.0);
         a.retarget(190.0, 1100.0);

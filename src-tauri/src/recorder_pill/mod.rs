@@ -22,9 +22,13 @@ mod layout;
 mod macos;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(target_os = "windows")]
+mod win32;
+#[cfg(target_os = "windows")]
+use win32 as native;
 
 /// Platforms without a native pill keep painting it in the webview.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod native {
     pub(super) fn create(_app: &tauri::AppHandle) {}
     pub(super) fn update(_app: &tauri::AppHandle, _state: super::PillState) {}
@@ -37,7 +41,7 @@ mod native {
 
 /// Whether this platform draws the pill natively, leaving the "waveform"
 /// webview as a headless recorder host.
-pub(crate) const NATIVE: bool = cfg!(target_os = "macos");
+pub(crate) const NATIVE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
 /// Whether the native pill is actually usable right now: the platform draws
 /// it natively *and* the linked native library speaks the expected ABI. Falls
