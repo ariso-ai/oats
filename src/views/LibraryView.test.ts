@@ -2396,24 +2396,21 @@ describe('LibraryView backend indicator', () => {
     return el.classes('account-pill--signed-out') ? 'signed-out' : 'signed-in';
   }
 
-  it('sits in the window corner, outside the titlebar and the sidebar', async () => {
+  it('sits in the titlebar, right after the sidebar toggle', async () => {
     const wrapper = await mountOn('local');
 
-    const wrap = wrapper.get('.account-pill-wrap').element;
-    expect(wrap.parentElement?.classList.contains('library')).toBe(true);
-    expect(wrapper.find('.titlebar .account-pill').exists()).toBe(false);
+    const wrap = wrapper.get('.titlebar .account-pill-wrap').element;
+    expect(wrap.previousElementSibling?.classList.contains('panel-toggle')).toBe(true);
     expect(wrapper.find('.sidebar .account-pill').exists()).toBe(false);
-    expect(wrapper.find('.detail-wrap--clear-corner').exists()).toBe(false);
   });
 
-  it('stays visible with the sidebar hidden, and keeps the detail card clear of it', async () => {
+  it('stays visible with the sidebar hidden', async () => {
     const wrapper = await mountOn('local');
 
     await wrapper.get('.panel-toggle').trigger('click');
 
     expect(wrapper.find('.sidebar').exists()).toBe(false);
     expect(pill(wrapper).text()).toBe('Local');
-    expect(wrapper.find('.detail-wrap').classes()).toContain('detail-wrap--clear-corner');
   });
 
   it('shows a static Local badge and never checks the session, even on an auth broadcast', async () => {
