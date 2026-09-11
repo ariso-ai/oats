@@ -560,6 +560,29 @@ fn parse_loopback_callback(request_line: &str) -> Option<(LoopbackDelivery, Stri
     Some((delivery, nonce?))
 }
 
+// On macOS the success page also hands the user back to the app: it redirects
+// to the `oats://` scheme (see `deep_link`), so the browser offers to open oats,
+// and keeps a link for a browser that blocks the automatic redirect. Nothing
+// about the flow rides in that URL. Other platforms register no scheme, so the
+// page there only says to close the tab.
+#[cfg(target_os = "macos")]
+macro_rules! callback_return_to_app {
+    () => {
+        concat!(
+            "<p><a href=\"oats://return\" style=\"display:inline-block;margin-top:8px;",
+            "padding:8px 16px;border-radius:10px;background:#1c1c1c;color:#fff;",
+            "text-decoration:none;font-weight:600\">Open oats</a></p>",
+            "<script>location.href=\"oats://return\";</script>"
+        )
+    };
+}
+#[cfg(not(target_os = "macos"))]
+macro_rules! callback_return_to_app {
+    () => {
+        ""
+    };
+}
+
 // Loopback responses. The success page must never echo the token, and its
 // wording must match the flow that opened the browser — see
 // `BrowserFlow::callback_ok_response`.
@@ -574,7 +597,9 @@ macro_rules! callback_ok_response {
             $heading,
             "</h2><p>",
             $body,
-            "</p></div></body></html>"
+            "</p>",
+            callback_return_to_app!(),
+            "</div></body></html>"
         )
     };
 }
@@ -696,12 +721,16 @@ async fn run_browser_sign_in(
     listener: tokio::net::TcpListener,
     nonce: String,
 ) {
-    let result = match tokio::time::timeout(
+    let delivery = tokio::time::timeout(
         SIGN_IN_TIMEOUT,
         accept_loopback_callback(&listener, &nonce, BrowserFlow::SignIn),
     )
-    .await
-    {
+    .await;
+    // The browser now holds the page that hands back via `oats://`.
+    if matches!(delivery, Ok(Ok(_))) {
+        crate::deep_link::remember_return_window(window.label());
+    }
+    let result = match delivery {
         Ok(Ok(LoopbackDelivery::Token(token))) => {
             exchange_token_for_session(window.app_handle(), &token).await
         }
@@ -878,12 +907,16 @@ async fn run_calendar_connect(
     listener: tokio::net::TcpListener,
     nonce: String,
 ) {
-    let result = match tokio::time::timeout(
+    let delivery = tokio::time::timeout(
         SIGN_IN_TIMEOUT,
         accept_loopback_callback(&listener, &nonce, BrowserFlow::CalendarConnect),
     )
-    .await
-    {
+    .await;
+    // The browser now holds the page that hands back via `oats://`.
+    if matches!(delivery, Ok(Ok(_))) {
+        crate::deep_link::remember_return_window(window.label());
+    }
+    let result = match delivery {
         Ok(Ok(LoopbackDelivery::Status(status))) => CalendarConnectResult {
             status: Some(status),
             error: None,
@@ -2963,6 +2996,20 @@ mod tests {
             accept.await.unwrap().unwrap(),
             LoopbackDelivery::Status("connected".into())
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn callback_success_pages_hand_back_to_the_app_scheme() {
+        let return_url = format!("{}://return", crate::deep_link::APP_URL_SCHEME);
+        for flow in [BrowserFlow::SignIn, BrowserFlow::CalendarConnect] {
+            let page = flow.callback_ok_response();
+            // Redirects on load (the browser's "Open oats?" prompt)…
+            assert!(page.contains(&format!("location.href=\"{return_url}\"")), "{flow:?}");
+            // …with a link for a browser that blocks the automatic redirect.
+            assert!(page.contains(&format!("href=\"{return_url}\"")), "{flow:?}");
+        }
+        assert!(!CALLBACK_NOT_FOUND_RESPONSE.contains("oats://"));
     }
 
     #[test]

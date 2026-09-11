@@ -6,6 +6,7 @@ mod audio_util;
 mod audio_capture;
 mod mic_capture;
 mod commands;
+mod deep_link;
 mod meeting_notifications;
 mod mic_monitor;
 mod platform;
@@ -437,6 +438,8 @@ fn main() {
                         eprintln!("Failed to open meetings window on dock reopen: {e}");
                     }
                 }
+                // An `oats://` URL — the browser handing back after sign-in.
+                tauri::RunEvent::Opened { urls } => deep_link::handle_opened_urls(_app, urls),
                 // Keep the Dock / Stage Manager presence in sync with the
                 // visible windows: promote to Regular while a real window is up,
                 // demote to Accessory once they're all gone. Focused covers
