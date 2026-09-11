@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   loadPlatformCapabilities: vi.fn(),
   requestMicrophonePermission: vi.fn(),
   checkMicrophonePermission: vi.fn(),
+  emit: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/plugin-store', () => ({
@@ -15,6 +16,9 @@ vi.mock('@tauri-apps/plugin-store', () => ({
   }),
 }));
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }));
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: (...a: unknown[]) => mocks.emit(...a),
+}));
 vi.mock('./usePlatformCapabilities', () => ({
   loadPlatformCapabilities: () => mocks.loadPlatformCapabilities(),
 }));
@@ -27,7 +31,9 @@ import {
   checkMicPermission,
   ensureMicPermission,
   loadRecordingEnabled,
+  setMicEnabled,
 } from './useRecordingPermissions';
+import { AUTO_RECORD_SYNC_EVENT } from './useAutoRecord';
 
 beforeEach(() => {
   mocks.values.clear();
@@ -38,6 +44,7 @@ beforeEach(() => {
   mocks.loadPlatformCapabilities.mockReset();
   mocks.requestMicrophonePermission.mockReset();
   mocks.checkMicrophonePermission.mockReset();
+  mocks.emit.mockReset();
 });
 
 describe('microphone permissions', () => {
@@ -72,6 +79,25 @@ describe('microphone permissions', () => {
     expect(stop).toHaveBeenCalledOnce();
     expect(query).toHaveBeenCalledWith({ name: 'microphone' });
     expect(mocks.requestMicrophonePermission).not.toHaveBeenCalled();
+  });
+});
+
+describe('setMicEnabled', () => {
+  it('persists the flag and then syncs the mic monitor so detection follows it', async () => {
+    const order: string[] = [];
+    mocks.set.mockImplementation(async (key: string, value: unknown) => {
+      mocks.values.set(key, value);
+      order.push('set');
+    });
+    mocks.emit.mockImplementation(async () => {
+      order.push('emit');
+    });
+
+    await setMicEnabled(false);
+
+    expect(mocks.set).toHaveBeenCalledWith('recordMicEnabled', false);
+    expect(mocks.emit).toHaveBeenCalledWith(AUTO_RECORD_SYNC_EVENT);
+    expect(order).toEqual(['set', 'emit']);
   });
 });
 

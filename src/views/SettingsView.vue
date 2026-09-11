@@ -280,7 +280,7 @@
               type="checkbox"
               class="toggle-input"
               :checked="autoRecordEnabled"
-              :disabled="!autoRecordSupported"
+              :disabled="!autoRecordSupported || !micEnabled"
               @change="onToggleAutoRecord"
             />
             <span class="toggle-track">
@@ -290,6 +290,11 @@
         </div>
         <p v-if="!autoRecordSupported" class="notif-status notif-status--err">
           Auto-record is not available on this platform.
+        </p>
+        <!-- Meeting detection (the prompt this setting configures) only runs
+             while the microphone is enabled. -->
+        <p v-else-if="!micEnabled" class="setting-hint">
+          Turn on Microphone to detect meetings.
         </p>
 
         <div class="setting-row" style="margin-top: 16px">
@@ -1650,6 +1655,15 @@ async function refreshCalendarAccess() {
 .toggle-input:focus-visible + .toggle-track {
   outline: 2px solid #1c1c1c;
   outline-offset: 2px;
+}
+
+/* Greyed out when unavailable (e.g. Auto-record while Microphone is off). */
+.toggle:has(.toggle-input:disabled) {
+  cursor: not-allowed;
+}
+
+.toggle-input:disabled + .toggle-track {
+  opacity: 0.5;
 }
 
 .download-confirm {

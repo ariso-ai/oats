@@ -86,11 +86,13 @@ vi.mock('../tauri', () => ({
     downloadLlm: () => downloadLlm(),
   },
 }));
+const loadRecordingEnabled = vi.fn(() => Promise.resolve({ mic: false, systemAudio: false }));
+const ensureMicPermission = vi.fn(() => Promise.resolve(true));
 vi.mock('../composables/useRecordingPermissions', () => ({
-  loadRecordingEnabled: () => Promise.resolve({ mic: false, systemAudio: false }),
+  loadRecordingEnabled: () => loadRecordingEnabled(),
   setMicEnabled: vi.fn(),
   setSystemAudioEnabled: vi.fn(),
-  ensureMicPermission: vi.fn(),
+  ensureMicPermission: () => ensureMicPermission(),
   ensureSystemAudioPermission: vi.fn(),
   checkSystemAudioPermission: vi.fn(() => Promise.resolve(true)),
   openMicSettings: vi.fn(),
@@ -172,6 +174,8 @@ beforeEach(() => {
     checkSession.mockResolvedValue(null);
     return Promise.resolve();
   });
+  loadRecordingEnabled.mockResolvedValue({ mic: false, systemAudio: false });
+  ensureMicPermission.mockResolvedValue(true);
 });
 
 function storeSession(): Promise<SignInResult> {
@@ -1070,5 +1074,47 @@ describe('SettingsView meeting stop reminder toggle', () => {
     await input.trigger('change');
     await flushPromises();
     expect(setMeetingEndReminderEnabled).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('SettingsView auto-record depends on the microphone', () => {
+  function autoRecordToggle(wrapper: ReturnType<typeof mount>) {
+    const row = wrapper
+      .findAll('.setting-row')
+      .find((r) => r.find('.setting-label').text() === 'Auto-record meetings');
+    expect(row, 'Auto-record meetings row').toBeDefined();
+    return row!.find('input.toggle-input');
+  }
+
+  function micToggle(wrapper: ReturnType<typeof mount>) {
+    const row = wrapper
+      .findAll('.setting-row')
+      .find((r) => r.find('.setting-label').text() === 'Microphone');
+    return row!.find('input.toggle-input');
+  }
+
+  it('disables auto-record with a hint while the microphone is off', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(autoRecordToggle(wrapper).attributes('disabled')).toBeDefined();
+    expect(wrapper.text()).toContain('Turn on Microphone to detect meetings.');
+  });
+
+  it('enables auto-record when the microphone is on', async () => {
+    loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    expect(autoRecordToggle(wrapper).attributes('disabled')).toBeUndefined();
+    expect(wrapper.text()).not.toContain('Turn on Microphone to detect meetings.');
+  });
+
+  it('re-enables auto-record as soon as the microphone is toggled on', async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const mic = micToggle(wrapper);
+    (mic.element as HTMLInputElement).checked = true;
+    await mic.trigger('change');
+    await flushPromises();
+    expect(autoRecordToggle(wrapper).attributes('disabled')).toBeUndefined();
   });
 });
