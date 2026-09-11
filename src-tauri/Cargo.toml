@@ -84,6 +84,8 @@ tauri-plugin-single-instance = "=2.4.4"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Reads `swift -print-target-info` when linking the Swift recorder pill.
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"

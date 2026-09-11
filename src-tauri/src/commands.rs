@@ -1420,7 +1420,9 @@ pub(crate) fn open_waveform_window(
     // Born hidden (painted-empty) when the meetings window already owns the
     // recorder UI, so the pill never flashes over it. The window is still
     // created visible for getUserMedia; only its painting is suppressed.
-    let pill_hidden = !crate::recorder_pill::should_show_now(app);
+    // Where the pill is drawn natively the webview never paints it at all.
+    let show_pill = crate::recorder_pill::should_show_now(app);
+    let pill_hidden = crate::recorder_pill::NATIVE || !show_pill;
     let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref(), force_new);
     let win = match WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
@@ -1457,6 +1459,7 @@ pub(crate) fn open_waveform_window(
     let app_for_event = app.clone();
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::Destroyed = event {
+            crate::recorder_pill::destroy_native(&app_for_event);
             let state = app_for_event.state::<crate::recording_state::RecordingState>();
             state.clear();
             state.release_window_claim();
@@ -1543,7 +1546,10 @@ pub(crate) fn open_waveform_window(
 
     // Show the pill only while the library window (with its embedded
     // recorder strip) can't be seen — minimized or closed.
-    crate::recorder_pill::spawn_watcher(app);
+    if crate::recorder_pill::NATIVE {
+        crate::recorder_pill::create_native(app, show_pill);
+    }
+    crate::recorder_pill::spawn_watcher(app, show_pill);
 
     // Tell every window (the library in particular) which meeting the new
     // recording is attached to, so it can surface that meeting immediately.

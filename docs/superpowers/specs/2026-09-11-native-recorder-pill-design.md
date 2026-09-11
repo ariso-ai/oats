@@ -45,8 +45,9 @@ lives exactly as long as the `waveform` window. The visual design matches
 ```
 
 - **`waveform` webview → headless recorder host.** When the platform has a
-  native pill, Rust adds `nativePill=1` to the route. `WaveformView` then renders
-  no pill markup and keeps the window click-through. The webview is still
+  native pill, Rust always launches the webview with the existing
+  `pillHidden=1` flag and never sends `recorder://pill-visible`, so
+  `WaveformView` paints no pill and keeps the window click-through. The webview is still
   created visible (Windows' `getUserMedia` needs an on-screen window) and the
   watcher hides it as soon as capture is active, regardless of the Meetings
   window. `WaveformView` itself still re-shows it before a Resume restarts
@@ -116,7 +117,7 @@ The three new events carry no payload and are only acted on while
 - **Swift (XCTest, `swift test`):** view-model layout per phase, timer
   formatting, bar clamping, the click-vs-drag threshold, and the dock frame
   math. Added to the macOS CI job.
-- **Vitest:** `WaveformView` with `nativePill=1` renders no pill and routes the
+- **Vitest:** `WaveformView` launched with `pillHidden=1` renders no pill and routes the
   three new events to finalize / resume / discard; without it the Vue pill
   behaves as before.
 - **Manual (macOS bundle):** record in cloud and local mode; minimize and close

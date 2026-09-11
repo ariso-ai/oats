@@ -8,6 +8,8 @@ src-tauri/ariso-stt/macos/.build/
 src-tauri/ariso-stt/macos/.xcode/
 src-tauri/ariso-stt/macos/.xcode-metallib/
 src-tauri/ariso-stt/macos/.swiftpm/
+src-tauri/recorder-pill/macos/.build/
+src-tauri/recorder-pill/macos/.swiftpm/
 src-tauri/ariso-stt/windows/target/
 src-tauri/gen/schemas/windows-schema.json
 .superpowers/
