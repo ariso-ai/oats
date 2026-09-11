@@ -838,8 +838,8 @@ const { name: orgName, logo: orgLogo } = organization;
 watch(
   () => [activeBackend.value?.id, accountSignedIn.value, accountEmail.value] as const,
   ([id, signedIn]) => {
+    organization.reset();
     if (id === 'ariso' && signedIn) void organization.refresh();
-    else organization.reset();
   }
 );
 
@@ -857,6 +857,7 @@ async function onBackendChanged(): Promise<void> {
 }
 
 function onAuthChanged(): void {
+  organization.reset();
   if (activeBackend.value?.id === 'ariso') void account.refresh(true);
 }
 

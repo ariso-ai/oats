@@ -624,6 +624,7 @@ async fn accept_loopback_callback(
     listener: &tokio::net::TcpListener,
     expected_nonce: &str,
     flow: BrowserFlow,
+    owner_label: &str,
 ) -> Result<LoopbackDelivery, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -655,6 +656,13 @@ async fn accept_loopback_callback(
             let matched = parse_loopback_callback(&request_line)
                 .filter(|(_, nonce)| nonce_matches(nonce, expected_nonce))
                 .map(|(delivery, _)| delivery);
+
+            // Remember the owning window before the browser can act on the
+            // success page's automatic `oats://return` navigation, so the
+            // deep-link handler always finds it.
+            if matched.is_some() {
+                crate::deep_link::remember_return_window(owner_label);
+            }
 
             let response = if matched.is_some() {
                 flow.callback_ok_response()
@@ -723,13 +731,9 @@ async fn run_browser_sign_in(
 ) {
     let delivery = tokio::time::timeout(
         SIGN_IN_TIMEOUT,
-        accept_loopback_callback(&listener, &nonce, BrowserFlow::SignIn),
+        accept_loopback_callback(&listener, &nonce, BrowserFlow::SignIn, window.label()),
     )
     .await;
-    // The browser now holds the page that hands back via `oats://`.
-    if matches!(delivery, Ok(Ok(_))) {
-        crate::deep_link::remember_return_window(window.label());
-    }
     let result = match delivery {
         Ok(Ok(LoopbackDelivery::Token(token))) => {
             exchange_token_for_session(window.app_handle(), &token).await
@@ -909,13 +913,14 @@ async fn run_calendar_connect(
 ) {
     let delivery = tokio::time::timeout(
         SIGN_IN_TIMEOUT,
-        accept_loopback_callback(&listener, &nonce, BrowserFlow::CalendarConnect),
+        accept_loopback_callback(
+            &listener,
+            &nonce,
+            BrowserFlow::CalendarConnect,
+            window.label(),
+        ),
     )
     .await;
-    // The browser now holds the page that hands back via `oats://`.
-    if matches!(delivery, Ok(Ok(_))) {
-        crate::deep_link::remember_return_window(window.label());
-    }
     let result = match delivery {
         Ok(Ok(LoopbackDelivery::Status(status))) => CalendarConnectResult {
             status: Some(status),
@@ -2938,7 +2943,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let accept = tokio::spawn(async move {
-            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::SignIn).await
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::SignIn, "main").await
         });
 
         let send = |req: String| async move {
@@ -2975,7 +2980,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let accept = tokio::spawn(async move {
-            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::CalendarConnect).await
+            accept_loopback_callback(&listener, "goodnonce", BrowserFlow::CalendarConnect, "main")
+                .await
         });
 
         let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
