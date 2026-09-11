@@ -59,9 +59,9 @@ lives exactly as long as the `waveform` window. The visual design matches
 - **`src-tauri/recorder-pill/macos/`** — SwiftPM package `OatsRecorderPill`, a
   static library that `build.rs` compiles and links into the oats binary (plus
   search paths for the OS Swift runtime). An `NSPanel` (borderless,
-  non-activating, floating level, all Spaces + over fullscreen apps, native
-  shadow) hosts an `NSHostingView` of a SwiftUI view driven by an observable
-  model.
+  non-activating, floating level, all Spaces + over fullscreen apps, fixed
+  size) hosts an `NSHostingView` of a SwiftUI view driven by an observable
+  model; the capsule draws its own shadow.
 
 ## The C ABI (macOS)
 
@@ -97,6 +97,16 @@ The three new events carry no payload and are only acted on while
 
 - **Hover** expands the pill upward (bottom-anchored) to show the timer, Pause,
   and Stop; leaving collapses it. No expansion during uploading/success/failed.
+  The panel itself never resizes. Resizing a window makes AppKit re-derive its
+  tracking areas and report a resting pointer as exited, which made an
+  earlier build flap open and shut. The panel is instead sized for the tallest
+  capsule plus shadow room, and the capsule animates inside it. Hover comes
+  from the pointer's position against the capsule's current rect, not the
+  panel's rectangle; the expanded rect contains the collapsed one, so hover
+  can't oscillate. Clicks on the panel's fully transparent pixels go to
+  whatever is underneath (the window server routes by alpha).
+- **Dropped near an edge**, a dragged pill is pulled back so even the tallest
+  capsule fits on screen.
 - **Click without movement** on the pill body opens Meetings on the recording.
 - **Drag from anywhere** except a button: a press that moves more than 3pt
   hands off to the OS window drag (`NSWindow.performDrag`). This replaces the

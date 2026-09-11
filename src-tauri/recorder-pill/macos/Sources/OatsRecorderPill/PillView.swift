@@ -21,9 +21,9 @@ private extension Color {
     static let retryIndigo = Color(hex: 0x818cf8)
 }
 
-/// The capsule. Its height always equals the panel's (see `PillController`),
-/// so the view fills the window and the flexible expanded area soaks up the
-/// difference while the window animates between collapsed and expanded.
+/// The capsule, bottom-anchored in the fixed-size panel (see `PillGeometry`).
+/// Its height animates between states; the flexible expanded area soaks up
+/// the difference so the controls are revealed as it grows.
 struct PillView: View {
     @ObservedObject var model: PillModel
     /// Moves the panel while the body is dragged; a press without movement
@@ -36,6 +36,20 @@ struct PillView: View {
     private typealias G = PillGeometry
 
     var body: some View {
+        // Clear space around the capsule is fully transparent, so the window
+        // server sends clicks there to whatever is underneath.
+        ZStack(alignment: .bottom) {
+            Color.clear
+            capsule
+                .frame(width: G.width, height: model.height)
+                .animation(.easeOut(duration: G.animation), value: model.height)
+                .shadow(color: .black.opacity(0.5), radius: 10, y: 6)
+                .padding(.bottom, G.shadowPad)
+        }
+        .frame(width: G.panelSize.width, height: G.panelSize.height)
+    }
+
+    private var capsule: some View {
         VStack(spacing: 0) {
             OatsLogo()
                 .fill(Color.white, style: FillStyle(eoFill: true))
@@ -61,6 +75,7 @@ struct PillView: View {
         }
         .frame(width: G.width)
         .frame(maxHeight: .infinity, alignment: .top)
+        .clipped()
         .background(Color.pillBackground)
         .clipShape(RoundedRectangle(cornerRadius: G.cornerRadius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: G.cornerRadius, style: .continuous))
