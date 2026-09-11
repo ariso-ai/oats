@@ -196,7 +196,7 @@
             <span class="account-name">{{ displayName }}</span>
             <span class="account-email">{{ email }}</span>
           </div>
-          <button class="sign-out-btn" @click="handleSignOut">Sign Out</button>
+          <button class="sign-out-btn" @click="signOut">Sign Out</button>
         </div>
         <div v-if="calendarConnected === false" class="calendar-connect">
           <p class="calendar-connect-text">
@@ -212,42 +212,12 @@
         </div>
         </template>
         <div v-else class="sign-in-container">
-          <button
-            :disabled="isSigningIn"
-            class="google-btn"
-            @click="handleSignIn('google')"
-          >
-            <svg class="google-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
-              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-            </svg>
-            <span v-if="signingInWith === 'google'">Continue in your browser…</span>
-            <span v-else>Sign in with Google</span>
-          </button>
-          <button
-            :disabled="isSigningIn"
-            class="microsoft-btn"
-            @click="handleSignIn('microsoft')"
-          >
-            <svg class="microsoft-icon" viewBox="0 0 21 21" aria-hidden="true">
-              <path fill="#F25022" d="M0 0h10v10H0z" />
-              <path fill="#7FBA00" d="M11 0h10v10H11z" />
-              <path fill="#00A4EF" d="M0 11h10v10H0z" />
-              <path fill="#FFB900" d="M11 11h10v10H11z" />
-            </svg>
-            <span v-if="signingInWith === 'microsoft'">Continue in your browser…</span>
-            <span v-else>Sign in with Microsoft</span>
-          </button>
-          <button
-            v-if="isSigningIn"
-            class="sign-out-btn"
-            @click="handleCancelSignIn"
-          >
-            Cancel
-          </button>
-          <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+          <SignInButtons
+            :signing-in-with="signingInWith"
+            :error-message="errorMessage"
+            @sign-in="handleSignIn"
+            @cancel="cancelSignIn"
+          />
         </div>
       </div>
     </section>
@@ -468,7 +438,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, api, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
 import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -502,20 +472,34 @@ import {
   isMeetingEndReminderEnabled,
   setMeetingEndReminderEnabled,
 } from '../composables/useMeetingEndReminder';
+import { useAccountState, type SignInProvider } from '../composables/useAccountState';
+import SignInButtons from './SignInButtons.vue';
 
-const isSignedIn = ref(false);
-type SignInProvider = 'google' | 'microsoft';
-// The provider whose browser flow is pending. Both buttons disable while
-// either is pending; only the clicked one reads "Continue in your browser…".
-const signingInWith = ref<SignInProvider | null>(null);
+const {
+  isSignedIn,
+  displayName,
+  email,
+  avatarUrl,
+  initials,
+  signingInWith,
+  // Also carries the platform-capabilities failure below, shown in the same spot.
+  errorMessage,
+  refresh: refreshSignedInAccount,
+  signIn,
+  cancelSignIn,
+  signOut,
+} = useAccountState();
 const isSigningIn = computed(() => signingInWith.value !== null);
 const isConnectingCalendar = ref(false);
 // null = not checked this session; false = checked and missing.
 const calendarConnected = ref<boolean | null>(null);
-const errorMessage = ref('');
-const displayName = ref('');
-const email = ref('');
-const avatarUrl = ref('');
+// The Calendar verdict belongs to the session that just ended, however it
+// ended: a sign-out here, or one that reached this window as a broadcast. The
+// next session may be a Microsoft sign-in finished in another window, which
+// reaches this window only through the refresh, and that keeps the verdict.
+watch(isSignedIn, (signedIn) => {
+  if (!signedIn) calendarConnected.value = null;
+});
 const micEnabled = ref(true);
 const systemAudioEnabled = ref(true);
 const autoRecordEnabled = ref(true);
@@ -695,18 +679,43 @@ async function selectBackend(next: 'ariso' | 'local') {
   void emitNotificationsSync().catch((err) => {
     console.warn('Failed to broadcast sync after backend change', err);
   });
+  if (next === 'local') await afterSwitchToLocal();
+}
+
+async function afterSwitchToLocal() {
+  await refreshModelStatus();
+  // First time only: ask before fetching the (large) on-device models.
+  const prompted = await hasPromptedLocalModels().catch(() => true);
+  if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
+    showDownloadConfirm.value = true;
+  } else {
+    // Already confirmed once before (or STT already installed): skip the
+    // modal and start any still-missing downloads right away, so the models
+    // are ready by the time the user records.
+    startMissingDownloads();
+  }
+}
+
+// Another window (the Meetings window's backend menu) switched the backend.
+// This window is pre-created and outlives that, so follow it, and treat a
+// switch to Local the way a switch made here is treated. Its own switches
+// come back here too, already applied, so an unchanged backend is a no-op.
+async function onBackendChangedElsewhere() {
+  let next: 'ariso' | 'local';
+  try {
+    next = await getBackendSetting();
+  } catch (e) {
+    console.warn('Failed to re-read backend setting', e);
+    return;
+  }
+  if (next === backend.value) return;
+  backend.value = next;
+  backendOpen.value = false;
   if (next === 'local') {
-    await refreshModelStatus();
-    // First time only: ask before fetching the (large) on-device models.
-    const prompted = await hasPromptedLocalModels().catch(() => true);
-    if (shouldPromptDownload(next, prompted, modelStatus.value.state)) {
-      showDownloadConfirm.value = true;
-    } else {
-      // Already confirmed once before (or STT already installed): skip the
-      // modal and start any still-missing downloads right away, so the models
-      // are ready by the time the user records.
-      startMissingDownloads();
-    }
+    await afterSwitchToLocal();
+  } else {
+    // Nothing left to confirm: the switch the modal was about is undone.
+    showDownloadConfirm.value = false;
   }
 }
 
@@ -916,11 +925,6 @@ async function onToggleMeetingNotifications(e: Event) {
   }
 }
 
-const initials = computed(() => {
-  const name = displayName.value || email.value || '?';
-  return name.slice(0, 2).toUpperCase();
-});
-
 async function onToggleMic(e: Event) {
   if (recordingToggleBusy.value) return;
   micToggling.value = true;
@@ -1003,93 +1007,8 @@ async function onToggleSystemAudio(e: Event) {
   }
 }
 
-async function fetchUserProfile() {
-  try {
-    const res = await api.request('GET', '/auth/me');
-    const data = res.data as { full_name?: string; email?: string };
-    displayName.value = data.full_name || '';
-    email.value = data.email || '';
-  } catch {
-    // profile fetch failed — leave fields empty
-  }
-  // Avatar is fetched separately and is non-critical: a failure here must not
-  // disturb the name/email above, and the UI falls back to initials.
-  avatarUrl.value = await fetchAvatar();
-}
-
-// Which provider the user signed in with isn't recorded, so ask Google first
-// and fall back to Microsoft: an account has no avatar on the other provider.
-async function fetchAvatar(): Promise<string> {
-  for (const path of ['/users/google-avatar', '/users/microsoft-avatar']) {
-    try {
-      const res = await api.request('GET', path);
-      const avatar = (res.data as { avatar?: string | null } | null)?.avatar;
-      // Preload before binding to the <img>: WKWebView drops the very first
-      // request for a freshly-rendered <img> during the post-sign-in churn and
-      // never retries it, leaving a broken "?". Loading it through a detached
-      // Image first (which is not affected) warms the cache, so the bound <img>
-      // resolves instantly. Falls back to initials if it truly can't load.
-      if (avatar) return await preloadAvatar(avatar);
-    } catch {
-      // Try the next provider.
-    }
-  }
-  return '';
-}
-
-// Resolves to `url` once it loads in a detached Image (retrying a few times for
-// transient webview failures), or to '' so the caller falls back to initials.
-function preloadAvatar(url: string): Promise<string> {
-  return new Promise((resolve) => {
-    const MAX_ATTEMPTS = 4;
-    let attempts = 0;
-    const attempt = () => {
-      const img = new Image();
-      img.referrerPolicy = 'no-referrer';
-      img.onload = () => resolve(url);
-      img.onerror = () => {
-        attempts += 1;
-        if (attempts >= MAX_ATTEMPTS) {
-          resolve('');
-        } else {
-          setTimeout(attempt, 300 * attempts);
-        }
-      };
-      img.src = url;
-    };
-    attempt();
-  });
-}
-
 let unlistenSignInPrompt: UnlistenFn | null = null;
 const unlistenUpdates: UnlistenFn[] = [];
-
-// Refresh account UI from persisted native session state. The settings window is
-// hidden/pre-created at app startup, so it cannot rely only on its first mount.
-// Never throws: a checkSession failure in onMounted would otherwise abort the
-// rest of initialization (update listeners, recording bootstrap, etc.), and a
-// failure inside the AUTH_SIGNED_IN_EVENT callback would reject the listener.
-async function refreshSignedInAccount() {
-  try {
-    const session = await auth.checkSession();
-    isSignedIn.value = !!session;
-    if (isSignedIn.value) {
-      await fetchUserProfile();
-    } else {
-      displayName.value = '';
-      email.value = '';
-      avatarUrl.value = '';
-      calendarConnected.value = null;
-    }
-  } catch (e) {
-    isSignedIn.value = false;
-    displayName.value = '';
-    email.value = '';
-    avatarUrl.value = '';
-    calendarConnected.value = null;
-    console.warn('Failed to refresh signed-in account', e);
-  }
-}
 
 onMounted(async () => {
   // Native capabilities are authoritative. Keep the conservative initial state
@@ -1136,9 +1055,12 @@ onMounted(async () => {
   const unTraySignIn = await listen<unknown>('tray://sign-in', (e) => {
     void handleTraySignIn(e.payload);
   });
-  const unSignedIn = await listen(AUTH_SIGNED_IN_EVENT, async () => {
-    await refreshSignedInAccount();
-    signInPrompt.value = false;
+  // This window is pre-created hidden and outlives sign-ins and sign-outs made
+  // elsewhere (Onboarding, the Meetings popover, a rejected session cleared
+  // natively), so follow the backend's broadcast rather than its own mount.
+  const unAuthChanged = await listen(AUTH_CHANGED_EVENT, async () => {
+    await refreshSignedInAccount(true);
+    if (isSignedIn.value) signInPrompt.value = false;
   });
 
   await loadUpdateState();
@@ -1158,7 +1080,7 @@ onMounted(async () => {
     checking.value = false;
   });
 
-  unlistenUpdates.push(unTraySignIn, unSignedIn, unAvail, unNone, unChecking, unError);
+  unlistenUpdates.push(unTraySignIn, unAuthChanged, unAvail, unNone, unChecking, unError);
 
   try {
     backend.value = await getBackendSetting();
@@ -1176,6 +1098,9 @@ onMounted(async () => {
   const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
     llmProgress.value = e.payload >= 0 ? e.payload : null;
   });
+  const unBackendChanged = await listen(BACKEND_CHANGED_EVENT, () => {
+    void onBackendChangedElsewhere();
+  });
   const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
     // The recording gate fired because a model isn't ready — auto-start the
@@ -1183,7 +1108,7 @@ onMounted(async () => {
     await refreshModelStatus();
     startMissingDownloads();
   });
-  unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt);
+  unlistenUpdates.push(unSttProgress, unLlmProgress, unModelPrompt, unBackendChanged);
 });
 
 // Registered as its own hook so a failure in the main bootstrap above can't
@@ -1204,37 +1129,18 @@ onUnmounted(() => {
 });
 
 async function handleSignIn(provider: SignInProvider) {
-  signingInWith.value = provider;
-  errorMessage.value = '';
-  try {
-    const result =
-      provider === 'google' ? await auth.googleSignIn() : await auth.microsoftSignIn();
-    if (result.error) {
-      if (result.error !== SIGN_IN_CANCELED_ERROR) {
-        errorMessage.value = result.error;
-      }
-      return;
-    }
-    isSignedIn.value = true;
-    signInPrompt.value = false;
-    await fetchUserProfile();
-    void emitNotificationsSync().catch((err) => {
-      console.warn('Failed to sync notifications after sign-in', err);
-    });
-    if (provider === 'google') {
-      // Sign-in may not carry Calendar — a user who already granted Google
-      // Workspace keeps their broader grant, which might not cover it.
-      await refreshCalendarAccess();
-    } else {
-      // Calendar comes from Google only, and the Connect Calendar nudge opens
-      // Google's consent page. Clear any verdict left by an earlier Google
-      // session in this window so the nudge stays hidden.
-      calendarConnected.value = null;
-    }
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Sign in failed';
-  } finally {
-    signingInWith.value = null;
+  const result = await signIn(provider);
+  if (result.error) return;
+  signInPrompt.value = false;
+  if (provider === 'google') {
+    // Sign-in may not carry Calendar — a user who already granted Google
+    // Workspace keeps their broader grant, which might not cover it.
+    await refreshCalendarAccess();
+  } else {
+    // Calendar comes from Google only, and the Connect Calendar nudge opens
+    // Google's consent page. Clear any verdict left by an earlier Google
+    // session in this window so the nudge stays hidden.
+    calendarConnected.value = null;
   }
 }
 
@@ -1274,31 +1180,6 @@ async function refreshCalendarAccess() {
   } finally {
     isConnectingCalendar.value = false;
   }
-}
-
-// Abort a pending browser sign-in. The backend resolves the waiting
-// sign-in call with the silent-cancel error, which resets the UI.
-async function handleCancelSignIn() {
-  try {
-    await auth.cancelSignIn();
-  } catch {
-    /* nothing pending — ignore */
-  }
-}
-
-async function handleSignOut() {
-  await auth.signOut();
-  isSignedIn.value = false;
-  displayName.value = '';
-  email.value = '';
-  avatarUrl.value = '';
-  // The Calendar verdict belongs to the session that just ended. The next one
-  // may be a Microsoft sign-in finished in another window, which reaches this
-  // window only through the signed-in refresh, and that keeps the verdict.
-  calendarConnected.value = null;
-  void emitNotificationsSync().catch((err) => {
-    console.warn('Failed to sync notifications after sign-out', err);
-  });
 }
 </script>
 
@@ -1449,52 +1330,6 @@ async function handleSignOut() {
      white card, where #9ca3af managed only 2.5:1 — under the WCAG AA floor. */
   color: #6f6f6f;
   margin: 0;
-}
-
-.sign-in-container {
-  text-align: center;
-}
-
-.google-btn,
-.microsoft-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 10px 16px;
-  background: #ffffff;
-  border: 1px solid #d6d6d6;
-  border-radius: 999px;
-  box-shadow: 2px 2px 0 #e7e5e2;
-  font-size: 14px;
-  font-weight: 500;
-  color: #1c1c1c;
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-
-.microsoft-btn {
-  margin-top: 8px;
-}
-
-.google-btn:hover:not(:disabled),
-.microsoft-btn:hover:not(:disabled) {
-  box-shadow: 1px 1px 0 #e7e5e2;
-  transform: translate(1px, 1px);
-}
-
-.google-btn:disabled,
-.microsoft-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.google-icon,
-.microsoft-icon {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
 }
 
 .error {

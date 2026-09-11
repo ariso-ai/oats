@@ -63,8 +63,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { emit } from '@tauri-apps/api/event';
-import { AUTH_SIGNED_IN_EVENT, SIGN_IN_CANCELED_ERROR, auth, openSettingsWindow, setOnboarded } from '../tauri';
+import { SIGN_IN_CANCELED_ERROR, auth, openSettingsWindow, setOnboarded } from '../tauri';
 import { emitNotificationsSync } from '../composables/useMeetingNotifications';
 import { ONBOARDING_STEPS, nextStepIndex } from './onboarding';
 
@@ -124,9 +123,6 @@ async function handleSignIn(provider: SignInProvider) {
     }
     void emitNotificationsSync().catch((err) => {
       console.warn('Failed to sync notifications after sign-in', err);
-    });
-    void emit(AUTH_SIGNED_IN_EVENT).catch((err) => {
-      console.warn('Failed to broadcast desktop sign-in', err);
     });
     // Calendar comes from Google only: ensureCalendarAccess opens Google's
     // Workspace consent page, which a Microsoft user must never land on.
