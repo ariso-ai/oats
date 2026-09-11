@@ -5,6 +5,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 const list = vi.fn();
 const combine = vi.fn();
 const reveal = vi.fn();
+const discardAudio = vi.fn();
 const bufferPath = vi.fn();
 const checkSession = vi.fn();
 const combineAndUpload = vi.fn();
@@ -17,6 +18,7 @@ vi.mock('../tauri', () => ({
     list: (...a: unknown[]) => list(...a),
     combine: (...a: unknown[]) => combine(...a),
     reveal: (...a: unknown[]) => reveal(...a),
+    discardAudio: (...a: unknown[]) => discardAudio(...a),
     bufferPath: (...a: unknown[]) => bufferPath(...a),
   },
 }));
@@ -274,6 +276,93 @@ describe('PendingUploads', () => {
     // A subsequent click only re-arms — it must not discard.
     await wrapper.find('.discard').trigger('click');
     expect(discardAll).not.toHaveBeenCalled();
+  });
+
+  // With a single recording, "Discard all" already discards exactly that one.
+  it('shows no per-recording Discard when only one recording is pending', async () => {
+    list.mockResolvedValue([items[0]]);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+    expect(wrapper.find('.pi-discard').exists()).toBe(false);
+  });
+
+  it('per-recording Discard confirms then discards only that recording', async () => {
+    list.mockResolvedValueOnce(items).mockResolvedValueOnce([items[0]]);
+    discardAudio.mockResolvedValue(undefined);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    const buttons = wrapper.findAll('.pi-discard');
+    expect(buttons).toHaveLength(2);
+    await buttons[1].trigger('click'); // first click → confirm
+    expect(wrapper.findAll('.pi-discard')[1].text()).toBe('Confirm');
+    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+    expect(discardAudio).not.toHaveBeenCalled();
+    await wrapper.findAll('.pi-discard')[1].trigger('click'); // second click → run
+    await flushPromises();
+
+    expect(discardAudio).toHaveBeenCalledTimes(1);
+    expect(discardAudio).toHaveBeenCalledWith('2026-06-12T11:00:00Z');
+    expect(discardAll).not.toHaveBeenCalled();
+    expect(wrapper.findAll('.pending-item')).toHaveLength(1);
+  });
+
+  it('arming one recording\'s Discard does not let another recording\'s click discard', async () => {
+    list.mockResolvedValue(items);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.findAll('.pi-discard')[0].trigger('click'); // arm the first
+    await wrapper.findAll('.pi-discard')[1].trigger('click'); // only arms the second
+
+    expect(discardAudio).not.toHaveBeenCalled();
+    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+    expect(wrapper.findAll('.pi-discard')[1].text()).toBe('Confirm');
+  });
+
+  it('cancels a per-recording discard confirmation when the pointer leaves its row', async () => {
+    list.mockResolvedValue(items);
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.findAll('.pi-discard')[0].trigger('click'); // arm confirm
+    await wrapper.findAll('.pi-controls')[0].trigger('mouseleave'); // move away
+    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+
+    await wrapper.findAll('.pi-discard')[0].trigger('click'); // only re-arms
+    expect(discardAudio).not.toHaveBeenCalled();
+  });
+
+  it('shows an error and keeps the recording when a per-recording discard fails', async () => {
+    list.mockResolvedValue(items);
+    discardAudio.mockRejectedValue(new Error('permission denied'));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.findAll('.pi-discard')[0].trigger('click');
+    await wrapper.findAll('.pi-discard')[0].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.pending-error').text()).toBe('Could not discard this recording.');
+    expect(wrapper.findAll('.pending-item')).toHaveLength(2);
+    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+  });
+
+  // Discarding a buffer mid-retry could pull it out from under the upload.
+  it('disables per-recording Discard while an upload is in flight', async () => {
+    list.mockResolvedValue(items);
+    combineAndUpload.mockReturnValue(new Promise(() => {}));
+    const wrapper = mount(PendingUploads);
+    await flushPromises();
+
+    await wrapper.find('.upload').trigger('click');
+    await flushPromises();
+
+    const buttons = wrapper.findAll('.pi-discard');
+    expect(buttons).toHaveLength(2);
+    for (const b of buttons) {
+      expect(b.attributes('disabled')).toBeDefined();
+    }
   });
 
   it('exposes refresh() to reload the list', async () => {
