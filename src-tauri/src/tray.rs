@@ -149,10 +149,15 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
 /// late arrival must not resurrect a recording menu over the idle one.
 pub fn refresh_recording_menu(app: &AppHandle) {
     let state = app.state::<crate::recording_state::RecordingState>();
-    if !state.is_active() {
-        return;
-    }
-    set_menu(app, true, state.is_paused());
+    // Serialized with `set_tray_recording`'s clear-then-idle-menu commit (see
+    // `RecordingState::menu_lock`) so a stop that lands between this check and
+    // the menu commit below cannot be resurrected by it.
+    state.with_menu_lock(|| {
+        if !state.is_active() {
+            return;
+        }
+        set_menu(app, true, state.is_paused());
+    });
 }
 
 /// Redraw the tray on the main thread (muda menus are main-thread on macOS).

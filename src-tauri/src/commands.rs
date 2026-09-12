@@ -1214,18 +1214,24 @@ pub async fn upload_file(
 #[tauri::command]
 pub async fn set_tray_recording(app: tauri::AppHandle, is_recording: bool, is_paused: bool) -> Result<(), String> {
     let state = app.state::<crate::recording_state::RecordingState>();
-    if is_recording {
-        // Mark capture before redrawing the tray so the title refresh sees the
-        // active recording and clears the countdown text in the menu bar.
-        state.mark_capture_active();
-        // Cached so a later identity-only menu rebuild keeps the right
-        // Pause/Resume row (see tray::refresh_recording_menu).
-        state.set_paused(is_paused);
-    } else {
-        state.clear();
-        let _ = app.emit("recording://state", false);
-    }
-    crate::tray::set_menu(&app, is_recording, is_paused);
+    // Serialized with `refresh_recording_menu`'s check-then-commit so a
+    // concurrent identity refresh can never resurrect the recording menu
+    // after this stop installs the idle one (or vice versa).
+    state.with_menu_lock(|| {
+        if is_recording {
+            // Mark capture before redrawing the tray so the title refresh sees
+            // the active recording and clears the countdown text in the menu
+            // bar.
+            state.mark_capture_active();
+            // Cached so a later identity-only menu rebuild keeps the right
+            // Pause/Resume row (see tray::refresh_recording_menu).
+            state.set_paused(is_paused);
+        } else {
+            state.clear();
+            let _ = app.emit("recording://state", false);
+        }
+        crate::tray::set_menu(&app, is_recording, is_paused);
+    });
     Ok(())
 }
 
@@ -1249,11 +1255,12 @@ pub async fn set_recording_meeting(
     // identity push races the stop path. Finalize clears the state via
     // `set_tray_recording(false)` and can then resolve a meeting id (an
     // unattached Ariso upload), which would otherwise repopulate the state
-    // after the recording ended and leave a stale id behind.
-    if !state.is_active() {
+    // after the recording ended and leave a stale id behind. The check and
+    // write happen atomically under the same lock `clear()` commits under, so
+    // a stop that races this cannot land between them.
+    if !state.set_recording_meeting_if_active(meeting_id, title) {
         return Ok(());
     }
-    state.set_recording_meeting(meeting_id, title);
     crate::tray::refresh_recording_menu(&app);
     Ok(())
 }

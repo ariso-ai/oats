@@ -57,6 +57,12 @@ pub struct RecordingState {
     /// an older one rather than queueing two recordings.
     pending_open: Mutex<Option<PendingOpen>>,
     next_open_token: AtomicU64,
+    /// Serializes "read lifecycle state, then commit a tray menu built from
+    /// it" across `set_tray_recording` and `refresh_recording_menu`. Without
+    /// this, a stop can clear state and install the idle menu *between* a
+    /// racing refresh's active check and its menu commit, letting the refresh
+    /// resurrect the recording menu after capture has already ended.
+    menu_lock: Mutex<()>,
 }
 
 impl RecordingState {
@@ -95,6 +101,33 @@ impl RecordingState {
     pub fn set_recording_meeting(&self, meeting_id: Option<i64>, title: Option<String>) {
         *self.meeting_id.lock().unwrap() = meeting_id;
         *self.recording_title.lock().unwrap() = title.filter(|t| !t.trim().is_empty());
+    }
+
+    /// Same as `set_recording_meeting`, but atomically conditioned on still
+    /// being active — under the same lock `clear()` commits under via
+    /// `with_menu_lock`. Returns `false` (and writes nothing) if a concurrent
+    /// stop already cleared the state, so an identity push that raced the stop
+    /// path can never leave a stale id/title behind on an idle state.
+    pub fn set_recording_meeting_if_active(
+        &self,
+        meeting_id: Option<i64>,
+        title: Option<String>,
+    ) -> bool {
+        self.with_menu_lock(|| {
+            if !self.is_active() {
+                return false;
+            }
+            self.set_recording_meeting(meeting_id, title);
+            true
+        })
+    }
+
+    /// Run `f` while holding the lock that serializes "read lifecycle state,
+    /// then commit a tray menu (or state write) built from it" — see
+    /// `menu_lock`.
+    pub fn with_menu_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.menu_lock.lock().unwrap_or_else(|p| p.into_inner());
+        f()
     }
 
     pub fn active_recording_title(&self) -> Option<String> {
