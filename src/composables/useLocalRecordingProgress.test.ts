@@ -24,10 +24,25 @@ describe('deriveStage', () => {
   it('returns idle for null', () => {
     expect(deriveStage(null)).toBe('idle');
   });
-  it('maps recording/transcribing to transcribing', () => {
-    expect(deriveStage(view({ status: 'recording' }))).toBe('transcribing');
+  it('maps transcribing to transcribing', () => {
     expect(deriveStage(view({ status: 'transcribing' }))).toBe('transcribing');
   });
+  // Issue #355: a local recording now writes status 'recording' from the moment
+  // capture starts. It gets its own stage, not 'idle': the detail pane renders
+  // no chip for it (RecorderStrip and the pill already say "recording"), but the
+  // poll loop keeps ticking so it is still alive when Stop flips the status to
+  // 'transcribing'.
+  it('maps a live recording to its own recording stage, not idle', () => {
+    expect(
+      deriveStage({
+        status: 'recording',
+        hasTranscript: false,
+        hasNote: false,
+        notesStatus: 'pending',
+      }),
+    ).toBe('recording');
+  });
+
   it('maps failed status to transcript-failed', () => {
     expect(deriveStage(view({ status: 'failed' }))).toBe('transcript-failed');
   });
@@ -80,6 +95,37 @@ describe('useLocalRecordingProgress polling', () => {
     const calls = recordingStatus.mock.calls.length;
     await vi.advanceTimersByTimeAsync(4000);
     expect(recordingStatus.mock.calls.length).toBe(calls);
+  });
+
+  // Regression guard (issue #355): nothing restarts this poller once it stops,
+  // so it has to survive the whole capture. If a live recording ever stops the
+  // loop, the user watching the in-progress recording's detail pane sees no
+  // status chip for the entire transcription that follows Stop.
+  it('keeps polling while the recording is still capturing, and on through transcription', async () => {
+    recordingStatus
+      .mockResolvedValueOnce(view({ status: 'recording' }))
+      .mockResolvedValueOnce(view({ status: 'recording' }))
+      .mockResolvedValueOnce(view({ status: 'transcribing' }))
+      .mockResolvedValue(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready' }));
+
+    const p = useLocalRecordingProgress(() => 'rec-1');
+    p.begin();
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(p.stage.value).toBe('recording');
+    expect(recordingStatus).toHaveBeenCalledTimes(1);
+
+    // Still capturing: the loop must have scheduled another tick.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.stage.value).toBe('recording');
+    expect(recordingStatus).toHaveBeenCalledTimes(2);
+
+    // Stop flips the status; the still-live poller picks the transcription up.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.stage.value).toBe('transcribing');
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.stage.value).toBe('ready');
   });
 
   it('stops polling at a failed stage', async () => {

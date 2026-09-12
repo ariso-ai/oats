@@ -425,6 +425,15 @@ export const local = {
   recordingIdForStart(createdAt: string, forceNew?: boolean): Promise<string> {
     return invoke<string>('local_recording_id_for_start', { createdAt, forceNew });
   },
+  /** Create a brand-new local recording's `meta.json` (status `recording`) the
+   *  moment capture starts, so rename / status / list work during the recording
+   *  instead of only after Stop. Idempotent: an id that already has a
+   *  `meta.json` (an append target) is left untouched. `title` must be the same
+   *  `timestampTitle(createdAt)` finalize will pass, or the label would change
+   *  when the recording stops. */
+  beginRecording(id: string, createdAt: string, title: string): Promise<void> {
+    return invoke('local_begin_recording', { id, createdAt, title });
+  },
   /** Cheap single-recording status for the detail panel's generation poller. */
   recordingStatus(id: string): Promise<RecordingStatusView> {
     return invoke<RecordingStatusView>('local_recording_status', { id });

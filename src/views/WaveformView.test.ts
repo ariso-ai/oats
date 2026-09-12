@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { ref } from 'vue';
 
 const startRecording = vi.fn();
 const stopRecording = vi.fn();
@@ -34,7 +35,10 @@ let routeQuery: Record<string, string> = {};
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: routeQuery }) }));
 const recorderIsRecording = { value: true };
 const recorderIsPaused = { value: false };
-const recorderDuration = { value: 5 };
+// A real ref (not a plain `{ value }` stub like its neighbors): Task 8's
+// duration watcher in WaveformView needs actual Vue reactivity to fire when a
+// test mutates this mid-recording.
+const recorderDuration = ref(5);
 const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
@@ -51,10 +55,19 @@ vi.mock('../composables/useRecorder', () => ({
     resumeRecording: vi.fn(),
   }),
 }));
-vi.mock('../composables/useBackend', () => ({
-  getActiveBackend: () =>
-    Promise.resolve({ id: backendKind.value, finalizeRecording: (...a: unknown[]) => finalizeRecording(...a) }),
-}));
+vi.mock('../composables/useBackend', async () => {
+  const actual = await vi.importActual<typeof import('../composables/useBackend')>(
+    '../composables/useBackend',
+  );
+  return {
+    timestampTitle: actual.timestampTitle,
+    getActiveBackend: () =>
+      Promise.resolve({
+        id: backendKind.value,
+        finalizeRecording: (...a: unknown[]) => finalizeRecording(...a),
+      }),
+  };
+});
 vi.mock('../composables/useRecordingPermissions', () => ({
   loadRecordingEnabled: () => loadRecordingEnabled(),
 }));
@@ -64,26 +77,44 @@ vi.mock('../composables/useSilenceDetection', () => ({
 }));
 
 const listScheduledMeetings = vi.fn(() => Promise.resolve([]));
+// `title` is nullable on the wire: an ad-hoc meeting is created without one.
+const getMeeting = vi.fn(
+  (): Promise<{ meeting: { title: string | null } }> =>
+    Promise.resolve({ meeting: { title: 'Budget sync' } }),
+);
+const createAudioMeeting = vi.fn(() => Promise.resolve({ meetingId: 77 }));
 vi.mock('../composables/useMeetingApi', () => ({
-  useMeetingApi: () => ({ listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a) }),
+  useMeetingApi: () => ({
+    listScheduledMeetings: (...a: unknown[]) => listScheduledMeetings(...a),
+    getMeeting: (...a: unknown[]) => getMeeting(...a),
+    createAudioMeeting: (...a: unknown[]) => createAudioMeeting(...a),
+  }),
 }));
 
 // vi.mock is hoisted before top-level consts, so shared mock handles that the
 // factory closes over must live in vi.hoisted() to avoid TDZ errors.
-const { discardPendingAudio, recordingIdForStart } = vi.hoisted(() => ({
+const { discardPendingAudio, recordingIdForStart, beginRecording } = vi.hoisted(() => ({
   discardPendingAudio: vi.fn(() => Promise.resolve()),
   // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
   // i.e. a fresh recording. Tests that exercise the append case override this.
-  recordingIdForStart: vi.fn((createdAt: string) =>
-    Promise.resolve(createdAt.split('.')[0].replace(/:/g, '-')),
-  ),
+  // Strips sub-second precision (if any) and re-appends the trailing `Z`,
+  // matching storage::sanitize_iso_to_id's head+"Z" reconstruction.
+  recordingIdForStart: vi.fn((createdAt: string) => {
+    const head = createdAt.includes('.') ? createdAt.split('.')[0] : createdAt.replace(/Z$/, '');
+    return Promise.resolve(`${head.replace(/:/g, '-')}Z`);
+  }),
+  beginRecording: vi.fn(() => Promise.resolve()),
 }));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
-  local: { recordingIdForStart: (...a: [string]) => recordingIdForStart(...a) },
+  local: {
+    recordingIdForStart: (...a: [string]) => recordingIdForStart(...a),
+    beginRecording: (...a: [string, string, string]) => beginRecording(...a),
+  },
 }));
 
 import WaveformView from './WaveformView.vue';
+import { timestampTitle } from '../composables/useBackend';
 import { SILENCE_PROMPT_MS, SILENCE_GRACE_MS } from '../composables/silenceWatch';
 
 // Recorder views own native listeners and timers, so every test must exercise
@@ -112,6 +143,9 @@ beforeEach(() => {
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
+  listScheduledMeetings.mockResolvedValue([]);
+  getMeeting.mockResolvedValue({ meeting: { title: 'Budget sync' } });
+  createAudioMeeting.mockResolvedValue({ meetingId: 77 });
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -818,5 +852,341 @@ describe('WaveformView recorder://yield handshake', () => {
     settleUpload({ backend: 'local' });
     await flushPromises();
     wrapper.unmount();
+  });
+});
+
+describe('WaveformView local recording identity (#355)', () => {
+  // Manual recordings are never length-gated and never auto-discarded, so the
+  // stub goes down the moment the id resolves — that is what makes the row
+  // renamable mid-capture.
+  it('creates the local recording on disk as soon as its id resolves', async () => {
+    backendKind.value = 'local';
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(beginRecording).toHaveBeenCalledTimes(1);
+    const [id, createdAt, title] = beginRecording.mock.calls[0];
+    expect(id).toBe('2026-06-09T10-00-00Z');
+    expect(createdAt).toBe('2026-06-09T10:00:00.000Z');
+    // The same string LocalBackend.finalizeRecording will pass, so the row's
+    // label does not change when the recording stops.
+    expect(title).toBe(timestampTitle('2026-06-09T10:00:00.000Z'));
+  });
+
+  // An auto recording under 15s is discarded without ever finalizing, and there
+  // is no delete for local recordings — a stub written at capture start would
+  // survive on disk forever as an empty phantom row. So it waits, exactly as
+  // the Ariso ad-hoc meeting does.
+  it('defers an auto recording\'s disk write until it outlives the discard window', async () => {
+    backendKind.value = 'local';
+    routeQuery = { auto: '1' };
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+    recorderDuration.value = 5;
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(recordingIdForStart).toHaveBeenCalled(); // the id still resolves early
+    expect(beginRecording).not.toHaveBeenCalled();
+
+    recorderDuration.value = 15;
+    await flushPromises();
+
+    expect(beginRecording).toHaveBeenCalledTimes(1);
+    expect(beginRecording).toHaveBeenCalledWith(
+      '2026-06-09T10-00-00Z',
+      '2026-06-09T10:00:00.000Z',
+      timestampTitle('2026-06-09T10:00:00.000Z'),
+    );
+
+    // Still exactly one stub however long the recording then runs.
+    recorderDuration.value = 90;
+    await flushPromises();
+    expect(beginRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it('never writes a stub for an auto recording that stops inside the discard window', async () => {
+    backendKind.value = 'local';
+    routeQuery = { auto: '1' };
+    recorderDuration.value = 5;
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+
+    mount(WaveformView);
+    await flushPromises();
+
+    await eventHandlers['auto-record://stop']?.({});
+    await flushPromises();
+
+    // Discarded, so nothing was ever finalized — and nothing is left on disk.
+    expect(finalizeRecording).not.toHaveBeenCalled();
+    expect(beginRecording).not.toHaveBeenCalled();
+
+    // A duration tick landing after the stop must not resurrect the write.
+    recorderDuration.value = 20;
+    await flushPromises();
+    expect(beginRecording).not.toHaveBeenCalled();
+  });
+
+  it('skips the disk write when continuing into an existing recording', async () => {
+    backendKind.value = 'local';
+    routeQuery = { localAppendId: '2026-06-09T09-00-00Z' };
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(beginRecording).not.toHaveBeenCalled();
+    expect(recordingIdForStart).not.toHaveBeenCalled();
+  });
+
+  it('does not touch local storage for an Ariso recording', async () => {
+    backendKind.value = 'ariso';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(beginRecording).not.toHaveBeenCalled();
+  });
+
+  // A cosmetic feature must never take the recording down with it.
+  it('keeps recording when the identity write fails', async () => {
+    backendKind.value = 'local';
+    beginRecording.mockRejectedValueOnce(new Error('disk full'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(startRecording).toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
+  });
+});
+
+describe('WaveformView tray identity (#355)', () => {
+  it('tells the tray which Ariso meeting is recording', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { meetingId: '42' };
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(getMeeting).toHaveBeenCalledWith(42);
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 42,
+      title: 'Budget sync',
+    });
+  });
+
+  it('sends a local recording its label with no meeting id', async () => {
+    backendKind.value = 'local';
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: null,
+      title: timestampTitle('2026-06-09T10:00:00.000Z'),
+    });
+  });
+
+  // Offline mode means offline: the label comes from the start time, and the
+  // meeting API is never touched — the same guard resolveSilenceSubtitle and
+  // resolveMeetingEnd apply, rather than relying on "a local recording can't
+  // carry a meeting id anyway".
+  it('never reaches the network for a local recording', async () => {
+    backendKind.value = 'local';
+    recorderStartedAt.value = '2026-06-09T10:00:00.000Z';
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(getMeeting).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: null,
+      title: timestampTitle('2026-06-09T10:00:00.000Z'),
+    });
+  });
+
+  // A meeting whose title can't be fetched still names the tray row, so the
+  // click-through exists — the label just falls back.
+  it('still registers the meeting when its title lookup fails', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { meetingId: '42' };
+    getMeeting.mockRejectedValueOnce(new Error('offline'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 42,
+      title: null,
+    });
+    expect(err).toHaveBeenCalled();
+  });
+
+  it('registers nothing while the recording has no identity', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = {};
+
+    mount(WaveformView);
+    await flushPromises();
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      'set_recording_meeting',
+      expect.anything(),
+    );
+  });
+});
+
+describe('WaveformView unmatched auto-trigger (#355)', () => {
+  it('creates an ad-hoc meeting once the recording outlives the discard window', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]); // no calendar match
+    recorderDuration.value = 5;
+
+    mount(WaveformView);
+    await flushPromises();
+
+    // Still inside the 15s window that discards a mic blip.
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+
+    recorderDuration.value = 15;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 77,
+      title: 'Budget sync',
+    });
+  });
+
+  // The realistic shape: createAudioMeeting() sends no title, so the ad-hoc
+  // meeting really is untitled until the user renames it. The tray row must
+  // still be registered (and, in Rust, still rendered) off the meeting id alone.
+  it('registers an untitled ad-hoc meeting with the tray', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    getMeeting.mockResolvedValue({ meeting: { title: null } });
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 15;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('set_recording_meeting', {
+      meetingId: 77,
+      title: null,
+    });
+  });
+
+  // The watcher fires on every duration tick, including ones that land after
+  // the user hit Stop. A discarded recording must not gain a permanent meeting.
+  it('creates no meeting once the recording is already stopping', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    recorderDuration.value = 5;
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+
+    mount(WaveformView);
+    await flushPromises();
+
+    // Under 15s and auto: this discards, setting isStopping.
+    await eventHandlers['auto-record://stop']?.({});
+    await flushPromises();
+
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  it('creates only one meeting however long the recording runs', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+
+    mount(WaveformView);
+    await flushPromises();
+
+    recorderDuration.value = 15;
+    await flushPromises();
+    recorderDuration.value = 20;
+    await flushPromises();
+    recorderDuration.value = 90;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a calendar-matched auto recording alone', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    const now = Date.now();
+    // `ScheduledMeeting` is snake_case on the wire (useMeetingApi.ts:51), and
+    // `pickDefaultMeeting` reads `start_at`. A meeting counts as "current" from
+    // start-5min to start+60min, so a start 1 minute ago matches.
+    listScheduledMeetings.mockResolvedValue([
+      { id: 9, title: 'Standup', start_at: new Date(now - 60_000).toISOString() },
+    ]);
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  it('leaves a manually-started recording alone', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = {}; // no auto=1: the picker already resolved an id
+    listScheduledMeetings.mockResolvedValue([]);
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  it('leaves a local auto recording alone', async () => {
+    backendKind.value = 'local';
+    routeQuery = { auto: '1' };
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 30;
+    await flushPromises();
+
+    expect(createAudioMeeting).not.toHaveBeenCalled();
+  });
+
+  // Identical to today's total lack of an id — never a regression, never a retry.
+  it('records unattached when the ad-hoc meeting cannot be created', async () => {
+    backendKind.value = 'ariso';
+    routeQuery = { auto: '1' };
+    listScheduledMeetings.mockResolvedValue([]);
+    createAudioMeeting.mockRejectedValueOnce(new Error('offline'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mount(WaveformView);
+    await flushPromises();
+    recorderDuration.value = 20;
+    await flushPromises();
+    recorderDuration.value = 40;
+    await flushPromises();
+
+    expect(createAudioMeeting).toHaveBeenCalledTimes(1); // no retry
+    expect(err).toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
   });
 });

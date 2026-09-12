@@ -15,6 +15,7 @@ import { useRecorder } from '../composables/useRecorder';
 import { recordingStartErrorMessage } from '../composables/recordingStartError';
 import {
   getActiveBackend,
+  timestampTitle,
   type Backend,
   type FinalizeResult,
   type RecordingMeta,
@@ -122,6 +123,77 @@ watch(
 );
 // Re-resolve the scheduled end whenever the attached meeting changes.
 watch(effectiveMeetingId, () => void resolveMeetingEnd());
+// Tell the native side what is being recorded, so the tray's recording menu can
+// name it and open it (#355). Fires whenever an identity becomes known: an
+// Ariso meeting (calendar-matched, picker-selected, or the ad-hoc one created
+// for an unmatched auto-trigger) or a local recording's resolved id. Local
+// passes no meeting id — it has no server-side meeting — and the tray routes
+// its click through the same `recording://reveal` broadcast either way.
+let trayIdentityToken = 0;
+async function registerTrayIdentity(): Promise<void> {
+  const token = ++trayIdentityToken;
+  const meetingId = effectiveMeetingId.value;
+  const localId = effectiveLocalRecordingId.value;
+  if (meetingId === null && localId === null) return;
+  // Wait for the backend to resolve rather than registering an unnamed row we
+  // would immediately have to correct; the watcher re-runs once it is known.
+  const backendId = backend.value?.id;
+  if (!backendId) return;
+
+  let title: string | null = null;
+  if (meetingId !== null) {
+    // Ariso only. A local recording must never reach out to the network, and
+    // that guarantee shouldn't rest on "a local recording can't carry a meeting
+    // id anyway" — resolveSilenceSubtitle and resolveMeetingEnd guard the same
+    // way. Without a title the row still exists and is still clickable.
+    if (backendId === 'ariso') {
+      try {
+        const { meeting } = await useMeetingApi().getMeeting(meetingId);
+        title = meeting.title ?? null;
+      } catch (e) {
+        // The row still needs to exist and be clickable; only its label suffers.
+        console.error('Failed to resolve the recording title for the tray', e);
+      }
+    }
+  } else if (recorder.startedAt.value) {
+    title = timestampTitle(recorder.startedAt.value);
+  }
+  if (token !== trayIdentityToken) return;
+  try {
+    await invoke('set_recording_meeting', { meetingId, title });
+  } catch (e) {
+    console.error('Failed to register the recording with the tray', e);
+  }
+}
+watch(
+  // The backend is a source too: it resolves asynchronously, and an Ariso
+  // meeting id can already be known (route query) before it does.
+  [effectiveMeetingId, effectiveLocalRecordingId, () => backend.value?.id],
+  () => void registerTrayIdentity(),
+  { immediate: true },
+);
+// The resolved local recording id whose stub `meta.json` has not been written
+// yet. Null when there is nothing to write: an explicit append target, a failed
+// resolve, a non-local backend, or a stub already written.
+let pendingStubId: string | null = null;
+
+// Write the stub `meta.json` that makes a capturing local recording a real,
+// renamable row. Pass the exact title finalize will use so the label never
+// changes under the user. At most one write per session, success or not.
+async function writeLocalRecordingStub(): Promise<void> {
+  const id = pendingStubId;
+  const startAt = recorder.startedAt.value;
+  if (!id || !startAt) return;
+  pendingStubId = null;
+  try {
+    await local.beginRecording(id, startAt, timestampTitle(startAt));
+  } catch (e) {
+    // Cosmetic: without it the rename affordance stays broken until Stop
+    // (today's behavior). Never worth aborting a live recording over.
+    console.error('Failed to create the local recording on disk', e);
+  }
+}
+
 // When a local recording starts, ask Rust which recording it will finalize into
 // (append target vs. new) and broadcast that id. Resolving once here — rather
 // than deriving a fresh id from the start time on every heartbeat — is what
@@ -135,6 +207,7 @@ watch(
     const token = ++idResolveToken;
     if (!startAt || backendId !== 'local') {
       effectiveLocalRecordingId.value = null;
+      pendingStubId = null;
       return;
     }
     if (localAppendId) {
@@ -146,7 +219,16 @@ watch(
       // forceNew makes the backend return this session's own new id (never an
       // append target), so the recorder docks to a fresh row.
       const id = await local.recordingIdForStart(startAt, forceNew);
-      if (token === idResolveToken) effectiveLocalRecordingId.value = id;
+      if (token !== idResolveToken) return;
+      effectiveLocalRecordingId.value = id;
+      // Give the recording an on-disk identity so its row is real and renamable
+      // while it captures (#355), not only after Stop. A manual recording gets
+      // it right away; an auto one waits until it outlives the discard window
+      // (see the duration watcher), because handleStop discards a sub-15s blip
+      // without ever finalizing and there is no delete for local recordings —
+      // the stub would be a permanent phantom row.
+      pendingStubId = id;
+      if (!isAuto) await writeLocalRecordingStub();
     } catch (e) {
       // Fall back to this session's own id so recording still works if the
       // resolve fails (worst case: today's behavior, a new-recording row).
@@ -255,10 +337,16 @@ async function startRecording() {
   await invoke('set_tray_recording', { isRecording: true, isPaused: false });
 }
 
+// True once an Ariso auto-trigger has run and found no calendar meeting to
+// attach to. Such a session has no identity at all today, so nothing can
+// surface it while it runs; `createAdHocMeeting` gives it one.
+const needsAdHocMeeting = ref(false);
+let adHocMeetingRequested = false;
+
 // Auto-trigger: attach to a matching calendar meeting when one is found. The
 // user has already opted in via the pre-recording notification prompt (or
 // auto-record is on), so there's no in-pill confirmation — a no-match recording
-// simply proceeds unattached.
+// gets its own ad-hoc meeting instead (see the duration watcher below).
 async function resolveAuto() {
   try {
     if (backend.value?.id === 'ariso') {
@@ -269,12 +357,55 @@ async function resolveAuto() {
       const assoc = resolveAssociation('ariso', meetings, now);
       if (assoc.kind === 'matched') {
         effectiveMeetingId.value = assoc.meetingId ?? null;
+      } else {
+        // No calendar match. Don't create the meeting yet: this could still be
+        // a two-second mic blip that handleStop discards.
+        needsAdHocMeeting.value = true;
       }
     }
   } catch (e) {
     console.error('Auto-trigger calendar match failed; recording unattached', e);
   }
 }
+
+// Once an unmatched auto recording outlives the discard threshold it is a real
+// meeting, so give it a real one — the same ad-hoc endpoint "Record a new
+// meeting" uses. From here it is indistinguishable, to every list/pill/tray
+// surface, from a manually-started ad-hoc recording.
+//
+// Deferring to this point sidesteps a hard problem for free: there is no
+// delete-meeting endpoint, so a meeting created for a session that then gets
+// discarded would be permanent garbage.
+async function createAdHocMeeting(): Promise<void> {
+  if (adHocMeetingRequested) return;
+  adHocMeetingRequested = true; // one attempt per session, never a mid-session retry
+  try {
+    const { meetingId } = await useMeetingApi().createAudioMeeting();
+    effectiveMeetingId.value = meetingId;
+  } catch (e) {
+    // Leave the session unattached for its remaining duration — identical to
+    // today's behavior, not a regression. Finalize still creates a meeting
+    // server-side when the upload arrives with no id attached.
+    console.error('Failed to create an ad-hoc meeting for this recording', e);
+  }
+}
+
+// An auto recording only earns a persistent identity once it outlives the
+// discard threshold — before that, handleStop throws the capture away and
+// neither backend can clean up after itself (no delete-meeting endpoint on
+// Ariso, no delete at all for local recordings). Both deferrals land here.
+watch(
+  () => recorder.durationSeconds.value,
+  (seconds) => {
+    if (isStopping.value) return;
+    if (seconds < MIN_AUTO_DURATION_S) return;
+    if (needsAdHocMeeting.value) {
+      needsAdHocMeeting.value = false;
+      void createAdHocMeeting();
+    }
+    if (isAuto && pendingStubId) void writeLocalRecordingStub();
+  },
+);
 
 // Discard the in-progress capture without uploading, then close.
 async function discardRecording() {

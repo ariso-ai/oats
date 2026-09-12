@@ -4,6 +4,7 @@ import { local, type RecordingStatusView } from '../tauri';
 /** Stages of the local generation pipeline, surfaced to the detail panel. */
 export type LocalProgressStage =
   | 'idle'
+  | 'recording'
   | 'transcribing'
   | 'transcript-failed'
   | 'notes-pending'
@@ -17,7 +18,14 @@ export type LocalProgressStage =
 export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (!s) return 'idle';
   if (s.status === 'failed') return 'transcript-failed';
-  if (s.status === 'recording' || s.status === 'transcribing') return 'transcribing';
+  // 'recording' means capture is still running (the stub meta.json written at
+  // start, issue #355) — no generation has begun, and the recorder pill / strip
+  // already communicate "recording", so the detail pane shows no status chip.
+  // It is deliberately its own stage rather than 'idle': the poll loop has to
+  // keep ticking through capture so it is still running when Stop flips the
+  // status to 'transcribing'. Nothing restarts it if it stops here.
+  if (s.status === 'recording') return 'recording';
+  if (s.status === 'transcribing') return 'transcribing';
   // status === 'done'
   if (s.hasNote || s.notesStatus === 'ready') return 'ready';
   if (s.notesStatus === 'empty-transcript') return 'notes-empty-transcript';
@@ -26,6 +34,10 @@ export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
 }
 
 const POLL_MS = 2000;
+
+/** Stages that are not terminal: capture is still running, or the generation
+ *  pipeline is still working. Polling continues while the stage is one of these. */
+const IN_FLIGHT_STAGES: readonly LocalProgressStage[] = ['recording', 'transcribing', 'notes-pending'];
 
 export interface LocalRecordingProgress {
   status: Ref<RecordingStatusView | null>;
@@ -45,8 +57,9 @@ export interface LocalRecordingProgress {
 
 /**
  * Polls `local.recordingStatus(id)` every 2s while the recording is still
- * generating (transcribing or notes-pending) and stops at any terminal stage
- * (ready / failed). `getId` is read on each tick so the caller can repoint it.
+ * capturing or generating (recording / transcribing / notes-pending) and stops
+ * at any terminal stage (ready / failed). `getId` is read on each tick so the
+ * caller can repoint it.
  * Retries set an optimistic status, resume polling, then fire the binding.
  */
 export function useLocalRecordingProgress(getId: () => string | null): LocalRecordingProgress {
@@ -74,16 +87,13 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
       const s = await local.recordingStatus(id);
       if (my !== token) return;
       status.value = s;
-      shouldContinue = stage.value === 'transcribing' || stage.value === 'notes-pending';
+      shouldContinue = IN_FLIGHT_STAGES.includes(stage.value);
     } catch (e) {
       if (my !== token) return;
       console.error('local recording status poll failed', e);
       // Keep retrying if we don't have an initial snapshot yet, so a transient
       // error doesn't permanently hide in-flight generation progress.
-      shouldContinue =
-        status.value == null ||
-        stage.value === 'transcribing' ||
-        stage.value === 'notes-pending';
+      shouldContinue = status.value == null || IN_FLIGHT_STAGES.includes(stage.value);
     }
     if (my !== token) return;
     // Keep polling only while there is still work in flight.

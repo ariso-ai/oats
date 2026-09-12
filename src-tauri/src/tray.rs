@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -117,12 +118,44 @@ fn apply_recording(app: &AppHandle, is_recording: bool) {
     set_icon(app, cached_theme(), is_recording);
 }
 
-/// Rebuild the tray menu in-place. Called from tray events (main thread)
-/// and from the `set_tray_recording` command.
+/// Rebuild the tray menu in-place. Called from tray events and from the
+/// `set_tray_recording` command.
+///
+/// Every commit is funnelled through the main thread, which serializes them:
+/// menu updates are driven by independent async commands
+/// (`set_tray_recording`, `set_recording_meeting`) plus the tray event
+/// handlers, and without a single ordering point a menu built from one state
+/// could land *after* a later transition's menu — leaving the recording menu
+/// and icon installed after the recording already stopped. The main thread is
+/// also where muda menus must be built on macOS, and dispatching (rather than
+/// holding a lock across the native call) keeps a commit from deadlocking
+/// against a main thread that is itself waiting to commit.
 pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
+    let app = app.clone();
+    let dispatch = app.clone();
+    let _ = dispatch.run_on_main_thread(move || {
+        // Read the identity at commit time, not at call time, so the menu
+        // reflects the state as of the moment it is actually installed.
+        let identity = if is_recording {
+            app.state::<crate::recording_state::RecordingState>()
+                .active_snapshot()
+        } else {
+            None
+        };
+        commit_menu(&app, is_recording, is_paused, identity.as_ref());
+    });
+}
+
+/// The commit itself. Must run on the main thread — see `set_menu`.
+fn commit_menu(
+    app: &AppHandle,
+    is_recording: bool,
+    is_paused: bool,
+    identity: Option<&crate::recording_state::RecordingSnapshot>,
+) {
     let Some(tray) = app.tray_by_id("main") else { return };
     let menu = if is_recording {
-        build_recording_menu(app, is_paused)
+        build_recording_menu(app, is_paused, identity)
     } else {
         let featured = app
             .state::<crate::tray_meeting::FeaturedMeetingState>()
@@ -144,6 +177,27 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
     refresh_tray_title(app);
 }
 
+/// Rebuild the recording menu after the recording's identity changes. A no-op
+/// when nothing is recording — the identity push races the stop path, and a
+/// late arrival must not resurrect a recording menu over the idle one.
+///
+/// The state read happens on the main thread at commit time, which is what
+/// makes the no-op reliable rather than merely likely: a
+/// `set_tray_recording(false)` racing this either clears the state before this
+/// closure runs (so nothing is committed here) or commits its own idle menu
+/// after it, never before. Both orderings end on the idle menu.
+pub fn refresh_recording_menu(app: &AppHandle) {
+    let app = app.clone();
+    let dispatch = app.clone();
+    let _ = dispatch.run_on_main_thread(move || {
+        let snapshot = app
+            .state::<crate::recording_state::RecordingState>()
+            .active_snapshot();
+        let Some(snapshot) = snapshot else { return };
+        commit_menu(&app, true, snapshot.is_paused, Some(&snapshot));
+    });
+}
+
 /// Redraw the tray on the main thread (muda menus are main-thread on macOS).
 /// While recording, the recording menu owns the tray — only the title is
 /// refreshed (which clears it). `rebuild_menu` skips a full idle-menu rebuild
@@ -155,7 +209,9 @@ pub fn refresh(app: &AppHandle, rebuild_menu: bool) {
             .state::<crate::recording_state::RecordingState>()
             .is_active();
         if rebuild_menu && !recording {
-            set_menu(&app_for_menu, false, false);
+            // Already on the main thread, so commit directly rather than
+            // dispatching a second hop through `set_menu`.
+            commit_menu(&app_for_menu, false, false, None);
         } else {
             refresh_tray_title(&app_for_menu);
         }
@@ -206,6 +262,24 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 "sign_in_google" => request_sign_in(app, "google"),
                 "sign_in_microsoft" => request_sign_in(app, "microsoft"),
                 "start_recording" => start_recording(app),
+                "show_recording" => {
+                    // Exactly what the floating pill's click does: bring up the
+                    // Meetings window, then nudge it to surface the recording.
+                    // A window that was only minimized needs the explicit
+                    // reveal; a freshly-created one lands on the recording via
+                    // its own recordingMeetingId watch once the recorder
+                    // strip's first heartbeat arrives.
+                    let app_async = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) =
+                            crate::commands::create_library_window(app_async.clone()).await
+                        {
+                            eprintln!("Failed to present Meetings window: {error}");
+                            return;
+                        }
+                        app_async.emit("recording://reveal", ()).ok();
+                    });
+                }
                 "record_featured" => {
                     let app_async = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -390,9 +464,69 @@ pub fn build_idle_menu(
         .build()
 }
 
+/// Max characters of a meeting title shown in a tray *menu* row. Far longer
+/// than `tray_meeting::TITLE_MAX_CHARS` (10): that cap exists because the
+/// menu-bar title pairs the title with a countdown on one line, which a menu
+/// row does not have to do.
+const MENU_TITLE_MAX_CHARS: usize = 40;
+
+/// Label for the tray's recording-identity row. `None`/blank becomes
+/// "Untitled meeting" (matching `tray_meeting::truncate_title` and
+/// `ArisoBackend.listMeetings`); longer titles are cut to 40 Unicode scalar
+/// values + `…`.
+pub(crate) fn truncate_menu_title(title: Option<&str>) -> String {
+    let Some(s) = title.filter(|s| !s.trim().is_empty()) else {
+        return "Untitled meeting".to_string();
+    };
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= MENU_TITLE_MAX_CHARS {
+        return s.to_string();
+    }
+    let mut out: String = chars[..MENU_TITLE_MAX_CHARS].iter().collect();
+    out.push('…');
+    out
+}
+
 /// Build the smaller tray menu shown while a recording is running. It exposes
 /// only controls that are safe during capture, so users cannot quit mid-upload.
-pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+///
+/// The top row names what is being recorded and opens it in the Meetings
+/// window, mirroring `build_idle_menu`'s `record_featured` row so the menu bar
+/// offers the same "the meeting is one click away" affordance in both states.
+///
+/// `identity` is passed in rather than read from `RecordingState` here: the
+/// caller takes it under the menu-commit lock, so the menu this builds cannot
+/// mix a title from before a lifecycle transition with a commit that lands
+/// after one.
+pub fn build_recording_menu(
+    app: &AppHandle,
+    is_paused: bool,
+    identity: Option<&crate::recording_state::RecordingSnapshot>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let mut builder = MenuBuilder::new(app);
+
+    // Only once the recorder window has told us what it is recording. Until
+    // then the menu is exactly what it is today — a row reading "Untitled
+    // meeting" for the first second of every recording would be noise.
+    //
+    // An identity is enough; a title is not required. An ad-hoc Ariso meeting
+    // is genuinely untitled until the user renames it, and that is the very
+    // case this row exists for: the id is known and routable, so the row falls
+    // back to "Untitled meeting" rather than disappearing.
+    let title = identity.and_then(|i| i.title.clone());
+    let has_identity = identity.is_some_and(|i| i.title.is_some() || i.meeting_id.is_some());
+    if has_identity {
+        let show = MenuItemBuilder::with_id("show_recording", truncate_menu_title(title.as_deref()))
+            .build(app)?;
+        // muda has no per-item font control, so a disabled item is the closest
+        // native "subtitle" — same trick as build_idle_menu's time row.
+        let status_label = if is_paused { "Paused" } else { "Recording" };
+        let status_row = MenuItemBuilder::with_id("recording_status", status_label)
+            .enabled(false)
+            .build(app)?;
+        builder = builder.item(&show).item(&status_row).separator();
+    }
+
     let pause_or_resume = if is_paused {
         MenuItemBuilder::with_id("resume_recording", "Resume Recording").build(app)?
     } else {
@@ -405,7 +539,7 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
 
     // Quit is intentionally omitted while recording to prevent
     // losing the current recording and skipping the upload flow.
-    MenuBuilder::new(app)
+    builder
         .item(&pause_or_resume)
         .item(&stop)
         .separator()
@@ -482,5 +616,40 @@ mod tests {
             pixels(tauri::Theme::Light, false),
             pixels(tauri::Theme::Dark, false)
         );
+    }
+
+    #[test]
+    fn menu_title_falls_back_to_untitled() {
+        // Matches tray_meeting::truncate_title's fallback and
+        // ArisoBackend.listMeetings' `title || 'Untitled meeting'`.
+        assert_eq!(truncate_menu_title(None), "Untitled meeting");
+        assert_eq!(truncate_menu_title(Some("")), "Untitled meeting");
+        assert_eq!(truncate_menu_title(Some("   ")), "Untitled meeting");
+    }
+
+    /// A menu row has no countdown string sharing its line, so it affords a
+    /// far longer title than the 10-char title-bar cap.
+    #[test]
+    fn menu_title_keeps_titles_up_to_the_cap() {
+        assert_eq!(truncate_menu_title(Some("Weekly Engineering Sync")), "Weekly Engineering Sync");
+        let exactly = "x".repeat(MENU_TITLE_MAX_CHARS);
+        assert_eq!(truncate_menu_title(Some(&exactly)), exactly);
+    }
+
+    #[test]
+    fn menu_title_truncates_past_the_cap() {
+        let long = "x".repeat(MENU_TITLE_MAX_CHARS + 5);
+        let out = truncate_menu_title(Some(&long));
+        assert_eq!(out.chars().count(), MENU_TITLE_MAX_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
+
+    /// Counts Unicode scalar values, not bytes, so a multi-byte title is never
+    /// cut mid-character.
+    #[test]
+    fn menu_title_counts_unicode_scalars_not_bytes() {
+        let long = "é".repeat(MENU_TITLE_MAX_CHARS + 3);
+        let out = truncate_menu_title(Some(&long));
+        assert_eq!(out.chars().count(), MENU_TITLE_MAX_CHARS + 1);
     }
 }

@@ -387,13 +387,27 @@ async fn fresh_recording_core(
     let id = storage::sanitize_iso_to_id(&created_at);
     let dir = storage::create_recording_dir(root, &id)?;
 
+    // Read the existing meta once: an in-place rewrite (a retry, or the resume
+    // path re-finalizing the same created_at) and a stub written at capture
+    // start both leave one behind, and two different fields depend on it.
+    let existing = storage::read_meta(&dir).ok();
+
+    // A title the user typed *during* capture (issue #355: the stub makes
+    // mid-recording rename work) outranks the frontend's timestamp default.
+    // `title_is_default: false` is exactly the "the user meant this" marker
+    // `rename_local_recording` and the notes auto-retitle already agree on.
+    let (title, title_is_default) = match existing.as_ref() {
+        Some(m) if !m.title_is_default => (m.title.clone(), false),
+        _ => (title, true),
+    };
+
     // Persist the audio into the vault first so it is never lost, even if STT
     // fails. The attachment is this recording's only audio home. On an in-place
     // rewrite (a retry re-runs this for the same dir), reuse the existing
     // attachment rather than deriving a fresh unique name — otherwise every
     // retry would orphan the prior file and repoint an existing note's embed at
-    // a duplicate.
-    let audio_file = match storage::read_meta(&dir).ok().and_then(|m| m.audio_file) {
+    // a duplicate. The name derives from the *effective* title resolved above.
+    let audio_file = match existing.and_then(|m| m.audio_file) {
         Some(existing) => existing, // in-place rewrite (retry): keep the same attachment
         None => format!(
             "{}.mp3",
@@ -419,7 +433,7 @@ async fn fresh_recording_core(
         last_clip_end_at: None,
         audio_file: Some(audio_file.clone()),
         notes_written: None,
-        title_is_default: true,
+        title_is_default,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -1092,6 +1106,156 @@ mod tests {
         let seg = crate::storage::read_segments(&dir).unwrap().expect("segments.json written");
         assert_eq!(seg.segments.len(), 1);
         assert_eq!(seg.participants[0].label, "Speaker 1");
+    }
+
+    /// Issue #355: a local recording gets a `meta.json` stub at capture start,
+    /// so the user can rename it while it is still recording. Finalize must
+    /// treat that rename as intentional instead of stamping the frontend's
+    /// timestamp default back over it.
+    #[tokio::test]
+    async fn finalize_keeps_a_title_the_user_set_during_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        // Stand in for `local_begin_recording` + a mid-recording rename.
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(tmp.path(), id).unwrap();
+        storage::write_meta(&dir, &RecordingMeta {
+            id: id.into(),
+            title: "Budget sync".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 0,
+            status: RecordingStatus::Recording,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
+            title_is_default: false,
+        }).unwrap();
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Tue Jun 2 @ 2:30PM".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.title, "Budget sync");
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Budget sync");
+        // A user rename is permanent: notes generation must not auto-retitle it.
+        assert!(!meta.title_is_default);
+        // The vault attachment is named from the effective (renamed) title.
+        assert!(
+            meta.audio_file.as_deref().unwrap().contains("Budget sync"),
+            "got: {:?}",
+            meta.audio_file
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// Where the two stub-related rules meet: a recording the user renamed
+    /// mid-capture that also already carries an `audio_file` from an earlier
+    /// finalize attempt. The rename must still win the title, and the existing
+    /// attachment must be reused verbatim rather than re-derived from the new
+    /// title — otherwise the retry orphans the old file and repoints an
+    /// existing note's embed at a duplicate.
+    #[tokio::test]
+    async fn finalize_keeps_a_renamed_stubs_existing_attachment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        // The first attempt wrote the attachment under the then-default title;
+        // the user renamed the recording afterwards, while it was still
+        // capturing, so the two names disagree.
+        let prior_audio = "2026-06-02 Tue Jun 2 @ 2-30PM.mp3";
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(tmp.path(), id).unwrap();
+        storage::write_meta(&dir, &RecordingMeta {
+            id: id.into(),
+            title: "Budget sync".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 0,
+            status: RecordingStatus::Recording,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: Some(prior_audio.into()),
+            notes_written: None,
+            title_is_default: false,
+        }).unwrap();
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Tue Jun 2 @ 2:30PM".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.title, "Budget sync");
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "Budget sync");
+        assert!(!meta.title_is_default);
+        assert_eq!(meta.audio_file.as_deref(), Some(prior_audio));
+        assert_eq!(crate::vault::read_audio(prior_audio).unwrap(), b"audio");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The untouched stub still yields the frontend's default title, and stays
+    /// auto-retitleable by notes generation.
+    #[tokio::test]
+    async fn finalize_uses_the_supplied_title_when_the_stub_was_never_renamed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let id = "2026-06-02T14-30-05Z";
+        let dir = storage::create_recording_dir(tmp.path(), id).unwrap();
+        storage::write_meta(&dir, &RecordingMeta {
+            id: id.into(),
+            title: "Tue Jun 2 @ 2:30PM".into(),
+            created_at: "2026-06-02T14:30:05.000Z".into(),
+            duration_seconds: 0,
+            status: RecordingStatus::Recording,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
+            title_is_default: true,
+        }).unwrap();
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Tue Jun 2 @ 2:30PM".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert_eq!(res.status, RecordingStatus::Done);
+        // The stub notes payload is raw markdown with no title, so the default
+        // survives; what matters is that it stayed flagged as a default.
+        let meta = read_meta(&dir).unwrap();
+        assert!(meta.title_is_default);
     }
 
     #[tokio::test]
