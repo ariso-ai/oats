@@ -110,25 +110,7 @@ pub fn stop(app: &AppHandle) {
     }
     drop(guard);
     *app.state::<FeaturedMeetingState>().0.lock().unwrap() = None;
-    refresh_tray(app, true);
-}
-
-/// Redraw the tray on the main thread (muda menus are main-thread on macOS).
-/// While recording, the recording menu owns the tray — only the title is
-/// refreshed (which clears it). `rebuild_menu` skips a full idle-menu rebuild
-/// on countdown-only ticks so an open tray menu isn't yanked shut.
-fn refresh_tray(app: &AppHandle, rebuild_menu: bool) {
-    let app_for_menu = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let recording = app_for_menu
-            .state::<crate::recording_state::RecordingState>()
-            .is_active();
-        if rebuild_menu && !recording {
-            crate::tray::set_menu(&app_for_menu, false, false);
-        } else {
-            crate::tray::refresh_tray_title(&app_for_menu);
-        }
-    });
+    crate::tray::refresh(app, true);
 }
 
 /// Fetch → pick → resolve end_at → render, then tick every 60s (countdown
@@ -175,7 +157,7 @@ async fn run_loop(app: AppHandle) {
             *guard = featured;
             changed
         };
-        refresh_tray(&app, menu_changed);
+        crate::tray::refresh(&app, menu_changed);
     }
 
     eprintln!("tray-meeting: session invalid; clearing token and stopping orchestrator");
@@ -185,7 +167,7 @@ async fn run_loop(app: AppHandle) {
         *mgr.handle.lock().unwrap() = None;
     }
     *app.state::<FeaturedMeetingState>().0.lock().unwrap() = None;
-    refresh_tray(&app, true);
+    crate::tray::refresh(&app, true);
 }
 
 /// Store successful end-time lookups only. A timeout or 5xx should show a

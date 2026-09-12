@@ -8,5 +8,16 @@
 	<string>oats needs microphone access to record meeting audio for transcription.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>oats needs system audio recording permission to capture audio from video calls.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ai.ariso.desktop</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>oats</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

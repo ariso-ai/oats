@@ -4,8 +4,9 @@ import { dayLabelWithDate, localDateKey } from './groupMeetingsByDate';
 export type { ActionItemEntry };
 
 /** A single Todo row: the item text and the meeting it came from (selecting the
- *  row opens that meeting in the detail pane). The endpoint already scopes items
- *  to the signed-in user, so rows carry no owner. */
+ *  row opens that meeting in the detail pane). Rows carry no owner: the Ariso
+ *  backend's endpoint already scopes items to the signed-in user, and the local
+ *  backend's vault has no concept of other users' notes to scope away. */
 export interface ActionItemRow {
   key: string;
   text: string;
@@ -16,19 +17,6 @@ export interface ActionItemSection {
   key: string;
   label: string;
   rows: ActionItemRow[];
-}
-
-/** The `YYYY-MM-DD` days the Todo tab asks the API for: today first, then the
- *  preceding local calendar days. One request per key — the endpoint serves a
- *  single day. */
-export function recentDayKeys(now: Date, count: number): string[] {
-  const keys: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    keys.push(localDateKey(d));
-  }
-  return keys;
 }
 
 /** Bucket action items under per-calendar-date headers, newest day first, with

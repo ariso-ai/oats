@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.23.0](https://github.com/ariso-ai/oats/compare/v0.22.0...v0.23.0) (2026-09-11)
+
+
+### Features
+
+* add delete action for local meeting notes ([251c51c](https://github.com/ariso-ai/oats/commit/251c51cdf610355b807eb2a03ed619e8a86a1ffa))
+* add delete action for local meeting notes ([9bcf3fd](https://github.com/ariso-ai/oats/commit/9bcf3fd6b5d88791114d3457162574710c46f487)), closes [#360](https://github.com/ariso-ai/oats/issues/360)
+* add list_vault_tasks command for vault-derived todos ([c4537b0](https://github.com/ariso-ai/oats/commit/c4537b0e723fe9497a884db1c8ae69dfe8742efd))
+* add microsoft_sign_in command and provider-neutral cancel_sign_in ([803ff81](https://github.com/ariso-ai/oats/commit/803ff814738b6c52cd94d66ee67b3deec4363b31)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **auto-record:** gate meeting detection on the Microphone toggle ([7354be3](https://github.com/ariso-ai/oats/commit/7354be39c74634fe73e7ab9fd3841004561a3f91))
+* broadcast auth://changed and scope cancel_sign_in to its window ([b777614](https://github.com/ariso-ai/oats/commit/b777614827c666c65e71d2b33ad2e6fb8b69c6bb)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** drop the signed-out dot from the backend indicator ([de70d1b](https://github.com/ariso-ai/oats/commit/de70d1b6b053a985af48b3b676ad408011900233)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** gray the ariso.ai menu option until signed in ([8e274e4](https://github.com/ariso-ai/oats/commit/8e274e4ce7ee2d6b66df0eb0793454bd8e8ac169)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** list vault Obsidian tasks in the offline Todos tab ([5b6b8bd](https://github.com/ariso-ai/oats/commit/5b6b8bd61baa1fc6d71ebae6a0900e9bf6be0c02))
+* **library:** make the backend indicator a backend menu ([9a69b93](https://github.com/ariso-ai/oats/commit/9a69b9309b6adce2c462efbffb1ae674c12cd45c)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** Meetings backend indicator ([#370](https://github.com/ariso-ai/oats/issues/370) part 3) ([aa256a9](https://github.com/ariso-ai/oats/commit/aa256a916be2f039e6c67836654d93226efd0a90))
+* **library:** move the backend indicator next to the sidebar toggle ([29e81ca](https://github.com/ariso-ai/oats/commit/29e81ca8c20c5b1830480de3a09b5daaecb1fd03)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** move the backend indicator to the bottom left, named after the backend ([0394dd5](https://github.com/ariso-ai/oats/commit/0394dd5b5b6d293bd45ea1a5c0cf4141ffaa6057)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** pin the backend indicator to the window's bottom-left corner ([ba51bc4](https://github.com/ariso-ai/oats/commit/ba51bc4e8b140179be84d3502bbc19b012380811)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **library:** show the backend and sign-in state in the Meetings titlebar ([dbb2820](https://github.com/ariso-ai/oats/commit/dbb2820083d2034f0d639ddce28bd6adb8957b83)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **meeting-prompt:** lead with Dismiss when auto-record is off ([033322e](https://github.com/ariso-ai/oats/commit/033322e75917e9a502854c6f5c3b9ee12faa1e5d))
+* microphone activation always creates new recording ([84b24f5](https://github.com/ariso-ai/oats/commit/84b24f5f8cf5dec4cc64b1844a2ef652f4a6c45e))
+* microphone activation always creates new recording ([0c49034](https://github.com/ariso-ai/oats/commit/0c49034a522568e096ca30502fc28f1dec95cf3f))
+* Microphone gates meeting detection; auto-record sets the prompt's default ([b9601f9](https://github.com/ariso-ai/oats/commit/b9601f9428b7ab822596264f410c8437ab4aa6a4))
+* **notes:** hide Obsidian Tasks metadata in the in-app renderer ([2373240](https://github.com/ariso-ai/oats/commit/23732405b666ffa134f0c475247ec3d136a6c6a0))
+* **notes:** surface a speechless recording as "Empty transcript" ([6638d4a](https://github.com/ariso-ai/oats/commit/6638d4a4e16b499a7ce16adbce9c98325e760c45))
+* **notes:** tick local AI-notes tasks to close their todos ([64dddc4](https://github.com/ariso-ai/oats/commit/64dddc439e500b1dcaef72978cb1336ac864ad5b))
+* **notes:** tick local AI-notes tasks to close their todos ([7e9614d](https://github.com/ariso-ai/oats/commit/7e9614d2a82816552a36f0dd6387cdb040a1f960))
+* **onboarding:** add Sign in with Microsoft ([e75de1e](https://github.com/ariso-ai/oats/commit/e75de1e3c96c28528901f4f1cc80fc6408246a0b)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* **settings:** add Sign in with Microsoft ([e56e424](https://github.com/ariso-ai/oats/commit/e56e424ff598eaf9609c0cf7037d385cf9014958)), closes [#370](https://github.com/ariso-ai/oats/issues/370)
+* sign in with Microsoft ([#370](https://github.com/ariso-ai/oats/issues/370) part 1) ([398f683](https://github.com/ariso-ai/oats/commit/398f683c4ba1e795cb642022eb2993186725df3b))
+* **tray:** move the sign-in rows into Quit's section ([d1f41fb](https://github.com/ariso-ai/oats/commit/d1f41fb68778bd977ac33461d7dff641c849a564))
+* **tray:** offer Sign in with Google/Microsoft while signed out ([9641cfc](https://github.com/ariso-ai/oats/commit/9641cfc2c245e1aa5427989a37c050a88633dbee))
+* **tray:** Sign in with Google/Microsoft rows while signed out ([3c0ddf5](https://github.com/ariso-ai/oats/commit/3c0ddf5cba7908192eeabfe5061e010ec620f04f))
+* tweak term ([01bd679](https://github.com/ariso-ai/oats/commit/01bd679cfd8bbecb2c4e86d1727d633dfcc7e6c8))
+* **vault:** parse open Obsidian Tasks out of a vault note ([155a007](https://github.com/ariso-ai/oats/commit/155a0078cc58cc57d8dee5f0723cbefe61ab6af9))
+* **vault:** render local action items as Obsidian Tasks checkboxes ([17fb670](https://github.com/ariso-ai/oats/commit/17fb67059bb02d07078f18dcca5fa40013ba17fc))
+
+
+### Bug Fixes
+
+* address final review findings for vault todos ([3f964f1](https://github.com/ariso-ai/oats/commit/3f964f13e9a3f14ead24d7ce144a543f16fec0c4))
+* address review comments ([04290f9](https://github.com/ariso-ai/oats/commit/04290f91dd91457dcbc5d67973ef73cb653ce509))
+* deliver browser-flow results only to the window that started them ([cf68f88](https://github.com/ariso-ai/oats/commit/cf68f882b7201ad143ebb238da4620307f4bfe1a))
+* **library:** keep nav pill bottom-anchored on empty sidebar states ([fb99a1a](https://github.com/ariso-ai/oats/commit/fb99a1a6d47b04974effc6a1e5e937ce914d6dbf))
+* **library:** keep nav pill bottom-anchored on empty sidebar states ([b6037a2](https://github.com/ariso-ai/oats/commit/b6037a270cfbf5fbd372b245e72a2fe5ce9af780)), closes [#383](https://github.com/ariso-ai/oats/issues/383)
+* **library:** stop the list↔detail reload loop on an empty transcript ([5740b41](https://github.com/ariso-ai/oats/commit/5740b41b2056e5ae9a3c26b590fb211cc98993b0))
+* **library:** stop the list↔detail reload loop on an empty transcript ([1dbcd1d](https://github.com/ariso-ai/oats/commit/1dbcd1df502468cba1d4a7f7d926c6ffee218d2a))
+* **notes:** never generate notes from a speechless transcript ([a695546](https://github.com/ariso-ai/oats/commit/a695546ca73d4a4a6be9f7ddbc15f582f8536642))
+* **notes:** never generate notes from a speechless transcript ([969eeb8](https://github.com/ariso-ai/oats/commit/969eeb822c7e866665e2894da4747618406167a0))
+* **vault:** track fence delimiter and narrow placeholder heuristic ([b85293e](https://github.com/ariso-ai/oats/commit/b85293e3e7733d1ac44565ca81f0ae8d07f4183c))
+
 ## [0.22.0](https://github.com/ariso-ai/oats/compare/v0.21.0...v0.22.0) (2026-09-10)
 
 

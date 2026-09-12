@@ -11,7 +11,9 @@
           <span class="pi-title">{{ titleFor(it) }}</span>
           <span class="pi-dur">{{ durationFor(it) }}</span>
         </div>
-        <div class="pi-controls">
+        <!-- Leaving the row disarms this recording's discard confirmation, like
+             the "Discard all" row below. -->
+        <div class="pi-controls" @mouseleave="disarmItem(it)">
           <span class="pi-play">
             <RecordingAudioPlayer
               :load="() => loadAudio(it)"
@@ -25,16 +27,27 @@
           >
             Locate
           </button>
+          <!-- With one recording, "Discard all" already discards exactly it. -->
+          <button
+            v-if="items.length > 1"
+            class="pi-discard"
+            :class="{ armed: confirmingItem === it.createdAt }"
+            :disabled="actionsDisabled"
+            title="Delete this buffered recording without uploading it"
+            @click="onDiscardItem(it)"
+          >
+            {{ confirmingItem === it.createdAt ? 'Confirm' : 'Discard' }}
+          </button>
         </div>
       </div>
       <!-- Leaving the actions row cancels a pending discard confirmation so the
            destructive second click can't linger armed after the user moves away. -->
       <div class="pending-actions" @mouseleave="confirmingDiscard = false">
-        <button class="pending-btn upload" :disabled="busy" @click="onUpload">
+        <button class="pending-btn upload" :disabled="actionsDisabled" @click="onUpload">
           <span v-if="busy" class="spinner" />
           <span v-else>Upload ({{ items.length }})</span>
         </button>
-        <button class="pending-btn discard" :disabled="busy" @click="onDiscard">
+        <button class="pending-btn discard" :disabled="actionsDisabled" @click="onDiscard">
           {{ confirmingDiscard ? 'Confirm discard' : 'Discard all' }}
         </button>
       </div>
@@ -50,7 +63,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { auth, pending, type PendingUploadMeta } from '../tauri';
 import { combineAndUpload, discardAll, PartialUploadError } from '../composables/usePendingUploads';
 import { useMeetingProcessing } from '../composables/useMeetingProcessing';
@@ -64,6 +77,14 @@ const items = ref<PendingUploadMeta[]>([]);
 const busy = ref(false);
 const error = ref<string | null>(null);
 const confirmingDiscard = ref(false);
+// The `createdAt` of the one recording whose Discard is armed, if any.
+const confirmingItem = ref<string | null>(null);
+// A single-recording discard in flight. Kept apart from `busy` so it doesn't
+// put the upload spinner on the Upload button.
+const discardingItem = ref(false);
+// Any upload or discard in flight locks every action: discarding a buffer
+// mid-retry could pull it out from under the combine/upload.
+const actionsDisabled = computed(() => busy.value || discardingItem.value);
 // Rust resolves this ($HOME on macOS, %USERPROFILE% on Windows, ARISO_ROOT in
 // dev), so the recovery line names a folder the user can actually open. The
 // literal is only the pre-IPC placeholder and the fallback when the lookup
@@ -127,6 +148,7 @@ async function onUpload(): Promise<void> {
   busy.value = true;
   error.value = null;
   confirmingDiscard.value = false;
+  confirmingItem.value = null;
   try {
     if (!(await auth.checkSession())) {
       error.value = 'Upload failed — sign in to Ari again, then retry.';
@@ -154,7 +176,34 @@ async function onUpload(): Promise<void> {
   }
 }
 
+function disarmItem(it: PendingUploadMeta): void {
+  if (confirmingItem.value === it.createdAt) confirmingItem.value = null;
+}
+
+// Two clicks, like "Discard all": the first arms this recording (disarming any
+// other), the second deletes just its buffer.
+async function onDiscardItem(it: PendingUploadMeta): Promise<void> {
+  confirmingDiscard.value = false;
+  if (confirmingItem.value !== it.createdAt) {
+    confirmingItem.value = it.createdAt;
+    return;
+  }
+  confirmingItem.value = null;
+  discardingItem.value = true;
+  error.value = null;
+  try {
+    await pending.discardAudio(it.createdAt);
+    await refresh();
+  } catch (e) {
+    console.error('Discard pending upload failed', e);
+    error.value = 'Could not discard this recording.';
+  } finally {
+    discardingItem.value = false;
+  }
+}
+
 async function onDiscard(): Promise<void> {
+  confirmingItem.value = null;
   if (!confirmingDiscard.value) {
     confirmingDiscard.value = true;
     return;
@@ -300,6 +349,31 @@ onMounted(async () => {
   background: #f7f6f4;
   border-color: #bdbbb6;
 }
+/* Same shape as Locate but muted, like "Discard all"; red once armed so the
+   confirming second click reads as destructive. */
+.pi-discard {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #d7d6d2;
+  background: #ffffff;
+  color: #6f6f6f;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pi-discard:not(:disabled):hover {
+  background: #f7f6f4;
+  border-color: #bdbbb6;
+  color: #1c1c1c;
+}
+.pi-discard.armed,
+.pi-discard.armed:not(:disabled):hover {
+  border-color: #e3b1ae;
+  color: #c2413b;
+}
+.pi-discard:disabled { opacity: 0.6; cursor: default; }
 .pending-error {
   margin: 0 10px;
   color: #c2413b;

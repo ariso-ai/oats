@@ -112,12 +112,82 @@ impl Machine {
     }
 }
 
+/// Waveform-window launch parameters for a mic-monitor detection.
+pub(crate) struct AutoRecordLaunch {
+    pub meeting_id: Option<i64>,
+    pub local_append_id: Option<String>,
+    pub force_new: bool,
+    pub auto: bool,
+}
+
+/// A detection means a *new* call just started, so the recorder always opens a
+/// brand-new recording: no meeting attachment, no append target, and `force_new`
+/// set so the local backend's 5-minute auto-append window can't silently merge
+/// this call into an earlier one — including whichever meeting the user happens
+/// to have open in the detail pane. Pure so the contract is unit-tested without
+/// a running app. `force_new` is a no-op on the Ariso path (only the local
+/// backend reads it), so this is effectively a local-mode guarantee.
+fn auto_record_launch() -> AutoRecordLaunch {
+    AutoRecordLaunch {
+        meeting_id: None,
+        local_append_id: None,
+        force_new: true,
+        auto: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn pids(list: &[i32]) -> HashSet<i32> {
         list.iter().copied().collect()
+    }
+
+    #[test]
+    fn auto_record_launches_a_brand_new_recording() {
+        let launch = auto_record_launch();
+        assert_eq!(
+            launch.meeting_id, None,
+            "a detection never attaches to a meeting"
+        );
+        assert_eq!(
+            launch.local_append_id, None,
+            "a detection has no explicit append target"
+        );
+        assert!(
+            launch.auto,
+            "the recorder must know this start was automatic"
+        );
+        assert!(
+            launch.force_new,
+            "a detection is a new call: it must never auto-append into an earlier recording"
+        );
+        // Compose through the real URL builder so a regression at the decision
+        // point fails here, not just a re-read of the struct field.
+        assert_eq!(
+            crate::commands::waveform_url(
+                launch.meeting_id,
+                launch.auto,
+                false,
+                launch.local_append_id.as_deref(),
+                launch.force_new,
+            ),
+            "/#/waveform?forceNew=1&auto=1"
+        );
+    }
+
+    #[test]
+    fn monitor_runs_only_when_supported_and_the_microphone_is_enabled() {
+        use serde_json::Value;
+        // Mic on (explicitly, or the unset first-run default) → detect.
+        assert!(monitor_desired(true, Some(&Value::Bool(true))));
+        assert!(monitor_desired(true, None));
+        // Mic toggled off in Settings → no detection, so no prompt.
+        assert!(!monitor_desired(true, Some(&Value::Bool(false))));
+        // Unsupported OS never runs, whatever the setting.
+        assert!(!monitor_desired(false, Some(&Value::Bool(true))));
+        assert!(!monitor_desired(false, None));
     }
 
     #[test]
@@ -223,6 +293,8 @@ pub fn is_supported() -> bool {
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SETTINGS_PATH: &str = "settings.json";
 const ENABLED_KEY: &str = "autoRecordEnabled";
+/// Settings → Microphone. Shared with the frontend's recording-source toggles.
+const MIC_KEY: &str = "recordMicEnabled";
 
 /// Holds the running monitor task (if any) plus a re-arm request flag. The flag
 /// is set by `request_mic_monitor_rearm` and consumed by `run_loop` to reset the
@@ -241,11 +313,11 @@ impl MicMonitorManager {
     }
 }
 
-/// Whether auto-record is enabled (defaults to true). The monitor now runs
-/// regardless — on detection it always prompts — so this only decides the
-/// no-response default: enabled → start recording when the prompt times out;
-/// disabled → skip. Read fresh per detection so a settings toggle takes effect
-/// without restarting the monitor.
+/// Whether auto-record is enabled (defaults to true). It doesn't gate the
+/// monitor — on detection it always prompts — so this only decides the
+/// no-response default (and the prompt's primary button): enabled → start
+/// recording when the prompt times out; disabled → skip. Read fresh per
+/// detection so a settings toggle takes effect without restarting the monitor.
 fn enabled(app: &AppHandle) -> bool {
     use tauri_plugin_store::StoreExt;
     match app.store(SETTINGS_PATH) {
@@ -254,12 +326,26 @@ fn enabled(app: &AppHandle) -> bool {
     }
 }
 
-/// Start the monitor if the OS supports per-process input detection; otherwise
-/// stop it. The enabled setting no longer gates the monitor (it only sets the
-/// prompt's timeout default), so the prompt fires in both modes. Safe to call
-/// repeatedly (startup, settings toggle).
+/// Whether the monitor should run: the OS must support per-process input
+/// detection and Settings → Microphone must be on. An unset value counts as on,
+/// matching the frontend's first-run default. Pure so it's unit-tested.
+fn monitor_desired(supported: bool, mic_setting: Option<&serde_json::Value>) -> bool {
+    supported && !matches!(mic_setting, Some(serde_json::Value::Bool(false)))
+}
+
+/// The raw Settings → Microphone value, or `None` if unset / the store is
+/// unreadable (both treated as on).
+fn mic_setting(app: &AppHandle) -> Option<serde_json::Value> {
+    use tauri_plugin_store::StoreExt;
+    app.store(SETTINGS_PATH).ok().and_then(|store| store.get(MIC_KEY))
+}
+
+/// Start the monitor when `monitor_desired` holds; otherwise stop it. The
+/// Microphone toggle gates detection (mic off → no prompt); the auto-record
+/// setting only sets the prompt's timeout default. Safe to call repeatedly
+/// (startup, settings toggle).
 pub async fn sync(app: &AppHandle) {
-    let desired = is_supported();
+    let desired = monitor_desired(is_supported(), mic_setting(app).as_ref());
     let mgr = app.state::<MicMonitorManager>();
     let mut guard = mgr.handle.lock().unwrap();
     if !desired {
@@ -332,19 +418,26 @@ async fn run_loop(app: AppHandle) {
                             crate::meeting_notifications::prompt_auto_record(&app2, default_record)
                                 .await;
                         // A manual recording may have started during the prompt;
-                        // don't stack a second recorder on top of it.
+                        // don't stack a second recorder on top of it. Also bail if
+                        // Settings → Microphone was disabled while the prompt was
+                        // showing — this detached task outlives run_loop, which is
+                        // what `sync` aborts on toggle-off.
                         if record
+                            && monitor_desired(is_supported(), mic_setting(&app2).as_ref())
                             && !app2
                                 .state::<crate::recording_state::RecordingState>()
                                 .is_active()
                         {
                             let app_main = app2.clone();
+                            let launch = auto_record_launch();
                             let _ = app2.run_on_main_thread(move || {
-                                if let Err(e) =
-                                    crate::commands::open_waveform_window(
-                                        &app_main, None, None, false, true,
-                                    )
-                                {
+                                if let Err(e) = crate::commands::open_waveform_window(
+                                    &app_main,
+                                    launch.meeting_id,
+                                    launch.local_append_id,
+                                    launch.force_new,
+                                    launch.auto,
+                                ) {
                                     eprintln!("mic-monitor: failed to open recorder window: {e}");
                                 }
                             });

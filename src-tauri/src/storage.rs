@@ -26,7 +26,18 @@ pub enum NotesStatus {
     Pending,
     Ready,
     Failed,
+    /// Nothing was said in the recording, so notes were deliberately skipped.
+    /// Distinct from `Failed`: there is no fault to retry, and the UI names the
+    /// empty transcript instead of blaming notes generation.
+    #[serde(rename = "empty-transcript")]
+    EmptyTranscript,
 }
+
+/// Reason stored in `meta.notes_error` when a recording carries no speech.
+/// `derive_notes_status` recognizes it, so this is the single source of truth
+/// linking the skip (in `transcribe`) to the status the UI renders.
+pub const NO_SPEECH_NOTES_ERROR: &str =
+    "no speech detected in this recording — notes generation skipped";
 
 /// Classify AI-notes generation from the note file's presence and any recorded
 /// `notes_error`. A present `ari-note.md` always means success (a stale error
@@ -34,6 +45,8 @@ pub enum NotesStatus {
 pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
     if has_note {
         NotesStatus::Ready
+    } else if notes_error == Some(NO_SPEECH_NOTES_ERROR) {
+        NotesStatus::EmptyTranscript
     } else if notes_error.is_some() {
         NotesStatus::Failed
     } else {
@@ -134,6 +147,11 @@ pub struct RecordingSummary {
     pub has_note: bool,
     /// Whether `transcript.md` exists in the recording's directory.
     pub has_transcript: bool,
+    /// AI-notes outcome, derived like [`RecordingStatusView::notes_status`] so
+    /// the Library row can tell a settled note-less recording from one still
+    /// generating. Like `has_note`, this layer only sees the legacy
+    /// `ari-note.md`; the command layer's vault overlay upgrades it to `Ready`.
+    pub notes_status: NotesStatus,
     /// The recording's vault audio attachment name (from meta), used by the
     /// command layer to verify the attachment still exists. Not serialized to
     /// the frontend.
@@ -519,6 +537,7 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
         match read_meta(&entry.path()) {
             Ok(m) => {
                 let recording_dir = entry.path();
+                let has_note = recording_dir.join("ari-note.md").is_file();
                 out.push(RecordingSummary {
                     id: m.id,
                     title: m.title,
@@ -528,8 +547,9 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                     last_clip_end_at: m.last_clip_end_at,
                     has_audio: m.audio_file.is_some()
                         || recording_dir.join("recording.mp3").is_file(),
-                    has_note: recording_dir.join("ari-note.md").is_file(),
+                    has_note,
                     has_transcript: recording_dir.join("transcript.md").is_file(),
+                    notes_status: derive_notes_status(has_note, m.notes_error.as_deref()),
                     audio_file: m.audio_file.clone(),
                 });
             }
@@ -730,6 +750,35 @@ mod tests {
         assert!(!list[1].has_audio);
         assert!(!list[1].has_note);
         assert!(!list[1].has_transcript);
+    }
+
+    #[test]
+    fn lists_recordings_carry_derived_notes_status() {
+        // The Library row can only stop claiming "Processing…" for a recording
+        // whose notes settled without a note if the list says so.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cases = [
+            ("2026-06-01T10-00-00Z", None, false, NotesStatus::Pending),
+            ("2026-06-02T10-00-00Z", Some(NO_SPEECH_NOTES_ERROR), false, NotesStatus::EmptyTranscript),
+            ("2026-06-03T10-00-00Z", Some("boom"), false, NotesStatus::Failed),
+            ("2026-06-04T10-00-00Z", Some("boom"), true, NotesStatus::Ready),
+        ];
+        for (id, notes_error, has_note, _) in &cases {
+            let dir = create_recording_dir(root, id).unwrap();
+            let mut m = meta_with(id, &id.replace("-00-00Z", ":00:00Z"));
+            m.notes_error = notes_error.map(str::to_string);
+            write_meta(&dir, &m).unwrap();
+            if *has_note {
+                std::fs::write(dir.join("ari-note.md"), b"notes").unwrap();
+            }
+        }
+
+        let list = list_recordings(root).unwrap();
+        for (id, _, _, expected) in &cases {
+            let s = list.iter().find(|s| s.id == *id).unwrap();
+            assert_eq!(s.notes_status, *expected, "{id}");
+        }
     }
 
     #[test]
@@ -1010,6 +1059,24 @@ mod tests {
     #[test]
     fn derive_notes_status_pending_when_no_note_no_error() {
         assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+    }
+
+    #[test]
+    fn derive_notes_status_empty_transcript_for_the_no_speech_reason() {
+        // A recording with nothing said isn't a failure to report and retry —
+        // the UI names it for what it is.
+        assert_eq!(
+            derive_notes_status(false, Some(NO_SPEECH_NOTES_ERROR)),
+            NotesStatus::EmptyTranscript
+        );
+    }
+
+    #[test]
+    fn notes_status_empty_transcript_serializes_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&NotesStatus::EmptyTranscript).unwrap(),
+            r#""empty-transcript""#
+        );
     }
 
     #[test]

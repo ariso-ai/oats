@@ -3,9 +3,10 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
-// Broadcast when any window completes desktop auth. Settings is pre-created and
-// can mount before onboarding signs in, so it needs a cross-window refresh cue.
-export const AUTH_SIGNED_IN_EVENT = 'auth://signed-in';
+// Broadcast by the backend to every window whenever the stored session changes:
+// sign-in or sign-out from any window, or a native path clearing a session the
+// server rejected. It carries no payload; listeners re-read via checkSession().
+export const AUTH_CHANGED_EVENT = 'auth://changed';
 
 /** Header carrying the non-binary arguments of a raw-body command. */
 const RAW_META_HEADER = 'x-oats-meta';
@@ -23,7 +24,7 @@ function rawMetaOptions(meta: unknown): { headers: Record<string, string> } {
   return { headers: { [RAW_META_HEADER]: hex } };
 }
 
-interface SignInResult {
+export interface SignInResult {
   success?: boolean;
   sessionToken?: string;
   error?: string;
@@ -52,43 +53,62 @@ interface ApiResponse {
 // up waiting on the browser). Views treat it as a silent cancel, not a failure.
 export const SIGN_IN_CANCELED_ERROR = 'Sign-in canceled';
 
-export const auth = {
-  async googleSignIn(): Promise<{ success?: boolean; sessionToken?: string; error?: string }> {
-    let resolveResult: (result: SignInResult) => void;
-    const resultPromise = new Promise<SignInResult>((resolve) => {
-      resolveResult = resolve;
-    });
+type SignInCommand = 'google_sign_in' | 'microsoft_sign_in';
 
-    // Await listener setup before triggering the flow. The backend scopes
-    // its "oauth-result" emit to this webview (it carries the session
-    // token), so listen on the current webview window too. If setup fails,
-    // let it throw here rather than starting a sign-in that can never
-    // resolve resultPromise.
-    const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
-      'oauth-result',
-      (event) => {
-        resolveResult(event.payload);
-      }
-    );
+/**
+ * Run a browser sign-in command and wait for its "oauth-result". The providers
+ * share the event name because the backend delivers results only to the window
+ * that started the attempt, and tells a superseded attempt it was canceled.
+ */
+async function browserSignIn(command: SignInCommand): Promise<SignInResult> {
+  let resolveResult: (result: SignInResult) => void;
+  const resultPromise = new Promise<SignInResult>((resolve) => {
+    resolveResult = resolve;
+  });
 
-    try {
-      // Trigger the OAuth flow — opens the sign-in page in the default browser
-      const immediate = await invoke<SignInResult>('google_sign_in');
-
-      // If the command itself returned an error (e.g. prepare-state failed), return it
-      if (immediate.error) {
-        return { error: immediate.error };
-      }
-
-      // Wait for the browser flow to hit the loopback callback and complete
-      return await resultPromise;
-    } finally {
-      unlisten();
+  // Await listener setup before triggering the flow. The backend's
+  // "oauth-result" emit is scoped to this webview (it carries the session
+  // token), so listen on the current webview window. If setup fails, let
+  // it throw here rather than starting a sign-in that can never resolve
+  // resultPromise.
+  const unlisten = await getCurrentWebviewWindow().listen<SignInResult>(
+    'oauth-result',
+    (event) => {
+      resolveResult(event.payload);
     }
+  );
+
+  try {
+    // Trigger the OAuth flow — opens the sign-in page in the default browser
+    const immediate = await invoke<SignInResult>(command);
+
+    // If the command itself returned an error (e.g. prepare-state failed), return it
+    if (immediate.error) {
+      return { error: immediate.error };
+    }
+
+    // Wait for the browser flow to hit the loopback callback and complete
+    return await resultPromise;
+  } finally {
+    unlisten();
+  }
+}
+
+export const auth = {
+  googleSignIn(): Promise<SignInResult> {
+    return browserSignIn('google_sign_in');
   },
 
+  microsoftSignIn(): Promise<SignInResult> {
+    return browserSignIn('microsoft_sign_in');
+  },
+
+  /**
+   * Abort this window's pending browser flow: either sign-in, or Calendar
+   * connect. A flow another window started is left running.
+   */
   async cancelSignIn(): Promise<void> {
-    await invoke('cancel_google_sign_in');
+    await invoke('cancel_sign_in');
   },
 
   /** Whether the API already holds Calendar read access for this user. */
@@ -109,7 +129,7 @@ export const auth = {
   /**
    * Second hop of desktop Google auth. Sign-in cannot widen an existing grant
    * without dropping the scopes already on file, so Calendar is acquired here
-   * through the additive Workspace connect flow. Mirrors googleSignIn(), but
+   * through the additive Workspace connect flow. Mirrors browserSignIn(), but
    * the loopback carries no token — only a status marker.
    */
   async connectGoogleCalendar(): Promise<CalendarConnectResult> {
@@ -334,9 +354,12 @@ export interface RecordingSummary {
   hasAudio: boolean;
   hasNote: boolean;
   hasTranscript: boolean;
+  notesStatus: NotesStatus;
 }
 
-export type NotesStatus = 'pending' | 'ready' | 'failed';
+/** `empty-transcript`: nothing was said, so notes were deliberately skipped —
+ *  not a failure, and nothing a retry can fix. */
+export type NotesStatus = 'pending' | 'ready' | 'failed' | 'empty-transcript';
 
 /** Mirrors the Rust `RecordingStatusView`. Drives the detail panel's local
  *  generation poller (tab enable/disable + the inline status chip). */
@@ -345,6 +368,11 @@ export interface RecordingStatusView {
   hasTranscript: boolean;
   hasNote: boolean;
   notesStatus: NotesStatus;
+}
+
+export interface VaultTaskGroup {
+  oatsId: string;
+  tasks: string[];
 }
 
 export interface LocalFinalizeResult {
@@ -378,6 +406,17 @@ export const local = {
   },
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
+  },
+  /** Open Obsidian tasks found in the vault's generated notes, grouped by the
+   *  recording each note belongs to. */
+  listVaultTasks(): Promise<VaultTaskGroup[]> {
+    return invoke<VaultTaskGroup[]>('list_vault_tasks');
+  },
+  /** Tick (or untick) the task on `line` of a recording's vault notes body.
+   *  `expected` is that line as last rendered — the backend rejects the write
+   *  when the note has changed since. Resolves to the updated notes body. */
+  setVaultTaskDone(id: string, line: number, expected: string, done: boolean): Promise<string> {
+    return invoke<string>('set_vault_task_done', { id, line, expected, done });
   },
   /** Resolve the recording id a new local recording (starting at `createdAt`)
    *  will finalize into — the append target if it will merge into the recent
@@ -441,6 +480,12 @@ export const local = {
   /** Update a local recording's title in its meta.json (folder id unchanged). */
   renameRecording(id: string, title: string): Promise<void> {
     return invoke('rename_local_recording', { id, title });
+  },
+  /** Permanently delete a local recording: its vault note + audio attachment
+   *  and its whole `~/.ariso/recordings/<id>/` directory. Rejects while the
+   *  recording is still recording or transcribing. */
+  deleteRecording(id: string): Promise<void> {
+    return invoke('delete_local_recording', { id });
   },
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');

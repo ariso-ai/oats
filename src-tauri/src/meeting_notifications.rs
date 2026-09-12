@@ -546,7 +546,8 @@ fn open_prep_from_notification(app: &AppHandle, prep_id: i64) {
 // notes / Dismiss with a countdown bar), which reports the user's choice back
 // through the `resolve_meeting_prompt` command into the `oneshot` below. The
 // user has 10 seconds to choose; if they don't, the caller's mode default
-// applies (record when auto-record is on, skip when it's off). The
+// applies (record when auto-record is on, skip when it's off). The default is
+// also the window's primary button: Take notes when on, Dismiss when off. The
 // UNUserNotificationCenter delegate in `macos_un` no longer carries the
 // auto-record decision — it now handles only meeting-prep deep-link clicks and
 // the silence-stop prompt's Keep / Stop buttons.
@@ -572,13 +573,18 @@ const MEETING_PROMPT_H_EXPANDED: f64 = 102.0;
 /// The route the meeting-start notification window loads. `seconds` drives the
 /// countdown bar so it always matches `AUTO_RECORD_PROMPT_TIMEOUT`; `subtitle`,
 /// when present, shows the live meeting's title (the view falls back to its own
-/// default subtitle when it's absent). Values are URL-encoded so titles with
+/// default subtitle when it's absent). `default_record` is what the timeout
+/// does: when false (auto-record off) `default=dismiss` makes the view lead with
+/// Dismiss instead of Take notes. Values are URL-encoded so titles with
 /// spaces/`&`/`#` survive the hash route.
-fn meeting_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
+fn meeting_prompt_url(seconds: u64, subtitle: Option<&str>, default_record: bool) -> String {
     let mut ser = url::form_urlencoded::Serializer::new(String::new());
     ser.append_pair("seconds", &seconds.to_string());
     if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
         ser.append_pair("subtitle", s);
+    }
+    if !default_record {
+        ser.append_pair("default", "dismiss");
     }
     format!("/#/meeting-prompt?{}", ser.finish())
 }
@@ -586,7 +592,11 @@ fn meeting_prompt_url(seconds: u64, subtitle: Option<&str>) -> String {
 /// Build (or focus) the borderless top-right notification window. Mirrors the
 /// waveform pill: no decorations, transparent, always-on-top, never focused so
 /// it can't interrupt the live meeting. Must run on the main thread.
-fn open_meeting_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result<(), String> {
+fn open_meeting_prompt_window(
+    app: &AppHandle,
+    subtitle: Option<&str>,
+    default_record: bool,
+) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     // Only one prompt is live per meeting; replace any stale window.
@@ -597,7 +607,7 @@ fn open_meeting_prompt_window(app: &AppHandle, subtitle: Option<&str>) -> Result
     let win = WebviewWindowBuilder::new(
         app,
         "meeting-prompt",
-        WebviewUrl::App(meeting_prompt_url(seconds, subtitle).into()),
+        WebviewUrl::App(meeting_prompt_url(seconds, subtitle, default_record).into()),
     )
     .title("")
     .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
@@ -826,7 +836,7 @@ pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
     let subtitle = current_meeting_title(app).await;
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
-    show_auto_record_prompt(app, subtitle);
+    show_auto_record_prompt(app, subtitle, default_record);
     let record = match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
         Ok(Ok(record)) => record,
         // Timed out, or the sender was dropped/replaced — apply the mode
@@ -844,10 +854,11 @@ pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
 
 /// Open the meeting-start notification window. Window creation must happen on
 /// the main thread (like `open_waveform_window`), so dispatch there.
-fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>) {
+fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>, default_record: bool) {
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Err(e) = open_meeting_prompt_window(&app_main, subtitle.as_deref()) {
+        if let Err(e) = open_meeting_prompt_window(&app_main, subtitle.as_deref(), default_record)
+        {
             eprintln!("meeting-prompt: failed to open notification window: {e}");
         }
     });
@@ -1374,23 +1385,37 @@ mod tests {
 
     #[test]
     fn meeting_prompt_url_carries_the_timeout_seconds() {
-        assert_eq!(super::meeting_prompt_url(10, None), "/#/meeting-prompt?seconds=10");
-        assert_eq!(super::meeting_prompt_url(7, None), "/#/meeting-prompt?seconds=7");
+        assert_eq!(super::meeting_prompt_url(10, None, true), "/#/meeting-prompt?seconds=10");
+        assert_eq!(super::meeting_prompt_url(7, None, true), "/#/meeting-prompt?seconds=7");
     }
 
     #[test]
     fn meeting_prompt_url_encodes_the_subtitle() {
         assert_eq!(
-            super::meeting_prompt_url(10, Some("Standup")),
+            super::meeting_prompt_url(10, Some("Standup"), true),
             "/#/meeting-prompt?seconds=10&subtitle=Standup"
         );
         // Spaces and reserved chars must survive the hash route.
         assert_eq!(
-            super::meeting_prompt_url(10, Some("Q3 Plan & Review")),
+            super::meeting_prompt_url(10, Some("Q3 Plan & Review"), true),
             "/#/meeting-prompt?seconds=10&subtitle=Q3+Plan+%26+Review"
         );
         // Empty subtitle is omitted entirely.
-        assert_eq!(super::meeting_prompt_url(10, Some("")), "/#/meeting-prompt?seconds=10");
+        assert_eq!(super::meeting_prompt_url(10, Some(""), true), "/#/meeting-prompt?seconds=10");
+    }
+
+    #[test]
+    fn meeting_prompt_url_marks_dismiss_as_the_default_when_auto_record_is_off() {
+        // Auto-record off: the countdown ends in a no-op, so the view leads with
+        // Dismiss. On (the default) adds nothing, keeping Take notes primary.
+        assert_eq!(
+            super::meeting_prompt_url(10, None, false),
+            "/#/meeting-prompt?seconds=10&default=dismiss"
+        );
+        assert_eq!(
+            super::meeting_prompt_url(10, Some("Standup"), false),
+            "/#/meeting-prompt?seconds=10&subtitle=Standup&default=dismiss"
+        );
     }
 
     #[test]

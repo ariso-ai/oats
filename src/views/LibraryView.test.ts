@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
+import { nextTick } from 'vue';
 
 const listMeetings = vi.fn();
 const searchMeetings = vi.fn();
@@ -19,12 +20,26 @@ const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
 const getMeetingPrep = vi.fn();
 const openPrepTab = vi.fn();
+const saveNotesNow = vi.fn(() => Promise.resolve());
 const listPendingUploads = vi.fn(() => Promise.resolve([]));
 const minimizeWindow = vi.fn(() => Promise.resolve());
 const toggleMaximizeWindow = vi.fn(() => Promise.resolve());
 const closeWindow = vi.fn(() => Promise.resolve());
 const isWindowMaximized = vi.fn(() => Promise.resolve(false));
 const onWindowResized = vi.fn(() => Promise.resolve(() => undefined));
+type SignInResult = { success?: boolean; sessionToken?: string; error?: string };
+const checkSession = vi.fn((): Promise<unknown> => Promise.resolve(null));
+const googleSignIn = vi.fn((): Promise<SignInResult> => Promise.resolve({ success: true }));
+const microsoftSignIn = vi.fn((): Promise<SignInResult> => Promise.resolve({ success: true }));
+const cancelSignIn = vi.fn(() => Promise.resolve());
+const apiRequest = vi.fn(
+  (_method: string, _path: string): Promise<{ status: number; data: unknown }> =>
+    Promise.resolve({ status: 200, data: {} })
+);
+const setBackendSetting = vi.fn((_backend: string) => Promise.resolve());
+const localModelStatus = vi.fn(
+  (): Promise<{ state: string; llmReady?: boolean }> => Promise.resolve({ state: 'ready', llmReady: true })
+);
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
@@ -73,7 +88,7 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
         supportsSearch: supportsSearch(),
         supportsActionItems: supportsActionItems(),
         listMeetings: () => listMeetings(),
-        listActionItems: (day: string) => listActionItems(day),
+        listActionItems: () => listActionItems(),
         searchMeetings: (query: string) => searchMeetings(query),
         getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
         getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
@@ -126,7 +141,21 @@ function resolveProcessing(id: string): void {
 // through ../tauri; keep those mocked so jsdom never touches real IPC.
 // pending.list() is also mocked so the PendingUploads child never calls Tauri IPC.
 vi.mock('../tauri', () => ({
+  AUTH_CHANGED_EVENT: 'auth://changed',
+  SIGN_IN_CANCELED_ERROR: 'Sign-in canceled',
+  auth: {
+    checkSession: () => checkSession(),
+    googleSignIn: () => googleSignIn(),
+    microsoftSignIn: () => microsoftSignIn(),
+    cancelSignIn: () => cancelSignIn(),
+    signOut: () => Promise.resolve(),
+  },
+  api: {
+    request: (method: string, path: string) => apiRequest(method, path),
+  },
+  setBackendSetting: (backend: string) => setBackendSetting(backend),
   local: {
+    modelStatus: () => localModelStatus(),
     openRecordingFile: (id: string, kind: string) => openRecordingFile(id, kind),
     readRecordingAudio: (id: string) => readRecordingAudio(id),
     readRecordingNote: (id: string) => readRecordingNote(id),
@@ -157,11 +186,11 @@ function item(over: Record<string, unknown>) {
 // chrome (selection, the recorder strip, the titlebar button).
 const detailStub = {
   name: 'MeetingDetailView',
-  emits: ['close', 'title-updated', 'content-ready'],
+  emits: ['close', 'title-updated', 'content-ready', 'tasks-changed', 'deleted'],
   props: ['item'],
   methods: {
     openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
-    saveNotesNow: () => Promise.resolve(),
+    saveNotesNow: () => saveNotesNow(),
   },
   template:
     '<div class="detail-stub" :data-meeting="item?.id" :data-prep="item?.prepId"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
@@ -205,6 +234,13 @@ beforeEach(() => {
   searchMeetings.mockResolvedValue([]);
   processingMock.tracked!.value = new Set();
   processingMock.version!.value = 0;
+  checkSession.mockResolvedValue(null);
+  googleSignIn.mockResolvedValue({ success: true });
+  microsoftSignIn.mockResolvedValue({ success: true });
+  cancelSignIn.mockResolvedValue(undefined);
+  apiRequest.mockResolvedValue({ status: 200, data: {} });
+  setBackendSetting.mockResolvedValue(undefined);
+  localModelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
 });
 afterEach(() => {
   // Restore real timers even if a fake-timer test failed before its own
@@ -718,6 +754,25 @@ describe('LibraryView', () => {
       expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
     });
 
+    // A missing note only implies "still generating" while the list can't say
+    // otherwise. Once it reports the notes settled without one — nothing was
+    // said, or generation failed — a spinning row would be a lie, and it would
+    // make every content-ready report from the open detail reload the list.
+    it.each(['empty-transcript', 'failed'])(
+      'shows the normal sub-line for a recent recording whose notes settled as %s',
+      async (notesStatus) => {
+        const wrapper = await mountWithRows([
+          item({
+            id: 'a',
+            timestamp: new Date(Date.now() - 60_000).toISOString(),
+            status: 'done',
+            files: { hasAudio: true, hasTranscript: true, hasNote: false, notesStatus },
+          }),
+        ]);
+        expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(false);
+      }
+    );
+
     // The window is measured from the end, so a long recording isn't already
     // stale the moment it stops.
     it('measures the window from the end of a long recording, not its start', async () => {
@@ -827,6 +882,53 @@ describe('LibraryView', () => {
       await flushPromises();
 
       expect(listMeetings).not.toHaveBeenCalled();
+    });
+
+    // The detail panel performs the delete; the list has to stop showing the row.
+    describe('a deleted local note', () => {
+      it('drops the row and clears the selection, then re-syncs from disk', async () => {
+        const wrapper = await mountWithRows([item({ id: 'a' }), item({ id: 'b' })]);
+        await wrapper.get('.meeting-item').trigger('click');
+        await flushPromises();
+        listMeetings.mockClear();
+        listMeetings.mockResolvedValue([item({ id: 'b' })]);
+
+        wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('deleted', { id: 'a' });
+        await flushPromises();
+
+        const rows = wrapper.findAll('.meeting-item');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].text()).not.toContain('a');
+        // Selection cleared -> the detail pane is replaced by the Up Next card.
+        expect(wrapper.findComponent({ name: 'MeetingDetailView' }).exists()).toBe(false);
+        expect(listMeetings).toHaveBeenCalled();
+      });
+
+      it('drops the row immediately, without waiting on the list reload', async () => {
+        const wrapper = await mountWithRows([item({ id: 'a' }), item({ id: 'b' })]);
+        await wrapper.get('.meeting-item').trigger('click');
+        await flushPromises();
+        // A reload that never settles: the row must still be gone from the UI.
+        listMeetings.mockReturnValue(new Promise(() => {}));
+
+        wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('deleted', { id: 'a' });
+        await nextTick();
+
+        expect(wrapper.findAll('.meeting-item')).toHaveLength(1);
+      });
+
+      it('does not autosave the notes of the recording it just deleted', async () => {
+        const wrapper = await mountWithRows([item({ id: 'a' })]);
+        await wrapper.get('.meeting-item').trigger('click');
+        await flushPromises();
+        saveNotesNow.mockClear();
+
+        wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('deleted', { id: 'a' });
+        await flushPromises();
+
+        // The folder is gone; the usual pre-selection-change flush must be skipped.
+        expect(saveNotesNow).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -1996,8 +2098,6 @@ describe('LibraryView meeting-prep notification', () => {
 });
 
 describe('LibraryView Todo tab', () => {
-  const ymd = (d: Date) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const daysAgo = (n: number) => {
     const d = new Date();
     d.setDate(d.getDate() - n);
@@ -2022,42 +2122,52 @@ describe('LibraryView Todo tab', () => {
     expect(listActionItems).not.toHaveBeenCalled();
   });
 
-  it('lists two weeks of action items grouped by day when the tab is opened', async () => {
+  it('enables the Todo tab for a local backend that has vault tasks', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
+        'Ship the RFC'
+      )
+    );
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    expect(todoButton(wrapper).attributes('disabled')).toBeUndefined();
+
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Ship the RFC');
+  });
+
+  it('lists action items grouped by day when the tab is opened', async () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
     const today = daysAgo(0);
     const yesterday = daysAgo(1);
-    listActionItems.mockImplementation((day: string) => {
-      if (day === ymd(today)) {
-        return Promise.resolve(
-          actionItems(
-            { id: '9', title: 'Q3 Pricing Review', timestamp: today.toISOString() },
-            'Send pricing deck',
-            'Follow up with finance'
-          )
-        );
-      }
-      if (day === ymd(yesterday)) {
-        return Promise.resolve(
-          actionItems(
-            { id: '7', title: 'Platform Sync', timestamp: yesterday.toISOString() },
-            'Draft migration plan'
-          )
-        );
-      }
-      return Promise.resolve([]);
-    });
+    listActionItems.mockResolvedValue([
+      ...actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: today.toISOString() },
+        'Send pricing deck',
+        'Follow up with finance'
+      ),
+      ...actionItems(
+        { id: '7', title: 'Platform Sync', timestamp: yesterday.toISOString() },
+        'Draft migration plan'
+      ),
+    ]);
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
     await todoButton(wrapper).trigger('click');
     await flushPromises();
 
-    // One request per day shown, today first.
-    expect(listActionItems.mock.calls.map((c) => c[0])).toEqual(
-      Array.from({ length: 14 }, (_, n) => ymd(daysAgo(n)))
-    );
+    expect(listActionItems).toHaveBeenCalledTimes(1);
 
     const headers = wrapper.findAll('.group-label').map((h) => h.text());
     expect(headers[0]).toContain('TODAY');
@@ -2074,14 +2184,10 @@ describe('LibraryView Todo tab', () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
-    listActionItems.mockImplementation((day: string) =>
-      Promise.resolve(
-        day === ymd(daysAgo(0))
-          ? actionItems(
-              { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
-              'Send pricing deck'
-            )
-          : []
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+        'Send pricing deck'
       )
     );
 
@@ -2096,33 +2202,50 @@ describe('LibraryView Todo tab', () => {
     expect(wrapper.findAll('.todo-item')[0].classes()).toContain('selected');
   });
 
-  it('still lists the days that loaded when one day request fails', async () => {
-    backendId.mockReturnValue('ariso');
+  it('drops a todo ticked in the detail pane without flashing the loading state', async () => {
+    backendId.mockReturnValue('local');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
-    listActionItems.mockImplementation((day: string) => {
-      if (day === ymd(daysAgo(0))) return Promise.reject(new Error('500'));
-      if (day === ymd(daysAgo(1))) {
-        return Promise.resolve(
-          actionItems(
-            { id: '7', title: 'Platform Sync', timestamp: daysAgo(1).toISOString() },
-            'Draft migration plan'
-          )
-        );
-      }
-      return Promise.resolve([]);
-    });
+    const meeting = { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() };
+    listActionItems.mockResolvedValue(actionItems(meeting, 'Ship the RFC', 'Email legal'));
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
     await todoButton(wrapper).trigger('click');
     await flushPromises();
+    await wrapper.findAll('.todo-item')[0].trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.todo-item')).toHaveLength(2);
 
-    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
-    expect(wrapper.text()).toContain('Draft migration plan');
+    listActionItems.mockResolvedValue(actionItems(meeting, 'Email legal'));
+    wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('tasks-changed', { id: meeting.id });
+    await nextTick();
+    expect(wrapper.text()).not.toContain('Loading…');
+    await flushPromises();
+
+    const rows = wrapper.findAll('.todo-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain('Email legal');
+    // The meeting stays open in the detail pane.
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe(meeting.id);
   });
 
-  it('reports an error when every day fails to load', async () => {
+  it('does not reload action items for a task ticked outside the Todo tab', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Some meeting' })]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await wrapper.findAll('.meeting-item')[0].trigger('click');
+    await flushPromises();
+    wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('tasks-changed', { id: 'a' });
+    await flushPromises();
+
+    expect(listActionItems).not.toHaveBeenCalled();
+  });
+
+  it('reports an error when the backend cannot load action items', async () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
@@ -2155,14 +2278,10 @@ describe('LibraryView Todo tab', () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
-    listActionItems.mockImplementation((day: string) =>
-      Promise.resolve(
-        day === ymd(daysAgo(0))
-          ? actionItems(
-              { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
-              'Send pricing deck'
-            )
-          : []
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+        'Send pricing deck'
       )
     );
 
@@ -2181,5 +2300,619 @@ describe('LibraryView Todo tab', () => {
     expect(wrapper.findAll('.todo-item')).toHaveLength(0);
     expect(wrapper.text()).toContain('Local recording');
     expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
+  });
+
+  it('reloads the Todo tab when switching to a backend that also supports action items', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+        'Send pricing deck'
+      )
+    );
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Send pricing deck');
+
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
+        'Ship the RFC'
+      )
+    );
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    expect(todoButton(wrapper).classes()).toContain('nav-tab--active');
+    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Ship the RFC');
+    expect(wrapper.text()).not.toContain('Send pricing deck');
+  });
+
+  it('drops a still-loading Todo request when the backend switches mid-load', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    let resolveAriso!: (entries: ReturnType<typeof actionItems>) => void;
+    listActionItems.mockReturnValueOnce(new Promise((resolve) => (resolveAriso = resolve)));
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('Loading…');
+
+    backendId.mockReturnValue('local');
+    listActionItems.mockResolvedValue(
+      actionItems(
+        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
+        'Ship the RFC'
+      )
+    );
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    resolveAriso(
+      actionItems(
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+        'Send pricing deck'
+      )
+    );
+    await flushPromises();
+
+    expect(listActionItems).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain('Ship the RFC');
+    expect(wrapper.text()).not.toContain('Send pricing deck');
+  });
+});
+
+describe('LibraryView organization branding', () => {
+  const LOGO = 'data:image/png;base64,iVBORw0KGgo=';
+
+  function mockOrg() {
+    apiRequest.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(
+        path === '/auth/me'
+          ? { status: 200, data: { full_name: 'Ada Lovelace', email: 'ada@example.com' } }
+          : path === '/organizations/info'
+            ? { status: 200, data: { organization: { id: 1, name: 'Acme', logo_data: LOGO } } }
+            : { status: 200, data: {} }
+      )
+    );
+  }
+
+  async function mountOn(backend: 'ariso' | 'local') {
+    backendId.mockReturnValue(backend);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  function orgRequests() {
+    return apiRequest.mock.calls.filter(([, path]) => path === '/organizations/info');
+  }
+
+  it('brands Up Next with the signed-in Ariso org', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+
+    expect(orgRequests()).toHaveLength(1);
+    const upNext = wrapper.findComponent(UpNextCard);
+    expect(upNext.props('orgName')).toBe('Acme');
+    expect(upNext.props('orgLogo')).toBe(LOGO);
+  });
+
+  it('asks for no org while signed out', async () => {
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+
+    expect(orgRequests()).toHaveLength(0);
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+  });
+
+  it('never asks for the org on Local', async () => {
+    mockOrg();
+    const wrapper = await mountOn('local');
+
+    expect(orgRequests()).toHaveLength(0);
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+  });
+
+  it('drops the org on a switch to Local and refetches on the way back', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+    expect(wrapper.findComponent(UpNextCard).props('orgLogo')).toBe('');
+
+    backendId.mockReturnValue('ariso');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(orgRequests()).toHaveLength(2);
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+  });
+
+  it('drops the org when the session ends elsewhere', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+
+    checkSession.mockResolvedValue(null);
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('');
+  });
+
+  it('keeps the org when an auth change leaves the same account signed in', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockOrg();
+    const wrapper = await mountOn('ariso');
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(wrapper.findComponent(UpNextCard).props('orgName')).toBe('Acme');
+    expect(wrapper.findComponent(UpNextCard).props('orgLogo')).toBe(LOGO);
+  });
+});
+
+describe('LibraryView backend indicator', () => {
+  function mockProfile() {
+    apiRequest.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(
+        path === '/auth/me'
+          ? { status: 200, data: { full_name: 'Ada Lovelace', email: 'ada@example.com' } }
+          : { status: 200, data: {} }
+      )
+    );
+  }
+
+  async function mountOn(backend: 'ariso' | 'local') {
+    backendId.mockReturnValue(backend);
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, { attachTo: document.body });
+    await flushPromises();
+    return wrapper;
+  }
+
+  function pill(wrapper: ReturnType<typeof mount>) {
+    return wrapper.get('.account-pill-wrap .account-pill');
+  }
+
+  function menuItem(wrapper: ReturnType<typeof mount>, label: string) {
+    const item = wrapper
+      .findAll('.backend-menu [role^="menuitem"]')
+      .find((el) => el.text() === label);
+    expect(item, `menu item "${label}"`).toBeDefined();
+    return item!;
+  }
+
+  async function openMenu(wrapper: ReturnType<typeof mount>) {
+    await pill(wrapper).trigger('click');
+    await flushPromises();
+  }
+
+  it('sits in the titlebar, right after the sidebar toggle', async () => {
+    const wrapper = await mountOn('local');
+
+    const wrap = wrapper.get('.titlebar .account-pill-wrap').element;
+    expect(wrap.previousElementSibling?.classList.contains('panel-toggle')).toBe(true);
+    expect(wrapper.find('.sidebar .account-pill').exists()).toBe(false);
+  });
+
+  it('stays visible with the sidebar hidden', async () => {
+    const wrapper = await mountOn('local');
+
+    await wrapper.get('.panel-toggle').trigger('click');
+
+    expect(wrapper.find('.sidebar').exists()).toBe(false);
+    expect(pill(wrapper).text()).toBe('Local');
+  });
+
+  it('names the backend, with its icon after the name', async () => {
+    const local = await mountOn('local');
+    expect(pill(local).text()).toBe('Local');
+    expect(pill(local).attributes('title')).toContain('Local mode');
+    expect(pill(local).element.lastElementChild?.tagName.toLowerCase()).toBe('svg');
+    local.unmount();
+
+    const ariso = await mountOn('ariso');
+    expect(pill(ariso).text()).toBe('ariso.ai');
+    expect(pill(ariso).attributes('title')).toBe('ariso.ai — not signed in');
+    expect(pill(ariso).element.lastElementChild?.tagName.toLowerCase()).toBe('svg');
+  });
+
+  it('carries the signed-in account in the tooltip', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+
+    expect(pill(wrapper).text()).toBe('ariso.ai');
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
+  });
+
+  it('opens a menu of ariso.ai, Local, and Settings, each with its icon', async () => {
+    const wrapper = await mountOn('local');
+    expect(pill(wrapper).attributes('aria-expanded')).toBe('false');
+
+    await openMenu(wrapper);
+
+    const menu = wrapper.get('.backend-menu');
+    expect(menu.attributes('role')).toBe('menu');
+    const items = menu.findAll('[role^="menuitem"]');
+    expect(items.map((el) => el.text())).toEqual(['ariso.ai', 'Local', 'Settings']);
+    for (const el of items) expect(el.find('svg').exists()).toBe(true);
+    expect(pill(wrapper).attributes('aria-expanded')).toBe('true');
+    // The active backend is checked, and focus lands on it.
+    expect(menuItem(wrapper, 'Local').attributes('aria-checked')).toBe('true');
+    expect(menuItem(wrapper, 'ariso.ai').attributes('aria-checked')).toBe('false');
+    expect(document.activeElement).toBe(menuItem(wrapper, 'Local').element);
+  });
+
+  it('grays the ariso.ai option while not signed in, but keeps it clickable', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    const ariso = menuItem(wrapper, 'ariso.ai');
+    expect(ariso.classes()).toContain('backend-menu-item--signed-out');
+    expect(ariso.attributes('disabled')).toBeUndefined();
+    expect(ariso.attributes('aria-label')).toBe('ariso.ai, not signed in');
+    expect(menuItem(wrapper, 'Local').classes()).not.toContain('backend-menu-item--signed-out');
+
+    await ariso.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+  });
+
+  it('shows the ariso.ai option normally once signed in', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    const ariso = menuItem(wrapper, 'ariso.ai');
+    expect(ariso.classes()).not.toContain('backend-menu-item--signed-out');
+    expect(ariso.attributes('aria-label')).toBeUndefined();
+  });
+
+  it('grays the ariso.ai option on Local, which never checks the session', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+
+    expect(menuItem(wrapper, 'ariso.ai').classes()).toContain('backend-menu-item--signed-out');
+    expect(checkSession).not.toHaveBeenCalled();
+  });
+
+  it('opening the menu on Local asks nothing of the network', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    emitEvent('auth://changed', null);
+    await flushPromises();
+
+    expect(checkSession).not.toHaveBeenCalled();
+    expect(apiRequest).not.toHaveBeenCalled();
+  });
+
+  it('moves through the menu with the arrow keys', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    const menu = wrapper.get('.backend-menu');
+
+    await menu.trigger('keydown', { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(menuItem(wrapper, 'Settings').element);
+    await menu.trigger('keydown', { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(menuItem(wrapper, 'ariso.ai').element);
+    await menu.trigger('keydown', { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(menuItem(wrapper, 'Settings').element);
+  });
+
+  it('Settings opens the Settings window', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'Settings').trigger('click');
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith('create_settings_window', {});
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+  });
+
+  it('Local switches the backend and reloads against it', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    listMeetings.mockClear();
+    checkSession.mockClear();
+    backendId.mockReturnValue('local');
+
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('local');
+    expect(emitAppEvent).toHaveBeenCalledWith(
+      'backend://changed',
+      expect.objectContaining({ source: expect.any(String) })
+    );
+    expect(emitNotificationsSync).toHaveBeenCalled();
+    expect(listMeetings).toHaveBeenCalled();
+    expect(pill(wrapper).text()).toBe('Local');
+    expect(checkSession).not.toHaveBeenCalled();
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    // Models are ready, so there's nothing for Settings to show.
+    expect(invoke).not.toHaveBeenCalledWith('create_settings_window', {});
+  });
+
+  it('Local brings up Settings when the on-device models still need downloading', async () => {
+    localModelStatus.mockResolvedValue({ state: 'not_downloaded' });
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('local');
+
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('local');
+    expect(invoke).toHaveBeenCalledWith('create_settings_window', {});
+  });
+
+  it('Local does nothing when it is already the backend', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+  });
+
+  it('ignores its own backend broadcast when it comes back', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('local');
+    await menuItem(wrapper, 'Local').trigger('click');
+    await flushPromises();
+    listMeetings.mockClear();
+
+    const [, payload] = emitAppEvent.mock.calls.find((call) => call[0] === 'backend://changed')!;
+    emitEvent('backend://changed', payload);
+    await flushPromises();
+
+    expect(listMeetings).not.toHaveBeenCalled();
+  });
+
+  it('ariso.ai while signed out shows the sign-in box', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('.backend-menu').exists()).toBe(false);
+    const box = wrapper.get('.sign-in-popover');
+    expect(box.attributes('role')).toBe('dialog');
+    expect(box.text()).toContain('Sign in to ariso.ai');
+    expect(box.get('.google-btn').text()).toContain('Sign in with Google');
+    expect(box.get('.microsoft-btn').text()).toContain('Sign in with Microsoft');
+    expect(document.activeElement).toBe(box.get('.google-btn').element);
+  });
+
+  it('ariso.ai while signed in just closes the menu', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(document.activeElement).toBe(pill(wrapper).element);
+  });
+
+  it('ariso.ai from Local switches, then offers sign-in when there is no session', async () => {
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('ariso');
+
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('ariso');
+    expect(pill(wrapper).text()).toBe('ariso.ai');
+    expect(checkSession).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+  });
+
+  it('ariso.ai from Local closes the menu when a session already exists', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('local');
+    await openMenu(wrapper);
+    backendId.mockReturnValue('ariso');
+
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    expect(setBackendSetting).toHaveBeenCalledWith('ariso');
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
+  });
+
+  it('cannot switch backend while recording', async () => {
+    getAllWebviewWindows.mockResolvedValue([{ label: 'waveform' }]);
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    expect(menuItem(wrapper, 'ariso.ai').attributes('disabled')).toBeDefined();
+    expect(menuItem(wrapper, 'Local').attributes('disabled')).toBeDefined();
+    expect(menuItem(wrapper, 'Settings').attributes('disabled')).toBeUndefined();
+    expect(wrapper.get('.backend-menu').text()).toContain("Backend can't be changed while recording.");
+  });
+
+  it('signs in from the sign-in box and closes it', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+
+    microsoftSignIn.mockImplementation(() => {
+      checkSession.mockResolvedValue({ sessionToken: 't' });
+      return Promise.resolve({ success: true });
+    });
+    mockProfile();
+    await wrapper.get('.sign-in-popover .microsoft-btn').trigger('click');
+    await flushPromises();
+
+    expect(microsoftSignIn).toHaveBeenCalledTimes(1);
+    expect(googleSignIn).not.toHaveBeenCalled();
+    expect(emitNotificationsSync).toHaveBeenCalled();
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
+  });
+
+  it('shows the pending flow with a Cancel, and a failure inline', async () => {
+    let resolveSignIn!: (r: SignInResult) => void;
+    googleSignIn.mockReturnValue(new Promise((resolve) => (resolveSignIn = resolve)));
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('.sign-in-popover .google-btn').text()).toContain('Continue in your browser…');
+    await wrapper.get('.sign-in-popover .sign-in-cancel').trigger('click');
+    expect(cancelSignIn).toHaveBeenCalledTimes(1);
+
+    resolveSignIn({ error: 'API returned 500' });
+    await flushPromises();
+    expect(wrapper.get('.sign-in-popover .sign-in-error').text()).toBe('API returned 500');
+  });
+
+  it('closes on Escape and returns focus to the pill', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    await menuItem(wrapper, 'Local').trigger('keydown', { key: 'Escape' });
+
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+    expect(document.activeElement).toBe(pill(wrapper).element);
+  });
+
+  it('closes on an outside click while idle', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+
+    wrapper.get('.backend-menu').element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find('.backend-popover').exists()).toBe(true);
+
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find('.backend-popover').exists()).toBe(false);
+  });
+
+  it('keeps the sign-in box open on an outside click while a flow is pending', async () => {
+    googleSignIn.mockReturnValue(new Promise(() => {}));
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
+
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+  });
+
+  it('follows an auth broadcast without a remount', async () => {
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(true);
+
+    // Signed in from Settings or a tray row.
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — ada@example.com');
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+
+    // Then signed out elsewhere.
+    checkSession.mockResolvedValue(null);
+    emitEvent('auth://changed', null);
+    await flushPromises();
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — not signed in');
+  });
+
+  it('follows a backend switch made elsewhere, and asks nothing on Local', async () => {
+    checkSession.mockResolvedValue({ sessionToken: 't' });
+    mockProfile();
+    const wrapper = await mountOn('ariso');
+
+    backendId.mockReturnValue('local');
+    checkSession.mockClear();
+    apiRequest.mockClear();
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(pill(wrapper).text()).toBe('Local');
+    expect(checkSession).not.toHaveBeenCalled();
+    expect(apiRequest).not.toHaveBeenCalled();
+
+    // Back to Ariso: re-checked, not the stale signed-in state from before.
+    checkSession.mockResolvedValue(null);
+    backendId.mockReturnValue('ariso');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+    expect(checkSession).toHaveBeenCalledTimes(1);
+    expect(pill(wrapper).attributes('title')).toBe('ariso.ai — not signed in');
+  });
+
+  it('closes the sign-in box and cancels its pending flow on a switch to Local', async () => {
+    googleSignIn.mockReturnValue(new Promise(() => {}));
+    const wrapper = await mountOn('ariso');
+    await openMenu(wrapper);
+    await menuItem(wrapper, 'ariso.ai').trigger('click');
+    await flushPromises();
+    await wrapper.get('.sign-in-popover .google-btn').trigger('click');
+    await flushPromises();
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    expect(cancelSignIn).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('.sign-in-popover').exists()).toBe(false);
+    expect(pill(wrapper).text()).toBe('Local');
+  });
+
+  it('does not cancel on a switch to Local when this window has no flow pending', async () => {
+    const wrapper = await mountOn('ariso');
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', null);
+    await flushPromises();
+
+    // Another window's flow is not this window's to cancel.
+    expect(cancelSignIn).not.toHaveBeenCalled();
   });
 });

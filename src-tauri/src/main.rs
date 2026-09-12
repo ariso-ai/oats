@@ -6,6 +6,7 @@ mod audio_util;
 mod audio_capture;
 mod mic_capture;
 mod commands;
+mod deep_link;
 mod meeting_notifications;
 mod mic_monitor;
 mod platform;
@@ -190,7 +191,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::google_sign_in,
-            commands::cancel_google_sign_in,
+            commands::microsoft_sign_in,
+            commands::cancel_sign_in,
             commands::connect_google_calendar,
             commands::check_session,
             commands::sign_out,
@@ -205,6 +207,8 @@ fn main() {
             commands::put_presigned,
             commands::get_desktop_config,
             commands::list_local_recordings,
+            commands::list_vault_tasks,
+            commands::set_vault_task_done,
             commands::get_vault_dir,
             commands::set_vault_dir,
             commands::local_recording_status,
@@ -220,6 +224,7 @@ fn main() {
             commands::copy_recording_file,
             commands::rename_local_recording,
             commands::local_begin_recording,
+            commands::delete_local_recording,
             commands::buffer_pending_audio,
             commands::discard_pending_audio,
             commands::list_pending_uploads,
@@ -307,6 +312,10 @@ fn main() {
             app.manage(tray_meeting::FeaturedMeetingState::new());
 
             tray::create_tray(app.handle())?;
+
+            // Feed recorder broadcasts to the native recorder pill, where the
+            // platform has one.
+            recorder_pill::install(app.handle());
 
             // Native next-meeting tray orchestrator. Self-gates on Ariso
             // backend + session; re-synced from BootstrapView on SYNC_EVENT.
@@ -435,6 +444,8 @@ fn main() {
                         eprintln!("Failed to open meetings window on dock reopen: {e}");
                     }
                 }
+                // An `oats://` URL — the browser handing back after sign-in.
+                tauri::RunEvent::Opened { urls } => deep_link::handle_opened_urls(_app, urls),
                 // Keep the Dock / Stage Manager presence in sync with the
                 // visible windows: promote to Regular while a real window is up,
                 // demote to Accessory once they're all gone. Focused covers

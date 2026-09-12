@@ -9,6 +9,7 @@ const getMeetingTranscript = vi.fn();
 const renameMeeting = vi.fn();
 const getMeetingAudio = vi.fn();
 const deleteMeetingClip = vi.fn();
+const deleteMeeting = vi.fn();
 const getMeetingPrep = vi.fn();
 const activeBackend = vi.fn();
 const notesCanEdit = vi.fn(() => false);
@@ -24,6 +25,7 @@ const apiRequest = vi.fn();
 const fetchSpeakerAudio = vi.fn();
 const pickMarkdownSavePath = vi.fn();
 const copyRecordingFile = vi.fn();
+const setVaultTaskDone = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -91,6 +93,7 @@ vi.mock('../tauri', () => ({
     retryNotes: (id: string) => retryNotes(id),
     copyRecordingFile: (id: string, kind: string, dest: string) =>
       copyRecordingFile(id, kind, dest),
+    setVaultTaskDone: (...a: unknown[]) => setVaultTaskDone(...a),
   },
 }));
 
@@ -137,6 +140,7 @@ beforeEach(() => {
     renameMeeting: (...a: unknown[]) => renameMeeting(...a),
     getMeetingAudio: (...a: [MeetingListItem, string?]) => getMeetingAudio(...a),
     deleteMeetingClip: (...a: [MeetingListItem, string]) => deleteMeetingClip(...a),
+    deleteMeeting: (...a: [MeetingListItem]) => deleteMeeting(...a),
     getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
   });
   notesCanEdit.mockReturnValue(false);
@@ -162,6 +166,7 @@ beforeEach(() => {
   copyRecordingFile.mockResolvedValue(undefined);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
+  deleteMeeting.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
   apiRequest.mockReset();
   apiRequest.mockResolvedValue({ status: 200, data: {} });
@@ -965,6 +970,19 @@ describe('MeetingDetailView local generation progress', () => {
     expect(retryNotes).toHaveBeenCalledWith('7');
   });
 
+  it('names an empty transcript instead of blaming notes, with no Retry', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'empty-transcript',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
+    await flushPromises();
+
+    expect(wrapper.find('.tab-status-label').text()).toBe('Empty transcript');
+    // Nothing was said — regenerating cannot produce notes, so offering a retry
+    // would promise a fix that does not exist.
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+  });
+
   it('shows a Retry button on transcript failure and calls retryTranscription', async () => {
     recordingStatus.mockResolvedValue({
       status: 'failed', hasTranscript: false, hasNote: false, notesStatus: 'pending',
@@ -1089,6 +1107,24 @@ describe('MeetingDetailView local generation progress', () => {
     const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
     await flushPromises();
 
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+  });
+
+  // The Library answers a report by refetching its list and swapping in the
+  // fresh row. That row is a new object with the same fields, so reloading on it
+  // would restart the poll, re-report the same settled stage, and loop forever.
+  it('does not reload or re-report when a list refresh hands it an identical row', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'empty-transcript',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
+    expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+    expect(getMeetingDetail).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ item: { ...localItem, files: { ...localItem.files! } } });
+    await flushPromises();
+
+    expect(getMeetingDetail).toHaveBeenCalledTimes(1);
     expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
   });
 
@@ -1281,6 +1317,118 @@ describe('MeetingDetailView per-clip delete', () => {
     // c2 stays active/showing, rather than snapping back to the (now sole) first clip.
     expect(wrapper.text()).toContain('from clip two');
     expect(wrapper.text()).not.toContain('from clip one');
+  });
+});
+
+describe('MeetingDetailView whole-note delete', () => {
+  const localDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
+    detail({ isLocal: true, hasTranscript: true, note: '# notes', ...over });
+
+  it('offers no delete action for an Ariso meeting', async () => {
+    const wrapper = await mountWith(detail());
+    expect(wrapper.find('.note-del-btn').exists()).toBe(false);
+  });
+
+  it('deletes the note on confirm and tells the parent', async () => {
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    // Nothing happens until the confirmation is accepted.
+    expect(deleteMeeting).not.toHaveBeenCalled();
+
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeeting).toHaveBeenCalledWith(item);
+    expect(wrapper.emitted('deleted')).toEqual([[{ id: '7' }]]);
+  });
+
+  it('names the note in the confirmation so the right one is deleted', async () => {
+    const wrapper = await mountWith(localDetail({ title: 'Budget review' }));
+    await wrapper.find('.note-del-btn').trigger('click');
+
+    const dialog = wrapper.find('[role="dialog"]');
+    expect(dialog.text()).toContain('Budget review');
+    // The vault note and audio go too — the copy has to say so.
+    expect(dialog.text()).toMatch(/Obsidian vault/i);
+  });
+
+  it('leaves the note alone when the confirmation is canceled', async () => {
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    await wrapper.find('.secondary-btn').trigger('click');
+    await flushPromises();
+
+    expect(deleteMeeting).not.toHaveBeenCalled();
+    expect(wrapper.emitted('deleted')).toBeUndefined();
+    expect(wrapper.find('.note-del-btn').exists()).toBe(true);
+  });
+
+  it('disables delete while the recording is still being captured', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'recording',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+    const wrapper = await mountWith(localDetail({ hasTranscript: false, note: undefined }));
+
+    expect(wrapper.find('.note-del-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('disables delete while AI notes are still generating', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done',
+      hasTranscript: true,
+      hasNote: false,
+      notesStatus: 'pending',
+    });
+    const wrapper = await mountWith(localDetail({ note: undefined }));
+
+    expect(wrapper.find('.note-del-btn').attributes('disabled')).toBeDefined();
+  });
+
+  it('allows delete for a recording whose transcription failed', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'failed',
+      hasTranscript: false,
+      hasNote: false,
+      notesStatus: 'failed',
+    });
+    const wrapper = await mountWith(localDetail({ hasTranscript: false, note: undefined }));
+
+    expect(wrapper.find('.note-del-btn').attributes('disabled')).toBeUndefined();
+  });
+
+  it('keeps the note and shows an error when the delete fails', async () => {
+    deleteMeeting.mockRejectedValue(new Error('disk on fire'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.emitted('deleted')).toBeUndefined();
+    expect(wrapper.find('.note-del-btn').exists()).toBe(true);
+    expect(wrapper.find('.note-delete-error').text()).toContain('Could not delete this note');
+  });
+
+  it('stops autosaving notes into a deleted recording', async () => {
+    notesCanEdit.mockReturnValue(true);
+    loadNote.mockResolvedValue({ content: 'draft', title: 'T' });
+    const wrapper = await mountWith(localDetail());
+
+    await wrapper.find('.note-del-btn').trigger('click');
+    await wrapper.find('.danger-btn').trigger('click');
+    await flushPromises();
+
+    // The parent calls this while clearing its selection; the recording's
+    // folder is gone, so the save must not be attempted.
+    saveNote.mockClear();
+    await (wrapper.vm as unknown as { saveNotesNow: () => Promise<void> }).saveNotesNow();
+    expect(saveNote).not.toHaveBeenCalled();
   });
 });
 
@@ -1992,5 +2140,93 @@ describe('MeetingDetailView transcript download', () => {
     await flushPromises();
 
     expect(wrapper.find('.tab-download').attributes('disabled')).toBeDefined();
+  });
+});
+
+describe('MeetingDetailView local AI-notes tasks', () => {
+  const NOTE = '## Action Items\n- [ ] Ship the RFC ➕ 2026-09-09\n- [ ] Email legal ➕ 2026-09-09\n';
+
+  it('ticks a task in the vault note, strikes it through, and tells the parent', async () => {
+    const ticked = NOTE.replace('- [ ] Ship the RFC ➕ 2026-09-09', '- [x] Ship the RFC ➕ 2026-09-09 ✅ 2026-09-10');
+    setVaultTaskDone.mockResolvedValue(ticked);
+    const wrapper = await mountWith(detail({ isLocal: true, note: NOTE }));
+
+    const box = wrapper.find('.md input[data-task-line="1"]');
+    expect(box.attributes('disabled')).toBeUndefined();
+    await box.setValue(true);
+    await flushPromises();
+
+    expect(setVaultTaskDone).toHaveBeenCalledWith('7', 1, '- [ ] Ship the RFC ➕ 2026-09-09', true);
+    const done = wrapper.findAll('.md li.task-done');
+    expect(done).toHaveLength(1);
+    expect(done[0].text()).toBe('Ship the RFC');
+    expect(wrapper.emitted('tasksChanged')).toEqual([[{ id: '7' }]]);
+  });
+
+  it('unticks a done task', async () => {
+    const doneNote = '- [x] Ship the RFC ✅ 2026-09-10\n';
+    setVaultTaskDone.mockResolvedValue('- [ ] Ship the RFC\n');
+    const wrapper = await mountWith(detail({ isLocal: true, note: doneNote }));
+
+    await wrapper.find('.md input[data-task-line="0"]').setValue(false);
+    await flushPromises();
+
+    expect(setVaultTaskDone).toHaveBeenCalledWith('7', 0, '- [x] Ship the RFC ✅ 2026-09-10', false);
+    expect(wrapper.find('.md li.task-done').exists()).toBe(false);
+    expect(wrapper.emitted('tasksChanged')).toHaveLength(1);
+  });
+
+  it('reverts the checkbox and re-reads the note when the write is rejected', async () => {
+    setVaultTaskDone.mockRejectedValue('the note changed since it was loaded');
+    readRecordingFile.mockResolvedValue(NOTE);
+    const wrapper = await mountWith(detail({ isLocal: true, note: NOTE }));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const box = wrapper.find('.md input[data-task-line="1"]');
+    await box.setValue(true);
+    await flushPromises();
+
+    expect((box.element as HTMLInputElement).checked).toBe(false);
+    expect(readRecordingFile).toHaveBeenCalledWith('7', 'note');
+    expect(wrapper.emitted('tasksChanged')).toBeUndefined();
+    err.mockRestore();
+  });
+
+  it('still emits tasksChanged when the write resolves after the user switched meetings', async () => {
+    // The vault write succeeded, so the Library's Todos view must be told to
+    // refresh even though the panel has since moved on to a different
+    // meeting — only the (now stale) local note update should be skipped.
+    let resolveToggle!: (body: string) => void;
+    setVaultTaskDone.mockReturnValue(
+      new Promise<string>((resolve) => {
+        resolveToggle = resolve;
+      })
+    );
+    getMeetingDetail.mockImplementation((meeting: MeetingListItem) =>
+      Promise.resolve(
+        meeting.id === '7'
+          ? detail({ id: '7', isLocal: true, note: NOTE })
+          : detail({ id: meeting.id, isLocal: true, note: 'Other note' })
+      )
+    );
+    const second: MeetingListItem = { id: 'b', title: 'Second', timestamp: '2026-06-02T11:00:00Z' };
+
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+
+    const box = wrapper.find('.md input[data-task-line="1"]');
+    await box.setValue(true);
+    await flushPromises();
+
+    await wrapper.setProps({ item: second });
+    await flushPromises();
+
+    resolveToggle(
+      NOTE.replace('- [ ] Ship the RFC ➕ 2026-09-09', '- [x] Ship the RFC ➕ 2026-09-09 ✅ 2026-09-10')
+    );
+    await flushPromises();
+
+    expect(wrapper.emitted('tasksChanged')).toEqual([[{ id: '7' }]]);
+    expect(wrapper.find('.md').text()).not.toContain('Ship the RFC');
   });
 });

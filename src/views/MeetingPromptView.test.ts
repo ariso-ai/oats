@@ -51,28 +51,55 @@ describe('MeetingPromptView', () => {
 
   it('toggles the more-options menu and grows/shrinks the window', async () => {
     const wrapper = mount(MeetingPromptView);
-    expect(wrapper.find('[data-test="menu-dismiss"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="menu-item"]').exists()).toBe(false);
 
     await wrapper.find('[data-test="more-options"]').trigger('click');
     expect(invoke).toHaveBeenCalledWith('resize_meeting_prompt', { expanded: true });
-    expect(wrapper.find('[data-test="menu-dismiss"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="menu-item"]').exists()).toBe(true);
 
     await wrapper.find('[data-test="more-options"]').trigger('click');
     expect(invoke).toHaveBeenCalledWith('resize_meeting_prompt', { expanded: false });
-    expect(wrapper.find('[data-test="menu-dismiss"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="menu-item"]').exists()).toBe(false);
   });
 
   it('resolves with record=false from the menu Dismiss item', async () => {
     const wrapper = mount(MeetingPromptView);
     await wrapper.find('[data-test="more-options"]').trigger('click');
-    await wrapper.find('[data-test="menu-dismiss"]').trigger('click');
+    await wrapper.find('[data-test="menu-item"]').trigger('click');
     expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: false });
+  });
+
+  it('makes Take notes the primary action by default (auto-record on)', () => {
+    const wrapper = mount(MeetingPromptView);
+    expect(wrapper.find('.split-main').text()).toBe('Take notes');
   });
 
   it('labels the menu item Dismiss in start mode', async () => {
     const wrapper = mount(MeetingPromptView);
     await wrapper.find('[data-test="more-options"]').trigger('click');
-    expect(wrapper.find('[data-test="menu-dismiss"]').text()).toBe('Dismiss');
+    expect(wrapper.find('[data-test="menu-item"]').text()).toBe('Dismiss');
+  });
+});
+
+describe('MeetingPromptView with auto-record off (default=dismiss)', () => {
+  beforeEach(() => {
+    window.location.hash = '#/meeting-prompt?seconds=10&default=dismiss';
+  });
+
+  it('makes Dismiss the primary action', async () => {
+    const wrapper = mount(MeetingPromptView);
+    expect(wrapper.find('.split-main').text()).toBe('Dismiss');
+    await wrapper.find('.split-main').trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: false });
+  });
+
+  it('offers Take notes behind the chevron', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await wrapper.find('[data-test="more-options"]').trigger('click');
+    const item = wrapper.find('[data-test="menu-item"]');
+    expect(item.text()).toBe('Take notes');
+    await item.trigger('click');
+    expect(invoke).toHaveBeenCalledWith('resolve_meeting_prompt', { record: true });
   });
 });
 
@@ -103,7 +130,7 @@ describe('MeetingPromptView switch mode', () => {
     const wrapper = mount(MeetingPromptView);
     await wrapper.find('[data-test="more-options"]').trigger('click');
     expect(invoke).toHaveBeenCalledWith('resize_meeting_switch_prompt', { expanded: true });
-    const keep = wrapper.find('[data-test="menu-dismiss"]');
+    const keep = wrapper.find('[data-test="menu-item"]');
     expect(keep.text()).toBe('Keep recording');
     await keep.trigger('click');
     expect(invoke).toHaveBeenCalledWith('resolve_meeting_switch_prompt', { switch: false });

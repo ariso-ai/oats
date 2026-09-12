@@ -928,6 +928,79 @@ describe('WaveformView vertical pill', () => {
   });
 });
 
+// Where the pill is drawn natively, the webview is launched painted-empty and
+// the native pill drives the failed-upload controls through events instead of
+// DOM clicks.
+describe('WaveformView native pill controls', () => {
+  async function mountFailedUpload() {
+    routeQuery = { pillHidden: '1' };
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValueOnce(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await eventHandlers['tray://stop-recording']?.({});
+    await flushPromises();
+    expect(finalizeRecording).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('.pill').exists()).toBe(false);
+    return wrapper;
+  }
+
+  it('recorder://retry-upload re-runs finalize with the held recording', async () => {
+    await mountFailedUpload();
+    finalizeRecording.mockResolvedValue({ backend: 'local' });
+    emitEvent.mockClear();
+
+    await eventHandlers['recorder://retry-upload']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(finalizeRecording).toHaveBeenCalledTimes(2);
+    expect(finalizeRecording.mock.calls[1][0]).toBe(finalizeRecording.mock.calls[0][0]);
+    const phases = emitEvent.mock.calls
+      .filter(([name]) => name === 'recorder://state')
+      .map(([, p]) => (p as { phase: string }).phase);
+    expect(phases).toContain('success');
+  });
+
+  it('recorder://continue-recording resumes capture and keeps the audio', async () => {
+    await mountFailedUpload();
+    startRecording.mockClear();
+
+    await eventHandlers['recorder://continue-recording']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(startRecording).toHaveBeenCalledTimes(1);
+    expect(discardPendingAudio).not.toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
+  });
+
+  it('recorder://discard-recording discards the buffered audio and closes', async () => {
+    await mountFailedUpload();
+
+    await eventHandlers['recorder://discard-recording']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(discardPendingAudio).toHaveBeenCalledWith('2026-06-09T10:00:00Z');
+    expect(closeWin).toHaveBeenCalled();
+  });
+
+  it('ignores the failed-upload events while recording', async () => {
+    routeQuery = { pillHidden: '1' };
+    mount(WaveformView);
+    await flushPromises();
+    startRecording.mockClear();
+
+    await eventHandlers['recorder://retry-upload']?.({ payload: undefined });
+    await eventHandlers['recorder://continue-recording']?.({ payload: undefined });
+    await eventHandlers['recorder://discard-recording']?.({ payload: undefined });
+    await flushPromises();
+
+    expect(finalizeRecording).not.toHaveBeenCalled();
+    expect(startRecording).not.toHaveBeenCalled();
+    expect(discardPendingAudio).not.toHaveBeenCalled();
+    expect(closeWin).not.toHaveBeenCalled();
+  });
+});
+
 // A pending upload used to block starting a new recording outright: the failed
 // pill kept the one recorder window alive, and every entry point no-opped into
 // focusing it (#313). The native side now asks the incumbent pill to stand down.

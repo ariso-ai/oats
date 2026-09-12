@@ -181,7 +181,9 @@ const isAuto = route.query.auto === '1';
 // exist (and stay visible to WebKit so getUserMedia resolves), but the pill
 // paints nothing so it never flashes over the meetings window. The Rust
 // visibility watcher pushes recorder://pill-visible to flip this when the
-// meetings window is minimized or closed mid-recording.
+// meetings window is minimized or closed mid-recording. Where the pill is drawn
+// natively (macOS), the window is always launched hidden and never flipped: it
+// only hosts the recording, and the native pill renders recorder://state.
 const pillHidden = ref(route.query.pillHidden === '1');
 const isStopping = ref(false);
 // Auto recordings shorter than this are discarded, not uploaded (guards against
@@ -476,6 +478,9 @@ async function applyPillVisibility(hidden: boolean) {
 let unlistenPillVisible: UnlistenFn | null = null;
 let unlistenPendingUploaded: UnlistenFn | null = null;
 let unlistenYield: UnlistenFn | null = null;
+let unlistenRetryUpload: UnlistenFn | null = null;
+let unlistenContinueRecording: UnlistenFn | null = null;
+let unlistenDiscardRecording: UnlistenFn | null = null;
 let unlistenPause: UnlistenFn | null = null;
 let unlistenResume: UnlistenFn | null = null;
 let unlistenStop: UnlistenFn | null = null;
@@ -943,6 +948,15 @@ async function resumeFailed() {
   broadcastState();
 }
 
+// The native pill's failed-upload controls arrive as events rather than DOM
+// clicks. Like the buttons they stand in for, they only act on a failed upload.
+function whenFailed(action: () => Promise<void>) {
+  return () => {
+    if (uploadResult.value !== 'failed') return;
+    void action();
+  };
+}
+
 async function closeWindow() {
   broadcastState('closed');
   try {
@@ -976,6 +990,9 @@ onMounted(async () => {
 
   unlistenPendingUploaded = await listen('pending-upload://succeeded', handlePendingUploadSucceeded);
   unlistenYield = await listen('recorder://yield', handleYield);
+  unlistenRetryUpload = await listen('recorder://retry-upload', whenFailed(runFinalize));
+  unlistenContinueRecording = await listen('recorder://continue-recording', whenFailed(resumeFailed));
+  unlistenDiscardRecording = await listen('recorder://discard-recording', whenFailed(dismissFailed));
 
   unlistenPause = await listen('tray://pause-recording', handlePause);
   unlistenResume = await listen('tray://resume-recording', handleResume);
@@ -1102,6 +1119,9 @@ onUnmounted(() => {
   unlistenPillVisible?.();
   unlistenPendingUploaded?.();
   unlistenYield?.();
+  unlistenRetryUpload?.();
+  unlistenContinueRecording?.();
+  unlistenDiscardRecording?.();
   unlistenPause?.();
   unlistenResume?.();
   unlistenStop?.();

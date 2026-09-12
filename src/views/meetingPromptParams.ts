@@ -2,11 +2,16 @@
  *  (`start`), or the next calendar meeting started mid-recording (`switch`). */
 export type PromptMode = 'start' | 'switch';
 
+/** What happens if the countdown runs out with no answer, which also decides the
+ *  primary button: `record` (auto-record on) or `dismiss` (auto-record off). */
+export type PromptDefaultAction = 'record' | 'dismiss';
+
 export interface PromptParams {
   seconds: number;
   title: string;
   subtitle: string;
   mode: PromptMode;
+  defaultAction: PromptDefaultAction;
 }
 
 /** Both modes show the same heading; only Rust's countdown and the subtitle
@@ -28,6 +33,7 @@ export function parsePromptParams(search: string): PromptParams {
     title: params.get('title') || DEFAULT_TITLE,
     subtitle: params.get('subtitle') || (mode === 'switch' ? '' : START_DEFAULT_SUBTITLE),
     mode,
+    defaultAction: params.get('default') === 'dismiss' ? 'dismiss' : 'record',
   };
 }
 

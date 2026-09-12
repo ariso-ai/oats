@@ -1,11 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { load } from '@tauri-apps/plugin-store';
+import { emit } from '@tauri-apps/api/event';
 import {
   deriveEnabledFromLegacy,
   type RecordingEnabled,
 } from '../views/recordingSettings';
 import { loadPlatformCapabilities } from './usePlatformCapabilities';
+import { AUTO_RECORD_SYNC_EVENT } from './useAutoRecord';
 import {
   requestMicrophonePermission,
   checkMicrophonePermission,
@@ -60,9 +62,12 @@ export async function loadRecordingEnabled(): Promise<RecordingEnabled> {
   return persisted;
 }
 
+/** Persist the mic flag, then sync the native mic monitor: meeting detection
+ *  (the "Meeting started" prompt) only runs while the microphone is enabled. */
 export async function setMicEnabled(enabled: boolean): Promise<void> {
   const store = await load(SETTINGS_PATH, { autoSave: true });
   await store.set(MIC_KEY, enabled);
+  await emit(AUTO_RECORD_SYNC_EVENT);
 }
 
 export async function setSystemAudioEnabled(enabled: boolean): Promise<void> {

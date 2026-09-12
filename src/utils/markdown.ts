@@ -38,6 +38,17 @@ function renderInline(text: string): string {
   return out;
 }
 
+// Obsidian Tasks emoji signifiers (created, start, scheduled, due, done,
+// cancelled, the five priorities, recurrence, on-completion, id, dependsOn).
+// oats stamps `➕ <date>` on generated action items; in-app that metadata is
+// noise, so a task line is shown from its start up to the first signifier.
+// Mirrors TASK_SIGNIFIERS in src-tauri/src/vault.rs — keep the two in sync.
+const TASK_METADATA = /\s*[➕🛫⏳📅✅❌🔺⏫🔼🔽⏬🔁🏁🆔⛔].*$/u;
+
+function stripTaskMetadata(text: string): string {
+  return text.replace(TASK_METADATA, '');
+}
+
 // Strip a leading YAML front-matter block (`---` … `---`) if the string opens
 // with one. Local recordings persist note/transcript markdown with metadata
 // front-matter (title/date/duration/participants) that's useful in the exported
@@ -50,8 +61,15 @@ export function stripFrontmatter(src: string): string {
   return match ? normalized.slice(match[0].length).replace(/^\n+/, '') : src;
 }
 
+export interface RenderMarkdownOptions {
+  /** Render `[ ]`/`[x]` task checkboxes enabled, each tagged with
+   *  `data-task-line` — its 0-based line index in `src` after CRLF
+   *  normalization — so a click can be written back to the source note. */
+  interactiveTasks?: boolean;
+}
+
 /** Render a Markdown string to a sanitized HTML string. */
-export function renderMarkdown(src: string): string {
+export function renderMarkdown(src: string, options: RenderMarkdownOptions = {}): string {
   if (!src) return '';
   const lines = escapeHtml(src.replace(/\r\n/g, '\n')).split('\n');
   const html: string[] = [];
@@ -61,6 +79,11 @@ export function renderMarkdown(src: string): string {
   let listType: 'ul' | 'ol' | null = null;
   let para: string[] = [];
   let quote: string[] = [];
+  // Fenced-code-block state, tracked only to gate interactive task controls:
+  // Obsidian Tasks (and the vault writer's `set_task_done`) never treat a
+  // fenced line as a task, so a control must not be made clickable there
+  // either. Mirrors advance_fence in src-tauri/src/vault.rs.
+  let fence: '`' | '~' | null = null;
 
   const flushList = () => {
     if (listType) {
@@ -86,8 +109,15 @@ export function renderMarkdown(src: string): string {
     flushQuote();
   };
 
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     const line = raw.trimEnd();
+
+    const fenceMarker = line.trimStart().match(/^(`{3,}|~{3,})/);
+    if (fenceMarker) {
+      const delim = fenceMarker[1][0] as '`' | '~';
+      if (fence === null) fence = delim;
+      else if (fence === delim) fence = null;
+    }
 
     if (!line.trim()) {
       flushAll();
@@ -122,15 +152,20 @@ export function renderMarkdown(src: string): string {
         html.push('<ul>');
         listType = 'ul';
       }
-      // GFM task list: `[ ]`/`[]` → unchecked, `[x]`/`[X]` → checked. Both are
-      // rendered as disabled checkboxes (display only, not interactive).
+      // GFM task list: `[ ]`/`[]` → unchecked, `[x]`/`[X]` → checked. Rendered
+      // as disabled checkboxes unless `interactiveTasks` is set; even then `[]`
+      // stays read-only, as Obsidian Tasks (and the vault writer) only know `[ ]`.
       const task = ul[1].match(/^\[([ xX]?)\](?:\s+(.*))?$/);
       if (task) {
         const checked = task[1] === 'x' || task[1] === 'X';
+        const control =
+          options.interactiveTasks && task[1] !== '' && !fence
+            ? ` data-task-line="${index}"`
+            : ' disabled';
         html.push(
-          `<li class="task-list-item"><input type="checkbox" disabled${
+          `<li class="task-list-item${checked ? ' task-done' : ''}"><input type="checkbox"${control}${
             checked ? ' checked' : ''
-          } />${renderInline(task[2] ?? '')}</li>`,
+          } />${renderInline(stripTaskMetadata(task[2] ?? ''))}</li>`,
         );
       } else {
         html.push(`<li>${renderInline(ul[1])}</li>`);

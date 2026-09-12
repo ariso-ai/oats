@@ -29,6 +29,111 @@
           <line x1="6.75" y1="3" x2="6.75" y2="15" stroke="currentColor" stroke-width="1.5" />
         </svg>
       </button>
+      <!-- Which backend oats is on, named as in Settings, next to the sidebar
+           toggle. Clicking it opens a menu to switch backend or open Settings;
+           picking ariso.ai while signed out shows the sign-in box instead. -->
+      <div
+        v-if="accountPill"
+        ref="accountPillWrap"
+        class="account-pill-wrap"
+        @keydown.escape="closeBackendPopover({ restoreFocus: true })"
+      >
+        <button
+          ref="backendPillButton"
+          type="button"
+          class="account-pill"
+          :title="backendPillTitle"
+          aria-haspopup="menu"
+          :aria-expanded="backendPopover !== null"
+          @click="toggleBackendMenu"
+          @keydown.down.prevent="openBackendMenu"
+        >
+          <span class="account-pill-label">{{ accountPill === 'local' ? 'Local' : 'ariso.ai' }}</span>
+          <svg v-if="accountPill === 'local'" class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+          <svg v-else class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+        </button>
+        <div v-if="backendPopover" class="backend-popover">
+          <div
+            v-if="backendPopover === 'menu'"
+            ref="backendMenu"
+            class="backend-menu"
+            role="menu"
+            aria-label="Backend"
+            @keydown="onBackendMenuKeydown"
+          >
+            <button
+              type="button"
+              role="menuitemradio"
+              class="backend-menu-item"
+              :class="{
+                'backend-menu-item--active': activeBackend?.id === 'ariso',
+                'backend-menu-item--signed-out': !accountSignedIn,
+              }"
+              :aria-checked="activeBackend?.id === 'ariso'"
+              :aria-label="accountSignedIn ? undefined : 'ariso.ai, not signed in'"
+              :title="accountSignedIn ? undefined : 'Not signed in — click to sign in'"
+              :disabled="recording"
+              tabindex="-1"
+              @click="chooseAriso"
+            >
+              <span>ariso.ai</span>
+              <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              role="menuitemradio"
+              class="backend-menu-item"
+              :class="{ 'backend-menu-item--active': activeBackend?.id === 'local' }"
+              :aria-checked="activeBackend?.id === 'local'"
+              :disabled="recording"
+              tabindex="-1"
+              @click="chooseLocal"
+            >
+              <span>Local</span>
+              <svg class="account-pill-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+            </button>
+            <p v-if="recording" class="backend-menu-hint">Backend can't be changed while recording.</p>
+            <div class="backend-menu-sep" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              class="backend-menu-item"
+              tabindex="-1"
+              @click="chooseSettings"
+            >
+              <span>Settings</span>
+              <Cog6ToothIcon class="account-pill-icon backend-menu-gear" aria-hidden="true" />
+            </button>
+          </div>
+          <div
+            v-else
+            class="sign-in-popover"
+            role="dialog"
+            aria-labelledby="sign-in-popover-title"
+          >
+            <p id="sign-in-popover-title" class="sign-in-popover-title">Sign in to ariso.ai</p>
+            <SignInButtons
+              ref="signInButtons"
+              :signing-in-with="accountSigningInWith"
+              :error-message="accountErrorMessage"
+              @sign-in="account.signIn"
+              @cancel="account.cancelSignIn"
+            />
+          </div>
+        </div>
+      </div>
       <!-- While a recording runs off-screen (its meeting isn't shown), the
            Start button becomes a "Recording" indicator that re-docks the strip
            when clicked. A recording attached to no meeting has nowhere to
@@ -133,9 +238,8 @@
 
       <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
 
-      <!-- Todo: the action items assigned to the signed-in user across the last
-           two weeks of meetings, grouped by day. Selecting a row opens the
-           meeting it came from in the detail pane. -->
+      <!-- Todo: the user's open action items, grouped by day. Selecting a row
+           opens the meeting it came from in the detail pane. -->
       <template v-if="activeView === 'todo'">
         <p v-if="todoLoading" class="hint">Loading…</p>
         <p v-else-if="todoError" class="hint">{{ todoError }}</p>
@@ -235,11 +339,15 @@
           @close="clearSelection"
           @title-updated="onTitleUpdated"
           @content-ready="onContentReady"
+          @tasks-changed="onTasksChanged"
+          @deleted="onNoteDeleted"
         />
         <UpNextCard
           v-else
           :meetings="displayMeetings"
           :now="now"
+          :org-name="orgName"
+          :org-logo="orgLogo"
           @select="(m) => selectMeeting(m, { userSelected: true })"
           @start="startRecordingFor"
           @record="startRecording"
@@ -294,7 +402,6 @@ import {
   type MeetingSection,
 } from '../composables/groupMeetingsByDate';
 import {
-  recentDayKeys,
   groupActionItemsByDay,
   type ActionItemEntry,
   type ActionItemRow,
@@ -317,6 +424,11 @@ import {
   recordingBlockedPayload,
   recordingStartErrorMessage,
 } from '../composables/recordingStartError';
+import { useAccountState } from '../composables/useAccountState';
+import { useOrganizationInfo } from '../composables/useOrganizationInfo';
+import { AUTH_CHANGED_EVENT, local, setBackendSetting } from '../tauri';
+import { Cog6ToothIcon } from '@heroicons/vue/24/outline';
+import SignInButtons from './SignInButtons.vue';
 import oatsLogo from '../assets/oats-dark.svg';
 
 const meetings = ref<MeetingListItem[]>([]);
@@ -399,9 +511,6 @@ const dayNum = computed(() => now.value.getDate());
 const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'long' }).toUpperCase());
 
 const activeView = ref<'today' | 'meetings' | 'todo'>('meetings');
-// The action-items endpoint serves a single day, so the Todo tab asks for the
-// last two weeks one day at a time and groups what comes back.
-const TODO_DAY_COUNT = 14;
 const todoEntries = ref<ActionItemEntry[]>([]);
 const todoLoading = ref(false);
 const todoError = ref<string | null>(null);
@@ -477,55 +586,63 @@ async function openTodoView(): Promise<void> {
   await loadActionItems();
 }
 
-// Bump per call so a slow fan-out can't overwrite a newer one.
+// Bump per call so a slow load can't overwrite a newer one.
 let loadActionItemsRequest = 0;
 
-// One request per day shown. A day that fails is skipped rather than blanking
-// the tab — only a week that returns nothing at all reads as an error.
-async function loadActionItems(): Promise<void> {
-  if (todoLoading.value) return;
+// The backend owns its own window (Ariso: the last two weeks; local: the whole
+// vault). It rejects only when nothing at all could be loaded. A `silent`
+// refresh keeps the current rows on screen instead of swapping in "Loading…",
+// supersedes any load in flight (which may predate the change being picked
+// up), and keeps the rows it has if the refresh fails.
+async function loadActionItems({ silent = false } = {}): Promise<void> {
+  if (todoLoading.value && !silent) return;
   const backend = activeBackend.value ?? (await getActiveBackend());
   activeBackend.value = backend;
   if (!backend.supportsActionItems) return;
   const requestId = ++loadActionItemsRequest;
-  todoLoading.value = true;
-  todoError.value = null;
+  if (!silent) {
+    todoLoading.value = true;
+    todoError.value = null;
+  }
   try {
-    const results = await Promise.allSettled(
-      recentDayKeys(now.value, TODO_DAY_COUNT).map((day) => backend.listActionItems(day))
-    );
+    const loaded = await backend.listActionItems();
     if (requestId !== loadActionItemsRequest) return;
-    const loaded: ActionItemEntry[] = [];
-    let failures = 0;
-    for (const result of results) {
-      if (result.status === 'fulfilled') loaded.push(...result.value);
-      else {
-        failures++;
-        console.error('Failed to load a day of action items', result.reason);
-      }
-    }
-    if (failures === results.length) {
+    todoEntries.value = loaded;
+    todoError.value = null;
+  } catch (e) {
+    if (requestId !== loadActionItemsRequest) return;
+    console.error('Failed to load action items', e);
+    if (!silent) {
       todoEntries.value = [];
       todoError.value = 'Could not load action items.';
-    } else {
-      todoEntries.value = loaded;
     }
   } finally {
     if (requestId === loadActionItemsRequest) todoLoading.value = false;
   }
 }
 
+// A task ticked in the open meeting's AI notes closes its todo; drop it from
+// the list in place. Outside the Todo tab, opening the tab reloads anyway.
+function onTasksChanged(): void {
+  if (activeView.value === 'todo') void loadActionItems({ silent: true });
+}
+
 // Switching backends swaps the whole corpus: drop the previous backend's action
 // items, and leave the Todo tab when the new backend has none (offline mode),
 // where the tab is disabled and would otherwise stay highlighted over an
-// empty pane.
+// empty pane. A load still in flight belongs to the old backend: invalidate it
+// so it can't land its items here, and so the reload below isn't skipped.
 watch(
   () => activeBackend.value?.id,
   () => {
+    loadActionItemsRequest++;
+    todoLoading.value = false;
     todoEntries.value = [];
     todoError.value = null;
     if (activeView.value === 'todo' && !activeBackend.value?.supportsActionItems) {
       activeView.value = 'meetings';
+    } else if (activeView.value === 'todo') {
+      void loadActionItems();
     }
   }
 );
@@ -533,6 +650,218 @@ watch(
 const emptyListHint = computed(() =>
   activeView.value === 'today' ? 'No meetings today.' : 'No past meetings.'
 );
+
+// Titlebar backend indicator. This window's own account state, kept current by
+// the backend's AUTH_CHANGED_EVENT broadcast. It is only ever refreshed on
+// Ariso: Local mode makes no session or profile request from this window.
+const account = useAccountState();
+const {
+  isSignedIn: accountSignedIn,
+  checked: accountChecked,
+  email: accountEmail,
+  signingInWith: accountSigningInWith,
+  errorMessage: accountErrorMessage,
+} = account;
+type AccountPill = 'local' | 'checking' | 'signed-in' | 'signed-out';
+const accountPill = computed<AccountPill | null>(() => {
+  const id = activeBackend.value?.id;
+  if (id === 'local') return 'local';
+  if (id !== 'ariso') return null; // backend not loaded yet
+  if (!accountChecked.value) return 'checking';
+  return accountSignedIn.value ? 'signed-in' : 'signed-out';
+});
+const backendPillTitle = computed(() => {
+  switch (accountPill.value) {
+    case 'local':
+      return 'Local mode — recordings stay on this device';
+    case 'signed-in':
+      return accountEmail.value ? `ariso.ai — ${accountEmail.value}` : 'ariso.ai';
+    case 'signed-out':
+      return 'ariso.ai — not signed in';
+    default:
+      return 'ariso.ai';
+  }
+});
+
+// The pill's popover holds the backend menu, or the sign-in box once ariso.ai
+// is picked without a session.
+const backendPopover = ref<'menu' | 'sign-in' | null>(null);
+const accountPillWrap = ref<HTMLElement | null>(null);
+const backendPillButton = ref<HTMLButtonElement | null>(null);
+const backendMenu = ref<HTMLElement | null>(null);
+const signInButtons = ref<{ focus: () => void } | null>(null);
+let switchingBackend = false;
+
+function backendMenuItems(): HTMLElement[] {
+  return [
+    ...(backendMenu.value?.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)') ?? []),
+  ];
+}
+
+function focusBackendMenuItem(idx: number): void {
+  const items = backendMenuItems();
+  if (items.length === 0) return;
+  items[((idx % items.length) + items.length) % items.length].focus();
+}
+
+function onBackendMenuKeydown(event: KeyboardEvent): void {
+  const items = backendMenuItems();
+  const current = items.indexOf(document.activeElement as HTMLElement);
+  const moves: Record<string, number> = {
+    ArrowDown: current + 1,
+    ArrowUp: current - 1,
+    Home: 0,
+    End: items.length - 1,
+  };
+  if (!(event.key in moves)) return;
+  event.preventDefault();
+  focusBackendMenuItem(moves[event.key]);
+}
+
+async function openBackendMenu(): Promise<void> {
+  backendPopover.value = 'menu';
+  await nextTick();
+  // Land on the active backend, as Settings' backend picker does.
+  const items = backendMenuItems();
+  (items.find((el) => el.getAttribute('aria-checked') === 'true') ?? items[0])?.focus();
+}
+
+function toggleBackendMenu(): void {
+  if (backendPopover.value) closeBackendPopover();
+  else void openBackendMenu();
+}
+
+function closeBackendPopover({ restoreFocus = false } = {}): void {
+  if (!backendPopover.value) return;
+  backendPopover.value = null;
+  if (restoreFocus) backendPillButton.value?.focus();
+}
+
+async function showSignInBox(): Promise<void> {
+  backendPopover.value = 'sign-in';
+  await nextTick();
+  signInButtons.value?.focus();
+}
+
+// Tags this window's own backend-changed broadcasts, which it has already
+// applied by the time they come back to it.
+const backendSwitchSource = `library-${Math.random().toString(36).slice(2)}`;
+
+// The switch Settings' backend picker makes: persist it, then tell every
+// window and the native orchestrators (tray next-meeting, notifications).
+// Refused while a recording owns the recorder, as in Settings.
+async function switchBackend(next: 'ariso' | 'local'): Promise<boolean> {
+  if (recording.value || switchingBackend) return false;
+  switchingBackend = true;
+  try {
+    await setBackendSetting(next);
+  } catch (e) {
+    console.error('Failed to switch backend', e);
+    return false;
+  } finally {
+    switchingBackend = false;
+  }
+  void emit(BACKEND_CHANGED_EVENT, { source: backendSwitchSource }).catch((err) => {
+    console.warn('Failed to broadcast backend change', err);
+  });
+  void emitNotificationsSync().catch((err) => {
+    console.warn('Failed to broadcast sync after backend change', err);
+  });
+  await onBackendChanged();
+  return true;
+}
+
+// ariso.ai: switch to it if needed, then sign in if there's no session.
+async function chooseAriso(): Promise<void> {
+  if (activeBackend.value?.id !== 'ariso' && !(await switchBackend('ariso'))) return;
+  if (!accountChecked.value) await account.refresh();
+  if (activeBackend.value?.id !== 'ariso') return; // switched away meanwhile
+  if (accountSignedIn.value) closeBackendPopover({ restoreFocus: true });
+  else await showSignInBox();
+}
+
+async function chooseLocal(): Promise<void> {
+  closeBackendPopover({ restoreFocus: true });
+  if (activeBackend.value?.id === 'local' || !(await switchBackend('local'))) return;
+  // Settings owns the on-device models: their first-time download confirmation
+  // and progress. Its backend-changed listener starts that flow; bring it up
+  // when there's something to see.
+  try {
+    const status = await local.modelStatus();
+    if (status.state !== 'ready' || status.llmReady !== true) await openSettings();
+  } catch (e) {
+    console.warn('Failed to read on-device model status', e);
+    await openSettings();
+  }
+}
+
+async function chooseSettings(): Promise<void> {
+  closeBackendPopover();
+  await openSettings();
+}
+
+// A click elsewhere dismisses the popover, except while a browser flow is
+// pending: its Cancel button lives there.
+function onDocumentMousedown(event: MouseEvent): void {
+  if (!backendPopover.value || accountSigningInWith.value) return;
+  if (accountPillWrap.value?.contains(event.target as Node)) return;
+  closeBackendPopover();
+}
+
+// However the session arrived (the sign-in box, Settings, Onboarding, a tray
+// row), the sign-in box has nothing left to offer.
+watch(accountSignedIn, (signedIn) => {
+  if (signedIn && backendPopover.value === 'sign-in') closeBackendPopover();
+});
+
+// Covers both the first load on mount and every backend switch, since each
+// re-reads the active backend. On Local, forget the account instead of asking,
+// so a later switch back doesn't flash the stale state.
+watch(
+  () => activeBackend.value?.id,
+  (id) => {
+    if (id === 'ariso') {
+      void account.refresh();
+    } else if (id === 'local') {
+      if (backendPopover.value === 'sign-in') closeBackendPopover();
+      if (accountSigningInWith.value) void account.cancelSignIn();
+      account.reset();
+    }
+  }
+);
+
+// The signed-in user's Ariso org brands the Up Next greeting. Fetched only on
+// Ariso with a session — Local mode never asks — and refetched when the account
+// changes (the email tells one user from the next).
+const organization = useOrganizationInfo();
+const { name: orgName, logo: orgLogo } = organization;
+watch(
+  () => [activeBackend.value?.id, accountSignedIn.value, accountEmail.value] as const,
+  ([id, signedIn]) => {
+    organization.reset();
+    if (id === 'ariso' && signedIn) void organization.refresh();
+  }
+);
+
+// Switching backends changes the whole meeting corpus. Close any meeting held
+// open from the previous backend — returning the detail to the neutral Up Next
+// state — and reload against the new backend.
+async function onBackendChanged(): Promise<void> {
+  selectedItem.value = null;
+  userSelectedMeetingId.value = null;
+  pinnedMeetings.value = new Map();
+  // The tracked ids are Ariso's; keeping them alive would keep polling its
+  // API from offline mode and re-show "Processing…" on a later switch back.
+  processingMeetings.reset();
+  await loadMeetings();
+}
+
+// The organization follows the account watcher above, which resets it on any
+// change of account. Resetting here too would blank it for good whenever the
+// session changes without the account changing.
+function onAuthChanged(): void {
+  if (activeBackend.value?.id === 'ariso') void account.refresh(true);
+}
 
 // Only the next upcoming meeting (soonest, or the one in progress) carries a
 // relative-time chip; it's the first item of the Today view's UPCOMING section.
@@ -579,11 +908,17 @@ function rowProcessingLabel(m: MeetingListItem): string | null {
     // a lie.
     if (m.status === 'recording' || m.status === 'transcribing') return PROCESSING_LABEL;
     // "Has a transcript but no note" is an *inference* that notes are still
-    // generating, and it can't tell a running pipeline from one that never
-    // finished (telling notes-pending from notes-failed needs the per-recording
-    // status view, which the list payload doesn't carry). Generation runs for
-    // minutes, so bound it: an old recording with no note is stuck, not busy.
-    if (m.status === 'done' && m.files?.hasTranscript && !m.files?.hasNote) {
+    // generating. It holds only while the notes are still pending: a recording
+    // that settled without a note (nothing was said, or generation failed) is
+    // done, and its detail panel names why. Even pending can't tell a running
+    // pipeline from one that died mid-generation, so bound it: generation runs
+    // for minutes, and an old recording with no note is stuck, not busy.
+    if (
+      m.status === 'done' &&
+      m.files?.hasTranscript &&
+      !m.files.hasNote &&
+      (m.files.notesStatus ?? 'pending') === 'pending'
+    ) {
       return finishedRecently(m) ? PROCESSING_LABEL : null;
     }
     return null;
@@ -680,6 +1015,25 @@ function onTitleUpdated(payload: { id: string; title: string }): void {
   }
 }
 
+// The open local note was deleted from the detail panel. Drop the row and the
+// selection right away so the list reflects it without waiting on a round trip,
+// then reload from disk so the removal survives navigation and relaunch.
+//
+// Deliberately does NOT go through `clearSelection()`: that flushes the notes
+// editor via `saveNotesNow()`, and the recording's folder no longer exists.
+function onNoteDeleted(payload: { id: string }): void {
+  meetings.value = meetings.value.filter((m) => m.id !== payload.id);
+  pinnedMeetings.value.delete(payload.id);
+  if (selectedItem.value?.id === payload.id) {
+    // Invalidate any in-flight selection so a racing `selectMeeting` can't
+    // re-seat the deleted note after this clears it.
+    selectionReqId++;
+    selectedItem.value = null;
+    userSelectedMeetingId.value = null;
+  }
+  void loadMeetings(false, true);
+}
+
 // The open local recording finished generating. Its row still shows the stale
 // "Processing…" sub-line the list payload described, so pull fresh list data —
 // but only when the row actually claims to be processing, so simply opening an
@@ -741,9 +1095,12 @@ let loadMeetingsRequest = 0;
 // lands on the first visible grouped row, not the backend's raw list order.
 // Refresh-driven reloads (window focus/move, upload completion) pass false so
 // they never yank the user off the Up Next greeting/card view back into detail.
-async function loadMeetings(autoSelectFirst = false): Promise<void> {
+// `silent` re-syncs the list without the full-list "Loading…" placeholder, for
+// callers that have already updated the UI optimistically and only need disk to
+// confirm — blanking the list there would undo the immediate feedback.
+async function loadMeetings(autoSelectFirst = false, silent = false): Promise<void> {
   const requestId = ++loadMeetingsRequest;
-  loading.value = true;
+  if (!silent) loading.value = true;
   error.value = null;
   try {
     const backend = await getActiveBackend();
@@ -784,7 +1141,7 @@ async function loadMeetings(autoSelectFirst = false): Promise<void> {
     console.error('Failed to list meetings', e);
     error.value = 'Could not load meetings.';
   } finally {
-    if (requestId === loadMeetingsRequest) loading.value = false;
+    if (requestId === loadMeetingsRequest && !silent) loading.value = false;
   }
 }
 
@@ -1185,6 +1542,7 @@ let unlistenVaultChanged: UnlistenFn | null = null;
 let unlistenBackendChanged: UnlistenFn | null = null;
 let unlistenPrepOpen: UnlistenFn | null = null;
 let unlistenWindowResized: UnlistenFn | null = null;
+let unlistenAuthChanged: UnlistenFn | null = null;
 
 // Recover the attached meeting for a recording that started before this
 // library window existed. The `recording://started` event is one-shot, so a
@@ -1241,17 +1599,11 @@ onMounted(() => {
   }).then((un) => {
     unlistenVaultChanged = un;
   });
-  // Switching backends (in Settings) changes the whole meeting corpus. Close
-  // any meeting held open from the previous backend — returning the detail to
-  // the neutral Up Next state — and reload against the new backend.
-  void listen(BACKEND_CHANGED_EVENT, () => {
-    selectedItem.value = null;
-    userSelectedMeetingId.value = null;
-    pinnedMeetings.value = new Map();
-    // The tracked ids are Ariso's; keeping them alive would keep polling its
-    // API from offline mode and re-show "Processing…" on a later switch back.
-    processingMeetings.reset();
-    void loadMeetings();
+  // A backend switch made in Settings (or another window).
+  void listen(BACKEND_CHANGED_EVENT, (event) => {
+    const source = (event.payload as { source?: unknown } | null)?.source;
+    if (source === backendSwitchSource) return;
+    void onBackendChanged();
   }).then((un) => {
     unlistenBackendChanged = un;
   });
@@ -1261,17 +1613,23 @@ onMounted(() => {
   }).then((un) => {
     unlistenPrepOpen = un;
   });
+  // A sign-in or sign-out anywhere, or a rejected session cleared natively.
+  void listen(AUTH_CHANGED_EVENT, onAuthChanged).then((un) => {
+    unlistenAuthChanged = un;
+  });
   clockTimer = window.setInterval(() => {
     now.value = new Date();
   }, 30_000);
   window.addEventListener('focus', onWindowFocus);
   window.addEventListener('keydown', onGlobalKeydown);
+  document.addEventListener('mousedown', onDocumentMousedown);
 });
 
 onUnmounted(() => {
   if (clockTimer !== undefined) clearInterval(clockTimer);
   window.removeEventListener('focus', onWindowFocus);
   window.removeEventListener('keydown', onGlobalKeydown);
+  document.removeEventListener('mousedown', onDocumentMousedown);
   unlistenRecordingStarted?.();
   unlistenRecordingState?.();
   unlistenRecordingStartFailed?.();
@@ -1280,6 +1638,7 @@ onUnmounted(() => {
   unlistenBackendChanged?.();
   unlistenPrepOpen?.();
   unlistenWindowResized?.();
+  unlistenAuthChanged?.();
 });
 </script>
 
@@ -1434,6 +1793,9 @@ onUnmounted(() => {
 }
 
 /* Sidebar */
+/* The top padding matches the detail pane's, so the search box lines up with
+   the detail card. The search box, meeting rows and nav pill all span the
+   sidebar's content width, 18px in from each side. */
 .sidebar {
   width: 300px;
   flex-shrink: 0;
@@ -1506,6 +1868,138 @@ onUnmounted(() => {
    to re-dock on), so it must not invite a click it can't honor. */
 .add-btn--static { cursor: default; }
 .add-btn--static:hover { box-shadow: 1px 1px 0 #e7e5e2; transform: none; }
+/* Backend indicator: a compact pill beside the sidebar toggle, matching the
+   Start recording pill at the other end of the titlebar. Name first, then the
+   backend's icon, as in Settings' backend picker. */
+.account-pill-wrap {
+  position: relative;
+  display: flex;
+  margin-left: 6px;
+}
+.titlebar--windows .account-pill-wrap { margin-left: 4px; }
+.account-pill {
+  max-width: 160px;
+  height: 22px;
+  padding: 0 7px 0 9px;
+  gap: 5px;
+  border-radius: 11px;
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  box-shadow: 1px 1px 0 #e7e5e2;
+  color: #1a1a1a;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.titlebar--windows .account-pill { height: 26px; border-radius: 13px; }
+.account-pill:hover { box-shadow: 0 0 0 #e7e5e2; transform: translate(1px, 1px); }
+.account-pill:focus-visible {
+  outline: 2px solid #3b6fc4;
+  outline-offset: 2px;
+}
+.account-pill-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.backend-menu-gear { stroke-width: 1.5; }
+.account-pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.backend-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+}
+/* Same card and rows as Settings' backend picker. */
+.backend-menu {
+  min-width: 160px;
+  box-sizing: border-box;
+  padding: 4px;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  box-shadow: 2px 2px 0 #e7e5e2;
+}
+.backend-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #1c1c1c;
+  font-family: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.backend-menu-item:hover:not(:disabled) { background: rgba(0, 0, 0, 0.03); }
+.backend-menu-item:focus-visible {
+  background: #f5f5f7;
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
+}
+.backend-menu-item--active,
+.backend-menu-item--active:hover:not(:disabled),
+.backend-menu-item--active:focus-visible {
+  background: #1c1c1c;
+  color: #ffffff;
+}
+.backend-menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
+/* ariso.ai without a session: grayed, but still clickable, since it leads to
+   the sign-in box. Local never checks the session, so it reads as signed out
+   there too. When it's the active backend, a light fill still marks it. */
+.backend-menu-item--signed-out { color: #8a8a86; }
+.backend-menu-item--signed-out.backend-menu-item--active,
+.backend-menu-item--signed-out.backend-menu-item--active:hover:not(:disabled),
+.backend-menu-item--signed-out.backend-menu-item--active:focus-visible {
+  background: #efeeeb;
+  color: #8a8a86;
+}
+.backend-menu-hint {
+  margin: 4px 10px;
+  font-size: 11px;
+  color: #6f6f6f;
+  white-space: nowrap;
+}
+.backend-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: #e5e6e3;
+}
+.sign-in-popover {
+  width: 260px;
+  box-sizing: border-box;
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid #e5e6e3;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.sign-in-popover-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c1c1c;
+}
 /* Mini live waveform: four bars pulsing on a staggered cycle. */
 .rec-wave {
   display: inline-flex;
@@ -1532,9 +2026,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 9px;
-  width: calc(100% - 12px);
+  width: 100%;
   min-height: 42px;
-  margin: 0 6px 10px;
+  margin: 0 0 10px;
   padding: 0 12px;
   border: 1px solid #d7d6d2;
   border-radius: 999px;
@@ -1566,7 +2060,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.hint { font-size: 14px; color: #6f6f6f; padding: 0 6px; }
+.hint { flex: 1; font-size: 14px; color: #6f6f6f; padding: 0 6px; }
 
 /* Meeting list with top/bottom fade so the first/last rows dissolve into the
    backdrop on scroll, matching the design. */
@@ -1577,7 +2071,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 6px;
+  /* No left padding: rows start flush with the search box and nav pill. */
+  padding: 6px 6px 6px 0;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
 }
@@ -1690,6 +2185,10 @@ onUnmounted(() => {
   gap: 8px;
   padding-top: 24px;
 }
+.nav-pill {
+  flex: 1;
+  min-width: 0;
+}
 .nav-pill,
 .nav-circle {
   display: flex;
@@ -1702,10 +2201,13 @@ onUnmounted(() => {
   padding: 5px;
 }
 .nav-tab {
+  /* Share the pill's width, so the tabs fill it edge to edge. */
+  flex: 1 1 auto;
+  justify-content: center;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 6px;
   border: none;
   border-radius: 999px;
   background: transparent;
