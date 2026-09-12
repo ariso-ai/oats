@@ -17,8 +17,8 @@ final class PillPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         isOpaque = false
         backgroundColor = .clear
-        // The shadow follows the capsule's alpha; re-derived after each resize.
-        hasShadow = true
+        // The capsule draws its own shadow, so it animates with the capsule.
+        hasShadow = false
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = true
         isReleasedWhenClosed = false
@@ -32,10 +32,13 @@ final class PillPanel: NSPanel {
 }
 
 /// Hosts the SwiftUI pill. Takes the first click (the panel is never key) and
-/// reports hover with an always-active tracking area, since oats is rarely
-/// the frontmost app while the pill is up.
+/// reports the pointer with an always-active tracking area, since oats is
+/// rarely the frontmost app while the pill is up. The area covers the whole
+/// (fixed-size) panel; the model decides whether the pointer is over the
+/// capsule itself.
 final class PillHostingView: NSHostingView<PillView> {
-    var onHover: ((Bool) -> Void)?
+    /// Pointer position in panel coordinates, or nil once it has left.
+    var onPointer: ((NSPoint?) -> Void)?
     private var hoverArea: NSTrackingArea?
 
     required init(rootView: PillView) {
@@ -56,7 +59,7 @@ final class PillHostingView: NSHostingView<PillView> {
         if let hoverArea { removeTrackingArea(hoverArea) }
         let area = NSTrackingArea(
             rect: .zero,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -66,11 +69,16 @@ final class PillHostingView: NSHostingView<PillView> {
 
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
-        if event.trackingArea === hoverArea { onHover?(true) }
+        if event.trackingArea === hoverArea { onPointer?(event.locationInWindow) }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        onPointer?(event.locationInWindow)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        if event.trackingArea === hoverArea { onHover?(false) }
+        if event.trackingArea === hoverArea { onPointer?(nil) }
     }
 }

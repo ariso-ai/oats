@@ -1,7 +1,7 @@
 import AppKit
 
-/// Owns the one pill panel: applies state from Rust, keeps the panel frame in
-/// step with the capsule's height, and turns clicks and drags into actions.
+/// Owns the one pill panel: applies state from Rust, places the panel, and
+/// turns pointer movement, clicks and drags into hover and actions.
 @MainActor
 final class PillController {
     static var shared: PillController?
@@ -11,8 +11,6 @@ final class PillController {
     private let hosting: PillHostingView
     private let sendAction: (PillAction) -> Void
     private var drag: ClickDragTracker?
-    /// The height the panel is at or animating toward.
-    private var targetHeight: CGFloat = 0
 
     init(send: @escaping (PillAction) -> Void) {
         sendAction = send
@@ -22,14 +20,16 @@ final class PillController {
             onBodyDrag: { [weak self] in self?.bodyDrag($0) },
             send: { [weak self] in self?.sendAction($0) }
         )
-        hosting.onHover = { [weak self] in self?.hover($0) }
+        hosting.onPointer = { [weak self] point in
+            guard let self else { return }
+            if let point { self.model.pointerMoved(to: point) } else { self.model.pointerExited() }
+        }
         panel.contentView = hosting
-        syncFrame(animated: false)
+        panel.setContentSize(PillGeometry.panelSize)
     }
 
     func update(phase: PillPhase, isPaused: Bool, durationSeconds: UInt32, bars: [Double]) {
         model.apply(phase: phase, isPaused: isPaused, durationSeconds: durationSeconds, bars: bars)
-        syncFrame(animated: false)
     }
 
     /// Showing always re-docks to the primary screen's right edge, like the
@@ -37,28 +37,20 @@ final class PillController {
     func setVisible(_ visible: Bool) {
         if visible {
             guard !panel.isVisible else { return }
-            let screen = NSScreen.screens.first ?? NSScreen.main
-            if let screen {
-                panel.setFrame(PillGeometry.dockFrame(in: screen.visibleFrame, height: model.height), display: false)
+            if let screen = NSScreen.screens.first ?? NSScreen.main {
+                panel.setFrameOrigin(PillGeometry.dockOrigin(in: screen.visibleFrame))
             }
             panel.orderFrontRegardless()
-            panel.invalidateShadow()
         } else {
             drag = nil
-            model.setHovering(false)
+            model.pointerExited()
             panel.orderOut(nil)
-            syncFrame(animated: false)
         }
     }
 
     func destroy() {
         panel.orderOut(nil)
         panel.close()
-    }
-
-    private func hover(_ hovering: Bool) {
-        model.setHovering(hovering)
-        syncFrame(animated: true)
     }
 
     private func bodyDrag(_ event: PillView.BodyDragEvent) {
@@ -75,31 +67,13 @@ final class PillController {
         case .ended:
             let wasClick = drag?.isClick ?? false
             drag = nil
-            if wasClick { sendAction(.openMeetings) }
-        }
-    }
-
-    /// The panel hugs the capsule, so transparent space never blocks clicks
-    /// meant for the app underneath. Compared against the last target rather
-    /// than the live frame: state updates arrive many times a second and must
-    /// not cut a running hover animation short.
-    private func syncFrame(animated: Bool) {
-        let height = model.height
-        guard height != targetHeight else { return }
-        targetHeight = height
-        let visible = (panel.screen ?? NSScreen.screens.first)?.visibleFrame ?? .infinite
-        let target = PillGeometry.resized(panel.frame, toHeight: height, within: visible)
-        guard animated, panel.isVisible else {
-            panel.setFrame(target, display: true)
-            panel.invalidateShadow()
-            return
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = PillGeometry.animation
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().setFrame(target, display: true)
-        } completionHandler: { [weak self] in
-            MainActor.assumeIsolated { self?.panel.invalidateShadow() }
+            if wasClick {
+                sendAction(.openMeetings)
+            } else if let visible = (panel.screen ?? NSScreen.screens.first)?.visibleFrame {
+                // Keep room to expand: a pill parked under the menu bar would
+                // otherwise grow its controls off-screen.
+                panel.setFrameOrigin(PillGeometry.clampedOrigin(panel.frame.origin, within: visible))
+            }
         }
     }
 }
