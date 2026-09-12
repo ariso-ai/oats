@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.24.0](https://github.com/ariso-ai/oats/compare/v0.23.0...v0.24.0) (2026-09-12)
+
+
+### Features
+
+* **auth:** hand back to oats from the sign-in callback page ([51142b7](https://github.com/ariso-ai/oats/commit/51142b70e879450b816ca0556335cbff47a9bcae))
+* customizes the greeting UX ([d1600e6](https://github.com/ariso-ai/oats/commit/d1600e667e1232fad1ab9849afd87754f620bd7d))
+* **library:** brand Up Next with the Ariso organization ([3061c9c](https://github.com/ariso-ai/oats/commit/3061c9c41f4c4e2878d044d789bcbf15bf989fa6))
+* **library:** discard an individual pending upload ([96bc864](https://github.com/ariso-ai/oats/commit/96bc864e4991ab5319bde1d78cba990d53b570ac))
+* **library:** discard an individual pending upload ([d74ebf3](https://github.com/ariso-ai/oats/commit/d74ebf3b534014b02d4621c23e14b2679c946d89))
+* make an in-progress impromptu recording discoverable and renamable ([ba4a4f7](https://github.com/ariso-ai/oats/commit/ba4a4f779a249b77d3c1435c05fa7e51bca287a1))
+* **recorder-pill:** draw the floating pill natively on macOS ([e8d5a85](https://github.com/ariso-ai/oats/commit/e8d5a856c9ad75ee2342c4727a7d0ac3ae721e06))
+* **recorder-pill:** draw the floating pill natively on macOS ([#390](https://github.com/ariso-ai/oats/issues/390)) ([de5fb98](https://github.com/ariso-ai/oats/commit/de5fb987af103ad0658b7bab8787d5ceb18b42c8))
+* **recorder-pill:** draw the floating pill natively on Windows ([0563012](https://github.com/ariso-ai/oats/commit/05630123f48e4935ff29e89cfdef678021da11ab))
+* **recorder-pill:** draw the floating pill natively on Windows ([#390](https://github.com/ariso-ai/oats/issues/390)) ([fa30ea6](https://github.com/ariso-ai/oats/commit/fa30ea69060314f3592b71234c27b39a09816214))
+* **recorder-pill:** platform-free pill layout for the Windows pill ([07b72ab](https://github.com/ariso-ai/oats/commit/07b72ab6e6761eead31cd8b3f5df40f17d22f262))
+
+
+### Bug Fixes
+
+* close the recording-identity and tray-menu races structurally ([f4ad182](https://github.com/ariso-ai/oats/commit/f4ad18238b95a63d766e08b046103666d5b5d8ae))
+* keep note delete disabled while a recording is still capturing ([fbe1ce1](https://github.com/ariso-ai/oats/commit/fbe1ce12b0f7652045ca9207f5d9f0c42233b833))
+* **library:** keep org branding across same-account auth changes ([552e1d1](https://github.com/ariso-ai/oats/commit/552e1d133cb321761ac4fab449ef5d9df8bac599))
+* **recorder-pill:** stop the macOS pill flapping on hover ([ad6447f](https://github.com/ariso-ai/oats/commit/ad6447fc8626aa22875520a7240dbfab93e7d6ce))
+* **recorder-pill:** stop the macOS pill flapping on hover ([8d82043](https://github.com/ariso-ai/oats/commit/8d820437fe2ac7a95da01139054b81a5376652cf))
+
 ## [0.23.0](https://github.com/ariso-ai/oats/compare/v0.22.0...v0.23.0) (2026-09-11)
 
 
