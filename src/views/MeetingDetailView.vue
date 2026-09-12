@@ -1102,6 +1102,10 @@ const noteDeleteError = ref<string | null>(null);
 const noteDeleted = ref(false);
 
 const deleteDisabledReason = computed<string | null>(() => {
+  // A still-capturing recording (issue #355 gives it a real row and a real
+  // `meta.json` from the moment it starts) has its own stage. Deleting it
+  // mid-capture would remove the folder finalize is about to write into.
+  if (progress.stage.value === 'recording') return 'Wait until this recording finishes';
   if (progress.stage.value === 'transcribing')
     return 'Wait until this recording finishes processing';
   if (progress.stage.value === 'notes-pending') return 'Wait until AI notes finish generating';
