@@ -1209,10 +1209,9 @@ mod tests {
     #[test]
     fn model_bundle_cdn_pins_are_well_formed() {
         assert!(MODELS_CDN_BASE.starts_with(r2_base!()));
-        assert_eq!(
-            WINDOWS_MODEL_LOCK.cdn_base,
-            "https://pub-b22579d60a5b47d8835d2c4660e7bc16.r2.dev/models"
-        );
+        // Windows bundles live at the bucket root (`windows/...`) of the same R2
+        // host as the macOS models and the updater.
+        assert_eq!(WINDOWS_MODEL_LOCK.cdn_base, r2_base!());
         let bundles = macos_stt_bundles()
             .into_iter()
             .chain(windows_stt_bundles())
