@@ -1,115 +1,18 @@
 <template>
-  <!-- The window is a fixed size (room for the expanded pill + its shadow); the
-       pill is anchored to the bottom and grows UPWARD via a CSS transition. -->
-  <div class="stage">
-    <!-- While the meetings window owns the recorder UI (its embedded strip), the
-         window stays born-visible for getUserMedia but paints nothing — no flash.
-         pillHidden flips to false if the meetings window is minimized/closed. -->
-    <div
-      v-if="!pillHidden"
-      class="pill"
-      :class="{ expanded: isExpanded, paused: recorder.isPaused.value }"
-      @mouseenter="expand"
-      @mouseleave="collapse"
-      @click="showMeetings"
-    >
-      <img class="logo" src="../assets/oats-tray-white.svg" alt="" />
-
-      <template v-if="uploadResult === 'failed'">
-        <span class="status-icon err">✗</span>
-        <button
-          class="ctrl-btn retry-btn"
-          :aria-label="retryButtonLabel"
-          :title="retryButtonLabel"
-          @click.stop.prevent="runFinalize"
-        >↻</button>
-        <button
-          class="ctrl-btn resume-btn"
-          :aria-label="resumeButtonLabel"
-          :title="resumeButtonLabel"
-          @click.stop.prevent="resumeFailed"
-        >●</button>
-        <button
-          class="ctrl-btn dismiss-btn"
-          :aria-label="discardButtonLabel"
-          :title="discardButtonLabel"
-          @click.stop.prevent="dismissFailed"
-        >✕</button>
-      </template>
-      <template v-else-if="uploadResult === 'success'">
-        <span class="status-icon ok">✓</span>
-      </template>
-      <template v-else-if="isUploading">
-        <span class="spinner" />
-      </template>
-      <template v-else>
-        <div class="bars">
-          <div
-            v-for="(level, i) in bars"
-            :key="i"
-            class="bar"
-            :class="{ paused: recorder.isPaused.value }"
-            :style="{ height: `${barHeightPercent(level)}%` }"
-          />
-        </div>
-
-        <!-- Always in the DOM so its reveal can animate; clipped + faded when
-             collapsed. Pause sits above Stop. -->
-        <div class="expanded-area" :class="{ open: isExpanded }">
-          <span class="timer">{{ formattedDuration }}</span>
-          <button
-            class="ctrl-btn pause-btn"
-            :aria-label="pauseResumeLabel"
-            :title="pauseResumeLabel"
-            @click.stop.prevent="recorder.isPaused.value ? handleResume() : handlePause()"
-          >
-            <svg v-if="!recorder.isPaused.value" width="14" height="14" viewBox="0 0 14 14">
-              <rect x="2" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
-              <rect x="8.5" y="1" width="3.5" height="12" rx="1" fill="currentColor" />
-            </svg>
-            <svg v-else width="14" height="14" viewBox="0 0 14 14">
-              <circle cx="7" cy="7" r="5.5" fill="currentColor" />
-            </svg>
-          </button>
-          <button
-            class="ctrl-btn stop-btn"
-            :aria-label="stopButtonLabel"
-            :title="stopButtonLabel"
-            @click.stop.prevent="handleStop"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14">
-              <rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor" />
-            </svg>
-          </button>
-        </div>
-
-        <!-- Windows tracks the pointer itself because WebView2 can deliver the
-             first move before Tauri's asynchronous native drag loop is ready. -->
-        <div
-          class="drag-handle"
-          @pointerdown.left.stop.prevent="startWindowDrag"
-          @click.stop
-        >
-          <div class="divider" />
-          <div class="drag-dots">
-            <span v-for="n in 6" :key="n" class="dot" />
-          </div>
-        </div>
-      </template>
-    </div>
-  </div>
+  <!-- Headless recorder host. The floating pill is drawn natively (Swift on
+       macOS, Win32 on Windows; see src-tauri/src/recorder_pill) from the
+       recorder://state this view broadcasts. The window paints nothing and
+       ignores the cursor. -->
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
-import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecorder } from '../composables/useRecorder';
 import { recordingStartErrorMessage } from '../composables/recordingStartError';
-import { useWaveform } from '../composables/useWaveform';
 import {
   getActiveBackend,
   timestampTitle,
@@ -122,7 +25,7 @@ import { loadRecordingEnabled } from '../composables/useRecordingPermissions';
 import { isSilenceDetectionEnabled } from '../composables/useSilenceDetection';
 import { isMeetingEndReminderEnabled } from '../composables/useMeetingEndReminder';
 import { deriveRecordingMode } from './recordingSettings';
-import { barHeightPercent, centerWeightedBars } from './waveformBars';
+import { centerWeightedBars } from './waveformBars';
 import { shouldPromptSilence, shouldAutoStopAfterPrompt } from '../composables/silenceWatch';
 import {
   shouldPromptMeetingEnd,
@@ -138,28 +41,14 @@ import { useMeetingApi } from '../composables/useMeetingApi';
 const SUCCESS_CLOSE_MS = 1500;
 
 const recorder = useRecorder();
-const waveform = useWaveform();
 const backend = ref<Backend | null>(null);
-// These labels drive both native hover tooltips and accessibility names so the
-// icon-only controls stay understandable in local and cloud recording flows.
-const pauseResumeLabel = computed(() => (recorder.isPaused.value ? 'Resume recording' : 'Pause recording'));
-const stopButtonLabel = 'Stop and save recording';
-const retryButtonLabel = 'Retry upload';
-const resumeButtonLabel = 'Continue recording';
-const discardButtonLabel = 'Discard recording';
 const isUploading = ref(false);
 const uploadResult = ref<'success' | 'failed' | null>(null);
-const isExpanded = ref(false);
 
 // Held after stop so a failed upload can be retried without re-recording.
 // Cleared on success/dismiss; the meta also keys the on-disk pending buffer.
 const stoppedBlob = ref<Blob | null>(null);
 const stoppedMeta = ref<RecordingMeta | null>(null);
-
-// Voice energy lives in the low FFT bins; the upper bins are near-silent and
-// would leave the higher bars dead. Bucket only the low part of the spectrum,
-// center-weighted so the middle bar carries the hottest (lowest) bucket.
-const bars = computed(() => centerWeightedBars(waveform.levels.value.slice(0, 20), 3));
 
 const route = useRoute();
 const meetingIdQuery = route.query.meetingId;
@@ -177,29 +66,14 @@ const localAppendId =
 // forces a brand-new recording and skips the 5-minute auto-append.
 const forceNew = route.query.forceNew === '1';
 const isAuto = route.query.auto === '1';
-// Born hidden when the meetings window is the visible UI: the window must still
-// exist (and stay visible to WebKit so getUserMedia resolves), but the pill
-// paints nothing so it never flashes over the meetings window. The Rust
-// visibility watcher pushes recorder://pill-visible to flip this when the
-// meetings window is minimized or closed mid-recording. Where the pill is drawn
-// natively (macOS), the window is always launched hidden and never flipped: it
-// only hosts the recording, and the native pill renders recorder://state.
-const pillHidden = ref(route.query.pillHidden === '1');
 const isStopping = ref(false);
 // Auto recordings shorter than this are discarded, not uploaded (guards against
 // late mic-on / quick-off races). Manual recordings are never length-gated.
 const MIN_AUTO_DURATION_S = 15;
 
-const formattedDuration = computed(() => {
-  const s = recorder.durationSeconds.value;
-  const mins = Math.floor(s / 60).toString().padStart(2, '0');
-  const secs = (s % 60).toString().padStart(2, '0');
-  return `${mins}:${secs}`;
-});
-
-// Mirror the recording to the library window's embedded recorder strip. The
-// bars ride on frameLevels (sampled in the audio callback, so the cadence
-// survives this window being hidden, unlike rAF-driven waveform.levels).
+// Mirror the recording to the library window's embedded recorder strip and the
+// native floating pill. The bars ride on frameLevels, sampled in the audio
+// callback, so the cadence survives this window being hidden.
 type RecorderPhase = 'starting' | 'recording' | 'uploading' | 'success' | 'failed' | 'closed';
 
 function currentPhase(): RecorderPhase {
@@ -369,113 +243,6 @@ watch(
 const stateHeartbeat = setInterval(() => broadcastState(), 1_000);
 onUnmounted(() => clearInterval(stateHeartbeat));
 
-function expand() {
-  // Don't expand during upload/result states.
-  if (isUploading.value || uploadResult.value) return;
-  isExpanded.value = true;
-}
-
-function collapse() {
-  isExpanded.value = false;
-}
-
-type WindowsDragState = {
-  pointerId: number;
-  startPointerX: number;
-  startPointerY: number;
-  startWindowX: number;
-  startWindowY: number;
-  handle: HTMLElement;
-};
-
-let windowsDrag: WindowsDragState | null = null;
-
-function finishWindowsDrag(event?: PointerEvent) {
-  if (!windowsDrag || (event && event.pointerId !== windowsDrag.pointerId)) return;
-
-  const { handle, pointerId } = windowsDrag;
-  windowsDrag = null;
-  window.removeEventListener('pointermove', moveWindowsWindow, true);
-  window.removeEventListener('pointerup', finishWindowsDrag, true);
-  window.removeEventListener('pointercancel', finishWindowsDrag, true);
-  handle.removeEventListener('lostpointercapture', finishWindowsDrag);
-  if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
-}
-
-function moveWindowsWindow(event: PointerEvent) {
-  if (
-    !windowsDrag
-    || event.pointerId !== windowsDrag.pointerId
-    || event.isPrimary === false
-    || (event.buttons & 1) === 0
-  ) return;
-
-  event.preventDefault();
-  const x = windowsDrag.startWindowX + event.screenX - windowsDrag.startPointerX;
-  const y = windowsDrag.startWindowY + event.screenY - windowsDrag.startPointerY;
-  // CSSOM screen coordinates and Tauri LogicalPosition use logical pixels, so
-  // this remains correct on Windows displays with non-100% scaling.
-  void getCurrentWebviewWindow().setPosition(new LogicalPosition(x, y)).catch((e) => {
-    console.error('Failed to move recorder window', e);
-    finishWindowsDrag(event);
-  });
-}
-
-async function startWindowDrag(event: PointerEvent) {
-  if (/Windows/i.test(navigator.userAgent)) {
-    if (event.isPrimary === false || event.button !== 0) return;
-    finishWindowsDrag();
-
-    const handle = event.currentTarget as HTMLElement;
-    windowsDrag = {
-      pointerId: event.pointerId,
-      startPointerX: event.screenX,
-      startPointerY: event.screenY,
-      startWindowX: window.screenX,
-      startWindowY: window.screenY,
-      handle,
-    };
-    window.addEventListener('pointermove', moveWindowsWindow, true);
-    window.addEventListener('pointerup', finishWindowsDrag, true);
-    window.addEventListener('pointercancel', finishWindowsDrag, true);
-    handle.addEventListener('lostpointercapture', finishWindowsDrag);
-    handle.setPointerCapture?.(event.pointerId);
-    return;
-  }
-
-  try {
-    await getCurrentWebviewWindow().startDragging();
-  } catch (e) {
-    console.error('Failed to start recorder window drag', e);
-  }
-}
-
-onUnmounted(() => finishWindowsDrag());
-
-// Clicking the pill body (not the controls or the drag handle) brings up the
-// meetings window and surfaces the meeting being recorded. A window that was
-// only minimized is already running, so it needs the explicit `reveal` nudge;
-// a freshly-created one instead lands on the recording via its own
-// recordingMeetingId watch once the recorder strip's first heartbeat arrives.
-async function showMeetings() {
-  try {
-    await invoke('create_library_window');
-    await emit('recording://reveal');
-  } catch (e) {
-    console.error('Failed to open meetings window', e);
-  }
-}
-
-// Keep the empty transparent window from intercepting clicks meant for the
-// window underneath it while the pill isn't painted.
-async function applyPillVisibility(hidden: boolean) {
-  pillHidden.value = hidden;
-  try {
-    await getCurrentWebviewWindow().setIgnoreCursorEvents(hidden);
-  } catch { /* permission denied / shutting down */ }
-}
-
-let unlistenPillVisible: UnlistenFn | null = null;
 let unlistenPendingUploaded: UnlistenFn | null = null;
 let unlistenYield: UnlistenFn | null = null;
 let unlistenRetryUpload: UnlistenFn | null = null;
@@ -547,11 +314,11 @@ async function startRecording() {
     return;
   }
 
-  // WebKit never resolves getUserMedia for a window that isn't actually on
-  // screen. The pill is hidden whenever the library's embedded strip is the
-  // visible recording UI — including across a failed-upload → Resume, where it
-  // stays hidden from the prior stop. Show it before capture so getUserMedia
-  // can resolve; the native pill watcher re-hides it once capture is active.
+  // Webviews don't reliably resolve getUserMedia for a window that isn't on
+  // screen, and this window is hidden once capture starts — including across a
+  // failed-upload → Resume, where it stays hidden from the prior stop. Show it
+  // (empty and click-through) before capture so getUserMedia can resolve; the
+  // native pill watcher re-hides it once capture is active.
   try {
     await getCurrentWebviewWindow().show();
   } catch {
@@ -566,10 +333,6 @@ async function startRecording() {
     }).catch(() => {});
     await rollbackAndClose();
     return;
-  }
-  const analyser = recorder.getAnalyser();
-  if (analyser) {
-    waveform.start(analyser);
   }
   await invoke('set_tray_recording', { isRecording: true, isPaused: false });
 }
@@ -668,7 +431,6 @@ async function discardRecording() {
     meetingEndPromptShownAt = null;
     void invoke('dismiss_meeting_end_prompt');
   }
-  waveform.stop();
   try {
     await recorder.stopRecording();
   } catch {
@@ -705,9 +467,7 @@ async function handleStop() {
     meetingEndPromptShownAt = null;
     void invoke('dismiss_meeting_end_prompt');
   }
-  collapse();
   isUploading.value = true;
-  waveform.stop();
   const endAt = new Date().toISOString();
   const startAt = recorder.startedAt.value;
   const newBlob = await recorder.stopRecording();
@@ -948,8 +708,8 @@ async function resumeFailed() {
   broadcastState();
 }
 
-// The native pill's failed-upload controls arrive as events rather than DOM
-// clicks. Like the buttons they stand in for, they only act on a failed upload.
+// The native pill's failed-upload controls (Retry / Continue / Discard) arrive
+// as events and only act while an upload has actually failed.
 function whenFailed(action: () => Promise<void>) {
   return () => {
     if (uploadResult.value !== 'failed') return;
@@ -982,11 +742,11 @@ onMounted(async () => {
 
   backend.value = await getActiveBackend();
 
-  // Match the window's click behavior to its initial (param-driven) paint state.
-  await applyPillVisibility(pillHidden.value);
-  unlistenPillVisible = await listen<boolean>('recorder://pill-visible', (e) => {
-    void applyPillVisibility(!e.payload);
-  });
+  // The window stays on screen until capture starts (see startRecording) but
+  // is empty: let clicks fall through to whatever is underneath.
+  try {
+    await getCurrentWebviewWindow().setIgnoreCursorEvents(true);
+  } catch { /* permission denied / shutting down */ }
 
   unlistenPendingUploaded = await listen('pending-upload://succeeded', handlePendingUploadSucceeded);
   unlistenYield = await listen('recorder://yield', handleYield);
@@ -1116,7 +876,6 @@ onMounted(async () => {
 onUnmounted(() => {
   if (silenceTimer) clearInterval(silenceTimer);
   if (closeTimer) clearTimeout(closeTimer);
-  unlistenPillVisible?.();
   unlistenPendingUploaded?.();
   unlistenYield?.();
   unlistenRetryUpload?.();
@@ -1150,190 +909,5 @@ html, body {
   padding: 0;
   height: 100%;
   overflow: hidden;
-}
-</style>
-
-<style scoped>
-/* Fills the (fixed-size) window and bottom-centers the pill, leaving transparent
-   room above and around it for the shadow and the upward growth. */
-.stage {
-  width: 100vw;
-  height: 100vh;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding-bottom: 22px;
-  box-sizing: border-box;
-}
-
-.pill {
-  width: 48px;
-  background: #0d0d0d;
-  border-radius: 24px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 7px 0;
-  box-sizing: border-box;
-  overflow: hidden;
-  cursor: grab; /* open hand on hover */
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-}
-.pill:active { cursor: grabbing; } /* closed/grabbing hand while pressed */
-
-.logo {
-  width: 24px;
-  height: 24px;
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
-/* The height the bars travel through: tall enough that the difference between
-   quiet and loud reads at a glance from across the desk. */
-.bars {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 22px;
-  margin-top: 7px;
-  flex-shrink: 0;
-}
-
-.bar {
-  width: 3px;
-  border-radius: 2px;
-  background: #f9d852;
-  transition: height 75ms, background 150ms;
-}
-
-.bar.paused {
-  background: #4b5563;
-}
-
-/* Revealed on hover: animates open/closed so the pill grows/shrinks smoothly. */
-.expanded-area {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  max-height: 0;
-  margin-top: 0;
-  opacity: 0;
-  overflow: hidden;
-  pointer-events: none;
-  flex-shrink: 0;
-  transition: max-height 180ms ease, margin-top 180ms ease, opacity 150ms ease;
-}
-
-.expanded-area.open {
-  max-height: 130px;
-  margin-top: 7px;
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.timer {
-  font-size: 10px;
-  font-family: monospace;
-  color: #9ca3af;
-}
-
-.ctrl-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #1f1f1f;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.ctrl-btn:hover {
-  background: #2a2a2a;
-}
-
-.stop-btn { color: #f87171; }
-.pause-btn { color: #ffffff; }
-
-/* Fixed margin above + the pill's bottom padding below give the handle the same
-   surrounding space whether the pill is collapsed or expanded. */
-.drag-handle {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  margin-top: 7px;
-  flex-shrink: 0;
-  cursor: grab;
-}
-/* Give the nested handle graphics the same affordance as their hit target. */
-.drag-handle * { cursor: grab; }
-.drag-handle:active,
-.drag-handle:active * { cursor: grabbing; }
-
-.divider {
-  width: 22px;
-  height: 1px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.drag-dots {
-  display: grid;
-  grid-template-columns: repeat(3, 3.2px);
-  gap: 2.4px 3.2px;
-  justify-content: center;
-  margin-top: 6px;
-}
-
-.dot {
-  width: 3.2px;
-  height: 3.2px;
-  border-radius: 50%;
-  background: #6b7280;
-}
-
-.status-icon {
-  margin-top: 8px;
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.status-icon.ok { color: #34d399; }
-.status-icon.err { color: #f87171; }
-
-.retry-btn {
-  margin-top: 8px;
-  color: #818cf8;
-  font-size: 15px;
-  font-weight: 700;
-}
-.resume-btn {
-  margin-top: 6px;
-  color: #34d399;
-  font-size: 13px;
-  font-weight: 700;
-}
-.dismiss-btn {
-  margin-top: 6px;
-  color: #f87171;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.spinner {
-  margin-top: 8px;
-  width: 16px;
-  height: 16px;
-  border: 2px solid #4b5563;
-  border-top-color: #818cf8;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 </style>

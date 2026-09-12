@@ -266,7 +266,8 @@ if ($Upload) {
 
   $prefix = ([Uri]$Lock.cdnBase).AbsolutePath.Trim('/')
   foreach ($bundle in $bundles) {
-    $key = "$prefix/$($bundle.Path)"
+    # A bucket-root cdnBase has an empty prefix; don't emit a leading "/" key.
+    $key = (@($prefix, $bundle.Path) | Where-Object { $_ }) -join '/'
     $existing = & aws s3 ls "s3://$R2Bucket/$key/" --endpoint-url $R2Endpoint 2>$null
     if ($LASTEXITCODE -ne 0) {
       throw "Could not inspect s3://$R2Bucket/$key/."

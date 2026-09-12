@@ -1,5 +1,5 @@
-//! The floating recorder pill: when it is visible, and — where the platform
-//! draws it natively — the bridge between it and the recorder.
+//! The floating recorder pill: when it is visible, and the bridge between the
+//! natively drawn pill (Swift on macOS, Win32 on Windows) and the recorder.
 //!
 //! While a recording is on-going, the recording UI normally lives in the
 //! library window's embedded recorder strip; the pill is the fallback shown
@@ -7,42 +7,32 @@
 //! closed. Tauri emits no minimize/restore events, so a watcher task polls
 //! and exits once the waveform window is gone.
 //!
-//! The recording session itself always runs in the "waveform" webview. Where
-//! [`NATIVE`] is set, that webview paints nothing and stays hidden once
-//! capture starts; a native pill renders its `recorder://state` broadcasts and
-//! turns clicks back into the events the webview pill used to handle.
+//! The recording session itself runs in the "waveform" webview, which paints
+//! nothing and is hidden once capture starts. The native pill renders its
+//! `recorder://state` broadcasts and turns clicks into the events it handles.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
+#[cfg(any(target_os = "windows", test))]
+mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(target_os = "windows")]
+mod win32;
+#[cfg(target_os = "windows")]
+use win32 as native;
 
-/// Platforms without a native pill keep painting it in the webview.
-#[cfg(not(target_os = "macos"))]
+/// Other platforms (not shipped) have no pill.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod native {
     pub(super) fn create(_app: &tauri::AppHandle) {}
     pub(super) fn update(_app: &tauri::AppHandle, _state: super::PillState) {}
     pub(super) fn set_visible(_app: &tauri::AppHandle, _visible: bool) {}
     pub(super) fn destroy(_app: &tauri::AppHandle) {}
-    pub(super) fn is_available() -> bool {
-        false
-    }
-}
-
-/// Whether this platform draws the pill natively, leaving the "waveform"
-/// webview as a headless recorder host.
-pub(crate) const NATIVE: bool = cfg!(target_os = "macos");
-
-/// Whether the native pill is actually usable right now: the platform draws
-/// it natively *and* the linked native library speaks the expected ABI. Falls
-/// back to [`NATIVE`] = `false` behavior (the webview paints the pill itself)
-/// when a mismatched build leaves the native side unable to draw anything.
-pub(crate) fn native_available() -> bool {
-    NATIVE && native::is_available()
 }
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
@@ -176,9 +166,6 @@ pub(crate) fn dispatch(app: &AppHandle, action: PillAction) {
 
 /// Forward recorder broadcasts to the native pill for the app's lifetime.
 pub(crate) fn install(app: &AppHandle) {
-    if !NATIVE {
-        return;
-    }
     let handle = app.clone();
     app.listen_any("recorder://state", move |event| {
         match parse_state(event.payload()) {
@@ -205,50 +192,8 @@ pub(crate) fn destroy_native(app: &AppHandle) {
     native::destroy(app);
 }
 
-/// With a native pill the webview is never the UI: it is on screen only until
-/// capture starts (see `visibility_action`), then hidden for good.
-fn webview_should_show(pill_desired: bool, native: bool) -> bool {
-    pill_desired && !native
-}
-
 fn native_should_show(pill_desired: bool, closed: bool) -> bool {
     pill_desired && !closed
-}
-
-/// Pill ("waveform") window size in CSS px — must match the `inner_size` used
-/// when the window is built (see `open_waveform_window`). Kept here so the
-/// right-edge docking math and the window dimensions stay in sync.
-pub(crate) const PILL_W: f64 = 92.0;
-pub(crate) const PILL_H: f64 = 284.0;
-/// Gap from the screen's right edge, in CSS px.
-const PILL_MARGIN: f64 = 16.0;
-
-/// Physical-pixel top-left for the pill docked to a monitor's right edge,
-/// vertically centered. Pure so the edge math is unit-tested without a window.
-fn pill_dock_position(monitor_pos: (i32, i32), monitor_size: (u32, u32), scale: f64) -> (i32, i32) {
-    let win_w = (PILL_W * scale).round() as i32;
-    let win_h = (PILL_H * scale).round() as i32;
-    let margin = (PILL_MARGIN * scale).round() as i32;
-    let x = monitor_pos.0 + monitor_size.0 as i32 - win_w - margin;
-    let y = monitor_pos.1 + (monitor_size.1 as i32 - win_h) / 2;
-    (x, y)
-}
-
-/// Dock the pill to the right edge of the primary screen, vertically centered,
-/// rather than wherever the OS first placed it (≈ mid-screen). Called both when
-/// the pill is born as the visible UI and each time the watcher reveals it
-/// (e.g. the meetings window was minimized mid-recording).
-pub(crate) fn dock_to_right_edge(win: &WebviewWindow) {
-    if let Ok(Some(monitor)) = win.primary_monitor() {
-        let msize = monitor.size();
-        let mpos = monitor.position();
-        let (x, y) = pill_dock_position(
-            (mpos.x, mpos.y),
-            (msize.width, msize.height),
-            monitor.scale_factor(),
-        );
-        let _ = win.set_position(PhysicalPosition::new(x, y));
-    }
 }
 
 /// The pill is the fallback recording UI: visible only while the library
@@ -267,15 +212,11 @@ pub(crate) fn should_show_now(app: &AppHandle) -> bool {
     pill_should_show(lib.is_some(), minimized)
 }
 
-/// What the watcher should do this tick: `Some(true)` show, `Some(false)`
-/// hide, `None` leave as-is. Hiding is deferred until capture has started:
-/// WebKit never resolves getUserMedia for a hidden window, so hiding the
-/// freshly-created (visible) recorder too early would stall the recording.
-fn visibility_action(should_show: bool, capture_active: bool, is_visible: bool) -> Option<bool> {
-    if should_show != is_visible && (should_show || capture_active) {
-        return Some(should_show);
-    }
-    None
+/// The recorder webview is never the UI, but it is created visible (and
+/// re-shown before a Resume) because webviews don't reliably resolve
+/// getUserMedia for a hidden window. Hide it once capture is running.
+fn should_hide_recorder_window(capture_active: bool, is_visible: bool) -> bool {
+    capture_active && is_visible
 }
 
 /// Keep the pill's visibility in sync with the library window for the
@@ -283,14 +224,8 @@ fn visibility_action(should_show: bool, capture_active: bool, is_visible: bool) 
 pub(crate) fn spawn_watcher(app: &AppHandle, initially_shown: bool) {
     let app = app.clone();
     let generation = WATCHER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    // Native availability can't change mid-process (it's a one-time ABI
-    // check), so snapshot it once rather than re-checking every poll.
-    let native = native_available();
-    // The waveform window was born painting itself iff it should show (see
-    // `waveform_url`'s pillHidden flag), and `create_native` showed or hid the
-    // native pill the same way; mirror that so we only push changes when the
-    // desired state actually flips.
-    let mut last_desired = initially_shown;
+    // `create_native` already showed or hid the pill to match; only push
+    // changes when the desired state actually flips.
     let mut last_native = initially_shown;
     tauri::async_runtime::spawn(async move {
         loop {
@@ -308,35 +243,13 @@ pub(crate) fn spawn_watcher(app: &AppHandle, initially_shown: bool) {
             let capture = app
                 .state::<crate::recording_state::RecordingState>()
                 .capture_active();
-            let desired = should_show_now(&app);
-            if native {
-                let native_visible = native_should_show(desired, NATIVE_CLOSED.load(Ordering::SeqCst));
-                if native_visible != last_native {
-                    native::set_visible(&app, native_visible);
-                    last_native = native_visible;
-                }
-            } else if desired != last_desired {
-                // Tell the waveform window whether to paint the pill. Decoupled
-                // from show()/hide() (which waits on capture): painting an
-                // off-screen or hidden window is a no-op, but it must be painted
-                // the instant the window is shown again, so the paint state
-                // tracks `desired` directly.
-                let _ = app.emit_to("waveform", "recorder://pill-visible", desired);
-                last_desired = desired;
+            let shown = native_should_show(should_show_now(&app), NATIVE_CLOSED.load(Ordering::SeqCst));
+            if shown != last_native {
+                native::set_visible(&app, shown);
+                last_native = shown;
             }
-            let visible = wave.is_visible().unwrap_or(desired);
-            match visibility_action(webview_should_show(desired, native), capture, visible) {
-                Some(true) => {
-                    // Re-dock to the right edge before revealing: the pill was
-                    // born at the OS default spot when the meetings window owned
-                    // the UI, so show it docked rather than mid-screen.
-                    dock_to_right_edge(&wave);
-                    let _ = wave.show();
-                }
-                Some(false) => {
-                    let _ = wave.hide();
-                }
-                None => {}
+            if should_hide_recorder_window(capture, wave.is_visible().unwrap_or(false)) {
+                let _ = wave.hide();
             }
         }
     });
@@ -362,24 +275,12 @@ mod tests {
     }
 
     #[test]
-    fn hiding_waits_for_capture_to_start() {
-        // WebKit won't resolve getUserMedia for a hidden window, so the pill
-        // must stay visible until capture is running.
-        assert_eq!(visibility_action(false, false, true), None);
-        assert_eq!(visibility_action(false, true, true), Some(false));
-    }
-
-    #[test]
-    fn showing_never_waits() {
-        assert_eq!(visibility_action(true, false, false), Some(true));
-        assert_eq!(visibility_action(true, true, false), Some(true));
-    }
-
-    #[test]
-    fn steady_states_do_nothing() {
-        assert_eq!(visibility_action(true, true, true), None);
-        assert_eq!(visibility_action(false, true, false), None);
-        assert_eq!(visibility_action(false, false, false), None);
+    fn the_recorder_window_hides_only_once_capture_runs() {
+        // Webviews won't reliably resolve getUserMedia for a hidden window, so
+        // it stays on screen (empty, click-through) until capture is running.
+        assert!(!should_hide_recorder_window(false, true));
+        assert!(should_hide_recorder_window(true, true));
+        assert!(!should_hide_recorder_window(true, false));
     }
 
     fn state(json: serde_json::Value) -> Option<StateUpdate> {
@@ -484,37 +385,9 @@ mod tests {
     }
 
     #[test]
-    fn native_pill_never_wants_the_webview_on_screen() {
-        // The webview is only kept visible until capture starts; after that it
-        // hides even while the Meetings window is closed.
-        assert!(!webview_should_show(true, true));
-        assert!(!webview_should_show(false, true));
-        assert!(webview_should_show(true, false));
-        assert!(!webview_should_show(false, false));
-    }
-
-    #[test]
     fn a_closed_native_pill_stays_hidden() {
         assert!(native_should_show(true, false));
         assert!(!native_should_show(false, false));
         assert!(!native_should_show(true, true));
-    }
-
-    #[test]
-    fn docks_against_the_monitor_right_edge_vertically_centered() {
-        // 1920x1080 primary monitor at the origin, no HiDPI scaling.
-        let (x, y) = pill_dock_position((0, 0), (1920, 1080), 1.0);
-        assert_eq!(x, 1920 - PILL_W as i32 - PILL_MARGIN as i32); // 16px gap from the right
-        assert_eq!(y, (1080 - PILL_H as i32) / 2); // vertically centered
-    }
-
-    #[test]
-    fn dock_position_respects_scale_and_monitor_offset() {
-        // A 2x monitor positioned to the right of a primary one (offset origin).
-        let (x, y) = pill_dock_position((1920, 0), (2560, 1440), 2.0);
-        let win_w = (PILL_W * 2.0) as i32;
-        let margin = (PILL_MARGIN * 2.0) as i32;
-        assert_eq!(x, 1920 + 2560 - win_w - margin);
-        assert_eq!(y, (1440 - (PILL_H * 2.0) as i32) / 2);
     }
 }

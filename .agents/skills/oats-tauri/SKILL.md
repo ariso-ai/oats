@@ -14,7 +14,10 @@ The backend is Rust in `src-tauri/`, exposing commands the Vue frontend calls vi
 - `commands.rs` — the bulk of `#[tauri::command]` functions (the frontend API surface).
 - Domain modules: `audio_capture.rs`, `transcribe.rs`, `model_manager.rs`,
   `storage.rs`, `recording_state.rs`, `mic_monitor.rs`, `meeting_notifications.rs`,
-  `recorder_pill.rs`, `tray.rs` / `tray_meeting.rs`, `update_manager.rs`.
+  `recorder_pill/` (the native floating pill's bridge; Win32 renderer in `win32.rs`,
+  Swift package in `src-tauri/recorder-pill/macos`, whose tests run with
+  `swift test --package-path src-tauri/recorder-pill/macos`), `tray.rs` /
+  `tray_meeting.rs`, `update_manager.rs`.
 
 ## The invoke contract
 

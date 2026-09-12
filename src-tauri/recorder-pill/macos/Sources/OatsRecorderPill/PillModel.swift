@@ -57,14 +57,36 @@ final class PillModel: ObservableObject {
     func setHovering(_ hovering: Bool) {
         isHovering = hovering
     }
+
+    /// Hover is decided by the pointer's position (panel coordinates) against
+    /// the capsule as currently sized, not by the panel's rectangular tracking
+    /// area, so the transparent space above a collapsed pill doesn't expand it.
+    /// The expanded capsule contains the collapsed one, so this can't flap.
+    func pointerMoved(to point: NSPoint) {
+        let hovering = PillGeometry.capsuleRect(height: height).contains(point)
+        if hovering != isHovering { isHovering = hovering }
+    }
+
+    func pointerExited() {
+        if isHovering { isHovering = false }
+    }
 }
 
-/// Sizes and placement, shared by the SwiftUI layout and the panel frame so the
-/// window always hugs the capsule exactly.
+/// Sizes and placement, shared by the SwiftUI layout, hover hit-testing and
+/// the panel frame.
+///
+/// The panel never resizes: resizing a window makes AppKit re-derive its
+/// tracking areas and report the resting pointer as exited, which collapsed
+/// the pill mid-expansion and made it flap. Instead the panel is sized for the
+/// tallest capsule and the capsule grows inside it, bottom-anchored. The
+/// window server routes clicks on fully transparent pixels to the window
+/// underneath, so the empty space above a short capsule never blocks clicks.
 enum PillGeometry {
     static let width: CGFloat = 48
     static let cornerRadius: CGFloat = 24
     static let screenMargin: CGFloat = 16
+    /// Room around the capsule for its drop shadow.
+    static let shadowPad: CGFloat = 22
 
     static let padding: CGFloat = 7
     static let logo: CGFloat = 24
@@ -99,25 +121,35 @@ enum PillGeometry {
         }
     }
 
-    /// Right edge of `visibleFrame`, with the collapsed recording pill
-    /// vertically centered; a taller state extends upward from the same bottom.
-    static func dockFrame(in visibleFrame: NSRect, height: CGFloat) -> NSRect {
-        let collapsed = self.height(for: .recording, expanded: false)
-        return NSRect(
-            x: visibleFrame.maxX - screenMargin - width,
-            y: visibleFrame.midY - collapsed / 2,
-            width: width,
-            height: height
+    /// The fixed panel: the tallest capsule any phase needs, plus shadow room.
+    static var panelSize: NSSize {
+        let tallest = max(height(for: .recording, expanded: true), height(for: .failed, expanded: false))
+        return NSSize(width: width + 2 * shadowPad, height: tallest + 2 * shadowPad)
+    }
+
+    /// The capsule within the panel, in panel (bottom-left origin) coordinates.
+    static func capsuleRect(height: CGFloat) -> NSRect {
+        NSRect(x: shadowPad, y: shadowPad, width: width, height: height)
+    }
+
+    /// Panel origin that puts the capsule against the right edge of
+    /// `visibleFrame`, the collapsed recording pill vertically centered; taller
+    /// states extend upward from the same bottom edge.
+    static func dockOrigin(in visibleFrame: NSRect) -> NSPoint {
+        let collapsed = height(for: .recording, expanded: false)
+        return NSPoint(
+            x: visibleFrame.maxX - screenMargin - width - shadowPad,
+            y: visibleFrame.midY - collapsed / 2 - shadowPad
         )
     }
 
-    /// Cocoa frames grow from the bottom-left, so keeping `origin` is what
-    /// anchors the bottom edge and makes the pill grow upward — unless that
-    /// would push the top past `visibleFrame`, in which case it grows down.
-    static func resized(_ frame: NSRect, toHeight height: CGFloat, within visibleFrame: NSRect) -> NSRect {
-        var y = frame.minY
-        if y + height > visibleFrame.maxY { y = max(visibleFrame.minY, visibleFrame.maxY - height) }
-        return NSRect(x: frame.minX, y: y, width: frame.width, height: height)
+    /// Pulls a dragged panel back so even the tallest capsule stays inside
+    /// `visibleFrame` (only the shadow margin may hang off-screen).
+    static func clampedOrigin(_ origin: NSPoint, within visibleFrame: NSRect) -> NSPoint {
+        let capsule = NSSize(width: width, height: panelSize.height - 2 * shadowPad)
+        let x = min(max(origin.x, visibleFrame.minX - shadowPad), visibleFrame.maxX - capsule.width - shadowPad)
+        let y = min(max(origin.y, visibleFrame.minY - shadowPad), visibleFrame.maxY - capsule.height - shadowPad)
+        return NSPoint(x: x, y: y)
     }
 
     /// Mirrors `barHeightPercent` in src/views/waveformBars.ts: levels are

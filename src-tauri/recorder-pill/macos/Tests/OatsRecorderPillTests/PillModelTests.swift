@@ -69,36 +69,81 @@ final class PillModelTests: XCTestCase {
         )
     }
 
-    func testDocksCollapsedPillToTheRightEdgeVerticallyCentered() {
+    func testPanelFitsTheTallestCapsulePlusShadowRoom() {
+        let tallest = max(
+            PillGeometry.height(for: .recording, expanded: true),
+            PillGeometry.height(for: .failed, expanded: false)
+        )
+        XCTAssertEqual(PillGeometry.panelSize.width, PillGeometry.width + 2 * PillGeometry.shadowPad)
+        XCTAssertEqual(PillGeometry.panelSize.height, tallest + 2 * PillGeometry.shadowPad)
+    }
+
+    func testCapsuleIsBottomAnchoredAndCenteredInThePanel() {
+        let rect = PillGeometry.capsuleRect(height: 90)
+        XCTAssertEqual(rect, NSRect(x: PillGeometry.shadowPad, y: PillGeometry.shadowPad, width: PillGeometry.width, height: 90))
+        // Growing keeps the bottom edge where it is.
+        XCTAssertEqual(PillGeometry.capsuleRect(height: 190).minY, rect.minY)
+    }
+
+    func testDocksCollapsedCapsuleToTheRightEdgeVerticallyCentered() {
         let visible = NSRect(x: 0, y: 40, width: 1440, height: 860)
-        let frame = PillGeometry.dockFrame(in: visible, height: 120)
-        XCTAssertEqual(frame.maxX, visible.maxX - PillGeometry.screenMargin)
-        XCTAssertEqual(frame.width, PillGeometry.width)
-        XCTAssertEqual(frame.height, 120)
-        let collapsed = PillGeometry.height(for: .recording, expanded: false)
-        // The collapsed pill is centered; taller states grow upward from it.
-        XCTAssertEqual(frame.minY, visible.midY - collapsed / 2)
+        let origin = PillGeometry.dockOrigin(in: visible)
+        let capsule = PillGeometry.capsuleRect(height: PillGeometry.height(for: .recording, expanded: false))
+            .offsetBy(dx: origin.x, dy: origin.y)
+        XCTAssertEqual(capsule.maxX, visible.maxX - PillGeometry.screenMargin)
+        XCTAssertEqual(capsule.midY, visible.midY)
     }
 
-    func testDockFrameRespectsAnOffsetScreen() {
+    func testDockOriginRespectsAnOffsetScreen() {
         let visible = NSRect(x: -1920, y: 0, width: 1920, height: 1080)
-        let frame = PillGeometry.dockFrame(in: visible, height: 90)
-        XCTAssertEqual(frame.maxX, -PillGeometry.screenMargin)
+        let origin = PillGeometry.dockOrigin(in: visible)
+        let capsule = PillGeometry.capsuleRect(height: 90).offsetBy(dx: origin.x, dy: origin.y)
+        XCTAssertEqual(capsule.maxX, -PillGeometry.screenMargin)
     }
 
-    func testResizeKeepsTheBottomEdgeFixed() {
-        let frame = NSRect(x: 100, y: 200, width: 48, height: 90)
-        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let grown = PillGeometry.resized(frame, toHeight: 190, within: screen)
-        XCTAssertEqual(grown, NSRect(x: 100, y: 200, width: 48, height: 190))
+    func testClampKeepsTheTallestCapsuleOnScreen() {
+        let visible = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let tallest = PillGeometry.panelSize.height - 2 * PillGeometry.shadowPad
+        func capsule(at origin: NSPoint) -> NSRect {
+            PillGeometry.capsuleRect(height: tallest).offsetBy(dx: origin.x, dy: origin.y)
+        }
+        // Dragged up under the menu bar: expanding must not go off the top.
+        XCTAssertEqual(capsule(at: PillGeometry.clampedOrigin(NSPoint(x: 600, y: 850), within: visible)).maxY, visible.maxY)
+        // Dragged below the bottom edge, and off either side.
+        XCTAssertEqual(capsule(at: PillGeometry.clampedOrigin(NSPoint(x: 600, y: -200), within: visible)).minY, visible.minY)
+        XCTAssertEqual(capsule(at: PillGeometry.clampedOrigin(NSPoint(x: -300, y: 300), within: visible)).minX, visible.minX)
+        XCTAssertEqual(capsule(at: PillGeometry.clampedOrigin(NSPoint(x: 1500, y: 300), within: visible)).maxX, visible.maxX)
+        // Anywhere inside is left alone.
+        XCTAssertEqual(PillGeometry.clampedOrigin(NSPoint(x: 600, y: 300), within: visible), NSPoint(x: 600, y: 300))
     }
 
-    func testResizeNearTheScreenTopGrowsDownInstead() {
-        // Dragged up against the menu bar: growing upward would go off-screen.
-        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let frame = NSRect(x: 100, y: 800, width: 48, height: 90)
-        let grown = PillGeometry.resized(frame, toHeight: 190, within: screen)
-        XCTAssertEqual(grown, NSRect(x: 100, y: 710, width: 48, height: 190))
+    func testHoverFollowsThePointerOverTheCapsuleOnly() {
+        let model = PillModel()
+        model.apply(phase: .recording, isPaused: false, durationSeconds: 1, bars: [])
+        let collapsed = PillGeometry.capsuleRect(height: model.height)
+        // Over the transparent space above the collapsed capsule: no hover.
+        model.pointerMoved(to: NSPoint(x: collapsed.midX, y: collapsed.maxY + 20))
+        XCTAssertFalse(model.isHovering)
+        // Onto the capsule: expands.
+        model.pointerMoved(to: NSPoint(x: collapsed.midX, y: collapsed.midY))
+        XCTAssertTrue(model.isExpanded)
+        // Up into the revealed controls: the expanded capsule contains it, so
+        // hover holds instead of collapsing under the pointer.
+        model.pointerMoved(to: NSPoint(x: collapsed.midX, y: collapsed.maxY + 20))
+        XCTAssertTrue(model.isExpanded)
+        // Into the shadow margin beside it: collapses.
+        model.pointerMoved(to: NSPoint(x: collapsed.minX - 4, y: collapsed.midY))
+        XCTAssertFalse(model.isHovering)
+    }
+
+    func testPointerLeavingThePanelEndsHover() {
+        let model = PillModel()
+        model.apply(phase: .recording, isPaused: false, durationSeconds: 1, bars: [])
+        let rect = PillGeometry.capsuleRect(height: model.height)
+        model.pointerMoved(to: NSPoint(x: rect.midX, y: rect.midY))
+        XCTAssertTrue(model.isHovering)
+        model.pointerExited()
+        XCTAssertFalse(model.isHovering)
     }
 
     func testBarHeightMatchesTheWebPillCurve() {
