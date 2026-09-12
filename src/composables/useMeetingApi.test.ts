@@ -265,6 +265,107 @@ describe('listActionItemsByDay', () => {
   });
 });
 
+describe('action-item follow-ups', () => {
+  it('lists a meeting’s action-item follow-ups with their text and completion', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: {
+        followUps: [
+          { id: 3, raw: { description: 'Send pricing deck', completed: true } },
+          { id: 4, searchable_json: { description: 'Book the venue' } },
+          { id: 5, description: 'Draft the RFC', raw: {} },
+          { id: 6, raw: {} },
+        ],
+      },
+    });
+
+    const followUps = await useMeetingApi().listFollowUpsBySource(9);
+
+    expect(apiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/follow-ups/by-source?source_id=9&source_type=action_item'
+    );
+    // A row with no description can't be tied to any item, so it is dropped.
+    expect(followUps).toEqual([
+      { id: 3, description: 'Send pricing deck', completed: true },
+      { id: 4, description: 'Book the venue', completed: false },
+      { id: 5, description: 'Draft the RFC', completed: false },
+    ]);
+  });
+
+  it('surfaces a failed follow-up lookup', async () => {
+    apiRequest.mockResolvedValue({ status: 500, data: { error: 'boom' } });
+    await expect(useMeetingApi().listFollowUpsBySource(9)).rejects.toThrow('boom');
+  });
+
+  it('creates a follow-up tied to the action item the way the web app does', async () => {
+    apiRequest.mockResolvedValue({
+      status: 201,
+      data: { followUp: { id: 11, raw: { description: 'Ship it', completed: false } } },
+    });
+
+    const created = await useMeetingApi().createActionItemFollowUp(9, 'Platform Sync', 'Ship it');
+
+    expect(apiRequest).toHaveBeenCalledWith('POST', '/follow-ups', {
+      description: 'Ship it',
+      importance: 0.7,
+      reasoning: 'Action item from meeting: Platform Sync',
+      expiresAt: null,
+      sourceId: '9',
+      sourceType: 'action_item',
+    });
+    expect(created).toEqual({ id: 11, description: 'Ship it', completed: false });
+  });
+
+  it('marks a follow-up complete or incomplete', async () => {
+    apiRequest.mockResolvedValue({ status: 200, data: {} });
+    await useMeetingApi().setFollowUpCompleted(11, true);
+    expect(apiRequest).toHaveBeenCalledWith('PATCH', '/follow-ups/11/complete', { completed: true });
+  });
+
+  it('surfaces a failed completion write', async () => {
+    apiRequest.mockResolvedValue({ status: 404, data: { error: 'Follow-up not found' } });
+    await expect(useMeetingApi().setFollowUpCompleted(11, false)).rejects.toThrow(
+      'Follow-up not found'
+    );
+  });
+});
+
+describe('reassignActionItem', () => {
+  it('patches the assignee and returns the server-resolved owner', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { actionItem: { id: 'a/1', name: 'Dana', meetingParticipantId: 42 } },
+    });
+
+    const owner = await useMeetingApi().reassignActionItem('9', 'a/1', 42);
+
+    expect(apiRequest).toHaveBeenCalledWith(
+      'PATCH',
+      '/meeting-notes/9/action-items/a%2F1/assignee',
+      { meetingParticipantId: 42 }
+    );
+    expect(owner).toEqual({ name: 'Dana', meetingParticipantId: 42 });
+  });
+
+  it('sends null to unassign', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { actionItem: { id: 'a1', name: 'Unassigned', meetingParticipantId: null } },
+    });
+    const owner = await useMeetingApi().reassignActionItem('9', 'a1', null);
+    expect(apiRequest.mock.calls[0][2]).toEqual({ meetingParticipantId: null });
+    expect(owner).toEqual({ name: 'Unassigned', meetingParticipantId: null });
+  });
+
+  it('surfaces a rejected reassignment', async () => {
+    apiRequest.mockResolvedValue({ status: 403, data: { error: 'Not a meeting attendee' } });
+    await expect(useMeetingApi().reassignActionItem('9', 'a1', 42)).rejects.toThrow(
+      'Not a meeting attendee'
+    );
+  });
+});
+
 describe('isMeetingNotesReady', () => {
   it('is ready once a transcript exists', () => {
     expect(isMeetingNotesReady({ hasTranscript: true })).toBe(true);

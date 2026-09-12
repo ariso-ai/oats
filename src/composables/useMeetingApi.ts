@@ -73,6 +73,23 @@ export interface DayActionItems {
   actionItems: Array<{ name?: string; item: string }>;
 }
 
+/** The requester's follow-up for one of a meeting's action items. The server
+ *  links the two only by text (`source_type` 'action_item', `source_id` the
+ *  meeting id), so `description` is the action item's text. Follow-ups are per
+ *  user: `completed` is whether *the requester* has checked the item off. */
+export interface ActionItemFollowUp {
+  id: number;
+  description: string;
+  completed: boolean;
+}
+
+/** Who an action item belongs to after a reassignment, as the server resolved
+ *  it. `meetingParticipantId` null means unassigned (or a bare-name owner). */
+export interface ActionItemOwner {
+  name: string;
+  meetingParticipantId: number | null;
+}
+
 /** A meeting prep, reduced to the two fields the desktop consumes: the markdown
  *  to render, and the meeting it belongs to (used to resolve a prep-ready
  *  notification back to a row in the library). */
@@ -108,6 +125,9 @@ interface MeetingNotesParticipant {
   /** Whether a human confirmed this speaker↔person link (as opposed to it
    *  coming from an unreviewed auto-match). */
   manual_confirm?: boolean;
+  /** The meeting_participants row id — the id an action item's assignee is
+   *  written as. Absent on responses that predate action-item reassignment. */
+  meeting_participant_id?: number | null;
 }
 
 /** A diarized voice in a recording, before anyone has said who it belongs to.
@@ -199,6 +219,24 @@ function parseTranscriptChunks(raw: unknown): TranscriptChunk[] | null {
     }))
     .filter((c) => c.content.length > 0);
   return chunks.length ? chunks : null;
+}
+
+// A follow-up row keeps its text in `raw.description`; older rows carry it in
+// `searchable_json` or at the top level. A row with no text can't be tied to
+// any action item, so it normalizes to null.
+function parseActionItemFollowUp(raw: unknown): ActionItemFollowUp | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const f = raw as {
+    id?: unknown;
+    description?: unknown;
+    raw?: { description?: unknown; completed?: unknown } | null;
+    searchable_json?: { description?: unknown } | null;
+  };
+  const description = [f.raw?.description, f.searchable_json?.description, f.description].find(
+    (d): d is string => typeof d === 'string' && d.length > 0
+  );
+  if (typeof f.id !== 'number' || !description) return null;
+  return { id: f.id, description, completed: f.raw?.completed === true };
 }
 
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
@@ -488,6 +526,77 @@ export function useMeetingApi() {
     return data?.actionItems ?? [];
   }
 
+  // The requester's follow-ups for one meeting's action items. Checking an
+  // item off lives on its follow-up, not on the item, so this is how both the
+  // detail panel and the Todo tab learn which items are done.
+  async function listFollowUpsBySource(
+    meetingId: number | string
+  ): Promise<ActionItemFollowUp[]> {
+    const params = new URLSearchParams({
+      source_id: String(meetingId),
+      source_type: 'action_item',
+    });
+    const res = await api.request('GET', `/follow-ups/by-source?${params.toString()}`);
+    assertOk(res, 200, 'list follow-ups');
+    const data = res.data as { followUps?: unknown[] } | null;
+    return (data?.followUps ?? [])
+      .map(parseActionItemFollowUp)
+      .filter((f): f is ActionItemFollowUp => f !== null);
+  }
+
+  // Create the requester's follow-up for an action item. The body matches the
+  // web meeting-notes page so both clients' follow-ups look the same.
+  async function createActionItemFollowUp(
+    meetingId: number | string,
+    meetingTitle: string,
+    text: string
+  ): Promise<ActionItemFollowUp> {
+    const res = await api.request('POST', '/follow-ups', {
+      description: text,
+      importance: 0.7,
+      reasoning: `Action item from meeting: ${meetingTitle}`,
+      expiresAt: null,
+      sourceId: String(meetingId),
+      sourceType: 'action_item',
+    });
+    assertOk2xx(res, 'create follow-up');
+    const followUp = parseActionItemFollowUp((res.data as { followUp?: unknown } | null)?.followUp);
+    if (!followUp) throw new Error('Server did not return the follow-up');
+    return followUp;
+  }
+
+  async function setFollowUpCompleted(followUpId: number, completed: boolean): Promise<void> {
+    const res = await api.request(
+      'PATCH',
+      `/follow-ups/${encodeURIComponent(String(followUpId))}/complete`,
+      { completed }
+    );
+    assertOk2xx(res, 'update follow-up');
+  }
+
+  // Move an action item to another attendee (null = Unassigned). Any attendee
+  // may do this. Returns the owner the server resolved, which is what the next
+  // fetch will show.
+  async function reassignActionItem(
+    meetingId: number | string,
+    actionItemId: string,
+    meetingParticipantId: number | null
+  ): Promise<ActionItemOwner> {
+    const res = await api.request(
+      'PATCH',
+      `/meeting-notes/${encodeURIComponent(String(meetingId))}/action-items/${encodeURIComponent(actionItemId)}/assignee`,
+      { meetingParticipantId }
+    );
+    assertOk2xx(res, 'reassign action item');
+    const item = (res.data as { actionItem?: { name?: unknown; meetingParticipantId?: unknown } } | null)
+      ?.actionItem;
+    return {
+      name: typeof item?.name === 'string' ? item.name : '',
+      meetingParticipantId:
+        typeof item?.meetingParticipantId === 'number' ? item.meetingParticipantId : null,
+    };
+  }
+
   // Search org members to assign a diarized speaker to. Scoped to the
   // meeting's org by the endpoint. Errors collapse to [] — this is a passive
   // type-ahead lookup, and an empty result already has a rendered state
@@ -744,6 +853,10 @@ export function useMeetingApi() {
     getMeetingIndividualNote,
     getMeetingPrep,
     listActionItemsByDay,
+    listFollowUpsBySource,
+    createActionItemFollowUp,
+    setFollowUpCompleted,
+    reassignActionItem,
     searchSpeakerMembers,
     assignSpeaker,
     updateMeeting,
