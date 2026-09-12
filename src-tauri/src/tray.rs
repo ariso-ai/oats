@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -117,12 +118,44 @@ fn apply_recording(app: &AppHandle, is_recording: bool) {
     set_icon(app, cached_theme(), is_recording);
 }
 
-/// Rebuild the tray menu in-place. Called from tray events (main thread)
-/// and from the `set_tray_recording` command.
+/// Rebuild the tray menu in-place. Called from tray events and from the
+/// `set_tray_recording` command.
+///
+/// Every commit is funnelled through the main thread, which serializes them:
+/// menu updates are driven by independent async commands
+/// (`set_tray_recording`, `set_recording_meeting`) plus the tray event
+/// handlers, and without a single ordering point a menu built from one state
+/// could land *after* a later transition's menu — leaving the recording menu
+/// and icon installed after the recording already stopped. The main thread is
+/// also where muda menus must be built on macOS, and dispatching (rather than
+/// holding a lock across the native call) keeps a commit from deadlocking
+/// against a main thread that is itself waiting to commit.
 pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
+    let app = app.clone();
+    let dispatch = app.clone();
+    let _ = dispatch.run_on_main_thread(move || {
+        // Read the identity at commit time, not at call time, so the menu
+        // reflects the state as of the moment it is actually installed.
+        let identity = if is_recording {
+            app.state::<crate::recording_state::RecordingState>()
+                .active_snapshot()
+        } else {
+            None
+        };
+        commit_menu(&app, is_recording, is_paused, identity.as_ref());
+    });
+}
+
+/// The commit itself. Must run on the main thread — see `set_menu`.
+fn commit_menu(
+    app: &AppHandle,
+    is_recording: bool,
+    is_paused: bool,
+    identity: Option<&crate::recording_state::RecordingSnapshot>,
+) {
     let Some(tray) = app.tray_by_id("main") else { return };
     let menu = if is_recording {
-        build_recording_menu(app, is_paused)
+        build_recording_menu(app, is_paused, identity)
     } else {
         let featured = app
             .state::<crate::tray_meeting::FeaturedMeetingState>()
@@ -147,16 +180,21 @@ pub fn set_menu(app: &AppHandle, is_recording: bool, is_paused: bool) {
 /// Rebuild the recording menu after the recording's identity changes. A no-op
 /// when nothing is recording — the identity push races the stop path, and a
 /// late arrival must not resurrect a recording menu over the idle one.
+///
+/// The state read happens on the main thread at commit time, which is what
+/// makes the no-op reliable rather than merely likely: a
+/// `set_tray_recording(false)` racing this either clears the state before this
+/// closure runs (so nothing is committed here) or commits its own idle menu
+/// after it, never before. Both orderings end on the idle menu.
 pub fn refresh_recording_menu(app: &AppHandle) {
-    let state = app.state::<crate::recording_state::RecordingState>();
-    // Serialized with `set_tray_recording`'s clear-then-idle-menu commit (see
-    // `RecordingState::menu_lock`) so a stop that lands between this check and
-    // the menu commit below cannot be resurrected by it.
-    state.with_menu_lock(|| {
-        if !state.is_active() {
-            return;
-        }
-        set_menu(app, true, state.is_paused());
+    let app = app.clone();
+    let dispatch = app.clone();
+    let _ = dispatch.run_on_main_thread(move || {
+        let snapshot = app
+            .state::<crate::recording_state::RecordingState>()
+            .active_snapshot();
+        let Some(snapshot) = snapshot else { return };
+        commit_menu(&app, true, snapshot.is_paused, Some(&snapshot));
     });
 }
 
@@ -171,7 +209,9 @@ pub fn refresh(app: &AppHandle, rebuild_menu: bool) {
             .state::<crate::recording_state::RecordingState>()
             .is_active();
         if rebuild_menu && !recording {
-            set_menu(&app_for_menu, false, false);
+            // Already on the main thread, so commit directly rather than
+            // dispatching a second hop through `set_menu`.
+            commit_menu(&app_for_menu, false, false, None);
         } else {
             refresh_tray_title(&app_for_menu);
         }
@@ -453,7 +493,16 @@ pub(crate) fn truncate_menu_title(title: Option<&str>) -> String {
 /// The top row names what is being recorded and opens it in the Meetings
 /// window, mirroring `build_idle_menu`'s `record_featured` row so the menu bar
 /// offers the same "the meeting is one click away" affordance in both states.
-pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+///
+/// `identity` is passed in rather than read from `RecordingState` here: the
+/// caller takes it under the menu-commit lock, so the menu this builds cannot
+/// mix a title from before a lifecycle transition with a commit that lands
+/// after one.
+pub fn build_recording_menu(
+    app: &AppHandle,
+    is_paused: bool,
+    identity: Option<&crate::recording_state::RecordingSnapshot>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
 
     // Only once the recorder window has told us what it is recording. Until
@@ -464,9 +513,9 @@ pub fn build_recording_menu(app: &AppHandle, is_paused: bool) -> tauri::Result<t
     // is genuinely untitled until the user renames it, and that is the very
     // case this row exists for: the id is known and routable, so the row falls
     // back to "Untitled meeting" rather than disappearing.
-    let state = app.state::<crate::recording_state::RecordingState>();
-    let title = state.active_recording_title();
-    if title.is_some() || state.active_meeting_id().is_some() {
+    let title = identity.and_then(|i| i.title.clone());
+    let has_identity = identity.is_some_and(|i| i.title.is_some() || i.meeting_id.is_some());
+    if has_identity {
         let show = MenuItemBuilder::with_id("show_recording", truncate_menu_title(title.as_deref()))
             .build(app)?;
         // muda has no per-item font control, so a disabled item is the closest
