@@ -22,6 +22,7 @@ const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
 const getMeetingPrepApi = vi.fn();
 const listActionItemsByDay = vi.fn();
+const listFollowUpsBySource = vi.fn();
 const reportUploadFailure = vi.fn(() => Promise.resolve());
 
 vi.mock('./useDiagnostics', () => ({
@@ -61,6 +62,7 @@ vi.mock('./useMeetingApi', () => ({
     deleteMeetingRecordingClip: (...a: unknown[]) => deleteMeetingRecordingClip(...a),
     getMeetingPrep: (...a: unknown[]) => getMeetingPrepApi(...a),
     listActionItemsByDay: (...a: unknown[]) => listActionItemsByDay(...a),
+    listFollowUpsBySource: (...a: unknown[]) => listFollowUpsBySource(...a),
   }),
 }));
 
@@ -77,6 +79,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   getMeetingNotes.mockReset();
   listVaultTasks.mockReset();
+  listFollowUpsBySource.mockReset();
+  listFollowUpsBySource.mockResolvedValue([]);
 });
 
 describe('LocalBackend', () => {
@@ -401,6 +405,35 @@ describe('ArisoBackend', () => {
     expect(d.publicShareExpiresAt).toBe('2026-07-01T10:00:00Z');
     expect(d.shareMeetingNotesToPublic).toBe('host_only');
     expect(d.participants[0].id).toBe(11);
+  });
+
+  it('keeps what reassigning an action item needs: item ids and participant rows', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 7,
+      title: 'Sync',
+      start_at: '2026-06-01T10:00:00Z',
+      participants: [{ id: 11, name: 'Ana', self: true, meeting_participant_id: 501 }],
+      summary: {
+        actionItems: [
+          { id: 'a1', name: 'Ana', item: 'Ship it', meetingParticipantId: 501 },
+          { id: 'a2', name: 'Unassigned', item: 'Book venue', meetingParticipantId: null },
+          { name: 'Bob', item: 'Legacy blob item' },
+        ],
+      },
+    });
+
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '7',
+      title: 'Sync',
+      timestamp: '2026-06-01T10:00:00Z',
+    });
+
+    expect(d.participants[0].meetingParticipantId).toBe(501);
+    expect(d.actionItems).toStrictEqual([
+      { id: 'a1', name: 'Ana', item: 'Ship it', meetingParticipantId: 501 },
+      { id: 'a2', name: 'Unassigned', item: 'Book venue', meetingParticipantId: null },
+      { name: 'Bob', item: 'Legacy blob item' },
+    ]);
   });
 
   it('marks the detail canceled from the meeting-notes status', async () => {
@@ -832,6 +865,81 @@ describe('action items', () => {
 
       expect(entries).toHaveLength(1);
       expect(entries[0].items[0].item).toBe('Draft migration plan');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('Ariso leaves out the items the user has checked off', async () => {
+    listActionItemsByDay.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === '2026-08-31'
+          ? [
+              {
+                meetingId: 9,
+                meetingTitle: 'Q3 Pricing Review',
+                startAt: '2026-08-31T09:00:00Z',
+                actionItems: [
+                  { name: 'Me', item: 'Send pricing deck' },
+                  { name: 'Me', item: 'Book the venue' },
+                ],
+              },
+              {
+                meetingId: 10,
+                meetingTitle: 'Retro',
+                startAt: '2026-08-31T15:00:00Z',
+                actionItems: [{ name: 'Me', item: 'Write the retro doc' }],
+              },
+            ]
+          : []
+      )
+    );
+    listFollowUpsBySource.mockImplementation((meetingId: number | string) =>
+      Promise.resolve(
+        String(meetingId) === '9'
+          ? [
+              { id: 1, description: 'Send pricing deck', completed: true },
+              { id: 2, description: 'Book the venue', completed: false },
+            ]
+          : [{ id: 3, description: 'Write the retro doc', completed: true }]
+      )
+    );
+
+    const entries = await new ArisoBackend().listActionItems();
+
+    expect(listFollowUpsBySource.mock.calls.map((c) => String(c[0])).sort()).toEqual(['10', '9']);
+    // A meeting whose every item is done drops out entirely.
+    expect(entries).toEqual([
+      {
+        meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
+        items: [{ name: 'Me', item: 'Book the venue' }],
+      },
+    ]);
+  });
+
+  it('Ariso keeps a meeting’s items when its follow-up lookup fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      listActionItemsByDay.mockImplementation((day: string) =>
+        Promise.resolve(
+          day === '2026-08-31'
+            ? [
+                {
+                  meetingId: 9,
+                  meetingTitle: 'Q3 Pricing Review',
+                  startAt: '2026-08-31T09:00:00Z',
+                  actionItems: [{ item: 'Send pricing deck' }],
+                },
+              ]
+            : []
+        )
+      );
+      listFollowUpsBySource.mockRejectedValue(new Error('500'));
+
+      const entries = await new ArisoBackend().listActionItems();
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0].items[0].item).toBe('Send pricing deck');
     } finally {
       errorSpy.mockRestore();
     }

@@ -270,17 +270,13 @@
 
             <section v-if="detail.actionItems.length" class="sec">
               <h3 class="sec-h">Action Items <span class="count">{{ detail.actionItems.length }}</span></h3>
-              <div class="ai-groups">
-                <div v-for="(g, gi) in groupedActionItems" :key="gi" class="ai-group">
-                  <div v-if="g.name" class="ai-owner">
-                    <span class="avatar avatar--sm" :style="{ background: avatarColor(gi) }">{{ initials(g.name) }}</span>
-                    <span class="ai-name">{{ g.name }}</span>
-                  </div>
-                  <ol class="ai-list" :class="{ 'ai-list--indent': g.name }">
-                    <li v-for="(it, i) in g.items" :key="i">{{ it.item }}</li>
-                  </ol>
-                </div>
-              </div>
+              <ArisoActionItems
+                :meeting-id="detail.id"
+                :meeting-title="detail.title"
+                :items="detail.actionItems"
+                :participants="detail.participants"
+                :todos-changed="onArisoTodosChanged"
+              />
             </section>
 
             <section v-if="detail.summary" class="sec">
@@ -445,7 +441,6 @@ import {
   type Backend,
   type MeetingListItem,
   type MeetingDetail,
-  type MeetingActionItem,
   type MeetingCoaching,
 } from '../composables/useBackend';
 import AriWillJoinTag from './AriWillJoinTag.vue';
@@ -456,6 +451,8 @@ import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import SpeakerAssignPopover from './SpeakerAssignPopover.vue';
 import { useSpeakerAssignment } from '../composables/useSpeakerAssignment';
+import { avatarColor, initials } from './avatarStyle';
+import ArisoActionItems from './ArisoActionItems.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { transcriptFilename } from './transcriptDownloadName';
 import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
@@ -477,8 +474,9 @@ const emit = defineEmits<{
    *  panel was open. The Library reloads its list so the row drops its
    *  "Processing…" sub-line and picks up the finished content. */
   contentReady: [payload: { id: string }];
-  /** A task in a local recording's AI notes was ticked or unticked, opening or
-   *  closing its todo. The Library refreshes its Todos list. */
+  /** An action item was checked off/reopened (a task in a local recording's
+   *  AI notes, or an Ariso item) or an Ariso item was reassigned — any of which
+   *  can open or close a todo. The Library refreshes its Todos list. */
   tasksChanged: [payload: { id: string }];
   /** The open local note was permanently deleted. The Library drops its row and
    *  clears the selection — without the usual notes autosave, since there is no
@@ -1678,21 +1676,12 @@ const otesEmpty = computed(() => {
   return !d.digest && !d.summary && !d.actionItems.length && d.score === undefined && !hasCoaching.value;
 });
 
-const groupedActionItems = computed<{ name?: string; items: MeetingActionItem[] }[]>(() => {
-  const groups = new Map<string, MeetingActionItem[]>();
-  const ungrouped: MeetingActionItem[] = [];
-  for (const it of detail.value?.actionItems ?? []) {
-    if (it.name) {
-      if (!groups.has(it.name)) groups.set(it.name, []);
-      groups.get(it.name)!.push(it);
-    } else {
-      ungrouped.push(it);
-    }
-  }
-  const out = [...groups.entries()].map(([name, items]) => ({ name, items }));
-  if (ungrouped.length) out.push({ name: undefined, items: ungrouped });
-  return out;
-});
+// An Ariso action item was checked off or reassigned, which can open or close
+// one of the user's todos. Reported for the meeting the write was made on, even
+// if the panel has moved on since — the Library refreshes its Todos list.
+function onArisoTodosChanged(meetingId: string): void {
+  emit('tasksChanged', { id: meetingId });
+}
 
 const SCORE_BADGES = [
   null,
@@ -1708,16 +1697,6 @@ const scoreBadge = computed(() => {
   if (s === undefined || s < 1 || s > 5) return null;
   return SCORE_BADGES[s];
 });
-
-const AVATAR_COLORS = ['#6c63c0', '#0ea5e9', '#f59e0b', '#ec4899', '#22c55e', '#64748b'];
-function avatarColor(i: number): string {
-  return AVATAR_COLORS[i % AVATAR_COLORS.length];
-}
-
-function initials(name?: string): string {
-  if (!name) return '?';
-  return name.split(/\s+/).filter(Boolean).map((n) => n[0]).join('').toUpperCase().slice(0, 2) || '?';
-}
 
 function formatType(t: string): string {
   return t.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -2046,12 +2025,6 @@ const durationLabel = computed<string | null>(() => {
 .sec:last-child { margin-bottom: 0; }
 .sec-h { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #1c1c1c; display: flex; align-items: center; gap: 8px; }
 .count { padding: 1px 8px; background: #ecebe8; color: #535353; font-size: 12px; font-weight: 500; border-radius: 999px; }
-
-.ai-groups { display: flex; flex-direction: column; gap: 16px; }
-.ai-owner { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.ai-name { font-size: 14px; font-weight: 500; color: #1c1c1c; }
-.ai-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; color: #535353; font-size: 14px; }
-.ai-list--indent { margin-left: 30px; }
 
 .acc { border: 1px solid #e5e6e3; border-radius: 10px; overflow: hidden; }
 .acc-btn { width: 100%; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; background: #fff; border: none; cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 500; color: #1c1c1c; }
