@@ -174,6 +174,10 @@ struct Pill {
     hwnd: HWND,
     tooltip: Option<HWND>,
     tool_ids: Vec<usize>,
+    /// One stable UTF-16 buffer per registered tool. `TTM_ADDTOOLW` stores the
+    /// `lpszText` pointer rather than copying the string, so these must
+    /// outlive the tool — cleared only after `TTM_DELTOOLW` for every id.
+    tool_texts: Vec<Box<[u16]>>,
     tool_signature: Option<(PillPhase, bool, bool)>,
     renderer: Renderer,
     state: PillState,
@@ -226,6 +230,7 @@ impl Pill {
             hwnd,
             tooltip: create_tooltip(hwnd, instance),
             tool_ids: Vec::new(),
+            tool_texts: Vec::new(),
             tool_signature: None,
             renderer,
             anim: HeightAnimation::settled(layout::capsule_height(state.phase, false)),
@@ -531,6 +536,7 @@ impl Pill {
                 SendMessageW(tooltip, TTM_DELTOOLW, None, Some(LPARAM(&mut info as *mut _ as isize)));
             }
         }
+        self.tool_texts.clear();
         let layout = layout::layout(self.state.phase, self.state.paused, height);
         let live = self.state.phase == PillPhase::Failed || signature.2;
         if !live {
@@ -538,7 +544,10 @@ impl Pill {
         }
         let scale = self.scale();
         for (id, button) in layout.buttons.iter().enumerate() {
-            let mut text: Vec<u16> = button.label.encode_utf16().chain(Some(0)).collect();
+            self.tool_texts.push(
+                button.label.encode_utf16().chain(Some(0)).collect::<Vec<_>>().into_boxed_slice(),
+            );
+            let text = self.tool_texts.last_mut().expect("just pushed");
             let mut info = tool_info(self.hwnd, id);
             info.uFlags = TTF_SUBCLASS;
             info.rect = RECT {
@@ -548,7 +557,7 @@ impl Pill {
                 bottom: (button.rect.bottom() * scale) as i32,
             };
             info.lpszText = PWSTR(text.as_mut_ptr());
-            // The control copies the text during TTM_ADDTOOLW.
+            // `tool_texts` keeps this pointer valid while the tool exists.
             unsafe {
                 SendMessageW(tooltip, TTM_ADDTOOLW, None, Some(LPARAM(&mut info as *mut _ as isize)));
             }
@@ -807,8 +816,9 @@ impl Renderer {
             self.target.SetDpi(dpi as f32, dpi as f32);
             self.target.BeginDraw();
             self.target.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            self.paint(frame)?;
+            let painted = self.paint(frame);
             self.target.EndDraw(None, None)?;
+            painted?;
 
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,

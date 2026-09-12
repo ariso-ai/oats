@@ -1481,6 +1481,13 @@ pub(crate) fn open_waveform_window(
             return Err(error.to_string());
         }
     };
+    // The window never paints and must not intercept clicks meant for
+    // whatever is beneath its (arbitrarily placed, always-on-top) rectangle.
+    if let Err(error) = win.set_ignore_cursor_events(true) {
+        let _ = win.close();
+        recording_state.release_window_claim();
+        return Err(error.to_string());
+    }
 
     // Capture may stop before upload/close completes. Keep the one-window
     // claim until this native window is actually destroyed.
