@@ -1,0 +1,607 @@
+name: Autopilot approved task
+
+# Triggered when shawnzhu applies the `autofix:approved` label to an issue typed
+# Task. (The same label on any other type belongs to issue-autofix.yml; each
+# workflow resolves the type first and only one of them acts.) Runs the
+# `autopilot` skill headlessly in a worktree under .worktrees/ — spec → plan →
+# subagent-driven implementation with per-task and final-branch review — then
+# enforces the path denylist and the build gate, pushes, and opens a non-draft
+# PR as github-actions[bot], which hands it to the CodeRabbit → apply-fixes.yml
+# loop. Merging stays human.
+#
+# SECURITY: the issue body and its comments are public, attacker-controlled
+# text. Unlike issue-autofix.yml, this agent gets an UNRESTRICTED shell:
+# subagent-driven development commits, runs superpowers' helper scripts, and
+# dispatches subagents, none of which a narrow allowlist can express. So the
+# defenses that matter here are structural, not the tool list:
+#
+#   1. Trigger gate — the label must be applied BY shawnzhu (`sender.login`).
+#   2. Author partitioning — shawnzhu's comments are requirements, everyone
+#      else's are untrusted context.
+#   3. No token on the machine the agent runs on. The self-hosted `autopilot`
+#      job holds no GitHub token at all; it hands a git bundle and the PR text
+#      to the `publish` job on a clean hosted runner, which does every push,
+#      PR, comment, and label. A process the agent leaves behind cannot read a
+#      token that never reaches its runner (the push URL carries the token in
+#      argv, visible to any same-user process). Same split as release.yaml.
+#   4. No cache writes. The sidecar cache is restore-only here: release.yaml
+#      restores the same key, so a save after the agent had a shell would be
+#      a path into a signed release.
+#   5. Git state rebuilt after the agent — this runner's .git is reused by
+#      every later job (release.yaml included), so .git/config is regenerated
+#      and hooks wiped in an always() step.
+#   6. Diff denylist, enforced in `publish` on the clean runner BEFORE the
+#      push — `.claude/`, `.agents/`, `.github/` are inputs to later agents
+#      (apply-fixes.yml runs claude inside this PR's head).
+#   7. Build gate — the workflow re-runs verification itself.
+#
+# The deny rules (.github/claude-autopilot-settings.json, --disallowed-tools)
+# are friction on top of these, not a boundary.
+#
+# Residual risk, stated plainly: an injected agent with a shell on a
+# PERSISTENT runner can still write outside the workspace — $HOME, a lingering
+# process — and that survives into later jobs on the same machine, including
+# release builds. The bound on that is shawnzhu's approval: this only runs
+# because a human read the issue and chose to. An ephemeral runner for this
+# job is the real fix if that bound stops being enough.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+env:
+  ISSUE: ${{ github.event.issue.number }}
+  REPO: ${{ github.repository }}
+  BRANCH: autopilot/issue-${{ github.event.issue.number }}
+
+jobs:
+  # Everything that needs a token BEFORE the agent runs happens here, on a
+  # hosted runner, so the self-hosted job never needs one.
+  route:
+    name: Route and stage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # `sender.login` is the account that applied the label — this, not the
+    # issue author, is the authorization we care about.
+    if: >-
+      github.event.label.name == 'autofix:approved' &&
+      github.event.sender.login == 'shawnzhu' &&
+      github.event.issue.state == 'open'
+    outputs:
+      type: ${{ steps.type.outputs.type }}
+      proceed: ${{ steps.pr.outputs.proceed }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # REST, not the event payload or `gh issue view --json issueType` — the
+      # same lookup feature-shaping.yml uses.
+      - name: Read issue type
+        id: type
+        run: |
+          set -euo pipefail
+          type=$(gh api "repos/$REPO/issues/$ISSUE" --jq '.type.name // ""')
+          echo "Issue #$ISSUE type: ${type:-<none>}"
+          echo "type=$type" >> "$GITHUB_OUTPUT"
+          if [ "$type" != "Task" ]; then
+            echo "Not a Task — issue-autofix.yml owns this label on other types."
+          fi
+
+      # Never start a second attempt over an open PR: iterating on it is what
+      # CodeRabbit + apply-fixes.yml are for, and a fresh run would clobber
+      # the fixes they have already pushed. `publish` does not run on this
+      # path, so the approval label is cleared here to keep it re-appliable.
+      - name: Check for an open PR
+        id: pr
+        if: steps.type.outputs.type == 'Task'
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            gh issue comment "$ISSUE" --repo "$REPO" \
+              --body "🤖 PR #$existing is already open for this task — leaving it alone rather than starting a second attempt. Iterate there, or close it and re-apply \`autofix:approved\` for a fresh run."
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label "autofix:approved" 2>/dev/null || true
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Visible status while the run is in flight; `publish` clears it on
+      # every outcome. Best-effort so a labeling hiccup never aborts the run.
+      - name: Mark issue autofix:working
+        if: steps.pr.outputs.proceed == 'true'
+        run: |
+          gh label create "autofix:working" \
+            --repo "$REPO" \
+            --color FBCA04 \
+            --description "An automation workflow is working on this" \
+            2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "autofix:working" \
+            || echo "::warning::could not add autofix:working label"
+
+      # Untrusted text reaches the agent only through these files. Comments
+      # are partitioned by author so the prompt can apply different trust to
+      # each.
+      - name: Stage issue context
+        if: steps.pr.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue-context"
+          jq '{
+            number: .issue.number,
+            title: .issue.title,
+            body: .issue.body,
+            author: .issue.user.login,
+            labels: [.issue.labels[].name]
+          }' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/issue-context/issue.json"
+
+          gh api --paginate "repos/$REPO/issues/$ISSUE/comments" \
+            | jq -s '[.[][] | {author: .user.login, body: .body}]' \
+            | jq '{
+                trusted:   [.[] | select(.author == "shawnzhu")],
+                untrusted: [.[] | select(.author != "shawnzhu")]
+              }' > "$RUNNER_TEMP/issue-context/comments.json"
+
+          echo "Trusted comments:   $(jq '.trusted   | length' "$RUNNER_TEMP/issue-context/comments.json")"
+          echo "Untrusted comments: $(jq '.untrusted | length' "$RUNNER_TEMP/issue-context/comments.json")"
+
+      - name: Upload issue context
+        if: steps.pr.outputs.proceed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: issue-context
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ runner.temp }}/issue-context/
+
+      # `publish` never runs when this job fails, so this is the only record.
+      # issue-autofix.yml's route job fails the same way on the same outage,
+      # so a type-lookup failure can double-post; better than silence.
+      - name: Flag failure on the issue
+        if: failure()
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "ai-failed" \
+            --remove-label "autofix:working" --remove-label "autofix:approved" 2>/dev/null || true
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Autopilot failed before it started. [Run log]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID) — re-apply \`autofix:approved\` to retry." \
+            2>/dev/null || true
+
+  # The long job. Holds NO GitHub token: nothing in it can push, comment, or
+  # label, and the agent's leftovers have nothing to steal. Its only outputs
+  # are the job outputs below and the `autopilot-result` artifact.
+  autopilot:
+    name: Implement task
+    needs: route
+    if: needs.route.outputs.type == 'Task' && needs.route.outputs.proceed == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    # Spec + plan + an implementer and a reviewer subagent per task + a final
+    # review, with cold cargo builds. Generous on purpose: a timeout
+    # mid-implementation throws away everything.
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.outcome.outputs.result }}
+      ahead: ${{ steps.outcome.outputs.ahead }}
+      base: ${{ steps.reset.outputs.base }}
+    env:
+      WORKTREE: .worktrees/autopilot-issue-${{ github.event.issue.number }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # The agent runs inside this repository, so no credential may be
+          # left in .git/config for it to read.
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # The runner is persistent and .git survives between runs, so an earlier
+      # run's worktree registration and local branch are cleared first. Never
+      # build on an existing remote branch — its package.json scripts would
+      # run in `npm ci` (CodeQL's actions/untrusted-checkout/high).
+      - name: Reset per-issue git state
+        id: reset
+        run: |
+          set -euo pipefail
+          git worktree remove --force "$WORKTREE" 2>/dev/null || true
+          git worktree prune
+          git branch -D "$BRANCH" 2>/dev/null || true
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Will branch $BRANCH from main at $(git rev-parse --short HEAD)."
+
+      - name: Download issue context
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: issue-context
+          path: ${{ runner.temp }}/issue-context
+
+      # The sidecar is a gitignored build artifact that tauri's `externalBin`
+      # requires before `cargo build` will link. RESTORE-ONLY — see SECURITY
+      # item 4. A miss costs one local xcodebuild, never a cache write.
+      - name: Fingerprint Xcode toolchain
+        id: toolchain
+        run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ariso-stt sidecar artifacts
+        id: sidecar-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            src-tauri/binaries/ariso-stt-aarch64-apple-darwin
+            src-tauri/binaries/mlx-swift_Cmlx.bundle
+          key: ariso-stt-aarch64-${{ steps.toolchain.outputs.fp }}-${{ hashFiles('src-tauri/ariso-stt/macos/Package.resolved', 'src-tauri/ariso-stt/macos/Sources/**') }}
+
+      - name: Build ariso-stt sidecar
+        if: steps.sidecar-cache.outputs.cache-hit != 'true'
+        working-directory: src-tauri/ariso-stt/macos
+        run: |
+          mkdir -p ../../binaries
+          xcodebuild build -scheme ariso-stt -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .xcode -skipMacroValidation
+          cp .xcode/Build/Products/Release/ariso-stt ../../binaries/ariso-stt-aarch64-apple-darwin
+          cp -R .xcode/Build/Products/Release/mlx-swift_Cmlx.bundle ../../binaries/
+
+      # The autopilot skill is repo-local, but the superpowers skills it drives
+      # (writing-plans, subagent-driven-development, using-git-worktrees) come
+      # from a plugin. The project's enabledPlugins only enables it — nothing
+      # installs it — so make sure it is present, without upgrading an
+      # already-installed version out from under the pipeline.
+      - name: Ensure superpowers plugin
+        run: |
+          set -euo pipefail
+          if ! claude plugin list --json | jq -e 'any(.[]; .id == "superpowers@claude-plugins-official")' >/dev/null; then
+            claude plugin marketplace add anthropics/claude-plugins-official 2>/dev/null || true
+            claude plugin install superpowers@claude-plugins-official
+          fi
+          claude plugin list --json \
+            | jq -r '.[] | select(.id == "superpowers@claude-plugins-official") | "superpowers \(.version) (\(.scope))"'
+
+      # The workflow owns worktree creation so it knows the path and branch to
+      # publish, and bootstraps it from main's trusted package.json. The
+      # skill's "create the worktree under .worktrees/" is still satisfied:
+      # using-git-worktrees detects it is already in one and skips creation.
+      - name: Create and bootstrap worktree
+        run: |
+          set -euo pipefail
+          git worktree add "$WORKTREE" -b "$BRANCH" "${{ steps.reset.outputs.base }}"
+          mkdir -p "$WORKTREE/src-tauri/binaries"
+          cp -R src-tauri/binaries/. "$WORKTREE/src-tauri/binaries/"
+          cd "$WORKTREE"
+          npm ci --prefer-offline
+          npm run vite:build
+
+      # The workflow supplies the date so the spec filename can never drift
+      # from the run that produced it.
+      - name: Resolve spec date
+        id: spec
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      # `/autopilot` is expanded by the CLI even though the skill sets
+      # disable-model-invocation (that only stops the MODEL invoking it); the
+      # CI adapter prompt rides along as its arguments. bypassPermissions, not
+      # an allowlist — see the SECURITY header. Deny rules still apply in this
+      # mode, and to subagents.
+      - name: Run Claude autopilot
+        working-directory: ${{ env.WORKTREE }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/autopilot-result"
+          rm -rf "$out" && mkdir -p "$out"
+          prompt="/autopilot $(cat "$GITHUB_WORKSPACE/.github/issue-autopilot-prompt.md")
+
+          Issue file (absolute path):    $RUNNER_TEMP/issue-context/issue.json
+          Comments file (absolute path): $RUNNER_TEMP/issue-context/comments.json
+          Today's date (use in the spec filename): ${{ steps.spec.outputs.date }}
+
+          Write your output files to:
+            $out/pr-title.txt
+            $out/pr-body.md
+            $out/stop-report.md"
+          claude -p "$prompt" \
+            --output-format json \
+            --settings "$GITHUB_WORKSPACE/.github/claude-autopilot-settings.json" \
+            --permission-mode bypassPermissions \
+            --disallowed-tools "WebFetch WebSearch Bash(gh:*) Bash(git push:*) Bash(git remote:*) Bash(git config:*) Bash(curl:*) Bash(wget:*) Bash(claude:*) Bash(sudo:*)" \
+            > "$RUNNER_TEMP/claude-output.json"
+          fence="stop-$(uuidgen)"
+          echo "Claude finished. Result:"
+          echo "::stop-commands::$fence"
+          jq -r '.result // "(no result field)"' "$RUNNER_TEMP/claude-output.json"
+          echo "::$fence::"
+
+      # The agent had a shell and write access to .git, which this runner
+      # reuses for every later job. A planted core.fsmonitor or core.sshCommand
+      # runs on the next git call; a hook runs inside it. Regenerate the config
+      # from known values — never restore a snapshot the agent could have
+      # edited — before this job's own git commands, and on every outcome.
+      - name: Rebuild git config and hooks
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            printf '[core]\n'
+            printf '\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n'
+            printf '\tlogallrefupdates = true\n\tignorecase = true\n\tprecomposeunicode = true\n'
+            printf '\thooksPath = /dev/null\n'
+            printf '[remote "origin"]\n'
+            printf '\turl = https://github.com/%s\n' "$REPO"
+            printf '\tfetch = +refs/heads/*:refs/remotes/origin/*\n'
+            printf '[gc]\n\tauto = 0\n'
+            printf '[user]\n\tname = github-actions[bot]\n'
+            printf '\temail = 41898282+github-actions[bot]@users.noreply.github.com\n'
+          } > .git/config
+          rm -rf .git/hooks && mkdir .git/hooks
+          git config --list --local
+
+      - name: Assess outcome
+        id: outcome
+        run: |
+          set -euo pipefail
+          base="${{ steps.reset.outputs.base }}"
+          out="$RUNNER_TEMP/autopilot-result"
+          if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+            echo "::error::Branch $BRANCH no longer exists."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$base" "$BRANCH"; then
+            echo "::error::$BRANCH no longer descends from main at $base — history was rewritten."
+            exit 1
+          fi
+          ahead=$(git rev-list --count "$base..$BRANCH")
+          echo "ahead=$ahead" >> "$GITHUB_OUTPUT"
+          echo "Commits on $BRANCH: $ahead"
+          git log --oneline "$base..$BRANCH"
+
+          dirty=$(git -C "$WORKTREE" status --porcelain -uall 2>/dev/null || true)
+          if [ -n "$dirty" ]; then
+            echo "::warning::Uncommitted changes in the worktree are NOT published:"
+            echo "$dirty"
+          fi
+
+          if [ -s "$out/stop-report.md" ]; then
+            if [ -s "$out/pr-title.txt" ]; then
+              echo "::warning::Claude wrote both a stop report and PR files — treating the run as stopped."
+            fi
+            rm -f "$out/pr-title.txt" "$out/pr-body.md"
+            echo "result=stopped" >> "$GITHUB_OUTPUT"
+            echo "Autopilot stopped early."
+            exit 0
+          fi
+
+          if [ "$ahead" = "0" ]; then
+            echo "::error::Autopilot committed nothing and wrote no stop report. Per the prompt it must explain why it stopped — treating this as a failed run."
+            exit 1
+          fi
+          for f in pr-title.txt pr-body.md; do
+            if [ ! -s "$out/$f" ]; then
+              echo "::error::Autopilot committed work but wrote no $f"
+              exit 1
+            fi
+          done
+          # release-please derives version bumps from PR titles.
+          title=$(head -1 "$out/pr-title.txt")
+          if ! printf '%s' "$title" | grep -Eq '^(fix|feat|docs|chore|refactor|perf|test|build|ci)(\([a-z0-9._-]+\))?!?: .+'; then
+            echo "::error::PR title is not Conventional Commits: $title"
+            exit 1
+          fi
+          echo "result=complete" >> "$GITHUB_OUTPUT"
+          echo "PR title: $title"
+
+      # Re-run verification rather than trusting the agent's claim, on exactly
+      # the commit that will be pushed: uncommitted leftovers are discarded
+      # first. (The denylist runs in `publish`, on a machine the agent never
+      # touched; a denied branch fails there before anything is pushed.)
+      - name: Verify the branch builds
+        if: steps.outcome.outputs.result == 'complete'
+        working-directory: ${{ env.WORKTREE }}
+        run: |
+          set -euo pipefail
+          git checkout --quiet --force "$BRANCH"
+          git clean -fdq
+          if [ "$(git rev-parse HEAD)" != "$(git -C "$GITHUB_WORKSPACE" rev-parse "$BRANCH")" ]; then
+            echo "::error::Worktree HEAD does not match $BRANCH — refusing to verify something other than what would be pushed."
+            exit 1
+          fi
+          npm test
+          npm run vite:build
+          cargo build --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Bundle the branch
+        if: steps.outcome.outputs.ahead != '0'
+        run: |
+          git bundle create "$RUNNER_TEMP/autopilot-result/branch.bundle" \
+            "refs/heads/$BRANCH" "^${{ steps.reset.outputs.base }}"
+
+      - name: Upload result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: autopilot-result
+          if-no-files-found: error
+          retention-days: 3
+          path: ${{ runner.temp }}/autopilot-result/
+
+      # The worktree holds agent-built artifacts (node_modules, target/) —
+      # never leave them for the next job. The bundle already carries the
+      # branch if it was worth keeping.
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP"/{autopilot-result,issue-context,claude-output.json}
+          git worktree remove --force "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
+          git worktree prune 2>/dev/null || true
+          git branch -D "$BRANCH" 2>/dev/null || true
+
+  # Every GitHub mutation after the agent ran, on a clean hosted runner.
+  publish:
+    name: Publish result
+    needs: [route, autopilot]
+    if: always() && needs.route.outputs.type == 'Task' && needs.route.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Default token for everything that posts model-authored text; the PAT
+      # (if configured) only for push and PR creation. A push or PR made with
+      # the default token does not trigger desktop.yaml, and model text
+      # published as shawnzhu could satisfy feature-shaping.yml's `/shape`
+      # gate. See issue-autofix.yml.
+      GH_TOKEN: ${{ github.token }}
+      PUSH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+      RESULT: ${{ needs.autopilot.outputs.result }}
+      AHEAD: ${{ needs.autopilot.outputs.ahead }}
+      BASE: ${{ needs.autopilot.outputs.base }}
+    steps:
+      - name: Checkout main
+        if: needs.autopilot.result == 'success' && env.AHEAD != '0'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download result
+        if: needs.autopilot.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: autopilot-result
+          path: ${{ runner.temp }}/autopilot-result
+
+      - name: Import the branch
+        if: needs.autopilot.result == 'success' && env.AHEAD != '0'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags "$RUNNER_TEMP/autopilot-result/branch.bundle" \
+            "refs/heads/$BRANCH:refs/heads/$BRANCH"
+          if ! git merge-base --is-ancestor "$BASE" "$BRANCH"; then
+            echo "::error::$BRANCH does not descend from the base it was cut from ($BASE)."
+            exit 1
+          fi
+          git log --oneline "$BASE..$BRANCH"
+
+      # THE containment step, over every committed change — the same list as
+      # issue-autofix.yml (see there for why each entry is on it). A tree diff
+      # against the base: --no-renames lists both sides of a rename, so moving
+      # a file out of a denied path is caught too.
+      - name: Enforce diff denylist
+        if: needs.autopilot.result == 'success' && env.AHEAD != '0'
+        run: |
+          set -euo pipefail
+          blocked=$(git -c core.quotePath=false diff --name-only --no-renames "$BASE" "$BRANCH" | grep -E \
+            -e '^\.github/' \
+            -e '^\.claude/' \
+            -e '^\.agents/' \
+            -e '^\.coderabbit\.yaml$' \
+            -e '^src-tauri/src/capabilities/' \
+            -e '^src-tauri/tauri\.conf\.json$' \
+            -e '(^|/)Info\.plist$' \
+            -e '\.entitlements$' \
+            -e '^package\.json$' \
+            -e '^package-lock\.json$' \
+            -e '^src-tauri/Cargo\.lock$' \
+            || true)
+          if [ -n "$blocked" ]; then
+            echo "::error::The branch touches paths that automation may not change:"
+            echo "$blocked"
+            echo "These are agent/pipeline inputs or signing config. A change here needs a human."
+            exit 1
+          fi
+          echo "Diff is within the permitted paths."
+
+      # Explicit authenticated URL because checkout ran with
+      # persist-credentials: false. --force is safe: `route` only lets a run
+      # through when no PR is open for the branch, so anything overwritten is
+      # an abandoned or stopped attempt. A stopped run's partial work is
+      # pushed too, so it is not lost — but it gets no PR.
+      - name: Push branch
+        if: needs.autopilot.result == 'success' && env.AHEAD != '0'
+        run: |
+          set -euo pipefail
+          git push --force \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" \
+            "refs/heads/$BRANCH:refs/heads/$BRANCH"
+
+      # Non-draft on purpose: it hands the branch straight to CodeRabbit,
+      # whose review then triggers apply-fixes.yml. `Closes` is appended here,
+      # not asked of the model, so merging always closes the task.
+      - name: Open pull request
+        if: needs.autopilot.result == 'success' && env.RESULT == 'complete'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/autopilot-result/pr-body.md"
+          {
+            echo
+            echo "Closes #$ISSUE"
+            echo
+            echo "---"
+            echo "🤖 Implemented from #$ISSUE by \`issue-autopilot.yml\` (autopilot: spec → plan → subagent-driven development with per-task and final review). The spec is committed; the plan is not. Review it as you would any PR — start with **Decisions** and **Rulings I made**."
+          } >> "$body"
+          gh pr create --repo "$REPO" \
+            --base main \
+            --head "$BRANCH" \
+            --title "$(head -1 "$RUNNER_TEMP/autopilot-result/pr-title.txt")" \
+            --body-file "$body"
+          url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // ""')
+          echo "pr_url=$url" >> "$GITHUB_ENV"
+
+      - name: Link the PR on the issue
+        if: needs.autopilot.result == 'success' && env.RESULT == 'complete'
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Autopilot opened ${pr_url:-a pull request} implementing this task." \
+            2>/dev/null || true
+
+      # A stop (BLOCKED, failing baseline, circuit breaker) is a legitimate
+      # outcome, not a failure.
+      - name: Report the stop on the issue
+        if: needs.autopilot.result == 'success' && env.RESULT == 'stopped'
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/autopilot-result/stop-report.md"
+          {
+            echo
+            echo "---"
+            if [ "$AHEAD" != "0" ]; then
+              echo "🤖 Autopilot stopped before finishing. The partial work is on branch [\`$BRANCH\`]($GITHUB_SERVER_URL/$REPO/tree/$BRANCH) — no PR was opened. Re-applying \`autofix:approved\` starts over from \`main\` and overwrites that branch."
+            else
+              echo "🤖 Autopilot stopped before committing anything. Answer the questions above and re-apply \`autofix:approved\`."
+            fi
+          } >> "$report"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$report"
+
+      # Covers a crashed or timed-out `autopilot` job as well as a failure
+      # here (a denied path, a failed push). Without it the labels clear and
+      # nothing on the issue says why.
+      - name: Flag failure on the issue
+        if: failure() || needs.autopilot.result != 'success'
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "ai-failed" 2>/dev/null || true
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 The autopilot run failed. [Run log]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID) — re-apply \`autofix:approved\` to retry." \
+            2>/dev/null || true
+
+      # Always clear both labels, whatever the outcome. `issues: labeled` only
+      # fires on transition, so a lingering `autofix:approved` would make the
+      # trigger un-reusable.
+      - name: Clear status labels
+        if: always()
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --remove-label "autofix:working" \
+            --remove-label "autofix:approved" \
+            2>/dev/null || true

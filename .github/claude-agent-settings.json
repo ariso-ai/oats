@@ -1,7 +1,8 @@
 {
   "$comment": [
     "Shared Claude Code settings for the issue-automation workflows",
-    "(issue-triage.yml, issue-autofix.yml, feature-shaping.yml). These run on a",
+    "(issue-triage.yml, issue-autofix.yml, feature-shaping.yml; issue-autopilot.yml",
+    "uses claude-autopilot-settings.json, a variant of this). These run on a",
     "PERSISTENT self-hosted runner with input from a public issue tracker, so the",
     "agent's home directory is in reach of anything an issue body talks it into.",
     "",

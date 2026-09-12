@@ -4,7 +4,9 @@ name: Apply review fixes
 # major/critical and minor findings, runs Claude with edit tools to apply
 # them (minors only when triage confirms a true positive), verifies the
 # Tauri + Rust builds, then commits + pushes as
-# github-actions[bot]. CodeRabbit re-reviews the new commit and posts
+# github-actions[bot]. It replies on every finding's thread and resolves
+# the CodeRabbit threads it fixed or ruled false positives; findings that
+# need a human stay open. CodeRabbit re-reviews the new commit and posts
 # the merge verdict (configured by .coderabbit.yaml). This workflow does
 # not gate merges itself.
 
@@ -241,19 +243,73 @@ jobs:
           git commit -F /tmp/commit-message.txt
           git push origin "HEAD:$HEAD_REF"
 
+      # Reply on each thread, then resolve the CodeRabbit threads Claude
+      # fixed, found already fixed, or ruled a false positive. needs-human
+      # threads stay open, and so does every human reviewer's thread —
+      # the reviewer resolves those. The file existence check is in the
+      # script because hashFiles() only sees GITHUB_WORKSPACE, so a
+      # hashFiles('/tmp/...') condition is always empty and skips the step.
       - name: Post thread replies
-        if: steps.findings.outputs.total != '0' && hashFiles('/tmp/thread-replies.json') != ''
+        if: steps.findings.outputs.total != '0'
+        env:
+          NO_CHANGES: ${{ steps.changes.outputs.no_changes }}
         run: |
           set -euo pipefail
-          count=$(jq 'length' /tmp/thread-replies.json)
+          replies=/tmp/thread-replies.json
+          if [ ! -s "$replies" ]; then
+            echo "No thread replies to post."
+            exit 0
+          fi
+          findings="$RUNNER_TEMP/actionable-findings.json"
+          count=$(jq 'length' "$replies")
           echo "Posting $count thread replies"
-          jq -c '.[]' /tmp/thread-replies.json | while IFS= read -r reply; do
+          jq -c '.[]' "$replies" | while IFS= read -r reply; do
             id=$(jq -r '.rootCommentId' <<< "$reply")
+            kind=$(jq -r '.kind // ""' <<< "$reply")
             body=$(jq -r '.body' <<< "$reply")
-            gh api "repos/$REPO/pulls/$PR/comments/$id/replies" \
-              -f body="$body" >/dev/null \
-              && echo "  replied to comment $id" \
-              || echo "::warning::failed to reply to comment $id"
+            # Take the thread from the findings this run handed Claude,
+            # not from Claude's output, so it can only reply to and
+            # resolve threads it was asked to triage.
+            match=$(jq -c --arg id "$id" '
+              [(.coderabbit + .coderabbit_minor)[]
+                 | select((.rootCommentId | tostring) == $id)
+                 | {threadId, coderabbit: true}]
+              + [.shawnzhu[]
+                 | select((.rootCommentId | tostring) == $id)
+                 | {threadId, coderabbit: false}]
+              | first // empty
+            ' "$findings")
+            if [ -z "$match" ]; then
+              echo "::warning::skipping reply to comment $id: not one of this run's findings"
+              continue
+            fi
+            if ! gh api "repos/$REPO/pulls/$PR/comments/$id/replies" \
+                 -f body="$body" >/dev/null; then
+              echo "::warning::failed to reply to comment $id"
+              continue
+            fi
+            echo "  replied to comment $id ($kind)"
+            case "$kind" in
+              # An "applied" claim with nothing committed fixed nothing.
+              applied) [ "$NO_CHANGES" = "false" ] || continue ;;
+              already-fixed|false-positive) ;;
+              *) continue ;;
+            esac
+            [ "$(jq -r '.coderabbit' <<< "$match")" = "true" ] || continue
+            thread_id=$(jq -r '.threadId' <<< "$match")
+            if gh api graphql \
+                 -f threadId="$thread_id" \
+                 -f query='
+                   mutation($threadId: ID!) {
+                     resolveReviewThread(input: {threadId: $threadId}) {
+                       thread { isResolved }
+                     }
+                   }
+                 ' >/dev/null; then
+              echo "  resolved thread for comment $id"
+            else
+              echo "::warning::failed to resolve thread for comment $id"
+            fi
           done
 
       # Step 5 of the prompt requires Claude to write thread-replies.json
@@ -268,7 +324,7 @@ jobs:
             echo "::error::Claude applied no fixes and wrote no /tmp/thread-replies.json. Per Step 5 it must record a triage reply for every finding — treating this as a failed run, not a clean no-op."
             exit 1
           fi
-          echo "No fixes applied; triage replies were recorded and posted."
+          echo "No fixes applied; triage replies were recorded (see Post thread replies)."
 
       - name: Cleanup
         if: always()

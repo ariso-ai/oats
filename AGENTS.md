@@ -28,6 +28,10 @@ For features: `brainstorming → writing-plans → subagent-driven-development �
 verification-before-completion`. For bugs: `systematic-debugging → test-driven-development
 → verification-before-completion`. Design specs live in `docs/superpowers/specs/`.
 
+`/autopilot <request>` runs the feature pipeline without approval pauses — one round of
+questions, then spec, plan, and subagent-driven implementation. User-invoked only; it is
+also what `issue-autopilot.yml` runs on Task issues (see `docs/autonomous-mode.md`).
+
 ## Commands
 
 ```bash
@@ -55,7 +59,8 @@ A fresh git worktree needs bootstrapping first (sidecar binaries, `npm ci`,
 
 ## Agent skills
 
-- `.agents/skills/` — the five oats skills above, shared by Codex and Claude Code.
+- `.agents/skills/` — the five oats skills above plus `autopilot`, shared by Codex and
+  Claude Code.
 
 ## `.claude/` directory
 
