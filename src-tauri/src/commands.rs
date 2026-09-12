@@ -1331,13 +1331,12 @@ pub async fn create_onboarding_window(app: tauri::AppHandle) -> Result<(), Strin
 }
 
 /// Build the waveform window's route, appending the optional `localAppendId`
-/// value, the `forceNew` flag, plus the `auto` and `pillHidden` query flags.
+/// value plus the `forceNew` and `auto` query flags.
 /// Kept pure so the wiring is unit-testable — `mic_monitor` composes its launch
 /// parameters through it to assert what the auto path actually opens.
 pub(crate) fn waveform_url(
     meeting_id: Option<i64>,
     auto: bool,
-    pill_hidden: bool,
     local_append_id: Option<&str>,
     force_new: bool,
 ) -> String {
@@ -1357,9 +1356,6 @@ pub(crate) fn waveform_url(
     }
     if auto {
         push("auto=1");
-    }
-    if pill_hidden {
-        push("pillHidden=1");
     }
     url
 }
@@ -1455,26 +1451,19 @@ pub(crate) fn open_waveform_window(
         }
         return Ok(());
     }
-    // Born hidden (painted-empty) when the meetings window already owns the
-    // recorder UI, so the pill never flashes over it. The window is still
-    // created visible for getUserMedia; only its painting is suppressed.
-    // Where the pill is drawn natively the webview never paints it at all.
+    // The floating pill is drawn natively (see recorder_pill); this window only
+    // hosts the recording and never paints.
     let show_pill = crate::recorder_pill::should_show_now(app);
-    let native_pill = crate::recorder_pill::native_available();
-    let pill_hidden = native_pill || !show_pill;
-    let url = waveform_url(meeting_id, auto, pill_hidden, local_append_id.as_deref(), force_new);
+    let url = waveform_url(meeting_id, auto, local_append_id.as_deref(), force_new);
     let win = match WebviewWindowBuilder::new(app, "waveform", WebviewUrl::App(url.into()))
         .title("")
-        // Fixed size: room for the expanded pill plus its CSS shadow. The pill
-        // itself is anchored to the bottom and grows upward within this window.
-        .inner_size(
-            crate::recorder_pill::PILL_W,
-            crate::recorder_pill::PILL_H,
-        )
-        // Born visible even when the library's embedded strip is the real UI:
-        // WebKit won't resolve getUserMedia for a hidden window, so the pill
-        // must stay on screen until capture starts. The visibility watcher
-        // hides it then (set_tray_recording marks capture active).
+        // The size the webview pill used to have; the window is empty and
+        // click-through, so it only matters that it's a real on-screen window.
+        .inner_size(92.0, 284.0)
+        // Born visible: webviews don't reliably resolve getUserMedia for a
+        // hidden window, so it stays on screen (painting nothing, ignoring the
+        // cursor) until capture starts. The visibility watcher hides it then
+        // (set_tray_recording marks capture active).
         // Throttling is disabled so the hidden webview keeps recording and
         // broadcasting recorder://state.
         .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
@@ -1492,6 +1481,13 @@ pub(crate) fn open_waveform_window(
             return Err(error.to_string());
         }
     };
+    // The window never paints and must not intercept clicks meant for
+    // whatever is beneath its (arbitrarily placed, always-on-top) rectangle.
+    if let Err(error) = win.set_ignore_cursor_events(true) {
+        let _ = win.close();
+        recording_state.release_window_claim();
+        return Err(error.to_string());
+    }
 
     // Capture may stop before upload/close completes. Keep the one-window
     // claim until this native window is actually destroyed.
@@ -1563,15 +1559,6 @@ pub(crate) fn open_waveform_window(
         return Err(format!("failed to remove waveform window menu: {error}"));
     }
 
-    // When the pill is the visible recording UI (the meetings window is hidden,
-    // minimized, or closed), dock it to the right edge of the primary screen
-    // rather than leaving it at the OS default spot. When the meetings window
-    // owns the UI the pill is painted-empty, so its position doesn't matter —
-    // the watcher re-docks it later if the meetings window is minimized.
-    if !pill_hidden {
-        crate::recorder_pill::dock_to_right_edge(&win);
-    }
-
     let source = if auto {
         crate::recording_state::RecordingSource::Auto
     } else {
@@ -1585,9 +1572,7 @@ pub(crate) fn open_waveform_window(
 
     // Show the pill only while the library window (with its embedded
     // recorder strip) can't be seen — minimized or closed.
-    if native_pill {
-        crate::recorder_pill::create_native(app, show_pill);
-    }
+    crate::recorder_pill::create_native(app, show_pill);
     crate::recorder_pill::spawn_watcher(app, show_pill);
 
     // Tell every window (the library in particular) which meeting the new
@@ -3056,22 +3041,17 @@ mod tests {
 
     #[test]
     fn waveform_url_appends_flags_with_correct_separators() {
-        assert_eq!(waveform_url(None, false, false, None, false), "/#/waveform");
-        assert_eq!(waveform_url(Some(42), false, false, None, false), "/#/waveform?meetingId=42");
-        assert_eq!(waveform_url(None, true, false, None, false), "/#/waveform?auto=1");
-        assert_eq!(waveform_url(None, true, true, None, false), "/#/waveform?auto=1&pillHidden=1");
-        assert_eq!(waveform_url(None, false, true, None, false), "/#/waveform?pillHidden=1");
-        assert_eq!(
-            waveform_url(Some(7), true, true, None, false),
-            "/#/waveform?meetingId=7&auto=1&pillHidden=1"
-        );
+        assert_eq!(waveform_url(None, false, None, false), "/#/waveform");
+        assert_eq!(waveform_url(Some(42), false, None, false), "/#/waveform?meetingId=42");
+        assert_eq!(waveform_url(None, true, None, false), "/#/waveform?auto=1");
+        assert_eq!(waveform_url(Some(7), true, None, false), "/#/waveform?meetingId=7&auto=1");
         // Local continue: the append target id rides on the URL like the flags.
         assert_eq!(
-            waveform_url(None, false, false, Some("2026-06-02T10-00-00Z"), false),
+            waveform_url(None, false, Some("2026-06-02T10-00-00Z"), false),
             "/#/waveform?localAppendId=2026-06-02T10-00-00Z"
         );
         assert_eq!(
-            waveform_url(None, true, false, Some("abc"), false),
+            waveform_url(None, true, Some("abc"), false),
             "/#/waveform?localAppendId=abc&auto=1"
         );
     }
@@ -3079,16 +3059,13 @@ mod tests {
     #[test]
     fn waveform_url_appends_force_new_flag() {
         // force_new rides on the URL the same way localAppendId does.
-        assert_eq!(waveform_url(None, false, false, None, true), "/#/waveform?forceNew=1");
-        assert_eq!(
-            waveform_url(None, true, true, None, true),
-            "/#/waveform?forceNew=1&auto=1&pillHidden=1"
-        );
+        assert_eq!(waveform_url(None, false, None, true), "/#/waveform?forceNew=1");
+        assert_eq!(waveform_url(None, true, None, true), "/#/waveform?forceNew=1&auto=1");
         // Both localAppendId and forceNew can theoretically be present (an
         // explicit continue still wins in finalize_core_with_target); the URL
         // just carries whatever flags it's given.
         assert_eq!(
-            waveform_url(Some(7), false, false, Some("2026-06-02T10-00-00Z"), true),
+            waveform_url(Some(7), false, Some("2026-06-02T10-00-00Z"), true),
             "/#/waveform?meetingId=7&localAppendId=2026-06-02T10-00-00Z&forceNew=1"
         );
     }

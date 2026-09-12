@@ -169,7 +169,6 @@ mod tests {
             crate::commands::waveform_url(
                 launch.meeting_id,
                 launch.auto,
-                false,
                 launch.local_append_id.as_deref(),
                 launch.force_new,
             ),

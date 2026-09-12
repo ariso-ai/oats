@@ -44,10 +44,10 @@ lives exactly as long as the `waveform` window. The visual design matches
                          create_library_window + recording://reveal  (body click)
 ```
 
-- **`waveform` webview → headless recorder host.** When the platform has a
-  native pill, Rust always launches the webview with the existing
-  `pillHidden=1` flag and never sends `recorder://pill-visible`, so
-  `WaveformView` paints no pill and keeps the window click-through. The webview is still
+- **`waveform` webview → headless recorder host.** `WaveformView` paints
+  nothing and keeps the window click-through. (In PR 1 macOS launched it with
+  the old `pillHidden=1` flag while Windows kept the Vue pill; PR 2 deletes the
+  Vue pill, the flag and `recorder://pill-visible`.) The webview is still
   created visible (Windows' `getUserMedia` needs an on-screen window) and the
   watcher hides it as soon as capture is active, regardless of the Meetings
   window. `WaveformView` itself still re-shows it before a Resume restarts
@@ -55,13 +55,37 @@ lives exactly as long as the `waveform` window. The visual design matches
 - **`src-tauri/src/recorder_pill/`** — `mod.rs` keeps the visibility watcher
   and gains the platform-neutral bridge: parsing `recorder://state` into a
   `PillState`, and mapping each `PillAction` to what the Vue pill used to do.
-  `macos.rs` is the FFI to Swift; PR 2 adds `windows.rs`.
+  `macos.rs` is the FFI to Swift; `win32.rs` is the Windows pill, built on the
+  platform-free `layout.rs` (geometry, hit-testing, hover, drag, docking).
 - **`src-tauri/recorder-pill/macos/`** — SwiftPM package `OatsRecorderPill`, a
   static library that `build.rs` compiles and links into the oats binary (plus
   search paths for the OS Swift runtime). An `NSPanel` (borderless,
   non-activating, floating level, all Spaces + over fullscreen apps, fixed
   size) hosts an `NSHostingView` of a SwiftUI view driven by an observable
   model; the capsule draws its own shadow.
+
+## Windows (PR 2)
+
+`win32.rs` draws the same pill with Win32 and Direct2D:
+
+- Window: `WS_POPUP` with `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
+  WS_EX_NOACTIVATE`, and `MA_NOACTIVATE` on `WM_MOUSEACTIVATE`, so it never
+  takes focus or a taskbar button.
+- Rendering: Direct2D/DirectWrite into a premultiplied 32-bpp DIB, presented
+  with `UpdateLayeredWindow`. Clicks on alpha-0 pixels go to the window below,
+  so the fixed-size panel has the same click-through as macOS. The shadow is
+  stacked translucent rounded rects, since a DC render target has no blur.
+- Input: hover from `WM_MOUSEMOVE` plus `TrackMouseEvent(TME_LEAVE)`. Buttons
+  act on release over the same button. The body drags past a 3 px threshold
+  (scaled to DPI) with `SetCapture`, and otherwise opens Meetings. A drag ends
+  clamped to the monitor's work area.
+- DPI: per-monitor. The DPI is re-read after every move, and
+  `WM_DPICHANGED` is honored.
+- Tooltips: a `tooltips_class32` control with one `TTF_SUBCLASS` tool per live
+  button.
+- Threading: all calls happen on Tauri's main thread. The state lives in a
+  thread-local that is never borrowed across a call that can re-enter the
+  window procedure.
 
 ## The C ABI (macOS)
 
@@ -122,18 +146,25 @@ The three new events carry no payload and are only acted on while
 
 ## Testing
 
-- **Rust:** `recorder://state` payload parsing, phase/action code mapping, and
-  the watcher's visibility decisions for native and webview pills.
+- **Rust:** `recorder://state` payload parsing, phase/action code mapping, the
+  watcher's visibility decisions, and `layout.rs` (heights matching the Swift
+  pill, element positions, hit-testing, hover, click-vs-drag, docking,
+  clamping, the bar curve, the height animation and the logo path). These run
+  on every host.
 - **Swift (XCTest, `swift test`):** view-model layout per phase, timer
   formatting, bar clamping, the click-vs-drag threshold, and the dock frame
   math. Added to the macOS CI job.
-- **Vitest:** `WaveformView` launched with `pillHidden=1` renders no pill and routes the
-  three new events to finalize / resume / discard; without it the Vue pill
-  behaves as before.
+- **Vitest:** `WaveformView` renders nothing and ignores the cursor. The
+  recording flow is driven through the events the native pills send
+  (`tray://stop-recording`, the three failed-upload events), and results are
+  asserted on the broadcast phases.
 - **Manual (macOS bundle):** record in cloud and local mode; minimize and close
   Meetings to reveal the pill; hover, click, drag, pause/resume, stop; force a
   failed upload (network off) and exercise Retry / Continue / Discard.
-- **Windows (PR 2):** CI builds and tests; a person validates on Windows.
+- **Windows (PR 2):** `win32.rs` is compile-checked locally against
+  `x86_64-pc-windows-msvc` in a scratch crate, then built and tested in CI on
+  `windows-latest`. A person validates it on a real Windows machine, including
+  a mixed-DPI setup.
 
 ## Risks
 
