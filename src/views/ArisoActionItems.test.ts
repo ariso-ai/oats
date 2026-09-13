@@ -273,34 +273,39 @@ describe('ArisoActionItems', () => {
   it('opens the assignee menu toward the side with room, and scrolls it into view', async () => {
     // Found live: a long item wraps its actions to the start of the next line,
     // and a right-anchored menu then grew out of the pane's left edge.
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;
-    const rectAt = (left: number, width: number) =>
-      ({ left, right: left + width, top: 0, bottom: 20, width, height: 20, x: left, y: 0 }) as DOMRect;
-    serve();
-    const wrapper = await mountWith([
-      { id: 'a2', name: 'Dana', item: 'Send pricing deck', meetingParticipantId: 2 },
-    ]);
-    const list = wrapper.find('.ai-groups').element as HTMLElement;
-    list.getBoundingClientRect = () => rectAt(0, 500);
-    const button = row(wrapper, 'Send pricing deck')
-      .findAll('button')
-      .find((b) => b.text() === 'Reassign')!;
+    try {
+      const rectAt = (left: number, width: number) =>
+        ({ left, right: left + width, top: 0, bottom: 20, width, height: 20, x: left, y: 0 }) as DOMRect;
+      serve();
+      const wrapper = await mountWith([
+        { id: 'a2', name: 'Dana', item: 'Send pricing deck', meetingParticipantId: 2 },
+      ]);
+      const list = wrapper.find('.ai-groups').element as HTMLElement;
+      list.getBoundingClientRect = () => rectAt(0, 500);
+      const button = row(wrapper, 'Send pricing deck')
+        .findAll('button')
+        .find((b) => b.text() === 'Reassign')!;
 
-    // Button near the list's left edge: plenty of room to the right.
-    (button.element as HTMLElement).getBoundingClientRect = () => rectAt(80, 60);
-    await button.trigger('click');
-    await flushPromises();
-    expect(wrapper.find('.ai-menu').classes()).not.toContain('ai-menu--end');
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+      // Button near the list's left edge: plenty of room to the right.
+      (button.element as HTMLElement).getBoundingClientRect = () => rectAt(80, 60);
+      await button.trigger('click');
+      await flushPromises();
+      expect(wrapper.find('.ai-menu').classes()).not.toContain('ai-menu--end');
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
 
-    await button.trigger('click'); // close
-    // Button near the right edge: a rightward menu would overflow, so it
-    // opens leftward from the button instead.
-    (button.element as HTMLElement).getBoundingClientRect = () => rectAt(420, 60);
-    await button.trigger('click');
-    await flushPromises();
-    expect(wrapper.find('.ai-menu').classes()).toContain('ai-menu--end');
+      await button.trigger('click'); // close
+      // Button near the right edge: a rightward menu would overflow, so it
+      // opens leftward from the button instead.
+      (button.element as HTMLElement).getBoundingClientRect = () => rectAt(420, 60);
+      await button.trigger('click');
+      await flushPromises();
+      expect(wrapper.find('.ai-menu').classes()).toContain('ai-menu--end');
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
   });
 
   it('puts a reassigned item back and explains when the server refuses', async () => {
