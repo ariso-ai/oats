@@ -41,18 +41,21 @@ name: Autopilot approved task
 # Residual risk, stated plainly: an injected agent with a shell on a
 # PERSISTENT runner can still write outside the workspace — $HOME, a lingering
 # process — and that survives into later jobs on the same machine, including
-# release builds. The bound on that is shawnzhu's approval: this only runs
-# because a human read the issue and chose to. An ephemeral runner for this
-# job is the real fix if that bound stops being enough.
+# release builds. It also runs as the runner's user, so it can read whatever
+# that user can, including the credential the claude CLI itself runs on, and
+# send it out: the deny rules and the missing curl/wget don't stop node or
+# python from opening a socket, and a secret scan of the published diff would
+# miss an encoded copy. The bound on both is shawnzhu's approval: this only
+# runs because a human read the issue and chose to. An ephemeral runner with
+# no standing credentials is the real fix if that bound stops being enough.
 
 on:
   issues:
     types: [labeled]
 
+# Each job grants itself only what it uses.
 permissions:
-  issues: write
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.issue.number }}
@@ -70,6 +73,9 @@ jobs:
     name: Route and stage
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: read
     # `sender.login` is the account that applied the label — this, not the
     # issue author, is the authorization we care about.
     if: >-
@@ -329,9 +335,10 @@ jobs:
       # runs on the next git call; a hook runs inside it. Regenerate the config
       # from known values — never restore a snapshot the agent could have
       # edited — before this job's own git commands, and on every outcome.
+      # Repeated after the build check, which runs agent-written code too.
       - name: Rebuild git config and hooks
         if: always()
-        run: |
+        run: &rebuild-git-state |
           set -euo pipefail
           {
             printf '[core]\n'
@@ -421,6 +428,13 @@ jobs:
           npm run vite:build
           cargo build --locked --manifest-path src-tauri/Cargo.toml
 
+      # npm test and build.rs just ran the agent's code against this same
+      # .git, after the rebuild above. Regenerate it again before the
+      # bundle, the cleanup, and every later job on this runner.
+      - name: Rebuild git config and hooks (after build check)
+        if: always()
+        run: *rebuild-git-state
+
       - name: Bundle the branch
         if: steps.outcome.outputs.ahead != '0'
         run: |
@@ -453,6 +467,10 @@ jobs:
     if: always() && needs.route.outputs.type == 'Task' && needs.route.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     env:
       # Default token for everything that posts model-authored text; the PAT
       # (if configured) only for push and PR creation. A push or PR made with
@@ -500,7 +518,11 @@ jobs:
         if: needs.autopilot.result == 'success' && env.AHEAD != '0'
         run: |
           set -euo pipefail
-          blocked=$(git -c core.quotePath=false diff --name-only --no-renames "$BASE" "$BRANCH" | grep -E \
+          # Diff on its own line so a failed diff fails the step. Piped into
+          # grep, the `|| true` below would swallow it and pass the branch
+          # unchecked.
+          changed=$(git -c core.quotePath=false diff --name-only --no-renames "$BASE" "$BRANCH")
+          blocked=$(printf '%s\n' "$changed" | grep -E \
             -e '^\.github/' \
             -e '^\.claude/' \
             -e '^\.agents/' \
