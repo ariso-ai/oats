@@ -611,10 +611,14 @@ export function useMeetingApi() {
     assertOk2xx(res, 'reassign action item');
     const item = (res.data as { actionItem?: { name?: unknown; meetingParticipantId?: unknown } } | null)
       ?.actionItem;
-    return {
-      name: typeof item?.name === 'string' ? item.name : '',
-      meetingParticipantId: parseRowId(item?.meetingParticipantId),
-    };
+    if (!item || typeof item.name !== 'string') {
+      throw new Error('Server did not return the reassigned action item');
+    }
+    const ownerId = item.meetingParticipantId === null ? null : parseRowId(item.meetingParticipantId);
+    if (item.meetingParticipantId !== null && ownerId === null) {
+      throw new Error('Server returned an invalid action-item owner');
+    }
+    return { name: item.name, meetingParticipantId: ownerId };
   }
 
   // Search org members to assign a diarized speaker to. Scoped to the

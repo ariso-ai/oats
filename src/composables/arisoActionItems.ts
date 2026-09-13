@@ -29,7 +29,7 @@ export function buildAssignTargets(participants: MeetingParticipantInfo[]): Assi
     seen.add(id);
     targets.push({
       key: `mp:${id}`,
-      name: p.name || p.displayName || p.email || 'Guest',
+      name: p.displayName || p.name || p.email || 'Guest',
       meetingParticipantId: id,
       avatarUrl: p.avatarUrl ?? null,
     });
