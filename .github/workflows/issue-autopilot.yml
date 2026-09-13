@@ -2,7 +2,8 @@ name: Autopilot approved task
 
 # Triggered when shawnzhu applies the `autofix:approved` label to an issue typed
 # Task. (The same label on any other type belongs to issue-autofix.yml; each
-# workflow resolves the type first and only one of them acts.) Runs the
+# workflow resolves the type first and only one of them acts.) A task with no
+# acceptance criteria is declined up front, on the hosted runner. Runs the
 # `autopilot` skill headlessly in a worktree under .worktrees/ — spec → plan →
 # subagent-driven implementation with per-task and final-branch review — then
 # enforces the path denylist and the build gate, pushes, and opens a non-draft
@@ -84,7 +85,7 @@ jobs:
       github.event.issue.state == 'open'
     outputs:
       type: ${{ steps.type.outputs.type }}
-      proceed: ${{ steps.pr.outputs.proceed }}
+      proceed: ${{ steps.criteria.outputs.proceed }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -120,10 +121,57 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Autopilot's Clarify step fills gaps with its own defaults, so a
+      # request with no definition of done comes back as whatever it
+      # guessed. Decline before the self-hosted job starts rather than
+      # after hours on the runner. The criteria can be in the body or in
+      # shawnzhu's comments; nobody else's comments count. A decline is not
+      # a failure, so it gets its own label instead of `ai-failed`.
+      - name: Require acceptance criteria
+        id: criteria
+        if: steps.pr.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          {
+            jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH"
+            gh api --paginate "repos/$REPO/issues/$ISSUE/comments" \
+              | jq -r -s '.[][] | select(.user.login == "shawnzhu") | .body'
+          } > "$RUNNER_TEMP/request.md"
+          # A `- [ ] item` checklist, or a "Done when" / "Acceptance
+          # criteria" heading or `Label:` line (bold allowed).
+          if grep -Eiq \
+               -e '^[[:space:]]*[-*][[:space:]]+\[[ x]\][[:space:]]+[^[:space:]]' \
+               -e '^[[:space:]]*#+[[:space:]]*(done when|acceptance criteria)([[:space:]]|:|$)' \
+               -e '^[[:space:]]*(\*\*)?(done when|acceptance criteria)(\*\*)?[[:space:]]*:' \
+               "$RUNNER_TEMP/request.md"; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Acceptance criteria found."
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label "needs-acceptance-criteria" 2>/dev/null || true
+            exit 0
+          fi
+          echo "proceed=false" >> "$GITHUB_OUTPUT"
+          echo "No acceptance criteria. Declining."
+          gh label create "needs-acceptance-criteria" \
+            --repo "$REPO" \
+            --color D4C5F9 \
+            --description "Autopilot needs a checklist or a 'Done when:' section first" \
+            2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --add-label "needs-acceptance-criteria" \
+            --remove-label "autofix:approved" 2>/dev/null || true
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file - <<'EOF'
+          🤖 Autopilot didn't start: this task has no acceptance criteria. Autopilot fills every gap with its own defaults, so it needs to know what "done" looks like first.
+
+          Add either of these to the issue body or to a comment of your own, then re-apply `autofix:approved`:
+
+          - a checklist: `- [ ] Settings shows the new toggle`
+          - a `Done when:` section listing the outcomes
+          EOF
+
       # Visible status while the run is in flight; `publish` clears it on
       # every outcome. Best-effort so a labeling hiccup never aborts the run.
       - name: Mark issue autofix:working
-        if: steps.pr.outputs.proceed == 'true'
+        if: steps.criteria.outputs.proceed == 'true'
         run: |
           gh label create "autofix:working" \
             --repo "$REPO" \
@@ -137,7 +185,7 @@ jobs:
       # are partitioned by author so the prompt can apply different trust to
       # each.
       - name: Stage issue context
-        if: steps.pr.outputs.proceed == 'true'
+        if: steps.criteria.outputs.proceed == 'true'
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/issue-context"
@@ -160,7 +208,7 @@ jobs:
           echo "Untrusted comments: $(jq '.untrusted | length' "$RUNNER_TEMP/issue-context/comments.json")"
 
       - name: Upload issue context
-        if: steps.pr.outputs.proceed == 'true'
+        if: steps.criteria.outputs.proceed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: issue-context

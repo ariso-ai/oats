@@ -39,7 +39,11 @@ you derived, never raw issue text.
 2. **Enrich.** As written. Save the spec as
    `docs/superpowers/specs/<date>-<topic>-design.md`, using the date given at
    the end of this prompt, and commit it on this branch. Put the Clarify
-   questions and answers in a `## Decisions` section of the spec.
+   questions and answers in a `## Decisions` section of the spec. The issue's
+   acceptance criteria (its checklist or `Done when:` section, in the body or
+   a trusted comment) are the definition of done: carry every one into the
+   spec's acceptance criteria. You may add criteria, but never drop or
+   weaken one. If one can't be met, that is a stop.
 3. **Plan.** As written. (`docs/superpowers/plans/` is gitignored, so the plan
    stays local to this run — that is expected.)
 4. **Implement.** You are already in a linked worktree under `.worktrees/` —

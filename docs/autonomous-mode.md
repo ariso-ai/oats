@@ -168,6 +168,14 @@ produces — so this is the lever where the issue text matters most. Write the
 task, or restate it in your own comment, as the implementation request you want
 built.
 
+**It needs acceptance criteria.** Before anything runs, the workflow checks
+the issue body and *your* comments (nobody else's count) for a definition of
+done: a `- [ ] …` checklist, or a `Done when:` / `Acceptance criteria:`
+section. Without one it declines: it comments saying what's missing, adds
+`needs-acceptance-criteria`, and clears the label. Add the criteria and
+re-apply. Autopilot carries every criterion into its spec and may add more,
+but never drops one.
+
 **What runs.** In order, in a worktree under `.worktrees/` on
 `autopilot/issue-<N>`:
 
@@ -230,6 +238,10 @@ purely as an implementation ("add a button that…") gives the agent nothing to
 reason about when the obvious implementation turns out to be wrong. Say who is
 blocked, on what, and what they do today instead.
 
+**For tasks**, end with what "done" looks like — a `- [ ]` checklist or a
+`Done when:` section of observable outcomes. Autopilot won't start without one,
+and anything not on that list is left to its defaults.
+
 The issue templates already ask for most of this. They're a floor, not a
 ceiling — the free-text fields are what get read most closely.
 
@@ -239,6 +251,7 @@ ceiling — the free-text fields are what get read most closely.
 |---|---|
 | `autofix:approved` | **You set this.** Starts a fix attempt on a Bug, autopilot on a Task. Cleared automatically after every run, so re-applying is always a clean retry. |
 | `autofix:working` | Set by the workflow while a run is in flight. Cleared on every outcome, including a crash. Purely informational. |
+| `needs-acceptance-criteria` | Autopilot declined a Task that had no checklist or `Done when:` section. Cleared automatically on the next run that finds criteria. |
 | `skip-ai-triage` | Set it *before* filing, or on an issue you don't want touched, to opt out of automatic triage entirely. |
 | `ai-failed` | The machinery broke. Comes with a comment linking the run log. Remove it once handled. |
 
