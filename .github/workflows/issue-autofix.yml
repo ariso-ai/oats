@@ -1,6 +1,8 @@
 name: Autofix approved bug
 
-# Triggered when shawnzhu applies the `autofix:approved` label to a bug issue.
+# Triggered when shawnzhu applies the `autofix:approved` label to a bug issue —
+# any type except Task, which issue-autopilot.yml owns on the same label (the
+# `route` job below makes sure only one of the two acts).
 # Branches from main, runs Claude with edit tools to produce a fix, verifies the
 # frontend tests + both builds, then commits, pushes, and opens a non-draft PR
 # as github-actions[bot]. The PR then flows into the existing review loop:
@@ -42,16 +44,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  autofix:
-    name: Fix issue and open PR
-    runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 60
+  # Tasks carry the same label to issue-autopilot.yml. Resolve the type before
+  # touching the issue, on a hosted runner so a Task never queues on the Mac.
+  # REST, not the event payload or `gh issue view --json issueType` — the same
+  # lookup feature-shaping.yml uses.
+  route:
+    name: Resolve issue type
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     # `sender.login` is the account that applied the label — this, not the
     # issue author, is the authorization we care about.
     if: >-
       github.event.label.name == 'autofix:approved' &&
       github.event.sender.login == 'shawnzhu' &&
       github.event.issue.state == 'open'
+    outputs:
+      type: ${{ steps.type.outputs.type }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Read issue type
+        id: type
+        run: |
+          set -euo pipefail
+          type=$(gh api "repos/$REPO/issues/$ISSUE" --jq '.type.name // ""')
+          echo "Issue #$ISSUE type: ${type:-<none>}"
+          echo "type=$type" >> "$GITHUB_OUTPUT"
+          if [ "$type" = "Task" ]; then
+            echo "Task — issue-autopilot.yml owns this label on Tasks."
+          fi
+
+      # The autofix job never starts when this fails, so this is the only
+      # record. issue-autopilot.yml's route job fails the same way on the same
+      # outage, so it can double-post; better than a silent, lingering label.
+      - name: Flag failure on the issue
+        if: failure()
+        run: |
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --add-label "ai-failed" --remove-label "autofix:approved" 2>/dev/null || true
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "🤖 Could not read this issue's type, so no autofix run started. [Run log]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID) — re-apply \`autofix:approved\` to retry." \
+            2>/dev/null || true
+
+  autofix:
+    name: Fix issue and open PR
+    needs: route
+    if: needs.route.outputs.type != 'Task'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
     env:
       # Model-authored text is posted with the default token on purpose (see
       # the comment steps). PUSH_TOKEN is used only for git push and gh pr
@@ -164,15 +206,21 @@ jobs:
       # it here — otherwise build verification fails for reasons that have
       # nothing to do with the fix. Keyed on the Xcode toolchain so an artifact
       # built by a different toolchain is never restored.
+      #
+      # RESTORE-ONLY. release.yaml restores this exact key, and a plain
+      # actions/cache would save it in a post-step that runs after `npm test`
+      # has executed agent-authored code — on a miss, a binary that code
+      # replaced would be cached and shipped in a signed release. A miss here
+      # costs one local xcodebuild instead.
       - name: Fingerprint Xcode toolchain
         id: toolchain
         if: steps.branch.outputs.proceed == 'true'
         run: echo "fp=$(xcodebuild -version | tr '\n ' '-_')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache ariso-stt sidecar artifacts
+      - name: Restore ariso-stt sidecar artifacts
         id: sidecar-cache
         if: steps.branch.outputs.proceed == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             src-tauri/binaries/ariso-stt-aarch64-apple-darwin
@@ -281,9 +329,14 @@ jobs:
           echo "Diff is within the permitted paths."
 
       # Re-run verification here rather than trusting the model's claim. The
-      # prompt requires these; only this step enforces them.
+      # prompt requires these; only this step enforces them. This executes
+      # agent-authored code (tests, build scripts), so the tokens are blanked
+      # exactly as they are for the agent step.
       - name: Verify the fix builds
         if: steps.changes.outputs.no_changes == 'false'
+        env:
+          GH_TOKEN: ""
+          PUSH_TOKEN: ""
         run: |
           set -euo pipefail
           npm test

@@ -64,8 +64,17 @@ For each entry in all three arrays, classify:
 - **valid-already-fixed** — real issue, but the current diff already
   addresses it. **Skip** — note this in the commit body and reply on
   the thread.
-- **false-positive** — false alarm, conflicts with project conventions,
-  or requires a design discussion. **Skip** with a one-sentence reason.
+- **false-positive** — false alarm: the defect isn't there, can't be
+  reached, or the suggestion goes against project conventions.
+  **Skip** with a one-sentence reason. The workflow resolves the thread.
+- **needs-human** — may well be real, but this job can't or shouldn't
+  fix it: it needs a design discussion, a change outside the repo
+  (runner or infra setup), or an edit this job is barred from (see
+  "Do NOT apply" and "Important" below). **Skip** with a one-sentence
+  reason. The thread stays open for a human.
+
+Pick `false-positive` only when you are confident the finding is wrong.
+If it might be right and you just can't act on it, it is `needs-human`.
 
 Read the diff and surrounding file context before deciding. Use `Read`,
 `Grep`, and `git diff origin/<base>...HEAD -- <path>` as needed.
@@ -102,8 +111,10 @@ Skip (classify as `false-positive`) minors that are:
 
 When unsure, skip — and say in the reply what you checked, e.g.
 "Skipping (minor, not a true positive): `foo` is only called after
-`bar` validates the input." Majors and `shawnzhu` findings keep the
-normal bar above.
+`bar` validates the input." A minor that fails any of the four checks
+is a `false-positive`, even when it isn't strictly wrong — minors are
+never `needs-human`, so a skipped minor gets resolved rather than left
+open. Majors and `shawnzhu` findings keep the normal bar above.
 
 ## Step 2 — Apply fixes
 
@@ -129,7 +140,10 @@ edits together. Use the `Edit` tool — no shell-based file rewriting.
 - Disagree with patterns established elsewhere in the codebase.
 
 If a suggestion conflicts with one of these rules, classify it as
-**false-positive** with the conflicting rule as the reason.
+**needs-human** with the conflicting rule as the reason — the finding
+may be right, but a human has to make that change. The exception is a
+suggestion that goes against patterns established elsewhere: that is a
+**false-positive**.
 
 ## Step 3 — Build verification
 
@@ -142,7 +156,7 @@ npm run vite:build
 ```
 
 If any fails, isolate the failure to a specific finding's edit, back
-it out, and reclassify that finding as `false-positive` with the build
+it out, and reclassify that finding as `needs-human` with the build
 error as the reason. Re-run until they pass cleanly.
 
 If you cannot make them pass, stop. Do not commit. Write a clear
@@ -163,6 +177,9 @@ Applied:
 Skipped (false-positive):
   - <path>:<line> — <reason>
 
+Skipped (needs-human):
+  - <path>:<line> — <reason>
+
 Skipped (already-fixed):
   - <path>:<line>
 ```
@@ -175,20 +192,28 @@ any thread that already has one.
 ```json
 [
   {"rootCommentId": 123, "kind": "applied",
-   "body": "Applied: <one-line summary>. @coderabbitai resolve"},
-  {"rootCommentId": 456, "kind": "skipped",
-   "body": "Skipping: <one-line reason>."},
+   "body": "Applied: <one-line summary>."},
   {"rootCommentId": 789, "kind": "already-fixed",
-   "body": "Already addressed in <short-sha>. @coderabbitai resolve"}
+   "body": "Already addressed in <short-sha>."},
+  {"rootCommentId": 456, "kind": "false-positive",
+   "body": "Skipping (false positive): <one-line reason>."},
+  {"rootCommentId": 321, "kind": "needs-human",
+   "body": "Leaving open for a human: <one-line reason>."}
 ]
 ```
 
-The workflow uses this file to post the replies after the push.
+`kind` must be exactly one of those four values. After the push, the
+workflow posts each reply, then resolves the CodeRabbit threads whose
+kind is `applied`, `already-fixed`, or `false-positive`. `needs-human`
+threads, and every `shawnzhu` thread, stay open. Do not write
+`@coderabbitai resolve` in a body — the workflow resolves threads
+itself.
 
 ## Step 5 — If nothing to apply
 
-If every finding triages to `false-positive` or `already-fixed` —
-i.e., you have no edits to make — do not write a commit message.
+If every finding triages to `false-positive`, `needs-human`, or
+`already-fixed` — i.e., you have no edits to make — do not write a
+commit message.
 Still write `/tmp/thread-replies.json` so the workflow can post
 explanations on each thread. The workflow detects "no changes" and
 skips the commit step.
