@@ -621,8 +621,9 @@ async function loadActionItems({ silent = false } = {}): Promise<void> {
   }
 }
 
-// A task ticked in the open meeting's AI notes closes its todo; drop it from
-// the list in place. Outside the Todo tab, opening the tab reloads anyway.
+// An action item ticked (or, on Ariso, reassigned) in the open meeting closes
+// or opens a todo; refresh the list in place. Outside the Todo tab, opening the
+// tab reloads anyway.
 function onTasksChanged(): void {
   if (activeView.value === 'todo') void loadActionItems({ silent: true });
 }

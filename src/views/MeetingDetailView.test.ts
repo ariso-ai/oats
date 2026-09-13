@@ -2230,3 +2230,50 @@ describe('MeetingDetailView local AI-notes tasks', () => {
     expect(wrapper.find('.md').text()).not.toContain('Ship the RFC');
   });
 });
+
+describe('MeetingDetailView Ariso action items', () => {
+  const mine = { id: 'a1', name: 'Me', item: 'Ship the RFC', meetingParticipantId: 1 };
+
+  function serveFollowUps() {
+    apiRequest.mockImplementation(async (method: string, url: string) => {
+      if (method === 'GET' && url.startsWith('/follow-ups/by-source')) {
+        return { status: 200, data: { followUps: [] } };
+      }
+      if (method === 'POST' && url === '/follow-ups') {
+        return { status: 201, data: { followUp: { id: 11, raw: { description: 'Ship the RFC' } } } };
+      }
+      if (method === 'PATCH' && url === '/follow-ups/11/complete') return { status: 200, data: {} };
+      throw new Error(`unexpected ${method} ${url}`);
+    });
+  }
+
+  it('lists the meeting’s action items with their follow-up and reassign actions', async () => {
+    serveFollowUps();
+    const wrapper = await mountWith(
+      detail({
+        actionItems: [mine, { id: 'a2', name: 'Dana', item: 'Book the venue', meetingParticipantId: 2 }],
+        participants: [
+          { name: 'Me', self: true, meetingParticipantId: 1 },
+          { name: 'Dana', meetingParticipantId: 2 },
+        ],
+      })
+    );
+
+    const rows = wrapper.findAll('.ai-row');
+    expect(rows.map((r) => r.find('.ai-text').text())).toEqual(['Ship the RFC', 'Book the venue']);
+    expect(rows[0].find('input[type="checkbox"]').exists()).toBe(true);
+    expect(rows[1].findAll('button').map((b) => b.text())).toEqual(['Follow-up', 'Reassign']);
+  });
+
+  it('tells the parent the Todo list changed when an action item is checked off', async () => {
+    serveFollowUps();
+    const wrapper = await mountWith(
+      detail({ actionItems: [mine], participants: [{ name: 'Me', self: true, meetingParticipantId: 1 }] })
+    );
+
+    await wrapper.find('.ai-row input[type="checkbox"]').setValue(true);
+    await flushPromises();
+
+    expect(wrapper.emitted('tasksChanged')).toEqual([[{ id: '7' }]]);
+  });
+});

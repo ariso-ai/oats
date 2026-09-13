@@ -15,7 +15,10 @@ import {
   type TranscriptChunk,
   type MeetingAudioClip,
   type MeetingPrep,
+  type ActionItemFollowUp,
+  parseRowId,
 } from './useMeetingApi';
+import { openActionItems } from './arisoActionItems';
 import { arisoTruthy } from './autoJoin';
 import { reportUploadFailure } from './useDiagnostics';
 import { isCanceledMeetingStatus } from './meetingStatus';
@@ -86,6 +89,12 @@ export interface MeetingActionItem {
   /** Owner/assignee name; absent for ungrouped items. */
   name?: string;
   item: string;
+  /** Ariso: the persisted action item's id — required to reassign it. Absent
+   *  on older meetings whose items live only in the summary blob. */
+  id?: string;
+  /** Ariso: the owner's meeting_participants row id; null when the owner is a
+   *  bare name or nobody (Unassigned). */
+  meetingParticipantId?: number | null;
 }
 
 /** One meeting's action items for the signed-in user, with the meeting itself as
@@ -119,6 +128,10 @@ export interface MeetingParticipantInfo {
   /** Ariso: whether a human confirmed this speaker↔person link, as opposed to
    *  it coming from an unreviewed auto-match. */
   manualConfirm?: boolean;
+  /** Ariso: the meeting_participants row id — what an action item is
+   *  reassigned to. Distinct from `id` (org-user mapping) and `participantId`
+   *  (diarization index). */
+  meetingParticipantId?: number | null;
 }
 
 /** Normalized meeting detail rendered by the library's right-hand panel.
@@ -230,7 +243,10 @@ export interface Backend {
 interface RawMeetingSummary {
   digest?: string;
   summary?: string;
-  actionItems?: Array<string | { name?: string; item?: string }>;
+  actionItems?: Array<
+    | string
+    | { name?: string; item?: string; id?: string; meetingParticipantId?: number | string | null }
+  >;
   score?: number;
   rationale?: string;
   recommendation?: string;
@@ -263,11 +279,19 @@ function normalizeActionItems(
       if (typeof it === 'string') return { item: it };
       const raw =
         it && typeof it === 'object'
-          ? (it as { name?: unknown; item?: unknown })
+          ? (it as { name?: unknown; item?: unknown; id?: unknown; meetingParticipantId?: unknown })
           : {};
       const name = typeof raw.name === 'string' ? raw.name : undefined;
       const item = typeof raw.item === 'string' ? raw.item : '';
-      return { name, item };
+      const out: MeetingActionItem = { name, item };
+      // Only persisted items carry these; blob-only items stay without them,
+      // which is what marks them as not reassignable.
+      if (typeof raw.id === 'string' && raw.id) out.id = raw.id;
+      if (raw.meetingParticipantId === null) out.meetingParticipantId = null;
+      else if (parseRowId(raw.meetingParticipantId) !== null) {
+        out.meetingParticipantId = parseRowId(raw.meetingParticipantId);
+      }
+      return out;
     })
     .filter((it) => it.item.trim().length > 0);
 }
@@ -359,6 +383,24 @@ export function recentDayKeys(now: Date, count: number): string[] {
     keys.push(localDateKey(d));
   }
   return keys;
+}
+
+// The day endpoint lists every item the user owns, done or not: checking one
+// off completes its follow-up, which the endpoint doesn't consult. So each
+// meeting's follow-ups are looked up and the completed items dropped. A failed
+// lookup keeps that meeting's items — a stale todo beats a silently lost one.
+async function withoutCheckedOff(entries: ActionItemEntry[]): Promise<ActionItemEntry[]> {
+  const { listFollowUpsBySource } = useMeetingApi();
+  const ids = [...new Set(entries.map((e) => e.meeting.id))];
+  const lookups = await Promise.allSettled(ids.map((id) => listFollowUpsBySource(id)));
+  const byMeeting = new Map<string, ActionItemFollowUp[]>();
+  lookups.forEach((result, i) => {
+    if (result.status === 'fulfilled') byMeeting.set(ids[i], result.value);
+    else console.error('Failed to load follow-ups for a meeting', result.reason);
+  });
+  return entries
+    .map((e) => ({ ...e, items: openActionItems(e.items, byMeeting.get(e.meeting.id) ?? []) }))
+    .filter((e) => e.items.length > 0);
 }
 
 export class ArisoBackend implements Backend {
@@ -460,7 +502,7 @@ export class ArisoBackend implements Backend {
     if (results.length > 0 && failures === results.length) {
       throw new Error('Could not load action items.');
     }
-    return entries;
+    return withoutCheckedOff(entries);
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
@@ -487,6 +529,7 @@ export class ArisoBackend implements Backend {
         displayName: p.display_name,
         participantId: p.participant_id ?? null,
         manualConfirm: p.manual_confirm ?? false,
+        meetingParticipantId: parseRowId(p.meeting_participant_id),
       })),
       // Absent on any response that predates diarized speakers, and always
       // absent on the shared/public view — which never exposes them.
