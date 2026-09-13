@@ -52,7 +52,9 @@ vi.mock('../tauri', () => ({
   getBackendSetting: () => getBackendSetting(),
 }));
 
-vi.mock('./useMeetingApi', () => ({
+// Only the API client is faked; pure helpers (e.g. parseRowId) stay real.
+vi.mock('./useMeetingApi', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./useMeetingApi')>()),
   useMeetingApi: () => ({
     uploadAudio: (...a: unknown[]) => uploadAudio(...a),
     listMeetingsInWindow: (...a: unknown[]) => listMeetingsInWindow(...a),
@@ -434,6 +436,25 @@ describe('ArisoBackend', () => {
       { id: 'a2', name: 'Unassigned', item: 'Book venue', meetingParticipantId: null },
       { name: 'Bob', item: 'Legacy blob item' },
     ]);
+  });
+
+  it('reads participant row ids the server sends as strings', async () => {
+    getMeetingNotes.mockResolvedValue({
+      id: 650,
+      title: 'Blocked time',
+      start_at: '2026-09-09T17:00:00-04:00',
+      participants: [{ id: '1', name: 'Shawn Zhu', self: true, meeting_participant_id: '1128' }],
+      summary: { actionItems: [{ id: 'e7', name: 'Shawn Zhu', item: 'Buy tools', meetingParticipantId: '1128' }] },
+    });
+
+    const d = await new ArisoBackend().getMeetingDetail({
+      id: '650',
+      title: 'Blocked time',
+      timestamp: '2026-09-09T17:00:00-04:00',
+    });
+
+    expect(d.participants[0].meetingParticipantId).toBe(1128);
+    expect(d.actionItems[0].meetingParticipantId).toBe(1128);
   });
 
   it('marks the detail canceled from the meeting-notes status', async () => {
@@ -898,10 +919,10 @@ describe('action items', () => {
       Promise.resolve(
         String(meetingId) === '9'
           ? [
-              { id: 1, description: 'Send pricing deck', completed: true },
-              { id: 2, description: 'Book the venue', completed: false },
+              { id: '1', description: 'Send pricing deck', completed: true },
+              { id: '2', description: 'Book the venue', completed: false },
             ]
-          : [{ id: 3, description: 'Write the retro doc', completed: true }]
+          : [{ id: '3', description: 'Write the retro doc', completed: true }]
       )
     );
 

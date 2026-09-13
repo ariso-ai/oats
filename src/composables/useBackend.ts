@@ -16,6 +16,7 @@ import {
   type MeetingAudioClip,
   type MeetingPrep,
   type ActionItemFollowUp,
+  parseRowId,
 } from './useMeetingApi';
 import { openActionItems } from './arisoActionItems';
 import { arisoTruthy } from './autoJoin';
@@ -243,7 +244,8 @@ interface RawMeetingSummary {
   digest?: string;
   summary?: string;
   actionItems?: Array<
-    string | { name?: string; item?: string; id?: string; meetingParticipantId?: number | null }
+    | string
+    | { name?: string; item?: string; id?: string; meetingParticipantId?: number | string | null }
   >;
   score?: number;
   rationale?: string;
@@ -285,8 +287,9 @@ function normalizeActionItems(
       // Only persisted items carry these; blob-only items stay without them,
       // which is what marks them as not reassignable.
       if (typeof raw.id === 'string' && raw.id) out.id = raw.id;
-      if (typeof raw.meetingParticipantId === 'number' || raw.meetingParticipantId === null) {
-        out.meetingParticipantId = raw.meetingParticipantId;
+      if (raw.meetingParticipantId === null) out.meetingParticipantId = null;
+      else if (parseRowId(raw.meetingParticipantId) !== null) {
+        out.meetingParticipantId = parseRowId(raw.meetingParticipantId);
       }
       return out;
     })
@@ -526,8 +529,7 @@ export class ArisoBackend implements Backend {
         displayName: p.display_name,
         participantId: p.participant_id ?? null,
         manualConfirm: p.manual_confirm ?? false,
-        meetingParticipantId:
-          typeof p.meeting_participant_id === 'number' ? p.meeting_participant_id : null,
+        meetingParticipantId: parseRowId(p.meeting_participant_id),
       })),
       // Absent on any response that predates diarized speakers, and always
       // absent on the shared/public view — which never exposes them.

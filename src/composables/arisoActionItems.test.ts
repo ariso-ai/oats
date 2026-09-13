@@ -83,13 +83,13 @@ describe('isOwnedBySelf', () => {
 
 describe('follow-up matching', () => {
   const followUps = [
-    { id: 1, description: 'Send pricing deck', completed: true },
-    { id: 2, description: 'Book the venue', completed: false },
+    { id: '1', description: 'Send pricing deck', completed: true },
+    { id: '2', description: 'Book the venue', completed: false },
   ];
 
   it('indexes follow-ups by the action-item text they were created from', () => {
     const index = indexFollowUps(followUps);
-    expect(index.get('Send pricing deck')?.id).toBe(1);
+    expect(index.get('Send pricing deck')?.id).toBe('1');
     expect(index.get('Book the venue')?.completed).toBe(false);
     expect(index.get('Something else')).toBeUndefined();
   });

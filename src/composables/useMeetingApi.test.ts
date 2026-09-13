@@ -287,10 +287,31 @@ describe('action-item follow-ups', () => {
     );
     // A row with no description can't be tied to any item, so it is dropped.
     expect(followUps).toEqual([
-      { id: 3, description: 'Send pricing deck', completed: true },
-      { id: 4, description: 'Book the venue', completed: false },
-      { id: 5, description: 'Draft the RFC', completed: false },
+      { id: '3', description: 'Send pricing deck', completed: true },
+      { id: '4', description: 'Book the venue', completed: false },
+      { id: '5', description: 'Draft the RFC', completed: false },
     ]);
+  });
+
+  it('keeps follow-ups whose bigint id the server sends as a string', async () => {
+    // The real /follow-ups/by-source payload: `id` is a string.
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: {
+        followUps: [
+          {
+            id: '138',
+            raw: { description: 'Purchase a smaller toolset', importance: 0.7 },
+            searchable_json: { importance: 0.7, source_id: '650', source_type: 'action_item' },
+          },
+          { id: 'not-an-id', raw: { description: 'Garbage row' } },
+        ],
+      },
+    });
+
+    const followUps = await useMeetingApi().listFollowUpsBySource('650');
+
+    expect(followUps).toEqual([{ id: '138', description: 'Purchase a smaller toolset', completed: false }]);
   });
 
   it('surfaces a failed follow-up lookup', async () => {
@@ -314,18 +335,27 @@ describe('action-item follow-ups', () => {
       sourceId: '9',
       sourceType: 'action_item',
     });
-    expect(created).toEqual({ id: 11, description: 'Ship it', completed: false });
+    expect(created).toEqual({ id: '11', description: 'Ship it', completed: false });
+  });
+
+  it('accepts a created follow-up whose id comes back as a string', async () => {
+    apiRequest.mockResolvedValue({
+      status: 201,
+      data: { followUp: { id: '138', raw: { description: 'Ship it' } } },
+    });
+    const created = await useMeetingApi().createActionItemFollowUp(650, 'Blocked time', 'Ship it');
+    expect(created).toEqual({ id: '138', description: 'Ship it', completed: false });
   });
 
   it('marks a follow-up complete or incomplete', async () => {
     apiRequest.mockResolvedValue({ status: 200, data: {} });
-    await useMeetingApi().setFollowUpCompleted(11, true);
+    await useMeetingApi().setFollowUpCompleted('11', true);
     expect(apiRequest).toHaveBeenCalledWith('PATCH', '/follow-ups/11/complete', { completed: true });
   });
 
   it('surfaces a failed completion write', async () => {
     apiRequest.mockResolvedValue({ status: 404, data: { error: 'Follow-up not found' } });
-    await expect(useMeetingApi().setFollowUpCompleted(11, false)).rejects.toThrow(
+    await expect(useMeetingApi().setFollowUpCompleted('11', false)).rejects.toThrow(
       'Follow-up not found'
     );
   });
@@ -346,6 +376,15 @@ describe('reassignActionItem', () => {
       { meetingParticipantId: 42 }
     );
     expect(owner).toEqual({ name: 'Dana', meetingParticipantId: 42 });
+  });
+
+  it('reads a participant id the server sends as a string', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: { actionItem: { id: 'a1', name: 'Shawn Zhu', meetingParticipantId: '1128' } },
+    });
+    const owner = await useMeetingApi().reassignActionItem('650', 'a1', 1128);
+    expect(owner).toEqual({ name: 'Shawn Zhu', meetingParticipantId: 1128 });
   });
 
   it('sends null to unassign', async () => {

@@ -78,7 +78,8 @@ export interface DayActionItems {
  *  meeting id), so `description` is the action item's text. Follow-ups are per
  *  user: `completed` is whether *the requester* has checked the item off. */
 export interface ActionItemFollowUp {
-  id: number;
+  /** A bigint the server serializes as a string ("138"); kept as one. */
+  id: string;
   description: string;
   completed: boolean;
 }
@@ -126,8 +127,9 @@ interface MeetingNotesParticipant {
    *  coming from an unreviewed auto-match). */
   manual_confirm?: boolean;
   /** The meeting_participants row id — the id an action item's assignee is
-   *  written as. Absent on responses that predate action-item reassignment. */
-  meeting_participant_id?: number | null;
+   *  written as. Absent on responses that predate action-item reassignment.
+   *  A bigint, so it may arrive as a numeric string; read it via parseRowId. */
+  meeting_participant_id?: number | string | null;
 }
 
 /** A diarized voice in a recording, before anyone has said who it belongs to.
@@ -221,6 +223,17 @@ function parseTranscriptChunks(raw: unknown): TranscriptChunk[] | null {
   return chunks.length ? chunks : null;
 }
 
+/** A database row id as the API may send it: a number, or — for bigint
+ *  columns — a numeric string. Anything else is not an id. */
+export function parseRowId(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw)) return raw;
+  if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
 // A follow-up row keeps its text in `raw.description`; older rows carry it in
 // `searchable_json` or at the top level. A row with no text can't be tied to
 // any action item, so it normalizes to null.
@@ -235,8 +248,16 @@ function parseActionItemFollowUp(raw: unknown): ActionItemFollowUp | null {
   const description = [f.raw?.description, f.searchable_json?.description, f.description].find(
     (d): d is string => typeof d === 'string' && d.length > 0
   );
-  if (typeof f.id !== 'number' || !description) return null;
-  return { id: f.id, description, completed: f.raw?.completed === true };
+  // The id is only ever sent back in a URL, so keep it verbatim as a string
+  // rather than risk a bigint losing precision as a number.
+  const id =
+    typeof f.id === 'number' && Number.isSafeInteger(f.id)
+      ? String(f.id)
+      : typeof f.id === 'string' && /^\d+$/.test(f.id)
+        ? f.id
+        : null;
+  if (!id || !description) return null;
+  return { id, description, completed: f.raw?.completed === true };
 }
 
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
@@ -565,10 +586,10 @@ export function useMeetingApi() {
     return followUp;
   }
 
-  async function setFollowUpCompleted(followUpId: number, completed: boolean): Promise<void> {
+  async function setFollowUpCompleted(followUpId: string, completed: boolean): Promise<void> {
     const res = await api.request(
       'PATCH',
-      `/follow-ups/${encodeURIComponent(String(followUpId))}/complete`,
+      `/follow-ups/${encodeURIComponent(followUpId)}/complete`,
       { completed }
     );
     assertOk2xx(res, 'update follow-up');
@@ -592,8 +613,7 @@ export function useMeetingApi() {
       ?.actionItem;
     return {
       name: typeof item?.name === 'string' ? item.name : '',
-      meetingParticipantId:
-        typeof item?.meetingParticipantId === 'number' ? item.meetingParticipantId : null,
+      meetingParticipantId: parseRowId(item?.meetingParticipantId),
     };
   }
 
