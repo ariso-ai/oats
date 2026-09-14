@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.1](https://github.com/ariso-ai/oats/compare/v0.24.0...v0.24.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* render local transcripts through the Ariso transcript list ([48ede69](https://github.com/ariso-ai/oats/commit/48ede69e8b9eab627ea831c1ebea91c17e560b22))
+* render local transcripts through the Ariso transcript list ([7c4f1a2](https://github.com/ariso-ai/oats/commit/7c4f1a27c19ad1a2ec555c8aea86787b31d9ab5f)), closes [#400](https://github.com/ariso-ai/oats/issues/400)
+
 ## [0.24.0](https://github.com/ariso-ai/oats/compare/v0.23.0...v0.24.0) (2026-09-13)
 
 
