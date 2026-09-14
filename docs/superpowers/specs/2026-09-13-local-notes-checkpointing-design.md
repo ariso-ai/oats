@@ -4,363 +4,497 @@
 
 For the Local (offline) backend, transcription and AI notes both run exactly
 once, and only after the user stops recording. `WaveformView.vue`'s
-`stopRecording()` is the sole entry point into the whole pipeline —
-`backend.value.finalizeRecording(stoppedBlob, meta)` (`WaveformView.vue:597`)
-sends the *entire* recorded audio to Rust, which transcribes it in one
-blocking pass (`run_transcribe`, `transcribe.rs`), writes `transcript.md`,
-flips `RecordingStatus` to `Done`, then spawns notes generation
-(`process_notes`, `transcribe.rs:247`) as a detached, best-effort task that
-runs the on-device Gemma 3 1B model over the full transcript from scratch.
+`handleStop()` → `runFinalize()` is the sole entry point into the whole
+pipeline — `backend.value.finalizeRecording(stoppedBlob, meta)`
+(`WaveformView.vue:597`) sends the *entire* recorded audio to Rust, which
+transcribes it in one blocking pass (`run_transcribe`, `transcribe.rs`), writes
+`transcript.md`, flips `RecordingStatus` to `Done`, then spawns notes generation
+(`process_notes`, `transcribe.rs:247`) as a detached, best-effort task that runs
+the on-device Gemma 3 1B model over the full transcript from scratch.
 
 During the recording itself, nothing happens: the only timer running is a
-cosmetic 1-second UI clock (`useRecorder.ts:376`) that updates the on-screen
-duration. `RecordingMeta` already carries a `notes_written: Option<String>`
-field whose doc comment says it was recorded "for future use... an
-auto-regeneration guard" (`storage.rs:114-118`) — this feature is the thing
-that comment was anticipating.
+cosmetic 1-second UI clock (`useRecorder.ts:376`). `RecordingMeta` already
+carries a `notes_written: Option<String>` field whose doc comment says it was
+recorded "for future use... an auto-regeneration guard" (`storage.rs:114-118`).
 
 For a long meeting (an hour or more) this means:
 
 - The user gets zero transcript or notes until they stop recording, however
   long the meeting runs.
-- If oats or the machine crashes mid-recording, the entire transcript and
-  notes are lost — there is no partial output on disk (only the raw
-  in-progress audio survives, and only in the frontend's memory until
-  `finalizeRecording` is called).
-- A naive "just re-run notes generation every 5 minutes on the whole
-  transcript so far" doesn't scale: Gemma 3 1B is a small on-device model
-  with a limited context window, and it already needs a repetition penalty to
-  avoid degenerating on a single normal-length transcript
-  (`2026-06-03-local-meeting-notes-design.md`). Re-summarizing a growing
-  transcript from scratch every 5 minutes means the prompt gets larger and
-  slower every cycle, and eventually exceeds what the model can reliably
-  process — exactly the "long recording" case this issue is asking to
-  support.
+- If oats or the machine crashes mid-recording, *everything* is lost: the audio
+  lives only in the recorder window's memory (`mp3Chunks`, `useRecorder.ts`)
+  until Stop, and the stub `meta.json` written at capture start (#355) is left
+  stuck in `Recording` status with nothing behind it.
+- Re-running today's notes pass every 5 minutes doesn't scale. The context
+  window is *not* the binding constraint — the one-shot pass already handles
+  an hour-long transcript on both platforms (macOS feeds the whole transcript to
+  Gemma 3 1B's 32K-token context in one `ChatSession`; an hour of speech is
+  roughly 12K tokens. Windows map-reduces it within a 4096-token llama.cpp
+  context, `ariso-stt/windows/src/notes.rs`). The problem is cost: each
+  from-scratch pass grows with the meeting, so repeating it every 5 minutes is
+  quadratic in total, and it competes with the live call for the same CPU/GPU.
+  The issue also asks, explicitly, that notes "remain consistent across multiple
+  checkpoints instead of being regenerated from scratch each time."
 
 ## Goal
 
-While a Local-backend recording is in progress, oats periodically (every 5
-minutes of recording) transcribes the audio captured since the last
-checkpoint and updates that recording's notes incrementally — without
-stopping the recording, and without regenerating the whole transcript's
-notes from scratch each time. Concretely:
+While a Local-backend recording is in progress, oats every 5 minutes of
+recorded audio persists and transcribes the audio captured since the last
+checkpoint and updates that recording's notes incrementally — without stopping
+the recording, and without regenerating the notes from scratch each time.
+Concretely:
 
-- Opening the in-progress recording in the Library (it already appears there
-  in `Recording` status) shows a transcript and AI notes that grow roughly
-  every 5 minutes, not just after the meeting ends.
-- Notes stay internally consistent across checkpoints: checkpoint *N* updates
-  what checkpoint *N-1* produced rather than starting over, so notes quality
-  and generation latency don't degrade as the meeting gets longer.
-- Stopping the recording still produces a complete, correct final transcript
-  and notes — checkpointing is a latency improvement, not a change to the
-  end state.
+- Opening the in-progress recording in the Library (it already appears there in
+  `Recording` status, via the #355 stub) shows a transcript and AI notes that
+  grow roughly every 5 minutes.
+- Across checkpoints, notes are *merged*: checkpoint *N* updates what checkpoint
+  *N-1* produced rather than starting over.
+- Audio captured up to the last checkpoint survives a crash.
+- **The end state is unchanged.** Checkpoint output is a *preview*. Stopping the
+  recording runs today's finalize path, unmodified, over the full audio, so the
+  final transcript (one diarization pass, consistent speaker ids) and final
+  notes are exactly what oats produces today for the same audio.
 
 ## Non-goals
 
 - **Cloud (Ariso) backend.** Out of scope — see [Cloud vs
   offline](#cloud-vs-offline).
-- **Configurable checkpoint interval.** Fixed at 5 minutes, matching the
-  house pattern of fixed windows elsewhere in the local pipeline (e.g.
-  `APPEND_WINDOW_SECONDS = 300` for cross-session append, `storage.rs:8`).
-- **Cross-checkpoint speaker reconciliation.** Each checkpoint's clip is
-  transcribed independently and its speaker ids are offset to stay distinct,
-  exactly like today's append-window merge (`offset_segments` /
-  `offset_participants`) — speaker identity is not reconciled across
-  checkpoints, same accepted limitation as multi-recording append.
-- **A "just refreshed" UI affordance.** Whether/how to visually indicate a
-  checkpoint just landed (toast, timestamp, subtle pulse) is left to review —
-  see [Open questions](#open-questions). This spec guarantees the content
-  updates; it doesn't design a new visual language for it.
-- **Resuming checkpoint state after an oats relaunch mid-recording.** An
-  in-progress recording surviving a full app restart is an existing gap in
-  the recording feature generally, not something this spec fixes.
-- **Reworking the notes prompt's structure** (sections, tone, length) beyond
-  what's needed to make it merge-aware. Untrusted discussion on the issue
-  argued for more structured, decision/risk/action-focused notes generally —
-  legitimate feedback, but a separate concern from checkpointing and not
-  acted on here.
+- **Configurable checkpoint interval.** Fixed at 5 minutes of recorded audio,
+  matching the house pattern of fixed windows elsewhere in the local pipeline
+  (e.g. `APPEND_WINDOW_SECONDS = 300`, `storage.rs:8`).
+- **Faster stop.** Stop latency stays what it is today (full-audio STT). This
+  feature's value is visibility *during* the meeting and crash safety, not stop
+  latency — see [Why a final full pass](#why-a-final-full-pass).
+- **Cross-checkpoint speaker reconciliation in previews.** Each checkpoint's
+  chunk is diarized independently and its speaker ids are offset to stay
+  distinct (`next_speaker_offset` / `offset_segments`), so a two-person meeting
+  previews as "Speaker 1…Speaker 24" after an hour. Previews accept this; the
+  final full pass removes it.
+- **Checkpointing sessions that append into an existing recording.** A session
+  that docks to a prior `Done` recording — auto-append within the 5-minute
+  window (`storage::resolve_local_recording_id`), an explicit "Continue this
+  meeting" (`localAppendId`), or resuming a failed stop with a held blob — is not
+  checkpointed in v1 and behaves exactly as today. See
+  [Open questions](#open-questions).
+- **A "just refreshed" UI affordance.** Content updates in place; no new visual
+  language.
+- **Resuming a recording after an oats relaunch.** Out of scope. A minimal
+  startup reconcile (§7) *is* in scope, because checkpoints leave real data
+  behind that must stay reachable.
+- **Reworking the notes prompt's structure** beyond the new merge mode.
 
 ## Design
 
 ### Overview
 
 ```
-record (frontend, useRecorder.ts) ──── 5-min chunk boundary ────┐
-        │                                                        │
-        │ (continues encoding)                    checkpoint_local_recording(id, chunk, is_final=false)
-        │                                                        │
-        │                                                        ▼
-        │                                          transcribe chunk → offset segments/speakers
-        │                                          → append to segments.json → re-render transcript.md
-        │                                          → incremental notes refresh (best-effort)
-        │                                                        │
-        ▼                                                        ▼
-stopRecording() ── final tail chunk ──► checkpoint_local_recording(id, chunk, is_final=true)
-                                          (same pipeline, then status → Done, final notes pass)
+record (WaveformView + useRecorder) ── every 300 s of recorded audio ──┐
+      │                                                                 ▼
+      │ (keeps encoding)                     local_checkpoint_recording(id, chunk, startByte)
+      │                                        [per-recording lock]
+      │                                        persist chunk → vault audio (append)
+      │                                        transcribe chunk → offset → segments.json
+      │                                        → re-render transcript.md
+      │                                        → spawn preview notes (detached, merge mode)
+      ▼
+handleStop() ── full blob (unchanged) ──► local_finalize_recording (unchanged contract)
+                                           [per-recording lock; aborts preview notes]
+                                           fresh_recording_core over the FULL audio:
+                                           authoritative transcript + notes, as today
 ```
 
-The core idea is to reuse the machinery already built for cross-session
-append (`docs/superpowers/specs/2026-07-02-local-multi-recording-oats-design.md`):
-transcribing a new clip, offsetting its timestamps/speaker ids by what's
-already accumulated, and appending into `segments.json`. That logic already
-exists for "a new recording session starts within 5 minutes of the last
-one." This feature triggers the same merge automatically, on a 5-minute
-timer, *within* a single still-open recording session, instead of waiting
-for the user to stop and restart.
+Two tiers:
 
-### 1. Frontend: chunked capture (`src/composables/useRecorder.ts`, `src/views/WaveformView.vue`)
+1. **Preview tier (new, during recording).** Incremental: each checkpoint
+   transcribes only its chunk and merges it into the preview transcript and
+   notes. Reuses the append machinery (`offset_segments`,
+   `offset_participants`, `next_speaker_offset`, audio concatenation) inside a
+   single still-open recording.
+2. **Final tier (existing, at stop).** `local_finalize_recording` is kept, with
+   its contract unchanged. The frontend still sends the full blob; the fresh path
+   rewrites the recording in place (it already handles a pre-existing
+   `meta.json` and reuses `meta.audio_file`, `transcribe.rs:390-419`) and
+   replaces every preview artifact.
 
-Today `useRecorder.ts` accumulates lamejs-encoded MP3 output into an in-memory
-buffer for the whole session and only builds a Blob from it at `stopRecording`
-time. MP3 frames are self-delimiting, so a prefix of that buffer is itself a
-valid, decodable MP3 stream — this is the same property the append feature
-already relies on when concatenating separate clips' raw bytes
-(`local-multi-recording` §4.3 step 4).
+#### Why a final full pass
 
-Changes, gated to `activeBackend.value.id === 'local'` only:
+Stitching checkpoint transcripts together as the final result would regress
+long meetings versus today: per-chunk speaker ids (above), words split at every
+5-minute boundary, and any failed chunk permanently missing from the transcript.
+Re-transcribing the full audio at stop costs exactly today's stop latency and
+guarantees today's quality. It also keeps the proven finalize path (including
+its retry / resume-after-failed-stop flows, which rely on finalize being an
+idempotent in-place rewrite) completely untouched.
 
-- Track a `lastCheckpointByteOffset` alongside the existing MP3 byte
-  accumulator.
-- A new sequential (not `setInterval`) checkpoint loop: after each 5-minute
-  mark, slice the bytes accumulated since `lastCheckpointByteOffset`, invoke
-  the new `local.checkpointRecording(id, chunkBytes, isFinal: false)` command,
-  and only schedule the next 5-minute wait once that call resolves. This
-  bounds concurrency to one in-flight checkpoint per recording by
-  construction — no Rust-side locking needed for the common case.
-- On `stopRecording()`: cancel the pending checkpoint timer, slice the final
-  remaining bytes since the last checkpoint, and call
-  `local.checkpointRecording(id, chunkBytes, isFinal: true)` instead of
-  today's `finalizeRecording(stoppedBlob, meta)` call. If no checkpoint ever
-  fired (a recording shorter than 5 minutes), the "chunk since last
-  checkpoint" is the entire recording, so this is exactly today's fresh-path
-  behavior — same bytes, new entry point.
-- `finalizeRecording`'s existing frontend/backend contract is retired in
-  favor of `checkpointRecording(..., isFinal: true)` for the local backend;
-  the cloud backend's `finalizeRecording` is untouched (see [Cloud vs
-  offline](#cloud-vs-offline)).
+### 1. Frontend: the checkpoint loop (`src/views/WaveformView.vue`, `src/composables/useRecorder.ts`)
 
-### 2. Backend: a shared "ingest a clip" pipeline (`src-tauri/src/transcribe.rs`)
+`useRecorder` stays backend-agnostic. It gains two small accessors over its
+existing `mp3Chunks` buffer:
 
-New command `checkpoint_local_recording(id: String, chunk: Vec<u8>, is_final: bool)`,
-registered alongside `local_begin_recording` / `local_recording_status`. It
-factors the parts of today's `fresh_recording_core` /
-`append_recording_core` that don't depend on "recording has fully stopped"
-into a shared `ingest_chunk_core(id, chunk_bytes) -> Result<(), String>`:
+- `encodedByteLength(): number`, the total bytes emitted so far.
+- `sliceFrom(startByte): { bytes: Uint8Array; endByte: number }`, the bytes
+  from `startByte` up to the latest *whole* `mp3Chunks` entry. Slices are cut
+  only at entry boundaries (whole encoder outputs), never at an arbitrary byte.
 
-1. Load `meta.json` for `id` (must exist — created at `local_begin_recording`
-   time — and have `status == Recording`).
-2. `run_transcribe` the chunk (same STT call as today's per-clip transcribe).
-3. `offset_segments` / `offset_participants` by what's already in
-   `segments.json` (byte-for-byte the same offsetting logic
-   `append_recording_core` already uses, `transcribe.rs:563`).
-4. Append the offset segments into `segments.json`; append the raw chunk
-   bytes into the vault audio attachment (`vault::write_audio`, extending
-   rather than replacing); update `meta.duration_seconds`.
-5. Re-render `transcript.md` from the updated `segments.json` + `meta.json`
-   (`storage::render_markdown`, unchanged).
-6. Run the incremental notes refresh (§3 below), best-effort — a failure here
-   never fails the checkpoint or touches the transcript that was just
-   written.
+The loop itself lives in `WaveformView.vue`, which owns the resolved recording
+id:
 
-`checkpoint_local_recording` calls `ingest_chunk_core`, then:
-- If `is_final == false`: leaves `status == Recording`, returns.
-- If `is_final == true`: sets `status = Done`, runs one last notes refresh
-  pass, and returns the same `FinalizeResult { id, ... }` shape
-  `local_finalize_recording` returns today, so the frontend's
-  success/close/re-list flow (`WaveformView.vue`) is unchanged.
+- **Eligibility** (all must hold): local backend; the resolved id is this
+  session's own new id (`effectiveLocalRecordingId ===
+  localRecordingIdFromStart(startAt)`, so no `localAppendId` and no auto-append
+  target); no held `stoppedBlob` (not a resume of a failed stop); the stub write
+  succeeded. For auto recordings the stub is deferred to `MIN_AUTO_DURATION_S`
+  (15 s), well before the first checkpoint.
+- **Trigger:** the existing `recorder.durationSeconds` watcher
+  (`WaveformView.vue:397`), not `setTimeout`/`setInterval`. That clock is driven
+  by the audio callback, so it keeps ticking when the hidden recorder webview's
+  JS timers are throttled (`useRecorder.ts:271`). It also excludes pauses, so
+  checkpoints fire every 300 s of *recorded audio*, not wall time.
+- **Concurrency:** at most one checkpoint in flight. If the next 300 s mark
+  passes while one is in flight, the next checkpoint fires as soon as it
+  resolves, carrying the larger chunk.
+- **Offset bookkeeping:** `lastCheckpointByte` advances only to the
+  `ingestedBytes` value Rust returns. On an IPC or Rust error it stays put, so
+  the next checkpoint resends from the same offset. Rust skips any prefix it
+  already ingested (§2), which makes a resend safe.
+- **Transport:** raw IPC body plus the `x-oats-meta` header, exactly like
+  `local.finalizeRecording` (`tauri.ts:393`), with meta `{ id, createdAt,
+  title, startByte }`. A JSON `number[]` is not acceptable: `local_finalize_recording`
+  moved off it because serializing 48 MB took ~30 s (`transcribe.rs:784-787`).
+  A 5-minute chunk (~4.8 MB) would block the webview main thread for seconds,
+  and that thread runs the `ScriptProcessor` audio encoding. The recording
+  itself would drop audio.
+- **Stop:** `handleStop()` stops scheduling checkpoints and then proceeds
+  *exactly as today* — full blob, `runFinalize()`. It does not await an
+  in-flight checkpoint; Rust orders the two with the per-recording lock (§2).
 
-This makes `local_finalize_recording` effectively dead code for the local
-backend (superseded by `checkpoint_local_recording(..., is_final: true)`); it
-is removed rather than kept as an unused parallel path, per this repo's
-convention of not keeping compatibility shims around.
+### 2. Backend: `local_checkpoint_recording` (`src-tauri/src/transcribe.rs`)
 
-**In-flight guard:** because the frontend awaits each checkpoint before
-scheduling the next, and `stopRecording` cancels the pending timer before
-sending the final chunk, only one `checkpoint_local_recording` call is ever
-in flight per recording in the expected flow. As defense in depth (a slow
-final call racing a very-late-firing prior timer), `ingest_chunk_core`
-rejects with a clear error if `status` isn't `Recording` when it starts,
-matching the existing pattern of failing loudly on an unexpected meta state
-rather than silently corrupting `segments.json`.
+New raw-body command, registered next to `local_finalize_recording`. The
+existing `APPEND_LOCKS` table becomes a general `RECORDING_LOCKS`
+(`get_recording_lock(id)`). It is taken by checkpoints, by the finalize fresh
+and append paths, and by `rename_local_recording` (which becomes `async`: a
+sync Tauri command runs on the main thread and must not block on a lock held
+across STT).
 
-### 3. Storage additions (`src-tauri/src/storage.rs`)
+`checkpoint_core(root, id, created_at, title, start_byte, chunk)`, under the
+lock:
 
-- `RecordingMeta` gains `checkpoint_count: u32` (`#[serde(default)]`, so
-  existing recordings deserialize as `0` and are never mistaken for having
-  been checkpointed) — used only to decide whether a checkpoint's notes call
-  is a first-generation or a merge (§3 below); not otherwise branched on.
-- No change to `notes_written` — it continues to record the most recent
-  successful note write, checkpoint or final, matching its existing
-  semantics.
+1. **Validate and load.** `validate_recording_id`. Read `meta.json`; if it is
+   missing (stub write failed), create the stub exactly as
+   `local_begin_recording` does (shared helper). If `status != Recording`, the
+   recording was already finalized or is an append target. Return `Ok` with
+   `stale: true` and write nothing. A late checkpoint is harmless.
+2. **Idempotency.** `meta.preview.bytes_ingested` records how much of the
+   stream is already persisted. A chunk ending at or before it is a duplicate:
+   return `Ok` unchanged. A chunk that overlaps it has its already-ingested
+   prefix skipped. (The boundary is an encoder-output boundary on both sides, so
+   the remainder starts on an MP3 frame.) A chunk starting *after* it is a gap
+   and is rejected; that can only be a frontend bug.
+3. **Persist audio first.** On the first checkpoint, derive the vault
+   attachment name exactly as `fresh_recording_core` does (`unique_basename` of
+   `note_basename(created_at, title, id)`) and store it in `meta.audio_file`
+   (the stub has `None`, `commands.rs:2354`). Append the chunk with
+   `append_recording_core`'s read → extend → `write_atomic` pattern
+   (`vault::write_audio` only replaces). Compute the chunk's duration from its
+   MP3 frame headers: count MPEG-1 Layer III frames × 1152 samples / 44.1 kHz.
+   This needs a small `storage::mp3_duration` header walk, not a new dependency,
+   and is exact where the frontend's whole-second clock would drift by up to
+   1 s per chunk. Update `preview.bytes_ingested`, `preview.duration_ms`, and
+   `meta.duration_seconds`, then `write_meta`. Audio is now crash-safe whatever
+   happens next.
+4. **Transcribe the chunk** from a temp file (like `append-clip.mp3`) with
+   `run_transcribe`. On success:
+   - offset its segments by the chunk's start time (`preview.duration_ms`
+     before step 3) and by `next_speaker_offset`;
+   - append them to `segments.json`;
+   - re-render `transcript.md` (`storage::render_markdown`, unchanged);
+   - bump `preview.checkpoints`.
 
-### 4. Sidecar: an incremental notes mode (`src-tauri/ariso-stt`, `main.swift`)
+   On failure, log it and set `preview.last_error`. The audio stays persisted
+   and the time offset has still advanced, so later chunks keep correct
+   timestamps. The preview transcript simply has a gap for that window, and the
+   final full pass covers it.
+5. **Return** `CheckpointResult { ingestedBytes, transcriptUpdated, stale }`.
+6. **After releasing the lock**, spawn the preview notes task (§3) unless one
+   is already running for this recording. That backpressure is safe: the
+   notes cursor didn't move, so the next run covers both deltas.
 
-Today's `notes` subcommand reads the whole transcript and always generates
-from scratch (`generateNotes()`, `main.swift:152`). It gains an optional
-`--previous-notes <path>` argument:
+The final tier gains two small changes to `finalize_core_with_target`'s fresh
+path when the target dir has a `Recording` meta with preview state:
 
-- **No `--previous-notes` (first checkpoint of a recording, or a legacy
-  transcript with no prior notes):** unchanged — the existing from-scratch
-  prompt over the transcript-so-far.
-- **`--previous-notes` present:** a different prompt — "here are the meeting
-  notes so far: `<previous notes body>`. Here is a new segment of the
-  transcript, continuing directly after the last one: `<delta transcript
-  since the last checkpoint>`. Update the notes to incorporate anything new —
-  add new discussion points, decisions, and action items; don't repeat what's
-  already covered; keep the existing structure." Runs on the already-loaded
-  `ModelContainer`, same as `generateTitle`'s second-turn reuse pattern
-  (`local-notes-title-generation` design) — no second model load.
-- Output stays the existing `{ "title": ..., "notes": "..." }` JSON contract
-  (`NotesResult`, from the title-generation feature). Title generation only
-  runs while `meta.title_is_default` is still true, unchanged from today.
+- it takes the recording lock, so it waits for an in-flight checkpoint (a few
+  seconds of STT at most);
+- it aborts the preview notes task. `JoinHandle::abort` drops the future, and
+  `run_notes` already sets `kill_on_drop(true)`, so the sidecar dies with it.
 
-Rust (`run_notes`, `transcribe.rs:131`) passes `--previous-notes` whenever
-`checkpoint_count > 0` **and** a previous note body is available to read
-(vault `read_note` for the recording's `oats_id`). If the LLM isn't installed
-(`llm_is_ready` false), the notes step of a checkpoint is skipped entirely —
-the transcript checkpoint still succeeds independently, matching today's
-existing decoupling of STT readiness (required to record) from LLM readiness
-(opt-in, notes-only).
+`fresh_recording_core` builds a new `RecordingMeta`, which drops `preview`
+state automatically.
 
-This is a materially harder prompting task for a 1B model than one-shot
-summarization, which already needs tuning (repetition penalty) to avoid
-degenerating. Quality here is a real risk, not a formality — see [Open
-questions](#open-questions).
+### 3. Preview notes (`src-tauri/src/transcribe.rs`)
 
-### 5. Vault write timing (`src-tauri/src/vault.rs`)
+A new `process_preview_notes(dir, models, id)`, detached, never awaited by the
+checkpoint call:
 
-The vault design's existing invariant already covers this case without
-changes: *"oats writes the note body only while the recording is still
-accreting; once finalized... it never rewrites the body"*
-(`2026-07-03-local-backend-vault-design.md`). A recording in `Recording`
-status is, by definition, still accreting — repeatedly overwriting its vault
-note every 5 minutes is exactly the behavior that invariant already permits.
-Once `is_final` flips `status` to `Done`, the existing "never rewrite after
-done" rule takes back over unchanged (a user can still trigger `retry_notes`
-manually afterward, as today).
+- **Skip conditions:** LLM not ready (`llm_is_ready` false). The delta — the
+  segments after `preview.notes_cursor` — carries no speech (the same
+  `transcript_has_speech` test `process_notes` uses). A silence-only chunk is
+  not a failure.
+- **Inputs:** the delta segments, rendered with `render_markdown`'s speaker
+  formatting into a temp `preview-delta.md`. The previous notes come from
+  `vault::read_note(id)`.
+  - No previous note (first checkpoint, or every earlier preview failed): run
+    today's `notes --transcript transcript.md` over the transcript so far.
+  - Otherwise, run `notes --previous-notes <tmp> --transcript preview-delta.md`
+    (merge mode, §4).
+- **Commit:** take the recording lock, re-read `meta.json`, and commit only if
+  `status == Recording` and `preview.notes_cursor` is unchanged since the run
+  started. Otherwise a newer run or the final pass owns the result, so discard
+  it. Write the vault note using the *fresh* meta, whose title and
+  `audio_file` may have changed through a rename since the run started. Then
+  set `preview.notes_cursor` and `notes_written`.
+- **Never** touches `meta.notes_error` (it records the error in
+  `preview.last_error`), and **never** applies the generated title. Titles are
+  generated once, from the full notes, by the final pass, as today.
+  Otherwise `maybe_apply_generated_title` would lock the title to the first
+  5 minutes (it clears `title_is_default` on first success) and rename the vault
+  audio mid-recording.
 
-### 6. Frontend: surfacing progressive updates (`useLocalRecordingProgress.ts`, `MeetingDetailView.vue`)
+**Fixing `process_notes`'s stale-meta write (existing race, widened here).**
+`process_notes` writes back the whole `meta` snapshot it captured at spawn
+(`transcribe.rs:305-307`). A rename that lands while notes run is reverted,
+and `meta.audio_file` ends up pointing at a file the rename moved away. Today
+the window is short and post-meeting. With live renames (#355) plus checkpoints
+it becomes routine. `process_notes` therefore re-reads `meta.json` under the
+recording lock before writing, and applies only the fields it owns: note,
+`notes_error`, `notes_written`, `notes_in_progress`, and the generated title
+only if `title_is_default` is still true.
 
-`useLocalRecordingProgress.ts` polls `local.recordingStatus(id)` every 2
-seconds but only to react to terminal-state *transitions*
-(`Recording→Transcribing→Done`, `NotesStatus` reaching `Ready`/`Failed`). A
-recording sits in `Recording` status for the entire meeting today, so
-nothing currently re-fetches transcript/note content while that status holds
-steady — there was never a reason to before this feature.
+### 4. Sidecar merge mode (both platforms)
 
-Extend the poll: include `checkpoint_count` and `notes_written` in the
-`recordingStatus` response, and have the composable emit a `content-updated`
-signal when either value changes while `status == Recording` (mirroring the
-existing `content-ready` emit pattern from
-`2026-08-13-post-meeting-processing-status-design.md`). `MeetingDetailView`
-re-reads transcript/notes on that signal the same way it does on reaching a
-terminal stage, so an open in-progress meeting's Transcript/AI Notes tabs
-update in place roughly every 5 minutes.
+`notes` gains an optional `--previous-notes <path>`. When it is present,
+`--transcript` is the delta, not the whole transcript. The output keeps the
+`{ "title": ..., "notes": ... }` contract. Merge mode is preview-only, so it
+emits `title: ""` and skips the title pass.
+
+- **macOS** (`ariso-stt/macos/Sources/ariso-stt/main.swift`): a
+  `generateMergedNotes(container:previousNotes:delta:)` next to
+  `generateNotes()` (`main.swift:152`), using the same sections, rules and
+  `GenerateParameters` (including the repetition penalty). The user turn is
+  "Current notes: … New transcript, continuing directly after the part those
+  notes cover: … Return the complete updated notes: add new key points,
+  decisions and action items; keep existing content unless the new transcript
+  corrects it; never duplicate an item." Budget: previous notes (≤2048 output
+  tokens) plus 5 minutes of transcript (~1K tokens) is far inside the 32K
+  context.
+- **Windows** (`ariso-stt/windows/src/notes.rs`): the same prompt through the
+  existing `PromptRunner`. The input budget is
+  `input_char_budget(4096, 512)` = (4096 − 512 − 768) × 3 = 8,448 chars.
+  Previous notes (≤512 tokens, ~2K chars) plus a 5-minute delta (~4.5K chars)
+  fits. When a backpressured, multi-checkpoint delta doesn't fit, condense the
+  delta first with the existing `chunk_summary_prompt`, then merge.
+
+Rust's `run_notes` (`transcribe.rs:131`) takes an optional previous-notes path
+and adds the flag.
+
+### 5. Notes status stays truthful (`storage.rs`, `commands.rs`, `useLocalRecordingProgress.ts`)
+
+Today "notes ready" is derived from whether a note exists
+(`derive_notes_status`, `storage.rs:45`; `deriveStage`,
+`useLocalRecordingProgress.ts:30`). Once a preview note exists, that breaks at
+stop:
+
+- the recording flips to `Done` with the preview note present, so the UI goes
+  straight to terminal `ready`, stops polling, and never shows the final notes;
+- `delete_local_recording`'s notes-pending guard (`commands.rs:2386-2400`)
+  lets the user delete while the final notes pass runs, and `write_note` then
+  re-creates the note in the vault — the exact orphan that guard exists to
+  prevent.
+
+Fix: `RecordingMeta.notes_in_progress: bool` (`#[serde(default)]`). It is set
+true, before spawning `process_notes`, by the fresh path, the append path and
+`retry_notes_core`. `process_notes` clears it on every exit that writes an
+outcome; a superseded run leaves it to the run that superseded it.
+`derive_notes_status` returns `Pending` whenever it is true, *before* the
+has-note check. That covers `local_recording_status`, `list_recordings` and the
+delete guard with no other changes. In the frontend, `deriveStage` checks
+`notesStatus === 'pending'` before `hasNote`.
+
+### 6. Frontend: live refresh of an open meeting (`useLocalRecordingProgress.ts`, `MeetingDetailView.vue`)
+
+The poller already keeps ticking through `recording` (it's an in-flight stage).
+Two changes:
+
+- `RecordingStatusView` gains `previewCheckpoints: u32` and `notesWritten:
+  Option<String>`. While `stage === 'recording'`, the composable bumps a
+  `contentRevision` ref whenever either changes.
+- `MeetingDetailView` watches `contentRevision` and re-reads **only** the
+  transcript and AI note — the same per-artifact reads `load()` does for a local
+  recording — preserving transcript scroll position. It deliberately does *not*
+  call `load()` or emit `contentReady`. That chain refetches the list and
+  reloads the whole pane (`MeetingDetailView.vue:1334`), which every 5 minutes
+  would disrupt the My Note editor the user is likely typing in during the
+  meeting.
+
+**User edits during recording.** Previews overwrite the vault note every
+checkpoint, and the final pass overwrites it at stop. So while `stage ===
+'recording'` the AI Notes task checkboxes (`set_vault_task_done`) are disabled,
+with the tooltip "Available after the recording finishes". Edits made in
+Obsidian to a still-recording note are overwritten. This is consistent with
+the vault invariant (`2026-07-03-local-backend-vault-design.md:173`): oats owns
+the body until the recording is finalized, i.e. until `notes_written` is set by
+the final pass and the append window has closed.
+
+### 7. Startup reconcile (`main.rs` setup)
+
+No recorder survives a relaunch, so at startup, for every local recording:
+
+- `status == Recording` → `Failed`, with `error = "oats quit while recording —
+  audio up to the last checkpoint was kept"`. `Failed` unlocks the existing
+  Retry (`retry_transcription_core` re-runs the full pipeline on the vault
+  audio, using `meta.duration_seconds` kept current by §2) and Delete. Without
+  this, the recording is stranded: `delete_local_recording` refuses
+  `Recording`, the detail pane offers no Retry for it, and the poller spins
+  forever. A stub with no audio also becomes `Failed` (deletable).
+- `status == Transcribing` → `Failed` (audio retained, Retry available). This
+  is the same sweep, and it also fixes today's zombie left by a crash during
+  finalize.
+- `notes_in_progress == true` → cleared. No notes task survives a restart. A
+  preview note left in place shows as `ready`, and Regenerate is available.
 
 ## Cloud vs offline
 
-**Local only.** The Ariso cloud backend has an entirely separate
-architecture — transcription and notes run server-side, driven by whatever
-pipeline Ariso's backend uses for meeting bots, not by this app's
-`finalizeRecording`/`ariso-stt` flow. Nothing in cloud mode calls the local
-sidecar or touches `segments.json`/vault files, so there's no shared code
-path to extend. If Ariso's server-side pipeline should also refresh notes
-mid-meeting, that's a backend-team feature request, not a desktop-app change
-— out of scope here entirely, consistent with how the issue itself frames
-this as "the Local backend."
+**Local only.** The Ariso cloud backend runs transcription and notes
+server-side; nothing in cloud mode calls the local sidecar or touches
+`segments.json`/vault files, so there's no shared code path to extend.
+Server-side mid-meeting notes would be a backend-team feature request. The
+checkpoint loop's eligibility check (§1) keeps cloud sessions on today's path.
 
-Everything in this design keeps running fully on-device: chunk transcription
-reuses the existing on-device STT sidecar call, and incremental notes reuse
-the already-downloaded on-device Gemma 3 1B model. No new network call is
-introduced anywhere in this flow, so the offline-mode privacy guarantee
+Everything here stays on-device: chunk transcription reuses the on-device STT
+sidecar, and merge mode reuses the already-downloaded Gemma 3 1B. No new
+network call is introduced, so the offline-mode privacy guarantee
 (`oats-security` §10) holds by construction.
 
 ## Error handling
 
 | Situation | Behavior |
 |---|---|
-| Chunk transcription fails (sidecar crash, corrupt chunk, silence-only chunk) | That checkpoint's transcript merge is skipped; `segments.json`/`transcript.md` stay at their last good state; logged, not surfaced as a recording failure. The next checkpoint (or the final chunk) picks up from where the last successful merge left off — the un-merged audio for the failed chunk is not retried separately, so that slice of speech is missing from the final transcript (a real but rare, bounded loss, flagged as an accepted trade-off rather than solved with a retry queue). |
-| Notes refresh fails at a checkpoint (model OOM, sidecar timeout) | Previous notes are left untouched — a checkpoint never overwrites good notes with an error. `meta.notes_error` is set transiently; the next checkpoint tries again from the (still-current) previous notes. |
-| LLM not installed (`llm_is_ready == false`) | Transcript checkpoints proceed normally; notes checkpoints are skipped entirely (no error state) — identical to today's existing decoupling of STT vs LLM readiness. |
-| `stopRecording` fires while a checkpoint is still in flight | Not expected in the normal flow — the frontend awaits each checkpoint before scheduling the next, and cancels the pending timer on stop. If it happens anyway (e.g. a very slow checkpoint overlapping a fast user stop), the final `checkpoint_local_recording(..., is_final: true)` call is queued behind it on the frontend (both go through the same sequential await chain), so they cannot race Rust-side. |
-| App/machine crashes mid-checkpoint | `segments.json`/`transcript.md`/vault audio writes are atomic (`write_atomic`, unchanged), so a crash mid-write cannot corrupt them — worst case is losing exactly the in-flight chunk's transcript, recoverable by re-recording that portion. This is strictly better than today, where a crash before `finalizeRecording` loses the entire meeting's transcript and notes. |
-| Recording is shorter than 5 minutes | No checkpoint ever fires; `stopRecording` sends the whole recording as one "final chunk," which is exactly today's fresh-recording behavior — no regression for short meetings. |
-| Cross-session append (existing 5-min-gap merge) onto a recording that was itself checkpointed | Unaffected — append operates on the finalized (`Done`) target recording exactly as it does today; checkpointing only changes what happens *while* a single recording is still `Recording`. |
+| Chunk transcription fails (sidecar crash, corrupt chunk) | Audio is already persisted and the time offset has advanced; the preview transcript has a gap for that window; `preview.last_error` is logged. The final full pass covers the gap, so nothing is lost from the end state. |
+| Checkpoint IPC/Rust error | The frontend keeps `lastCheckpointByte`; the next checkpoint resends from it; Rust skips any already-ingested prefix (§2). |
+| Preview notes fail | The previous preview note is untouched; `preview.last_error` is set; `notes_error` is not touched, so no failure UI. The cursor didn't move, so the next checkpoint retries with the combined delta. |
+| Preview notes still running at the next checkpoint | That round's notes are skipped (backpressure); the next run covers both deltas. |
+| LLM not installed | Transcript checkpoints proceed; preview notes are skipped; the final pass behaves as today. |
+| Stop while a checkpoint is in flight | Finalize waits on the recording lock (seconds), aborts the preview notes task, then runs as today. |
+| Checkpoint arrives after finalize began | `status != Recording` → `Ok { stale: true }`, nothing written. |
+| Stop while only preview notes are running | Finalize aborts the task, which kills the sidecar via `kill_on_drop`. |
+| Mid-recording rename | Serialized against checkpoints by the lock; notes commits use fresh meta; previews never auto-title. |
+| App/machine crash mid-recording | Audio up to the last checkpoint is in the vault. Startup reconcile marks the recording `Failed` → Retry transcription or Delete. (Today: everything is lost.) |
+| Crash during the final notes pass | Startup clears `notes_in_progress`; the last preview note shows as ready; Regenerate is available. |
+| Recording shorter than 5 minutes | No checkpoint fires — identical to today. |
+| Append / "Continue this meeting" / resume-a-failed-stop session | Not eligible (§1) — identical to today. |
 
 ## Testing
 
-### Rust (automated, `DYLD_LIBRARY_PATH=... cargo test --test-threads=1`)
+### Rust (`cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`)
 
-- `ingest_chunk_core`: a chunk is transcribed, offset, and merged into
-  `segments.json`; `transcript.md` is re-rendered; `status` stays `Recording`
-  when `is_final == false`.
-- `checkpoint_local_recording(..., is_final: true)`: same merge, then
-  `status → Done`, a final notes pass runs, and the returned shape matches
-  today's `FinalizeResult`.
-- A recording with `checkpoint_count == 0` calling notes generation omits
-  `--previous-notes`; `checkpoint_count > 0` with an existing vault note
-  passes it.
-- `llm_is_ready == false`: transcript checkpoint still succeeds; no notes
-  call is attempted.
-- A failed chunk transcription leaves `segments.json`/`transcript.md`
-  unchanged and does not flip `status` away from `Recording`.
-- A failed notes refresh leaves the existing vault note body untouched and
-  sets `meta.notes_error` without affecting `status`.
-- Regression: a short (never-checkpointed) recording finalized via
-  `checkpoint_local_recording(..., is_final: true)` produces byte-identical
-  output to today's `fresh_recording_core` path for the same input audio.
+- `checkpoint_core`:
+  - the first checkpoint creates the vault attachment and sets `audio_file`;
+  - it creates the stub if `meta.json` is missing;
+  - segments are offset by the frame-derived duration, and speaker ids by
+    `next_speaker_offset`;
+  - `transcript.md` is re-rendered;
+  - `status` stays `Recording`.
+- Idempotency: a duplicate `start_byte` is a no-op; an overlapping chunk
+  appends only its new suffix; a gap is rejected.
+- A failed chunk transcription still persists audio and advances
+  `duration_ms`; `segments.json` is unchanged; `status` stays `Recording`.
+- A checkpoint against a `Done` or `Transcribing` recording returns
+  `stale: true` and writes nothing.
+- `storage::mp3_duration` on lamejs-encoded fixtures (mono and stereo, 128 kbps).
+- Preview notes:
+  - no previous note → `--previous-notes` omitted; a previous note → passed
+    along with the delta;
+  - commit discarded when the cursor moved or `status` changed;
+  - `notes_error` and the title are never touched;
+  - skipped when the LLM isn't ready or the delta has no speech.
+- Finalize after checkpoints produces `segments.json`/`transcript.md`
+  byte-identical to finalizing the same full audio with no checkpoints, drops
+  `preview`, and aborts a running preview notes task.
+- `notes_in_progress`: `derive_notes_status` returns `Pending` with a note
+  present; `delete_local_recording` refuses; `process_notes` clears it.
+- `process_notes` commit after a concurrent rename keeps the renamed
+  title/`audio_file`.
+- Startup reconcile: `Recording`/`Transcribing` → `Failed`;
+  `notes_in_progress` cleared.
 
-### Sidecar (manual — no test target, per repo convention)
+### Sidecar
 
-Run `notes --previous-notes <prior>.md --transcript <delta>.md` against a
-hand-built two-part transcript and confirm the output notes incorporate the
-new segment without duplicating the prior content or degenerating (echoing
-transcript text, looping) — the same quality bar the original notes feature
-already had to hit, now under a harder prompt.
+- Windows (`ariso-stt/windows`, existing `PromptRunner` test seam): merge-mode
+  prompt construction; an over-budget delta is condensed first.
+- macOS (manual, no test target): run `notes --previous-notes <prior>.md
+  --transcript <delta>.md` on a hand-built two-part transcript. Confirm the
+  output merges without duplicating prior items or degenerating (echoing the
+  transcript, looping).
 
 ### Frontend (Vitest)
 
-- `useRecorder.test.ts`: with fake timers, confirm a checkpoint invoke fires
-  at the 5-minute mark with only the bytes since the last checkpoint; the
-  next timer doesn't schedule until the invoke's promise resolves; the
-  pending timer is cleared and a final `is_final: true` call is made on
-  `stopRecording`; nothing checkpoints for the cloud backend.
-- `useLocalRecordingProgress.test.ts` / `MeetingDetailView.test.ts`: a poll
-  response with an incremented `checkpoint_count` while `status ==
-  'recording'` triggers a `content-updated` emit and a transcript/notes
-  re-read; no emit when neither value changed.
+- `WaveformView`:
+  - a checkpoint fires when `durationSeconds` crosses 300, not on wall time
+    (pauses don't count);
+  - only the bytes since `lastCheckpointByte` are sent, over the raw-body
+    transport;
+  - at most one is in flight;
+  - the offset advances only to the returned `ingestedBytes`;
+  - no checkpoint for cloud, append targets, `localAppendId`, or a held
+    `stoppedBlob`;
+  - `handleStop` still sends the full blob via `finalizeRecording`.
+- `useRecorder`: `sliceFrom` cuts at `mp3Chunks` entry boundaries.
+- `useLocalRecordingProgress`: `contentRevision` bumps on a
+  `previewCheckpoints`/`notesWritten` change while recording, and not
+  otherwise; `deriveStage` returns `notes-pending` for `notesStatus:
+  'pending'` even with `hasNote`.
+- `MeetingDetailView`: a revision bump re-reads the transcript/note without
+  calling `load()` or emitting `contentReady`; task checkboxes are disabled
+  while recording.
 
 ### Manual
 
-Record a ~12–15 minute local meeting (long enough to hit two or three
-checkpoints); open it in the Library while still recording and confirm the
-transcript and AI notes visibly grow roughly every 5 minutes without
-duplicated content. Stop recording and confirm the final transcript/notes
-are complete and `status` reaches `Done`. Repeat with the notes LLM not
-installed and confirm the transcript still checkpoints normally while notes
-stay absent throughout.
+- Record a ~15-minute local meeting (three checkpoints). Open it while it
+  records and confirm the transcript and AI notes grow every ~5 minutes without
+  duplicated items. Stop, and confirm the final transcript has consistent
+  speaker labels and the final notes/title land, with the status chip showing
+  "Generating AI Notes" until they do.
+- Repeat with the notes LLM not installed.
+- Repeat on a base 8 GB Mac during a real video call and listen to the
+  recording for dropouts around each checkpoint (STT + Gemma model loads
+  mid-call).
+- `kill -9` oats mid-recording after one checkpoint, relaunch, and confirm the
+  recording shows as failed with its audio, and that Retry produces a full
+  transcript.
 
 ## Open questions
 
-- **Incremental-merge prompt quality.** This is the biggest unknown: Gemma 3
-  1B already needs tuning to avoid degenerating on a single-pass summary; a
-  "merge new content into existing notes" prompt is a harder task for the
-  same model. Needs hands-on prompt iteration once real checkpointed
-  transcripts are available; if quality doesn't hold up, the fallback is
-  regenerating from a *rolling window* of the transcript (e.g. last N
-  minutes plus the existing notes as context) rather than a strict two-input
-  merge — worth revisiting once the first version is in hand.
-- **Token/context budget.** What's the actual context-window ceiling for the
-  on-device Gemma 3 1B, and does "previous notes + 5 minutes of new
-  transcript" reliably fit? This should be checked empirically before
-  implementation locks in the 5-minute interval as fixed.
-- **UI treatment for a just-refreshed checkpoint.** Silent in-place update
-  (as designed here) vs. some explicit "updated Xm ago" indicator — punted
-  to [Non-goals](#non-goals), flagged here for a product decision.
-- **Failed-chunk data loss.** The error-handling table accepts that a failed
-  checkpoint's audio slice is not retried and is simply missing from the
-  final transcript. Is that acceptable, or does this need a retry-the-failed-
-  chunk-at-the-next-checkpoint mechanism? Leaning toward accepting it for v1
-  given how rare a mid-recording chunk-transcription failure should be, but
-  flagging since it's a real (if narrow) correctness gap versus today's
-  all-or-nothing transcription.
+- **Merge-prompt quality.** The biggest unknown: Gemma 3 1B already needs a
+  repetition penalty for one-shot summaries, and merging is harder. If it
+  doesn't hold up, the fallback stays incremental without a merge prompt:
+  summarize each checkpoint's delta once (cache the summaries in the recording
+  dir), and re-run only the reduce step over the cached summaries. That reuses
+  the Windows sidecar's existing `chunk_summary_prompt` /
+  `summary_reduction_prompt` pipeline.
+- **Final notes replace the preview.** The final pass regenerates notes from
+  the full, consistently diarized transcript, so the notes a user watched evolve
+  can read differently after stop. The alternative — one last merge pass on top
+  of the preview — would keep preview speaker labels ("Speaker 13") that don't
+  exist in the final transcript. Leaning toward the full regeneration as
+  authoritative; it is also exactly today's behavior.
+- **Append sessions.** Excluded in v1 (§1). Supporting them would mean
+  checkpointing into a `Done` target, i.e. temporarily flipping it back to
+  `Recording` and teaching `append_recording_core` to fold in the preview state.
+  Worth doing only if back-to-back sessions turn out to be common for long
+  meetings.
+- **Load during calls.** Each checkpoint loads the STT (Parakeet + diarizer)
+  and notes (Gemma) models while the user is on a call. If the 8 GB manual test
+  shows dropouts or heavy fan/battery use, consider skipping preview notes on
+  battery or lengthening the interval adaptively.
+- **UI treatment for a just-refreshed checkpoint.** Silent in-place update (as
+  designed) vs. an "updated Xm ago" indicator — a product decision.
