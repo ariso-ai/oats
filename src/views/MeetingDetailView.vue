@@ -455,6 +455,7 @@ import { avatarColor, initials } from './avatarStyle';
 import ArisoActionItems from './ArisoActionItems.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { transcriptFilename } from './transcriptDownloadName';
+import { parseLocalTranscript } from './localTranscript';
 import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
 import { ariJoinChip } from '../composables/meetingStatus';
 import {
@@ -1010,10 +1011,11 @@ const audioClips = computed<MeetingAudioClip[]>(() => detail.value?.audioClips ?
 
 // Chunks shown in the transcript pane. With <=1 clip we show everything; with
 // several, we show only the active clip's chunks (partitioned client-side from
-// the already clip-tagged transcript — no extra fetch, no async race).
+// the already clip-tagged transcript — no extra fetch, no async race). Local
+// recordings have no clips, so their parsed chunks always show in full.
 const displayedChunks = computed<TranscriptChunk[] | null>(() => {
-  const t = transcript.value;
-  if (!Array.isArray(t)) return null;
+  const t = detail.value?.isLocal ? localTranscriptChunks.value : transcript.value;
+  if (!Array.isArray(t) || t.length === 0) return null;
   if (audioClips.value.length <= 1 || !activeClipId.value) return t;
   return t.filter((c) => c.transcript_id === activeClipId.value);
 });
@@ -1419,11 +1421,19 @@ function commitNoteTitle(): void {
 }
 
 // Local recordings carry their transcript as markdown on the detail; Ariso
-// loads structured chunks lazily into `transcript`. The Transcript tab renders
-// whichever is present.
+// loads structured chunks lazily into `transcript`. The local markdown is parsed
+// into the same chunk shape so both backends render through one transcript list
+// (null = not in the rendered speaker-block format, [] = no speech).
+const localTranscriptChunks = computed<TranscriptChunk[] | null>(() => {
+  const md = detail.value?.isLocal ? detail.value.transcript : undefined;
+  return md ? parseLocalTranscript(md) : null;
+});
+
+// Only a local transcript the parser doesn't recognize falls back to markdown,
+// so its text is never dropped.
 const transcriptMarkdown = computed<string | null>(() => {
-  if (!detail.value?.isLocal) return null;
-  const md = detail.value?.transcript;
+  if (!detail.value?.isLocal || localTranscriptChunks.value) return null;
+  const md = detail.value.transcript;
   return md ? stripFrontmatter(md) : null;
 });
 
@@ -2060,7 +2070,7 @@ const durationLabel = computed<string | null>(() => {
 .bullet--green { color: #22c55e; }
 .bullet--amber { color: #f59e0b; }
 
-/* Structured transcript (Ariso chunks) */
+/* Structured transcript (Ariso chunks and parsed local transcript.md) */
 .transcript { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
 .transcript-line { display: flex; gap: 12px; align-items: baseline; font-size: 14px; line-height: 1.6; }
 .transcript-ts { flex-shrink: 0; min-width: 48px; font-variant-numeric: tabular-nums; font-size: 12px; color: #9a9a9a; padding-top: 1px; }

@@ -347,6 +347,58 @@ describe('MeetingDetailView inline title editing', () => {
     expect(lines[1].find('.transcript-content').text()).toBe('Speaker 1: should be three. Anyway');
   });
 
+  // Parity (#400): a local transcript.md renders through the same transcript
+  // list as Ariso chunks, so equivalent data looks identical on both backends.
+  function transcriptRows(wrapper: Awaited<ReturnType<typeof mountWith>>) {
+    return wrapper.findAll('.transcript-line').map((l) => ({
+      ts: l.find('.transcript-ts').text(),
+      content: l.find('.transcript-content').text(),
+    }));
+  }
+
+  it('renders a local transcript with the same rows as the equivalent Ariso transcript', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'Speaker 1: Five is five bars.', transcript_id: 'legacy' },
+      { chunk_index: 1, start_ms: 63_000, content: 'Speaker 2: Should be three.', transcript_id: 'legacy' },
+    ]);
+    const ariso = await mountWith(detail({ hasTranscript: true }));
+    await flushPromises();
+
+    const local = await mountWith(
+      detail({
+        isLocal: true,
+        hasTranscript: true,
+        transcript:
+          '---\ntitle: "t"\nparticipants: ["Speaker 1", "Speaker 2"]\n---\n\n' +
+          '**Speaker 1** [00:00:00]\nFive is five bars.\n\n' +
+          '**Speaker 2** [00:01:03]\nShould be three.\n\n',
+      })
+    );
+
+    expect(transcriptRows(local)).toEqual([
+      { ts: '0:00', content: 'Speaker 1: Five is five bars.' },
+      { ts: '1:03', content: 'Speaker 2: Should be three.' },
+    ]);
+    expect(transcriptRows(local)).toEqual(transcriptRows(ariso));
+    expect(local.find('.tab-pane .md').exists()).toBe(false);
+  });
+
+  it('falls back to markdown for a local transcript not in the speaker-block format', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: true, hasTranscript: true, transcript: '# Transcript\nImported text' })
+    );
+    expect(wrapper.find('.transcript-line').exists()).toBe(false);
+    expect(wrapper.find('.md').text()).toContain('Imported text');
+  });
+
+  it('shows the empty state for a local transcript with no speech', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: true, hasTranscript: true, transcript: '---\ntitle: "t"\n---\n\n**Speaker 1** [00:00:00]\n\n' })
+    );
+    expect(wrapper.find('.transcript-line').exists()).toBe(false);
+    expect(wrapper.find('.content-empty').text()).toBe('No transcript available.');
+  });
+
   it('shows the empty state when an Ariso meeting has no transcript chunks', async () => {
     getMeetingTranscript.mockResolvedValue(null);
     const wrapper = await mountWith(detail({ hasTranscript: true }));
