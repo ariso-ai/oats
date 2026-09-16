@@ -236,6 +236,7 @@ fn main() {
             commands::share_text_native,
             transcribe::local_recording_id_for_start,
             transcribe::local_finalize_recording,
+            transcribe::local_checkpoint_recording,
             transcribe::retry_local_transcription,
             transcribe::retry_local_notes,
             model_manager::local_model_status,

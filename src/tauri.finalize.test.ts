@@ -61,6 +61,26 @@ describe('local.finalizeRecording', () => {
   });
 });
 
+describe('local.checkpointRecording', () => {
+  // Same reason as finalizeRecording: a 5-minute chunk is ~4.8 MB, and JSON
+  // serialization runs on the webview main thread — the thread that encodes the
+  // live audio. Serializing there drops audio from the recording itself.
+  it('sends the chunk as the raw args payload with meta in the header', async () => {
+    const audio = new Uint8Array([1, 2, 3]);
+    await local.checkpointRecording(audio, '2026-06-02T14-30-05Z', '2026-06-02T14:30:05.000Z', 'T', 4096);
+    const [cmd, payload, options] = invoke.mock.calls[0];
+    expect(cmd).toBe('local_checkpoint_recording');
+    expect(payload).toBe(audio);
+    expect(ArrayBuffer.isView(payload)).toBe(true);
+    expect(decodeMetaHeader(options)).toEqual({
+      id: '2026-06-02T14-30-05Z',
+      createdAt: '2026-06-02T14:30:05.000Z',
+      title: 'T',
+      startByte: 4096,
+    });
+  });
+});
+
 describe('pending.bufferAudio', () => {
   it('sends the audio as the raw args payload with meta in the header', async () => {
     const audio = new Uint8Array([9]);

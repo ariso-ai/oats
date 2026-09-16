@@ -386,6 +386,17 @@ export interface LocalFinalizeResult {
   status: 'recording' | 'transcribing' | 'done' | 'failed';
 }
 
+/** Mirrors the Rust `CheckpointResult`. `ingestedBytes` is the recorder's new
+ *  `lastCheckpointByte`; it only advances on a committed write, so an error
+ *  leaves the next checkpoint resending from the same offset. */
+export interface LocalCheckpointResult {
+  ingestedBytes: number;
+  transcriptUpdated: boolean;
+  /** The recording was already finalized (or is an append target): nothing was
+   *  written and nothing more will be. */
+  stale: boolean;
+}
+
 export interface ModelStatus {
   state: 'not_downloaded' | 'downloading' | 'ready' | 'error' | 'unsupported';
   version?: string;
@@ -406,6 +417,23 @@ export const local = {
       'local_finalize_recording',
       audio,
       rawMetaOptions({ title, createdAt, durationSeconds, appendTo, forceNew })
+    );
+  },
+  /** Persist and transcribe the audio captured since `startByte` of a still-
+   *  running local recording, merging it into that recording's preview
+   *  transcript and notes. Raw-body transport for the same reason as
+   *  `finalizeRecording` — see `rawMetaOptions`. */
+  checkpointRecording(
+    audio: Uint8Array,
+    id: string,
+    createdAt: string,
+    title: string,
+    startByte: number
+  ): Promise<LocalCheckpointResult> {
+    return invoke<LocalCheckpointResult>(
+      'local_checkpoint_recording',
+      audio,
+      rawMetaOptions({ id, createdAt, title, startByte })
     );
   },
   listRecordings(): Promise<RecordingSummary[]> {

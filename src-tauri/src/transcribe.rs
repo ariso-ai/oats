@@ -1064,6 +1064,39 @@ pub async fn local_finalize_recording(
         .map(|(res, _notes)| res)
 }
 
+/// Non-binary arguments of [`local_checkpoint_recording`], carried in the
+/// `x-oats-meta` header because the audio chunk occupies the request body.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointArgs {
+    pub id: String,
+    pub created_at: String,
+    pub title: String,
+    pub start_byte: u64,
+}
+
+/// Persist and transcribe the audio captured since the last checkpoint of a
+/// still-running Local recording (issue #123).
+///
+/// Takes the chunk as a raw IPC body for the same reason as
+/// `local_finalize_recording` (see `raw_ipc`) — and here it matters more: a
+/// 5-minute chunk is ~4.8 MB, and the serialization would run on the webview
+/// thread that is encoding the live audio, so the recording itself would drop
+/// samples.
+#[tauri::command]
+pub async fn local_checkpoint_recording(
+    request: tauri::ipc::Request<'_>,
+) -> Result<CheckpointResult, String> {
+    let chunk = crate::raw_ipc::body_bytes(&request)?;
+    let CheckpointArgs { id, created_at, title, start_byte } = crate::raw_ipc::meta(&request)?;
+    let root = crate::vault::meta_root()?;
+    // Drop the preview-notes JoinHandle: like finalize's, the detached task
+    // writes its outcome to disk and the frontend observes it by polling.
+    checkpoint_core(&root, &id, &created_at, &title, start_byte, chunk)
+        .await
+        .map(|(result, _notes)| result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
