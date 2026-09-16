@@ -2331,29 +2331,26 @@ pub async fn rename_local_recording(id: String, title: String) -> Result<(), Str
 /// The stub's `status: Recording` deliberately fails
 /// `storage::most_recent_appendable`'s `status == Done` check, so a recording
 /// can never pick *itself* as an append target.
-#[tauri::command]
-pub fn local_begin_recording(
-    id: String,
-    created_at: String,
-    title: String,
+/// Write a capture-start `meta.json` stub (`status: Recording`) into `dir`.
+/// Shared by `local_begin_recording` and `transcribe::checkpoint_core`, which
+/// recreates the stub when the capture-start write failed.
+pub fn write_recording_stub(
+    dir: &std::path::Path,
+    id: &str,
+    created_at: &str,
+    title: &str,
 ) -> Result<(), String> {
-    // Rejects traversal ids before any path join (same guard as the note writers).
-    let dir = recording_dir(&id)?;
-    if crate::storage::read_meta(&dir).is_ok() {
-        return Ok(()); // append target, or a re-entrant call: keep what's there
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording dir: {e}"))?;
-
+    std::fs::create_dir_all(dir).map_err(|e| format!("create recording dir: {e}"))?;
     let trimmed = title.trim();
-    let title = if trimmed.is_empty() {
-        id.clone()
+    let title: String = if trimmed.is_empty() {
+        id.to_string()
     } else {
         trimmed.chars().take(MAX_TITLE_CHARS).collect()
     };
     let meta = crate::storage::RecordingMeta {
-        id: id.clone(),
+        id: id.to_string(),
         title,
-        created_at,
+        created_at: created_at.to_string(),
         duration_seconds: 0,
         status: crate::storage::RecordingStatus::Recording,
         language: None,
@@ -2367,8 +2364,23 @@ pub fn local_begin_recording(
         notes_written: None,
         notes_in_progress: false,
         title_is_default: true,
+        preview: None,
     };
-    crate::storage::write_meta(&dir, &meta)
+    crate::storage::write_meta(dir, &meta)
+}
+
+#[tauri::command]
+pub fn local_begin_recording(
+    id: String,
+    created_at: String,
+    title: String,
+) -> Result<(), String> {
+    // Rejects traversal ids before any path join (same guard as the note writers).
+    let dir = recording_dir(&id)?;
+    if crate::storage::read_meta(&dir).is_ok() {
+        return Ok(()); // append target, or a re-entrant call: keep what's there
+    }
+    write_recording_stub(&dir, &id, &created_at, &title)
 }
 
 /// Permanently delete a local recording: its vault note and audio attachment,
@@ -3378,6 +3390,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         }
     }
 
@@ -3919,6 +3932,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();

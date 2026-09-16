@@ -55,6 +55,17 @@ pub struct FinalizeResult {
     pub status: crate::storage::RecordingStatus,
 }
 
+/// Outcome of one checkpoint. `ingested_bytes` is the frontend's new
+/// `lastCheckpointByte`; it only advances on a committed write, so an error
+/// leaves the frontend resending from the same offset.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointResult {
+    pub ingested_bytes: u64,
+    pub transcript_updated: bool,
+    pub stale: bool,
+}
+
 /// Resolve the platform's `ariso-stt` sidecar from Tauri's externalBin layout.
 /// The test-only override never changes production process selection.
 pub fn sidecar_path() -> Result<PathBuf, String> {
@@ -344,6 +355,126 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
 
 use crate::storage::{self, RecordingMeta, RecordingStatus};
 
+/// Persist and transcribe the audio captured since the last checkpoint of a
+/// still-recording Local recording, merging it into that recording's *preview*
+/// transcript (issue #123). Never touches `status`: the recording stays
+/// `Recording` until Stop, and `local_finalize_recording` then rewrites every
+/// artifact this produced.
+///
+/// Ordering matters. Audio is persisted and `duration_ms` advanced *before* STT
+/// is attempted, so a crash — or a failed chunk — still leaves the audio in the
+/// vault and every later chunk correctly offset. A failed chunk costs the
+/// preview transcript one 5-minute gap; the final full pass covers it.
+pub async fn checkpoint_core(
+    root: &Path,
+    id: &str,
+    created_at: &str,
+    title: &str,
+    start_byte: u64,
+    chunk: &[u8],
+) -> Result<(CheckpointResult, Option<JoinHandle<()>>), String> {
+    storage::validate_recording_id(id)?;
+    let dir = storage::recordings_dir(root).join(id);
+    let result = {
+        let _guard = get_recording_lock(id).lock_owned().await;
+        checkpoint_locked(&dir, id, created_at, title, start_byte, chunk).await?
+    };
+    // Task 10 spawns the detached preview-notes task here, once the lock is
+    // released — the notes task takes the same lock to commit its result.
+    Ok((result, None))
+}
+
+/// The body of one checkpoint, run with the recording lock held. Split out so
+/// the guard's scope is exactly the mutation, and the caller can spawn the
+/// preview-notes task after releasing it.
+async fn checkpoint_locked(
+    dir: &Path,
+    id: &str,
+    created_at: &str,
+    title: &str,
+    start_byte: u64,
+    chunk: &[u8],
+) -> Result<CheckpointResult, String> {
+    // 1. Load, or recreate the stub the capture-start write may have missed.
+    let mut meta = match storage::read_meta(dir) {
+        Ok(m) => m,
+        Err(_) => {
+            crate::commands::write_recording_stub(dir, id, created_at, title)?;
+            storage::read_meta(dir)?
+        }
+    };
+    // Already finalized, or an append target: a late checkpoint is harmless, but
+    // it must not write anything.
+    if meta.status != RecordingStatus::Recording {
+        return Ok(CheckpointResult {
+            ingested_bytes: meta.preview.as_ref().map(|p| p.bytes_ingested).unwrap_or(0),
+            transcript_updated: false,
+            stale: true,
+        });
+    }
+
+    // 2. Idempotency, keyed on how much of the stream is already persisted.
+    let mut preview = meta.preview.clone().unwrap_or_default();
+    let end_byte = start_byte + chunk.len() as u64;
+    if end_byte <= preview.bytes_ingested {
+        return Ok(CheckpointResult {
+            ingested_bytes: preview.bytes_ingested,
+            transcript_updated: false,
+            stale: false,
+        });
+    }
+    if start_byte > preview.bytes_ingested {
+        return Err(format!(
+            "checkpoint gap: chunk starts at {start_byte} but only {} bytes are ingested",
+            preview.bytes_ingested
+        ));
+    }
+    // Both ends are encoder-output boundaries, so the remainder starts on an
+    // MP3 frame.
+    let new_bytes = &chunk[(preview.bytes_ingested - start_byte) as usize..];
+
+    // 3. Persist audio first, so it survives whatever happens next.
+    let audio_file = match meta.audio_file.clone() {
+        Some(existing) => existing,
+        None => {
+            // Same derivation as `fresh_recording_core`, so Stop reuses this
+            // exact attachment instead of orphaning it.
+            let name = format!(
+                "{}.mp3",
+                crate::vault::unique_basename(
+                    &crate::vault::ensure_vault()?,
+                    &crate::vault::note_basename(created_at, &meta.title, id),
+                )
+            );
+            meta.audio_file = Some(name.clone());
+            name
+        }
+    };
+    // `vault::write_audio` replaces, so read → extend → write, like
+    // `append_recording_core`.
+    let mut combined = if preview.bytes_ingested == 0 {
+        Vec::with_capacity(new_bytes.len())
+    } else {
+        crate::vault::read_audio(&audio_file)?
+    };
+    combined.extend_from_slice(new_bytes);
+    crate::vault::write_audio(&audio_file, &combined)?;
+
+    let chunk_start_ms = preview.duration_ms;
+    preview.bytes_ingested = end_byte;
+    preview.duration_ms += storage::mp3_duration_ms(new_bytes);
+    meta.duration_seconds = preview.duration_ms / 1000;
+    meta.preview = Some(preview.clone());
+    storage::write_meta(dir, &meta)?;
+    let _ = chunk_start_ms; // Task 5 offsets the chunk's segments by this
+
+    Ok(CheckpointResult {
+        ingested_bytes: preview.bytes_ingested,
+        transcript_updated: false,
+        stale: false,
+    })
+}
+
 /// Pure-ish orchestration over an explicit root, so tests use a tempdir.
 ///
 /// Returns as soon as the transcript is persisted and marked `Done`. Notes
@@ -467,6 +598,7 @@ async fn fresh_recording_core(
         notes_written: None,
         notes_in_progress: false,
         title_is_default,
+        preview: None,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -574,6 +706,7 @@ fn save_failed_clip(
                 notes_written: None,
                 notes_in_progress: false,
                 title_is_default: false,
+                preview: None,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -1235,6 +1368,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1294,6 +1428,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1340,6 +1475,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: true,
+            preview: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1538,6 +1674,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1570,7 +1707,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1594,7 +1731,7 @@ mod tests {
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1635,7 +1772,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2072,7 +2209,7 @@ mod tests {
             duration_seconds: 60, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2242,7 +2379,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2269,7 +2406,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2384,6 +2521,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 User Title.mp3", Some("Generated".into()));
         assert_eq!(meta.title, "User Title");
@@ -2408,6 +2546,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: true,
+            preview: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", None);
         assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
@@ -2432,6 +2571,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: true,
+            preview: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", Some("   ".to_string()));
         assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
@@ -2506,5 +2646,194 @@ mod tests {
         assert_eq!(meta.title, "User Chosen", "the rename must survive");
         assert!(!meta.title_is_default);
         assert!(meta.notes_written.is_some(), "notes still committed");
+    }
+
+    /// A synthetic MPEG-1 Layer III chunk of `frames` frames (128 kbps, 44.1 kHz,
+    /// mono): 417 bytes and 26.122 ms each. Matches `storage::mp3_duration_ms`.
+    fn mp3_chunk(frames: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..frames {
+            out.extend_from_slice(&[0xFF, 0xFB, 0x90, 0xC0]);
+            out.extend(std::iter::repeat_n(0u8, 417 - 4));
+        }
+        out
+    }
+
+    /// Write the capture-start stub `meta.json` the way `local_begin_recording`
+    /// does, so checkpoint tests start from the real on-disk state.
+    fn write_stub_meta(root: &Path, id: &str, created_at: &str, title: &str) -> PathBuf {
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        let meta = RecordingMeta {
+            id: id.into(),
+            title: title.into(),
+            created_at: created_at.into(),
+            duration_seconds: 0,
+            status: RecordingStatus::Recording,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
+            title_is_default: true,
+            notes_in_progress: false,
+            preview: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn first_checkpoint_persists_audio_and_creates_the_attachment() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let chunk = mp3_chunk(100);
+
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &chunk,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, chunk.len() as u64);
+        assert!(!res.stale);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Recording, "still capturing");
+        let audio_file = meta.audio_file.expect("attachment named on first checkpoint");
+        // Vault reads resolve via ARISO_ROOT, so it must stay set until every
+        // vault-touching assertion below has run.
+        assert_eq!(crate::vault::read_audio(&audio_file).unwrap(), chunk);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        let preview = meta.preview.expect("preview state written");
+        assert_eq!(preview.bytes_ingested, chunk.len() as u64);
+        assert_eq!(preview.duration_ms, 2612); // 100 frames
+        assert_eq!(meta.duration_seconds, 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_creates_the_stub_when_meta_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "My Title", 0,
+            &mp3_chunk(10),
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(!res.stale);
+        let dir = storage::recordings_dir(tmp.path()).join("2026-06-02T14-30-05Z");
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "My Title");
+        assert_eq!(meta.status, RecordingStatus::Recording);
+        assert!(meta.title_is_default);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_appends_successive_chunks_and_accumulates_duration() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(50);
+        let b = mp3_chunk(50);
+
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T",
+            a.len() as u64, &b,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, (a.len() + b.len()) as u64);
+        let meta = read_meta(&dir).unwrap();
+        let mut expected = a.clone();
+        expected.extend_from_slice(&b);
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), expected);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert_eq!(meta.preview.unwrap().duration_ms, 2612);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_checkpoint_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(50);
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        // The frontend never saw the reply and resent the same chunk.
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, a.len() as u64);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), a);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert_eq!(meta.preview.unwrap().duration_ms, 1306);
+    }
+
+    #[tokio::test]
+    async fn an_overlapping_checkpoint_appends_only_its_new_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(50);
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        // A resend from 0 that also carries 20 new frames.
+        let mut overlapping = a.clone();
+        let tail = mp3_chunk(20);
+        overlapping.extend_from_slice(&tail);
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &overlapping,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, overlapping.len() as u64);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(
+            crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(),
+            overlapping,
+            "the already-ingested prefix must not be written twice",
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn a_gap_checkpoint_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let err = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 999, &mp3_chunk(5),
+        ).await.unwrap_err();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert!(err.contains("gap"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_against_a_finalized_recording_is_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let mut meta = read_meta(&dir).unwrap();
+        meta.status = RecordingStatus::Done;
+        storage::write_meta(&dir, &meta).unwrap();
+
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &mp3_chunk(5),
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(res.stale);
+        assert!(read_meta(&dir).unwrap().preview.is_none(), "nothing written");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_rejects_a_traversal_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = checkpoint_core(tmp.path(), "../escape", "2026-06-02T14:30:05.000Z", "T", 0, b"x")
+            .await.unwrap_err();
+        assert!(err.contains("invalid recording id"), "got: {err}");
     }
 }

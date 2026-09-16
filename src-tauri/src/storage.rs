@@ -89,6 +89,36 @@ pub struct SegmentsFile {
     pub segments: Vec<Segment>,
 }
 
+/// Mid-recording checkpoint state for a Local recording (issue #123). Present
+/// only while a recording is being checkpointed; `fresh_recording_core` builds a
+/// brand-new `RecordingMeta` at Stop, which drops it, so its absence is exactly
+/// "this recording has no preview artifacts to reason about".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewState {
+    /// Bytes of the recorder's mp3 stream already persisted into the vault
+    /// attachment. The idempotency key: a chunk ending at or before this is a
+    /// duplicate, one starting after it is a gap.
+    #[serde(default)]
+    pub bytes_ingested: u64,
+    /// Duration of those bytes, from `mp3_duration_ms`. The next chunk's segment
+    /// time offset.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Committed checkpoints. Surfaced to the frontend so an open detail pane
+    /// can tell that the transcript grew.
+    #[serde(default)]
+    pub checkpoints: u32,
+    /// Number of segments in `segments.json` already covered by the preview
+    /// note. Segments past it are the delta the next preview-notes run merges.
+    #[serde(default)]
+    pub notes_cursor: usize,
+    /// Last checkpoint/preview-notes failure. Deliberately *not* `notes_error`:
+    /// a preview failure must not surface as a user-facing "AI Notes failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingMeta {
@@ -139,6 +169,10 @@ pub struct RecordingMeta {
     /// auto-retitled).
     #[serde(default)]
     pub title_is_default: bool,
+    /// Mid-recording checkpoint state (issue #123). `None` for every recording
+    /// that was never checkpointed, and for every recording after Stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PreviewState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -796,7 +830,7 @@ mod tests {
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         }
     }
 
@@ -1003,6 +1037,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -1024,7 +1059,7 @@ mod tests {
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -1265,6 +1300,7 @@ mod tests {
             notes_written: None,
             notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();

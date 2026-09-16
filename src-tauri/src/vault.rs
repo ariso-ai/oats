@@ -987,7 +987,7 @@ mod tests {
             ],
             model_version: None, error: None, notes_error: None, last_clip_end_at: None,
             audio_file: None, notes_written: None, notes_in_progress: false,
-            title_is_default: false,
+            title_is_default: false, preview: None,
         }
     }
 
