@@ -2301,6 +2301,67 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
     crate::storage::write_meta(&dir, &meta)
 }
 
+/// Maximum diarized-speaker label length, in characters. Generous next to
+/// `MAX_TITLE_CHARS` (40): a label may hold a full name plus an email address.
+const MAX_SPEAKER_LABEL_CHARS: usize = 60;
+
+/// List a local recording's diarized speakers (id + current label), read from
+/// `meta.json`. Empty for a recording with no diarized speech.
+#[tauri::command]
+pub fn list_local_speakers(id: String) -> Result<Vec<crate::storage::Participant>, String> {
+    let dir = recording_dir(&id)?;
+    Ok(crate::storage::read_meta(&dir)?.participants)
+}
+
+/// Rename one diarized speaker in a local recording: updates the label in
+/// `meta.json` and `segments.json` (matched by stable `id`, never array
+/// position — an appended clip shifts ids), then re-renders `transcript.md` so
+/// the change is visible immediately.
+///
+/// Returns the re-rendered transcript so the caller can patch its in-memory
+/// copy without a re-read round trip (mirrors `set_vault_task_done`).
+///
+/// Deliberately does NOT touch an already-generated `ari-note.md`: the label is
+/// baked into LLM prose there, and a find/replace over generated text is far
+/// more collision-prone than a document header. The existing "Regenerate notes"
+/// action re-runs generation against the updated transcript.
+#[tauri::command]
+pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Result<String, String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("label must not be empty".to_string());
+    }
+    if label.chars().count() > MAX_SPEAKER_LABEL_CHARS {
+        return Err(format!(
+            "label must be {MAX_SPEAKER_LABEL_CHARS} characters or fewer"
+        ));
+    }
+    let dir = recording_dir(&id)?;
+    let mut meta = crate::storage::read_meta(&dir)?;
+    let participant = meta
+        .participants
+        .iter_mut()
+        .find(|p| p.id == speaker_id)
+        .ok_or_else(|| format!("unknown speaker id: {speaker_id}"))?;
+    participant.label = label.to_string();
+
+    // `transcript.md` is a pure render of meta + segments, so a recording made
+    // before `segments.json` existed can't be re-rendered here. Checked before
+    // any write, so nothing is left half-applied.
+    let mut segments = crate::storage::read_segments(&dir)?.ok_or_else(|| {
+        "this recording predates structured transcripts and can't be renamed".to_string()
+    })?;
+    if let Some(p) = segments.participants.iter_mut().find(|p| p.id == speaker_id) {
+        p.label = label.to_string();
+    }
+    crate::storage::write_segments(&dir, &segments)?;
+    crate::storage::write_meta(&dir, &meta)?;
+
+    let md = crate::storage::render_markdown(&meta, &segments.segments);
+    crate::storage::write_transcript(&dir, &md)?;
+    Ok(md)
+}
+
 /// Create a local recording's on-disk identity the moment capture starts, so
 /// rename / status / list all work *during* the recording instead of only after
 /// Stop. Before this, `meta.json` was written only by finalize, and a
@@ -4123,6 +4184,212 @@ mod tests {
 
         assert!(err.contains("recording file not found"), "unexpected error: {err}");
         assert!(!dest.exists(), "no file should be created when the source is missing");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// Build a local recording on disk with two diarized speakers, returning its
+    /// directory. Mirrors what `local_finalize_recording` leaves behind.
+    fn seed_two_speaker_recording(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+        let dir = crate::storage::create_recording_dir(root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.participants = vec![
+            crate::storage::Participant { id: 0, label: "Speaker 1".into() },
+            crate::storage::Participant { id: 1, label: "Speaker 2".into() },
+        ];
+        let segments = crate::storage::SegmentsFile {
+            language: Some("en".into()),
+            participants: meta.participants.clone(),
+            segments: vec![
+                crate::storage::Segment { speaker: 0, text: "Hello there".into(), start: 0.0, end: 1.0 },
+                crate::storage::Segment { speaker: 1, text: "Hi back".into(), start: 1.0, end: 2.0 },
+            ],
+        };
+        crate::storage::write_segments(&dir, &segments).unwrap();
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let md = crate::storage::render_markdown(&meta, &segments.segments);
+        crate::storage::write_transcript(&dir, &md).unwrap();
+        dir
+    }
+
+    #[test]
+    fn list_local_speakers_returns_meta_participants() {
+        // SAFETY: command tests run with --test-threads=1, so the process-wide
+        // ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T10-00-00Z";
+        seed_two_speaker_recording(&root, id);
+
+        let speakers = list_local_speakers(id.into()).unwrap();
+        assert_eq!(
+            speakers,
+            vec![
+                crate::storage::Participant { id: 0, label: "Speaker 1".into() },
+                crate::storage::Participant { id: 1, label: "Speaker 2".into() },
+            ]
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_local_speakers_is_empty_without_diarized_speech() {
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T10-05-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        assert!(list_local_speakers(id.into()).unwrap().is_empty());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_updates_meta_segments_and_transcript() {
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T11-00-00Z";
+        let dir = seed_two_speaker_recording(&root, id);
+
+        // Padding is trimmed, exactly like the title rename.
+        let md = rename_local_speaker(id.into(), 1, "  Priya  ".into()).unwrap();
+
+        // Returned markdown carries the new label and leaves the text alone.
+        assert!(md.contains("**Priya** ["), "returned markdown missing new label: {md}");
+        assert!(!md.contains("**Speaker 2**"), "old label still present: {md}");
+        assert!(md.contains("**Speaker 1** ["), "unrelated speaker was renamed: {md}");
+        assert!(md.contains("Hi back"), "segment text was altered: {md}");
+
+        // ...and it is what landed on disk.
+        assert_eq!(std::fs::read_to_string(dir.join("transcript.md")).unwrap(), md);
+
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.participants[1].label, "Priya");
+        assert_eq!(meta.participants[0].label, "Speaker 1");
+
+        let segments = crate::storage::read_segments(&dir).unwrap().unwrap();
+        assert_eq!(segments.participants[1].label, "Priya");
+        assert_eq!(segments.participants[0].label, "Speaker 1");
+        // The rename must not disturb the transcript itself.
+        assert_eq!(segments.segments[1].text, "Hi back");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_matches_by_id_not_position() {
+        // An appended clip shifts ids via `offset_participants`, so the list can
+        // start at a non-zero id — indexing by position would rename the wrong voice.
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T11-15-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.participants = vec![
+            crate::storage::Participant { id: 3, label: "Speaker 4".into() },
+            crate::storage::Participant { id: 7, label: "Speaker 8".into() },
+        ];
+        let segments = crate::storage::SegmentsFile {
+            language: None,
+            participants: meta.participants.clone(),
+            segments: vec![
+                crate::storage::Segment { speaker: 3, text: "first".into(), start: 0.0, end: 1.0 },
+                crate::storage::Segment { speaker: 7, text: "second".into(), start: 1.0, end: 2.0 },
+            ],
+        };
+        crate::storage::write_segments(&dir, &segments).unwrap();
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        rename_local_speaker(id.into(), 7, "Priya".into()).unwrap();
+
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.participants[0].label, "Speaker 4");
+        assert_eq!(meta.participants[1].label, "Priya");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_rejects_empty_and_overlong_labels_without_touching_disk() {
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T12-00-00Z";
+        let dir = seed_two_speaker_recording(&root, id);
+        let before = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+
+        let err = rename_local_speaker(id.into(), 0, "   ".into()).unwrap_err();
+        assert!(err.contains("must not be empty"), "unexpected error: {err}");
+
+        // 61 chars — one past the limit. Counted in chars, not bytes.
+        let long: String = "é".repeat(61);
+        let err = rename_local_speaker(id.into(), 0, long).unwrap_err();
+        assert!(err.contains("60 characters or fewer"), "unexpected error: {err}");
+
+        // Exactly 60 is accepted.
+        let ok: String = "é".repeat(60);
+        rename_local_speaker(id.into(), 0, ok.clone()).unwrap();
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[0].label, ok);
+
+        // The two rejections left the pre-existing render untouched.
+        assert!(before.contains("**Speaker 1**"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_rejects_unknown_speaker_id() {
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T13-00-00Z";
+        let dir = seed_two_speaker_recording(&root, id);
+
+        let err = rename_local_speaker(id.into(), 99, "Priya".into()).unwrap_err();
+        assert!(err.contains("unknown speaker id"), "unexpected error: {err}");
+        assert!(!std::fs::read_to_string(dir.join("transcript.md")).unwrap().contains("Priya"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_errors_when_segments_json_is_absent() {
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T14-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.participants = vec![crate::storage::Participant { id: 0, label: "Speaker 1".into() }];
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        let err = rename_local_speaker(id.into(), 0, "Priya".into()).unwrap_err();
+        assert!(err.contains("predates structured transcripts"), "unexpected error: {err}");
+        // meta.json must be left alone — a half-applied rename is worse than none.
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[0].label, "Speaker 1");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_escapes_quotes_in_front_matter() {
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T15-00-00Z";
+        seed_two_speaker_recording(&root, id);
+
+        let md = rename_local_speaker(id.into(), 0, "Priya \"P\" Rao".into()).unwrap();
+
+        // The front-matter list is quoted, so the label's own quotes must be escaped
+        // there; the body header prints the label literally.
+        assert!(md.contains(r#"participants: ["Priya \"P\" Rao", "Speaker 2"]"#), "front matter: {md}");
+        assert!(md.contains(r#"**Priya "P" Rao** ["#), "body header: {md}");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }

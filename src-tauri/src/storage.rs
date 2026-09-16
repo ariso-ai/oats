@@ -424,6 +424,8 @@ pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
             .unwrap_or_else(|| format!("Speaker {}", speaker + 1))
     };
 
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+
     let participant_labels: Vec<String> = if meta.participants.is_empty() {
         let mut ids: Vec<u32> = segments.iter().map(|s| s.speaker).collect();
         ids.sort_unstable();
@@ -434,11 +436,10 @@ pub fn render_markdown(meta: &RecordingMeta, segments: &[Segment]) -> String {
     };
     let participants_yaml = participant_labels
         .iter()
-        .map(|l| format!("\"{l}\""))
+        .map(|l| format!("\"{}\"", esc(l)))
         .collect::<Vec<_>>()
         .join(", ");
 
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str(&format!("title: \"{}\"\n", esc(&meta.title)));

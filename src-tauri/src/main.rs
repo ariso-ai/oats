@@ -223,6 +223,8 @@ fn main() {
             commands::open_recording_file,
             commands::copy_recording_file,
             commands::rename_local_recording,
+            commands::list_local_speakers,
+            commands::rename_local_speaker,
             commands::local_begin_recording,
             commands::delete_local_recording,
             commands::buffer_pending_audio,
