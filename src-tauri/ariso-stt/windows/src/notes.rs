@@ -49,9 +49,34 @@ const MAX_STARTUP_DIAGNOSTIC_CHARS: usize = 2_048;
 /// Implements the notes subcommand as a narrow file-to-stdout adapter. It does
 /// not update recording metadata itself; the host interprets success or failure
 /// and owns the durable notes lifecycle shared with macOS.
-pub(crate) fn run_notes(transcript: &Path, models: &Path) -> Result<()> {
+pub(crate) fn run_notes(
+    transcript: &Path,
+    models: &Path,
+    previous_notes: Option<&Path>,
+) -> Result<()> {
     let transcript_text = fs::read_to_string(transcript)
         .with_context(|| format!("read transcript {}", transcript.display()))?;
+
+    // Merge mode (issue #123): `transcript` is the delta since `previous_notes`
+    // was written. Preview-only, so no title pass — the host generates the title
+    // once, from the full notes, at Stop.
+    if let Some(previous_path) = previous_notes {
+        let previous = fs::read_to_string(previous_path)
+            .with_context(|| format!("read previous notes {}", previous_path.display()))?;
+        let plan = plan_merge(&previous, &transcript_text)?;
+        let gemma = discover_gemma(models)?;
+        let llama_server = discover_notes_runtime()?;
+        let mut runtime = LlamaServer::start(&llama_server, &gemma)?;
+        let notes = clean_notes(&run_llama_merge_with_plan(
+            &mut runtime,
+            &previous,
+            &transcript_text,
+            plan,
+        )?);
+        print!("{}", serialize_notes_result("", &notes)?);
+        return Ok(());
+    }
+
     // Reject unsupported input before paying the model-load cost. This ordering
     // also keeps a malformed or unexpectedly large transcript from starting
     // any subprocess at all.
@@ -116,6 +141,85 @@ fn plan_notes(transcript: &str) -> Result<NotesPlan> {
         summary_budget,
         transcript_chunks,
     })
+}
+
+/// Bounded shape of one merge, decided before any model process exists.
+#[derive(Debug)]
+enum MergePlan {
+    Direct,
+    /// The delta does not fit beside the previous notes (several checkpoints
+    /// backpressured into one delta). Condense it first with the existing
+    /// chunk-summary pass, then merge the summaries.
+    CondenseDelta { delta_chunks: Vec<String> },
+}
+
+fn plan_merge(previous: &str, delta: &str) -> Result<MergePlan> {
+    let budget = input_char_budget(DEFAULT_CONTEXT_SIZE, DEFAULT_MAX_TOKENS)?;
+    if previous.chars().count() + delta.chars().count() <= budget {
+        return Ok(MergePlan::Direct);
+    }
+    let summary_budget = input_char_budget(DEFAULT_CONTEXT_SIZE, CHUNK_MAX_TOKENS)?;
+    let delta_chunks = chunk_text(delta, summary_budget);
+    if delta_chunks.len() > MAX_SOURCE_CHUNKS {
+        bail!(
+            "checkpoint delta requires {} note chunks; local notes support at most {MAX_SOURCE_CHUNKS}",
+            delta_chunks.len()
+        );
+    }
+    Ok(MergePlan::CondenseDelta { delta_chunks })
+}
+
+#[cfg(test)]
+fn run_llama_merge(
+    runtime: &mut impl PromptRunner,
+    previous: &str,
+    delta: &str,
+) -> Result<String> {
+    let plan = plan_merge(previous, delta)?;
+    run_llama_merge_with_plan(runtime, previous, delta, plan)
+}
+
+fn run_llama_merge_with_plan(
+    runtime: &mut impl PromptRunner,
+    previous: &str,
+    delta: &str,
+    plan: MergePlan,
+) -> Result<String> {
+    let delta_text = match plan {
+        MergePlan::Direct => delta.to_string(),
+        MergePlan::CondenseDelta { delta_chunks } => {
+            let total = delta_chunks.len();
+            let summary_tokens = DEFAULT_MAX_TOKENS.min(CHUNK_MAX_TOKENS);
+            let mut summaries = Vec::with_capacity(total);
+            for (index, chunk) in delta_chunks.iter().enumerate() {
+                summaries.push(runtime.complete(
+                    &chunk_summary_prompt(chunk, index + 1, total),
+                    summary_tokens,
+                )?);
+            }
+            join_summaries(&summaries)
+        }
+    };
+    runtime.complete(&gemma_merge_prompt(previous, &delta_text), DEFAULT_MAX_TOKENS)
+}
+
+fn gemma_merge_prompt(previous_notes: &str, delta: &str) -> String {
+    let instructions = "\
+You are a meeting-notes assistant. You are given the current notes for a meeting that is still in progress, plus the part of the transcript that continues directly after the part those notes cover. You return the complete updated notes.\n\n\
+Rules:\n\
+- Use only facts stated in the current notes or in the new transcript. Never invent details, names, or speakers.\n\
+- The transcript labels speakers generically (e.g. \"Speaker 1\", \"Speaker 2\"). Do not invent any speaker or person who does not appear in it.\n\
+- Return the COMPLETE updated notes, not only the new part.\n\
+- Add new key points, decisions, and action items from the new transcript. Keep existing content unless the new transcript corrects it; never duplicate an item that is already in the notes.\n\
+- Output the notes only, with no preamble, no closing remarks, and never repeat or restate these instructions.\n\
+- Output raw Markdown directly. Never wrap the notes in a code fence.\n\
+- Use these level-2 (##) sections, in this order: Summary, Key Points, Decisions, Action Items.\n\
+- \"Summary\" is 2-3 sentences describing what the meeting was about. The other sections are bullet lists.\n\
+- Omit any section that has no real content. Never write placeholder text under a heading.";
+
+    format!(
+        "<bos><start_of_turn>user\n{instructions}\n\nCurrent notes:\n{previous_notes}\n\nNew transcript, continuing directly after the part those notes cover:\n{delta}<end_of_turn>\n<start_of_turn>model\n"
+    )
 }
 
 /// Isolates llama.cpp process details from the sidecar contract. Prompt-policy
@@ -1060,5 +1164,44 @@ mod tests {
     fn cleans_prompt_echo_before_notes_heading() {
         let raw = "Rules:\n- Use sections.\n## Summary\n- Done";
         assert_eq!(clean_notes(raw), "## Summary\n- Done");
+    }
+
+    #[test]
+    fn merge_prompt_carries_both_sides_with_gemma_turn_markers() {
+        let prompt = gemma_merge_prompt("## Summary\n- Kickoff", "Speaker 3: Ship it.");
+        assert!(prompt.starts_with("<bos><start_of_turn>user\n"));
+        assert!(prompt.contains("Current notes:\n## Summary\n- Kickoff"));
+        assert!(prompt.contains("Speaker 3: Ship it."));
+        assert!(prompt.contains("never duplicate"));
+        assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn a_fitting_merge_is_one_model_call() {
+        let mut runtime =
+            StubPromptRunner::new(["## Summary\n- Kickoff, then shipped".to_string()]);
+        let notes = run_llama_merge(&mut runtime, "## Summary\n- Kickoff", "Speaker 3: Ship it.")
+            .unwrap();
+        assert_eq!(notes, "## Summary\n- Kickoff, then shipped");
+        assert_eq!(runtime.calls, 1);
+    }
+
+    #[test]
+    fn an_over_budget_delta_is_condensed_before_the_merge() {
+        // Backpressure can stack several checkpoints into one delta. Condense it
+        // with the existing chunk-summary pass rather than overflowing context.
+        let previous = "## Summary\n- Kickoff".to_string();
+        // 8 999 chars: over the 8 448-char merge budget, but inside one
+        // 9 216-char summary chunk — so exactly one condense pass, then the merge.
+        let delta = "word ".repeat(1_800);
+        let mut runtime = StubPromptRunner::new([
+            "Speaker 3 approved the launch.".to_string(),
+            "## Summary\n- Kickoff, then launch approved".to_string(),
+        ]);
+
+        let notes = run_llama_merge(&mut runtime, &previous, &delta).unwrap();
+
+        assert_eq!(notes, "## Summary\n- Kickoff, then launch approved");
+        assert_eq!(runtime.calls, 2, "one condense pass, then the merge");
     }
 }
