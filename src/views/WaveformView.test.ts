@@ -40,6 +40,9 @@ const recorderIsPaused = { value: false };
 // test mutates this mid-recording.
 const recorderDuration = ref(5);
 const recorderStartedAt = { value: '2026-06-09T10:00:00Z' };
+// Mutable buffer backing the encoder-output accessors so tests can grow it
+// mid-recording (Task 13's checkpoint loop reads through these).
+const encoded = { bytes: new Uint8Array(0) };
 vi.mock('../composables/useRecorder', () => ({
   useRecorder: () => ({
     isRecording: recorderIsRecording,
@@ -53,6 +56,11 @@ vi.mock('../composables/useRecorder', () => ({
     stopRecording: () => stopRecording(),
     pauseRecording: vi.fn(),
     resumeRecording: vi.fn(),
+    encodedByteLength: () => encoded.bytes.length,
+    sliceFrom: (startByte: number) => ({
+      bytes: encoded.bytes.slice(startByte),
+      endByte: encoded.bytes.length,
+    }),
   }),
 }));
 vi.mock('../composables/useBackend', async () => {
@@ -93,7 +101,7 @@ vi.mock('../composables/useMeetingApi', () => ({
 
 // vi.mock is hoisted before top-level consts, so shared mock handles that the
 // factory closes over must live in vi.hoisted() to avoid TDZ errors.
-const { discardPendingAudio, recordingIdForStart, beginRecording } = vi.hoisted(() => ({
+const { discardPendingAudio, recordingIdForStart, beginRecording, checkpointRecording } = vi.hoisted(() => ({
   discardPendingAudio: vi.fn(() => Promise.resolve()),
   // Default: resolve to the sanitized start id (mirrors Rust sanitize_iso_to_id),
   // i.e. a fresh recording. Tests that exercise the append case override this.
@@ -104,12 +112,17 @@ const { discardPendingAudio, recordingIdForStart, beginRecording } = vi.hoisted(
     return Promise.resolve(`${head.replace(/:/g, '-')}Z`);
   }),
   beginRecording: vi.fn(() => Promise.resolve()),
+  checkpointRecording: vi.fn((audio: Uint8Array) =>
+    Promise.resolve({ ingestedBytes: audio.length, transcriptUpdated: true, stale: false }),
+  ),
 }));
 vi.mock('../tauri', () => ({
   pending: { discardAudio: (...a: unknown[]) => discardPendingAudio(...a) },
   local: {
     recordingIdForStart: (...a: [string]) => recordingIdForStart(...a),
     beginRecording: (...a: [string, string, string]) => beginRecording(...a),
+    checkpointRecording: (...a: [Uint8Array, string, string, string, number]) =>
+      checkpointRecording(...a),
   },
 }));
 
@@ -141,6 +154,7 @@ beforeEach(() => {
   recorderIsPaused.value = false;
   recorderDuration.value = 5;
   recorderStartedAt.value = '2026-06-09T10:00:00Z';
+  encoded.bytes = new Uint8Array(0);
   loadRecordingEnabled.mockResolvedValue({ mic: true, systemAudio: false });
   isSilenceDetectionEnabled.mockResolvedValue(true);
   listScheduledMeetings.mockResolvedValue([]);
@@ -1188,5 +1202,129 @@ describe('WaveformView unmatched auto-trigger (#355)', () => {
     expect(createAudioMeeting).toHaveBeenCalledTimes(1); // no retry
     expect(err).toHaveBeenCalled();
     expect(closeWin).not.toHaveBeenCalled();
+  });
+});
+
+describe('mid-recording checkpoints', () => {
+  it('fires a checkpoint when the recorded-audio clock crosses 300s', async () => {
+    const w = mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+
+    recorderDuration.value = 299;
+    await flushPromises();
+    expect(checkpointRecording).not.toHaveBeenCalled();
+
+    recorderDuration.value = 300;
+    await flushPromises();
+    expect(checkpointRecording).toHaveBeenCalledTimes(1);
+    const [audio, id, createdAt, , startByte] = checkpointRecording.mock.calls[0];
+    expect((audio as Uint8Array).length).toBe(1000);
+    expect(id).toBe('2026-06-09T10-00-00Z');
+    expect(createdAt).toBe('2026-06-09T10:00:00Z');
+    expect(startByte).toBe(0);
+    w.unmount();
+  });
+
+  it('sends only the bytes since the last committed offset', async () => {
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    recorderDuration.value = 300;
+    await flushPromises();
+
+    encoded.bytes = new Uint8Array(2500);
+    recorderDuration.value = 600;
+    await flushPromises();
+
+    expect(checkpointRecording).toHaveBeenCalledTimes(2);
+    const [audio, , , , startByte] = checkpointRecording.mock.calls[1];
+    expect(startByte).toBe(1000);
+    expect((audio as Uint8Array).length).toBe(1500);
+  });
+
+  it('keeps the offset and resends after a failure', async () => {
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    checkpointRecording.mockRejectedValueOnce(new Error('ipc down'));
+    recorderDuration.value = 300;
+    await flushPromises();
+
+    encoded.bytes = new Uint8Array(2500);
+    recorderDuration.value = 600;
+    await flushPromises();
+
+    expect(checkpointRecording.mock.calls[1][4]).toBe(0);
+    expect((checkpointRecording.mock.calls[1][0] as Uint8Array).length).toBe(2500);
+  });
+
+  it('keeps at most one checkpoint in flight', async () => {
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    let release: (v: unknown) => void = () => {};
+    checkpointRecording.mockReturnValueOnce(new Promise((r) => { release = r; }));
+
+    recorderDuration.value = 300;
+    await flushPromises();
+    recorderDuration.value = 600;
+    await flushPromises();
+    expect(checkpointRecording).toHaveBeenCalledTimes(1);
+
+    release({ ingestedBytes: 1000, transcriptUpdated: true, stale: false });
+    await flushPromises();
+    recorderDuration.value = 601;
+    await flushPromises();
+    expect(checkpointRecording).toHaveBeenCalledTimes(2);
+  });
+
+  it('never checkpoints a cloud recording', async () => {
+    backendKind.value = 'ariso';
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    recorderDuration.value = 300;
+    await flushPromises();
+    expect(checkpointRecording).not.toHaveBeenCalled();
+  });
+
+  it('never checkpoints an explicit "Continue this meeting" session', async () => {
+    routeQuery = { localAppendId: '2026-06-01T09-00-00Z' };
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    recorderDuration.value = 300;
+    await flushPromises();
+    expect(checkpointRecording).not.toHaveBeenCalled();
+  });
+
+  it('never checkpoints an auto-append target', async () => {
+    // Rust resolved a PRIOR recording as the finalize target, so this session's
+    // audio will be appended to it — not checkpointed into a new one.
+    recordingIdForStart.mockResolvedValueOnce('2026-06-01T09-00-00Z');
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    recorderDuration.value = 300;
+    await flushPromises();
+    expect(checkpointRecording).not.toHaveBeenCalled();
+  });
+
+  it('stops scheduling checkpoints once Stop begins, and still sends the full blob', async () => {
+    mount(WaveformView);
+    await flushPromises();
+    encoded.bytes = new Uint8Array(1000);
+    stopRecording.mockResolvedValue(new Blob([new Uint8Array(2500)], { type: 'audio/mpeg' }));
+
+    eventHandlers['tray://stop-recording']?.({});
+    await flushPromises();
+    recorderDuration.value = 300;
+    await flushPromises();
+
+    expect(checkpointRecording).not.toHaveBeenCalled();
+    expect(finalizeRecording).toHaveBeenCalledTimes(1);
+    const [blob] = finalizeRecording.mock.calls[0];
+    expect((blob as Blob).size).toBe(2500);
   });
 });
