@@ -370,6 +370,86 @@ pub fn format_hms(secs: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// MPEG-1 Layer III bitrates (kbps) by header bitrate index 1..=14.
+const MP3_BITRATES_V1: [u32; 15] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+];
+/// MPEG-2 / 2.5 Layer III bitrates (kbps) by header bitrate index 1..=14.
+const MP3_BITRATES_V2: [u32; 15] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160,
+];
+
+/// Total duration, in milliseconds, of the MPEG audio frames in `bytes`.
+///
+/// Checkpoints derive every chunk's time offset from this rather than from the
+/// recorder's whole-second UI clock: the offset is cumulative, so a sub-second
+/// error per chunk would drift the preview transcript's timestamps further out
+/// with every checkpoint. Walks frame headers only — no decoding, no new
+/// dependency. Bytes that are not a valid frame header (an ID3 tag, a truncated
+/// tail) are skipped one byte at a time, so a chunk that does not start on a
+/// frame boundary still measures correctly.
+pub fn mp3_duration_ms(bytes: &[u8]) -> u64 {
+    // Accumulated in MICROseconds, not milliseconds. A frame is 1152/44100 s =
+    // 26.122 ms, so rounding each frame to whole milliseconds would lose
+    // 0.122 ms per frame — 1.4 s over a 5-minute chunk — and the error is
+    // cumulative across checkpoints, which is the exact drift this function
+    // exists to avoid. At microsecond granularity the loss is under 1 µs per
+    // frame (~5 µs over five minutes).
+    let mut total_us: u64 = 0;
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        let (h0, h1, h2) = (bytes[i], bytes[i + 1], bytes[i + 2]);
+        // Frame sync: 11 set bits.
+        if h0 != 0xFF || (h1 & 0xE0) != 0xE0 {
+            i += 1;
+            continue;
+        }
+        // Version: 00 = MPEG-2.5, 10 = MPEG-2, 11 = MPEG-1 (01 is reserved).
+        let version = (h1 >> 3) & 0x03;
+        // Layer: 01 = Layer III (the only layer lamejs emits).
+        let layer = (h1 >> 1) & 0x03;
+        if version == 0x01 || layer != 0x01 {
+            i += 1;
+            continue;
+        }
+        let bitrate_index = (h2 >> 4) as usize;
+        let rate_index = ((h2 >> 2) & 0x03) as usize;
+        if bitrate_index == 0 || bitrate_index == 15 || rate_index == 3 {
+            i += 1;
+            continue;
+        }
+        let is_v1 = version == 0x03;
+        let bitrate = if is_v1 {
+            MP3_BITRATES_V1[bitrate_index]
+        } else {
+            MP3_BITRATES_V2[bitrate_index]
+        } * 1000;
+        let sample_rate = match (version, rate_index) {
+            (0x03, 0) => 44_100,
+            (0x03, 1) => 48_000,
+            (0x03, 2) => 32_000,
+            (0x02, 0) => 22_050,
+            (0x02, 1) => 24_000,
+            (0x02, 2) => 16_000,
+            (_, 0) => 11_025,
+            (_, 1) => 12_000,
+            _ => 8_000,
+        };
+        let padding = ((h2 >> 1) & 0x01) as u32;
+        let samples_per_frame: u32 = if is_v1 { 1152 } else { 576 };
+        // Layer III: MPEG-1 packs 144 bytes per kbit-second, MPEG-2/2.5 packs 72.
+        let frame_len =
+            ((samples_per_frame / 8) * bitrate / sample_rate + padding) as usize;
+        if frame_len == 0 || i + frame_len > bytes.len() {
+            // Truncated final frame: it carries no complete audio, so stop.
+            break;
+        }
+        total_us += (samples_per_frame as u64) * 1_000_000 / (sample_rate as u64);
+        i += frame_len;
+    }
+    total_us / 1000
+}
+
 /// Reject recording ids that could escape the recordings dir. Ids are normally
 /// sanitized timestamps (e.g. `2026-06-02T14-30-05Z`); this mirrors the guard
 /// in `commands::recording_dir` so retry/status commands can validate ids that
@@ -1166,5 +1246,53 @@ mod tests {
     fn next_speaker_offset_zero_when_empty() {
         let empty = SegmentsFile { language: None, participants: vec![], segments: vec![] };
         assert_eq!(next_speaker_offset(&empty), 0);
+    }
+
+    /// Build `count` MPEG-1 Layer III frames at 128 kbps / 44.1 kHz.
+    /// Frame length = 144 * 128000 / 44100 = 417 bytes (no padding).
+    fn mp3_frames(count: usize, stereo: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..count {
+            // 0xFF 0xFB = sync + MPEG-1 + Layer III + no CRC.
+            // 0x90 = bitrate index 9 (128 kbps), sample-rate index 0 (44.1 kHz).
+            // 0x00 = stereo, 0xC0 = mono (channel mode in the top two bits).
+            out.extend_from_slice(&[0xFF, 0xFB, 0x90, if stereo { 0x00 } else { 0xC0 }]);
+            out.extend(std::iter::repeat_n(0u8, 417 - 4));
+        }
+        out
+    }
+
+    #[test]
+    fn mp3_duration_counts_mono_frames() {
+        // 10 frames * 1152 samples / 44100 Hz = 261.2 ms
+        assert_eq!(mp3_duration_ms(&mp3_frames(10, false)), 261);
+    }
+
+    #[test]
+    fn mp3_duration_is_channel_mode_independent() {
+        assert_eq!(
+            mp3_duration_ms(&mp3_frames(10, true)),
+            mp3_duration_ms(&mp3_frames(10, false)),
+        );
+    }
+
+    #[test]
+    fn mp3_duration_of_a_long_chunk_matches_the_frame_count() {
+        // ~5 minutes at 128 kbps: 11 490 frames.
+        let ms = mp3_duration_ms(&mp3_frames(11_490, false));
+        assert!((299_000..=301_000).contains(&ms), "got {ms} ms");
+    }
+
+    #[test]
+    fn mp3_duration_ignores_leading_garbage_and_trailing_partial_frames() {
+        let mut bytes = vec![b'I', b'D', b'3', 0, 0, 0, 0, 0];
+        bytes.extend(mp3_frames(4, false));
+        bytes.extend_from_slice(&[0xFF, 0xFB]); // truncated final header
+        assert_eq!(mp3_duration_ms(&bytes), 104); // 4 frames
+    }
+
+    #[test]
+    fn mp3_duration_of_non_audio_is_zero() {
+        assert_eq!(mp3_duration_ms(b"not audio at all"), 0);
     }
 }
