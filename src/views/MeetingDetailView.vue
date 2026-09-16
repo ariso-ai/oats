@@ -1310,6 +1310,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showAttendees.value = false;
   attendeesAnchor.value = null;
   speakers.reset();
+  localSpeakers.reset();
   speakersAnchor.value = null;
   transcript.value = null;
   transcriptLoaded.value = false;

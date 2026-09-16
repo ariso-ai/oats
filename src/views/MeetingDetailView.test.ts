@@ -2468,4 +2468,25 @@ describe('MeetingDetailView local speaker rename', () => {
     // Escape backs out of the field first, not the whole panel.
     expect(q('.lsp-pop')).not.toBeNull();
   });
+
+  it('closes the panel when the selected meeting changes', async () => {
+    await openPanel(localSpeakerDetail());
+    expect(q('.lsp-pop')).not.toBeNull();
+
+    // MeetingDetailView is reused across selections (no :key in LibraryView),
+    // so `load()` — driven by this prop change — must reset the local panel
+    // the same way it already resets the Ariso one, or it would stay mounted
+    // showing a stale/empty list at the old anchor position.
+    const otherItem: MeetingListItem = {
+      id: '9',
+      title: 'Other',
+      timestamp: '2026-06-03T10:00:00Z',
+      files: { hasAudio: true, hasNote: false, hasTranscript: true },
+    };
+    getMeetingDetail.mockResolvedValue(localSpeakerDetail({ id: '9' }));
+    await wrapper!.setProps({ item: otherItem });
+    await flushPromises();
+
+    expect(q('.lsp-pop')).toBeNull();
+  });
 });
