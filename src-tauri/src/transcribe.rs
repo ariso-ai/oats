@@ -30,16 +30,19 @@ fn configure_background_process(command: &mut Command) {
 #[cfg(not(windows))]
 fn configure_background_process(_command: &mut Command) {}
 
-/// Per-recording mutex table. Serializes concurrent `append_recording_core`
-/// calls to the same target so two simultaneous finalizations cannot both
-/// see a `Done` target and race on writing audio/segments/meta.
-static APPEND_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> = OnceLock::new();
+/// Per-recording mutex table. Serializes every writer that mutates one
+/// recording's directory: checkpoints (`checkpoint_core`), both finalize paths,
+/// the `process_notes` / `process_preview_notes` commits, and
+/// `rename_local_recording`. Without it a checkpoint's STT could land on top of
+/// a finalize, or a rename could be reverted by a notes commit.
+static RECORDING_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
+    OnceLock::new();
 
-fn get_append_lock(target_id: &str) -> Arc<TokioMutex<()>> {
-    let map = APPEND_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("append lock table poisoned");
+pub fn get_recording_lock(id: &str) -> Arc<TokioMutex<()>> {
+    let map = RECORDING_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("recording lock table poisoned");
     guard
-        .entry(target_id.to_string())
+        .entry(id.to_string())
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
 }
@@ -244,7 +247,7 @@ fn maybe_apply_generated_title(meta: &mut RecordingMeta, audio_file: &str, title
 /// `Done` status. A third outcome exists: if the transcript changes mid-run
 /// (superseded by a later append/regeneration), this writes neither file and
 /// silently discards its result.
-async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
+async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
     // Capture the transcript this run generates from; if it changes while notes
     // run (a later append/regeneration), a newer run owns the result — discard.
@@ -262,8 +265,13 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
             return;
         }
-        meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
+        let _guard = get_recording_lock(&meta.id).lock_owned().await;
+        let mut meta = match storage::read_meta(&dir) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
         meta.notes_in_progress = false;
+        meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
         let _ = storage::write_meta(&dir, &meta);
         return;
     }
@@ -271,13 +279,28 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
         return;
     }
+
+    // Everything below mutates meta.json, so re-read it under the recording lock
+    // and apply only the fields this task owns. The snapshot captured at spawn
+    // is stale by now: a rename (#355 makes them routine mid-recording) would be
+    // reverted, and `audio_file` would point at a file the rename moved away.
+    let _guard = get_recording_lock(&meta.id).lock_owned().await;
+    let mut meta = match storage::read_meta(&dir) {
+        Ok(m) => m,
+        // The recording was deleted while notes ran: nothing to commit.
+        Err(e) => {
+            eprintln!("notes commit: read meta: {e}");
+            return;
+        }
+    };
+    meta.notes_in_progress = false;
+
     match outcome {
         // Empty output is a silent failure: it would write a blank note with
         // notes_error unset, reading as success. Record it.
         Ok(output) if output.notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
-            meta.notes_in_progress = false;
             let _ = storage::write_meta(&dir, &meta);
         }
         Ok(output) => {
@@ -293,7 +316,6 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                             meta.notes_error = Some(e);
                         }
                     }
-                    meta.notes_in_progress = false;
                     let _ = storage::write_meta(&dir, &meta);
                     return;
                 }
@@ -302,22 +324,19 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
             if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &output.notes) {
                 eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
-                meta.notes_in_progress = false;
                 let _ = storage::write_meta(&dir, &meta);
                 return;
             }
-            // Regenerate the note title from the notes, but only while the title
-            // is still the auto-generated default (never clobber a user rename).
+            // Only while the title is still the auto-generated default — the
+            // re-read above is what makes "still default" mean *now*, not at spawn.
             maybe_apply_generated_title(&mut meta, &audio_file, output.title);
             meta.notes_error = None;
             meta.notes_written = Some(now_rfc3339());
-            meta.notes_in_progress = false;
             let _ = storage::write_meta(&dir, &meta);
         }
         Err(e) => {
             eprintln!("notes generation: {e}");
             meta.notes_error = Some(e);
-            meta.notes_in_progress = false;
             let _ = storage::write_meta(&dir, &meta);
         }
     }
@@ -395,6 +414,10 @@ async fn fresh_recording_core(
 ) -> Result<(FinalizeResult, JoinHandle<()>), String> {
     let id = storage::sanitize_iso_to_id(&created_at);
     let dir = storage::create_recording_dir(root, &id)?;
+
+    // Wait out any in-flight checkpoint on this recording (a few seconds of STT
+    // at most) so the rewrite below can't interleave with one.
+    let _recording_guard = get_recording_lock(&id).lock_owned().await;
 
     // Read the existing meta once: an in-place rewrite (a retry, or the resume
     // path re-finalizing the same created_at) and a stub written at capture
@@ -588,15 +611,25 @@ async fn append_recording_core(
     // Serialize concurrent appends to the same target recording so two
     // simultaneous finalize calls cannot both see Done status and race on
     // writing audio/segments/meta.
-    let _append_guard = get_append_lock(target_id).lock_owned().await;
+    let append_guard = get_recording_lock(target_id).lock_owned().await;
 
     // Re-read meta/segments inside the lock. A concurrent append may have
     // completed (and changed status) since finalize_core's
     // most_recent_appendable check. Fall back to a fresh recording if the
     // target's state is no longer suitable for an append.
     let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
-        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() => (m, s),
-        _ => return fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
+        (Ok(m), Ok(Some(s)))
+            if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() =>
+        {
+            (m, s)
+        }
+        _ => {
+            // The fresh path locks the recording it creates; an explicit
+            // append target can name that same id, and the lock is not
+            // reentrant. Release before falling back.
+            drop(append_guard);
+            return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+        }
     };
 
     // Capture the pre-append duration as the new clip's time offset before
@@ -2388,5 +2421,40 @@ mod tests {
             std::fs::read_dir(&vault).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>()
         );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// A rename that lands while notes are running must survive the notes
+    /// commit. `process_notes` writes the meta snapshot it captured at spawn, so
+    /// without a re-read the rename is reverted and `audio_file` points at a
+    /// file the rename already moved.
+    #[tokio::test]
+    async fn notes_commit_keeps_a_rename_that_landed_mid_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hello there","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Original".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+
+        // Rename between the spawn and the commit: mutate meta.json directly,
+        // exactly as `rename_local_recording` does.
+        let mut renamed = read_meta(&dir).unwrap();
+        renamed.title = "User Chosen".into();
+        renamed.title_is_default = false;
+        crate::storage::write_meta(&dir, &renamed).unwrap();
+
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "User Chosen", "the rename must survive");
+        assert!(!meta.title_is_default);
+        assert!(meta.notes_written.is_some(), "notes still committed");
     }
 }
