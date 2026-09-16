@@ -111,6 +111,12 @@ pub struct PreviewState {
     pub checkpoints: u32,
     /// Number of segments in `segments.json` already covered by the preview
     /// note. Segments past it are the delta the next preview-notes run merges.
+    ///
+    /// Paused: preview notes (Task 10) — see issue #123. This field is
+    /// written into every checkpointed `meta.json` (always `0`, since nothing
+    /// ever advances it) but never read: no preview-notes task exists yet to
+    /// consume it. Kept, rather than removed, because it's the seam Task 10
+    /// plugs into.
     #[serde(default)]
     pub notes_cursor: usize,
     /// Last checkpoint/preview-notes failure. Deliberately *not* `notes_error`:

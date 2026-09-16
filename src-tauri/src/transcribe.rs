@@ -32,9 +32,12 @@ fn configure_background_process(_command: &mut Command) {}
 
 /// Per-recording mutex table. Serializes every writer that mutates one
 /// recording's directory: checkpoints (`checkpoint_core`), both finalize paths,
-/// the `process_notes` / `process_preview_notes` commits, and
-/// `rename_local_recording`. Without it a checkpoint's STT could land on top of
-/// a finalize, or a rename could be reverted by a notes commit.
+/// the `process_notes` commit, and `rename_local_recording`. Without it a
+/// checkpoint's STT could land on top of a finalize, or a rename could be
+/// reverted by a notes commit.
+// Paused: preview notes (Task 10) — see issue #123. When that lands, the
+// preview-notes commit will also take this lock; there is no
+// `process_preview_notes` function yet.
 static RECORDING_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
     OnceLock::new();
 
@@ -365,6 +368,13 @@ use crate::storage::{self, RecordingMeta, RecordingStatus};
 /// is attempted, so a crash — or a failed chunk — still leaves the audio in the
 /// vault and every later chunk correctly offset. A failed chunk costs the
 /// preview transcript one 5-minute gap; the final full pass covers it.
+///
+/// Paused: preview notes (Task 10) — see issue #123. The return type's
+/// `Option<JoinHandle<()>>` is the seam Task 10 plugs into (a spawned,
+/// detached preview-notes task, mirroring `process_notes`'s handle); today it
+/// is unconditionally `None` because no such task is ever spawned. The shape
+/// is kept so callers (and this signature) don't need to change when Task 10
+/// lands.
 pub async fn checkpoint_core(
     root: &Path,
     id: &str,
@@ -396,6 +406,16 @@ async fn checkpoint_locked(
     chunk: &[u8],
 ) -> Result<CheckpointResult, String> {
     // 1. Load, or recreate the stub the capture-start write may have missed.
+    //
+    // If `meta.json` was lost mid-recording (not merely absent from a missed
+    // initial write), this recreates it with `preview = None` and
+    // `audio_file = None` — i.e. it forgets any audio already ingested. Every
+    // later checkpoint in this same recording will then fail the gap check in
+    // step 2 (their `start_byte` is ahead of the freshly-reset
+    // `bytes_ingested`), and at Stop `fresh_recording_core` mints a brand-new
+    // `… (2).mp3` attachment, orphaning whatever was checkpointed under the
+    // original `audio_file`. Narrow (requires losing `meta.json` after it was
+    // successfully written once), but real; no recovery is attempted here.
     let mut meta = match storage::read_meta(dir) {
         Ok(m) => m,
         Err(_) => {
@@ -434,6 +454,7 @@ async fn checkpoint_locked(
     let new_bytes = &chunk[(preview.bytes_ingested - start_byte) as usize..];
 
     // 3. Persist audio first, so it survives whatever happens next.
+    let had_existing_attachment = meta.audio_file.is_some();
     let audio_file = match meta.audio_file.clone() {
         Some(existing) => existing,
         None => {
@@ -452,10 +473,17 @@ async fn checkpoint_locked(
     };
     // `vault::write_audio` replaces, so read → extend → write, like
     // `append_recording_core`.
-    let mut combined = if preview.bytes_ingested == 0 {
-        Vec::with_capacity(new_bytes.len())
-    } else {
+    //
+    // Guard against a zero-cursor truncation footgun: start a fresh buffer
+    // only when there is genuinely no existing attachment to read (the
+    // common case, since the stub always writes `audio_file: None`). Gating
+    // this on `preview.bytes_ingested == 0` instead would truncate a real
+    // attachment on the rare/future path where `audio_file` is `Some` with a
+    // zero cursor — read what's there whenever an attachment already exists.
+    let mut combined = if had_existing_attachment {
         crate::vault::read_audio(&audio_file)?
+    } else {
+        Vec::with_capacity(new_bytes.len())
     };
     combined.extend_from_slice(new_bytes);
     crate::vault::write_audio(&audio_file, &combined)?;
@@ -1090,8 +1118,10 @@ pub async fn local_checkpoint_recording(
     let chunk = crate::raw_ipc::body_bytes(&request)?;
     let CheckpointArgs { id, created_at, title, start_byte } = crate::raw_ipc::meta(&request)?;
     let root = crate::vault::meta_root()?;
-    // Drop the preview-notes JoinHandle: like finalize's, the detached task
-    // writes its outcome to disk and the frontend observes it by polling.
+    // Paused: preview notes (Task 10) — see issue #123. `checkpoint_core`
+    // never spawns a preview-notes task today, so this is always `None`; the
+    // `_notes` binding is the seam Task 10 will fill in, at which point this
+    // comment should go back to describing a real dropped JoinHandle.
     checkpoint_core(&root, &id, &created_at, &title, start_byte, chunk)
         .await
         .map(|(result, _notes)| result)
@@ -3085,5 +3115,75 @@ mod tests {
         assert_eq!(transcript_a, transcript_b, "transcript.md must be byte-identical");
         assert!(meta_a.preview.is_none(), "preview state is dropped at Stop");
         assert_eq!(meta_a.status, RecordingStatus::Done);
+    }
+
+    /// The branch's highest-risk emergent behavior — the recording-lock
+    /// ordering between checkpoints and finalize (§2 of the design spec) — is
+    /// otherwise never exercised under real contention: every other test drives
+    /// checkpoint and finalize strictly sequentially. Here a checkpoint's lock
+    /// is held deliberately while Stop (`finalize_core`) runs concurrently, to
+    /// prove finalize *blocks* on the lock and then completes correctly,
+    /// instead of deadlocking or interleaving with the in-flight checkpoint.
+    /// `multi_thread` because a current-thread runtime would only ever advance
+    /// the spawned task at the test's own await points, which is too easy to
+    /// pass by accident even if the real lock ordering were broken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_blocks_on_a_checkpoint_holding_the_recording_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":2.0,"segments":[{"speaker":"model-speaker-0","text":"hello there","start":0.0,"end":2.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let id = "2026-06-02T14-30-05Z";
+        let created_at = "2026-06-02T14:30:05.000Z";
+        write_stub_meta(tmp.path(), id, created_at, "T");
+
+        // Simulate a checkpoint in flight: take the exact per-recording lock
+        // `fresh_recording_core` waits on, and hold it across the assertions
+        // below.
+        let guard = get_recording_lock(id).lock_owned().await;
+
+        let root = tmp.path().to_path_buf();
+        let full = mp3_chunk(100);
+        let mut handle = tokio::spawn(async move {
+            finalize_core(&root, full, "T".into(), created_at.into(), 2).await
+        });
+
+        // While the lock is held, finalize must be blocked ON the lock — not
+        // deadlocked forever, not interleaved with the "checkpoint". A short
+        // timeout that is EXPECTED to elapse is how we observe "still blocked"
+        // without hanging the test if this assumption is wrong.
+        let still_blocked = tokio::time::timeout(Duration::from_millis(300), &mut handle).await;
+        assert!(
+            still_blocked.is_err(),
+            "finalize_core completed while the recording lock was held — \
+             it should have been waiting on get_recording_lock"
+        );
+
+        // Release the simulated checkpoint's hold on the lock.
+        drop(guard);
+
+        // finalize must now actually finish. Wrapped in its own timeout so a
+        // real regression (a deadlock, not just slowness) FAILS LOUDLY here
+        // instead of hanging the whole suite — a hang reads as CI flake and
+        // gets retried instead of fixed.
+        let (res, notes) = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("finalize_core did not complete after the lock was released — deadlock?")
+            .expect("finalize task panicked")
+            .expect("finalize_core returned an error");
+        notes.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let dir = storage::recordings_dir(tmp.path()).join(&res.id);
+        let meta = read_meta(&dir).unwrap();
+        // Not just "unblocked" — correct: a real finalize, not a truncated or
+        // interleaved one.
+        assert_eq!(meta.status, RecordingStatus::Done);
+        assert!(meta.preview.is_none(), "preview state is dropped at Stop");
+        let transcript = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        assert!(transcript.contains("hello there"), "{transcript}");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }

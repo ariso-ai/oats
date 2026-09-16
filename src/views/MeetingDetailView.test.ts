@@ -1094,6 +1094,21 @@ describe('MeetingDetailView local generation progress', () => {
     expect(wrapper.find('.tab-regen').exists()).toBe(false);
   });
 
+  it('hides the Regenerate notes button while the recording is still capturing, even with a note present', async () => {
+    // Guards a latent trap once preview notes land mid-recording: clicking
+    // Regenerate while `status === 'recording'` would delete the vault note
+    // and set `notes_in_progress` while checkpoints keep rewriting
+    // transcript.md underneath it, leaving "Generating AI Notes" stuck
+    // forever. See issue #123.
+    recordingStatus.mockResolvedValue({
+      status: 'recording', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+    });
+    readRecordingFile.mockResolvedValue('AI body');
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
+    await flushPromises();
+    expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+
   it('hides the Regenerate notes button while notes are regenerating, showing the chip instead', async () => {
     recordingStatus.mockResolvedValue({
       status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',

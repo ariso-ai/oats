@@ -830,13 +830,22 @@ watch(progress.stage, (next, prev) => {
 // the AI Notes tab once a note already exists and nothing is in flight (the
 // status chip owns the row's right slot while generating/failed). Clicking
 // reuses the notes-retry path, which re-runs generation from transcript.md.
+//
+// Also gated on `!isCapturing`: no note exists yet during capture today, so this
+// is currently a no-op guard, but the moment preview notes land mid-recording,
+// clicking Regenerate would delete the vault note and set `notes_in_progress`
+// while checkpoints keep rewriting transcript.md underneath it — `process_notes`
+// then bails on its `transcript_changed` check without ever clearing the flag,
+// and no checkpoint supersedes it, so the recording shows "Generating AI Notes"
+// forever until Stop. See issue #123.
 const showRegenerate = computed(
   () =>
     !!detail.value?.isLocal &&
     activeTab.value === 'note' &&
     !!detail.value?.note &&
     !!detail.value?.hasTranscript &&
-    !showStatusChip.value
+    !showStatusChip.value &&
+    !isCapturing.value
 );
 function onRegenerate(): void {
   void progress.retryNotes();
