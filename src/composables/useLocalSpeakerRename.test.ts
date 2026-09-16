@@ -104,6 +104,56 @@ describe('useLocalSpeakerRename', () => {
     expect(md.value).toBe(before);
   });
 
+  it('drops a stale rename result when the displayed recording changes mid-commit', async () => {
+    let resolveRename: (markdown: string) => void = () => {};
+    renameSpeaker.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRename = resolve;
+        })
+    );
+    const { rename, list, md, recordingId } = setup();
+    const listBefore = list.value.map((p) => ({ ...p }));
+    const mdBefore = md.value;
+
+    rename.startEdit(0);
+    rename.draft.value = 'Priya';
+    const commitPromise = rename.commit();
+
+    // The user navigates to a different recording before the rename resolves.
+    recordingId.value = 'some-other-recording';
+    resolveRename('---\n---\n\n**Priya** [00:00:00]\nHi\n');
+    await commitPromise;
+
+    expect(list.value).toEqual(listBefore);
+    expect(md.value).toBe(mdBefore);
+    expect(rename.saving.value).toBe(false);
+  });
+
+  it('does not clobber a newer edit session opened on another speaker while a rename is in flight', async () => {
+    let resolveRename: (markdown: string) => void = () => {};
+    renameSpeaker.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRename = resolve;
+        })
+    );
+    const { rename } = setup();
+
+    rename.startEdit(0);
+    rename.draft.value = 'Priya';
+    const commitPromise = rename.commit();
+
+    // Same recording, but the user opens a different speaker's edit field
+    // before the first rename resolves.
+    rename.startEdit(1);
+    resolveRename('---\n---\n\n**Priya** [00:00:00]\nHi\n');
+    await commitPromise;
+
+    expect(rename.editingId.value).toBe(1);
+    expect(rename.draft.value).toBe('Speaker 2');
+  });
+
   it('ignores a commit with no recording loaded', async () => {
     const { rename, recordingId } = setup();
     rename.startEdit(0);

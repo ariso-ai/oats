@@ -87,14 +87,25 @@ export function useLocalSpeakerRename(deps: {
     error.value = null;
     try {
       const markdown = await local.renameSpeaker(id, speakerId, label);
+      // The displayed recording can change while this request is in flight
+      // (user picks a different meeting before it resolves). Applying a
+      // stale result would clobber the new recording's speakers/transcript
+      // with the old one's — drop it on the floor instead. Same idiom as the
+      // reqId guard in MeetingDetailView's reloadLocalArtifact.
+      if (deps.recordingId.value !== id) return;
       // Patched from the command's own result rather than re-read: the label we
       // sent and the transcript it rendered are the authoritative pair.
       deps.speakers.value = deps.speakers.value.map((p) =>
         p.id === speakerId ? { ...p, label } : p
       );
       deps.transcript.value = markdown;
-      editingId.value = null;
-      draft.value = '';
+      // Only close the edit field if it's still on the speaker we just
+      // renamed — the user may have already opened a different speaker's
+      // edit while this request was in flight, and that shouldn't be clobbered.
+      if (editingId.value === speakerId) {
+        editingId.value = null;
+        draft.value = '';
+      }
     } catch (e) {
       // A Tauri command rejects with a bare string, so this keeps the backend's
       // own wording (e.g. the "predates structured transcripts" case).
