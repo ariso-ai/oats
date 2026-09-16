@@ -2406,6 +2406,16 @@ describe('MeetingDetailView local speaker rename', () => {
     ]);
   });
 
+  it('warns that existing AI Notes keep the old name until regenerated', async () => {
+    // A rename never rewrites generated note prose (spec non-goal), so without
+    // this line the transcript saying "Priya" while the note still says
+    // "Speaker 2" just reads as a bug.
+    await openPanel(localSpeakerDetail());
+    expect(q('.lsp-foot')?.textContent).toContain(
+      'Existing AI Notes keep the old name until you regenerate them.'
+    );
+  });
+
   it('renames on Enter and updates the panel and the Transcript tab', async () => {
     const w = await openPanel(localSpeakerDetail());
 

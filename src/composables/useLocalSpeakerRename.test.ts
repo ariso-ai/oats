@@ -130,6 +130,33 @@ describe('useLocalSpeakerRename', () => {
     expect(rename.saving.value).toBe(false);
   });
 
+  it('drops a stale rename *error* when the displayed recording changes mid-commit', async () => {
+    // Regression: the catch had no id guard, so a failure on meeting A could
+    // paint A's error banner into the panel after the user switched to
+    // meeting B (load() resets the panel, but nothing re-cleared the error).
+    let rejectRename: (reason: string) => void = () => {};
+    renameSpeaker.mockImplementation(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectRename = reject;
+        })
+    );
+    const { rename, recordingId } = setup();
+
+    rename.startEdit(0);
+    rename.draft.value = 'Priya';
+    const commitPromise = rename.commit();
+
+    // The user navigates to a different recording; load() resets the panel.
+    recordingId.value = 'some-other-recording';
+    rename.reset();
+    rejectRename('unknown speaker id: 0');
+    await commitPromise;
+
+    expect(rename.error.value).toBeNull();
+    expect(rename.saving.value).toBe(false);
+  });
+
   it('does not clobber a newer edit session opened on another speaker while a rename is in flight', async () => {
     let resolveRename: (markdown: string) => void = () => {};
     renameSpeaker.mockImplementation(

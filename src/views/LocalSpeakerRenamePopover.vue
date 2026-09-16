@@ -34,6 +34,14 @@
           <button v-else class="lsp-btn lsp-edit" type="button" @click="startEdit(s.id)">Rename</button>
         </li>
       </ul>
+
+      <!-- A rename re-renders the transcript but deliberately never rewrites
+           already-generated note prose (a find/replace over LLM output is too
+           collision-prone — see the spec's non-goals). Without this line the
+           mismatch just looks like a bug: the transcript says "Priya" and the
+           note still says "Speaker 2". Sits outside the scrolling list so it is
+           always visible. -->
+      <p class="lsp-foot">Existing AI Notes keep the old name until you regenerate them.</p>
     </div>
   </teleport>
 </template>
@@ -110,4 +118,6 @@ function startEdit(speakerId: number): void {
 .lsp-input { width: 140px; flex-shrink: 0; height: 32px; padding: 0 10px; border: 1px solid #d6d6d6; border-radius: 8px; font-family: inherit; font-size: 13px; }
 .lsp-input:focus { outline: none; border-color: #6c63c0; }
 .lsp-input:disabled { background: #f7f6f4; color: #9b9b9b; }
+
+.lsp-foot { margin: 0; padding: 9px 14px; border-top: 1px solid #e5e6e3; background: #faf9f7; font-size: 11px; line-height: 1.4; color: #6f6f6f; flex-shrink: 0; }
 </style>

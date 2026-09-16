@@ -107,10 +107,20 @@ export function useLocalSpeakerRename(deps: {
         draft.value = '';
       }
     } catch (e) {
+      // Same stale-meeting guard as the success path above. `load()` calls
+      // reset() on a meeting switch, so without this a rename that failed on
+      // meeting A would paint A's error banner into the panel the next time it
+      // is opened on meeting B.
+      if (deps.recordingId.value !== id) return;
       // A Tauri command rejects with a bare string, so this keeps the backend's
       // own wording (e.g. the "predates structured transcripts" case).
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
+      // Deliberately NOT id-guarded, unlike the two branches above. `saving`
+      // only ever gates this panel's own input; leaving it stuck `true` after a
+      // meeting switch would disable the field for good, which is a worse
+      // failure than the transient it would prevent — and `reset()` (called by
+      // `load()` on every switch) clears it anyway.
       saving.value = false;
     }
   }
