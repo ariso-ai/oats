@@ -1915,6 +1915,56 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
+    /// Regression for the self-deadlock this scheme has to avoid: an explicit
+    /// `append_to` that names the very id the fresh path would derive from
+    /// `created_at`. `append_recording_core` takes the recording lock for
+    /// `target_id`; when the target isn't actually appendable (no `Done` meta
+    /// + segments here) it falls back to `fresh_recording_core`, which takes
+    /// the recording lock for the *same* id. `tokio::sync::Mutex` is not
+    /// reentrant, so `append_recording_core` must `drop(append_guard)` before
+    /// calling the fallback — otherwise this hangs forever waiting on a lock
+    /// held by itself.
+    ///
+    /// Today's UI can never actually produce this state ("Continue this
+    /// meeting" always targets a *prior* recording, whose id necessarily
+    /// differs from the new session's derived id) — this test is defense in
+    /// depth so the `drop(append_guard)` guard survives future refactors
+    /// without anyone deleting it as unreachable.
+    #[tokio::test]
+    async fn append_to_its_own_id_falls_back_without_deadlocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let created_at = "2026-06-02T10:01:00.000Z";
+        let self_id = storage::sanitize_iso_to_id(created_at);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            finalize_core_with_target(
+                tmp.path(), b"bbb".to_vec(), "T".into(), created_at.into(), 15,
+                Some(self_id.clone()), false,
+            ),
+        )
+        .await
+        .expect("append-to-self must not deadlock");
+        let (r, h) = result.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // The fallback must produce a normal finished recording at that id,
+        // not silently error out.
+        assert_eq!(r.id, self_id);
+        assert_eq!(r.status, RecordingStatus::Done);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&self_id);
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Done);
+        assert!(dir.join("transcript.md").exists(), "transcript must have landed");
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
     #[tokio::test]
     async fn force_new_starts_fresh_recording_even_within_append_window() {
         let tmp = tempfile::tempdir().unwrap();
