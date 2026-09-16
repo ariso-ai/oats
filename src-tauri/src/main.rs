@@ -305,6 +305,17 @@ fn main() {
                 eprintln!("ensure vault: {e}");
             }
 
+            // No recorder and no notes task survives a relaunch, so settle every
+            // recording left mid-pipeline before any window can read it.
+            // Best-effort: log and continue.
+            match crate::vault::meta_root()
+                .and_then(|root| crate::storage::reconcile_interrupted_recordings(&root))
+            {
+                Ok(0) => {}
+                Ok(n) => eprintln!("reconciled {n} interrupted recording(s)"),
+                Err(e) => eprintln!("reconcile interrupted recordings: {e}"),
+            }
+
             // Managed state must exist before the tray is created: tray menu
             // rebuilds and the title refresher read RecordingState and
             // FeaturedMeetingState.

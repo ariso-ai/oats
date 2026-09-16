@@ -702,6 +702,69 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
     Ok(out)
 }
 
+/// Message stamped on a recording that oats was still capturing when it quit.
+pub const INTERRUPTED_RECORDING_ERROR: &str =
+    "oats quit while recording — audio up to the last checkpoint was kept";
+/// Message stamped on a recording that oats was still transcribing when it quit.
+pub const INTERRUPTED_TRANSCRIBE_ERROR: &str =
+    "oats quit while transcribing — the audio was kept, so Retry can transcribe it again";
+
+/// Settle every recording left mid-pipeline by a crash or a quit, at startup.
+/// No recorder and no notes task survives a relaunch, so an in-progress status
+/// on disk is always a lie.
+///
+/// `Recording` / `Transcribing` → `Failed` (audio retained). `Failed` is what
+/// unlocks the existing affordances: `retry_transcription_core` re-runs the full
+/// pipeline over the vault audio — whose `duration_seconds` checkpoints keep
+/// current — and `delete_local_recording` accepts it. Without this the recording
+/// is stranded: undeletable, un-retryable, and the detail poller never stops.
+/// `notes_in_progress` is cleared wherever it is set. Returns how many
+/// recordings changed.
+pub fn reconcile_interrupted_recordings(root: &Path) -> Result<usize, String> {
+    let dir = recordings_dir(root);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut changed = 0usize;
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read recordings dir: {e}"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Unreadable meta.json is skipped with the same tolerance as
+        // `list_recordings` — a junk folder must not block startup.
+        let Ok(mut meta) = read_meta(&path) else { continue };
+        let mut dirty = false;
+        match meta.status {
+            RecordingStatus::Recording => {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(INTERRUPTED_RECORDING_ERROR.to_string());
+                dirty = true;
+            }
+            RecordingStatus::Transcribing => {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(INTERRUPTED_TRANSCRIBE_ERROR.to_string());
+                dirty = true;
+            }
+            _ => {}
+        }
+        if meta.notes_in_progress {
+            meta.notes_in_progress = false;
+            dirty = true;
+        }
+        if dirty {
+            // Best-effort per recording: one unwritable meta.json must not stop
+            // the sweep over the rest.
+            if let Err(e) = write_meta(&path, &meta) {
+                eprintln!("reconcile {}: {e}", path.display());
+                continue;
+            }
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 /// Compute the RFC3339 wall-clock end of a clip given its start timestamp and
 /// duration. Returns `None` if `created_at` cannot be parsed or the resulting
 /// timestamp is out of range.
@@ -1398,5 +1461,54 @@ mod tests {
     #[test]
     fn mp3_duration_of_non_audio_is_zero() {
         assert_eq!(mp3_duration_ms(b"not audio at all"), 0);
+    }
+
+    #[test]
+    fn reconcile_fails_recordings_interrupted_by_a_quit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (id, status) in [
+            ("2026-06-01T10-00-00Z", RecordingStatus::Recording),
+            ("2026-06-02T10-00-00Z", RecordingStatus::Transcribing),
+            ("2026-06-03T10-00-00Z", RecordingStatus::Done),
+            ("2026-06-04T10-00-00Z", RecordingStatus::Failed),
+        ] {
+            let dir = create_recording_dir(root, id).unwrap();
+            let mut meta = meta_with(id, "2026-06-01T10:00:00Z");
+            meta.status = status;
+            write_meta(&dir, &meta).unwrap();
+        }
+
+        assert_eq!(reconcile_interrupted_recordings(root).unwrap(), 2);
+
+        let read = |id: &str| read_meta(&recordings_dir(root).join(id)).unwrap();
+        assert_eq!(read("2026-06-01T10-00-00Z").status, RecordingStatus::Failed);
+        assert!(read("2026-06-01T10-00-00Z").error.unwrap().contains("quit while recording"));
+        assert_eq!(read("2026-06-02T10-00-00Z").status, RecordingStatus::Failed);
+        assert_eq!(read("2026-06-03T10-00-00Z").status, RecordingStatus::Done, "untouched");
+        assert_eq!(read("2026-06-04T10-00-00Z").status, RecordingStatus::Failed);
+        assert!(read("2026-06-04T10-00-00Z").error.is_none(), "not re-stamped");
+    }
+
+    #[test]
+    fn reconcile_clears_a_stranded_notes_in_progress_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = create_recording_dir(root, "2026-06-03T10-00-00Z").unwrap();
+        let mut meta = meta_with("2026-06-03T10-00-00Z", "2026-06-03T10:00:00Z");
+        meta.status = RecordingStatus::Done;
+        meta.notes_in_progress = true;
+        write_meta(&dir, &meta).unwrap();
+
+        assert_eq!(reconcile_interrupted_recordings(root).unwrap(), 1);
+        let after = read_meta(&dir).unwrap();
+        assert!(!after.notes_in_progress, "no notes task survives a restart");
+        assert_eq!(after.status, RecordingStatus::Done, "status is not touched");
+    }
+
+    #[test]
+    fn reconcile_on_a_missing_recordings_dir_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(reconcile_interrupted_recordings(tmp.path()).unwrap(), 0);
     }
 }
