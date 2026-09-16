@@ -429,15 +429,24 @@ watch(
 // swallowed: a recording must never be interrupted by a preview failure.
 async function runCheckpoint(): Promise<void> {
   if (checkpointInFlight || isStopping.value) return;
-  const id = effectiveLocalRecordingId.value;
-  const startAt = recorder.startedAt.value;
-  if (!id || !startAt) return;
-  // Schedule the next one off the current clock BEFORE awaiting, so a
-  // long-running checkpoint doesn't queue up a burst behind it.
+  // Schedule the next one off the current clock BEFORE awaiting (so a
+  // long-running checkpoint doesn't queue up a burst behind it) and BEFORE the
+  // eligibility checks below, so a transient null id/startedAt can't wedge the
+  // watcher into re-entering on every subsequent tick.
   nextCheckpointAt =
     Math.floor(recorder.durationSeconds.value / CHECKPOINT_INTERVAL_S) * CHECKPOINT_INTERVAL_S +
     CHECKPOINT_INTERVAL_S;
-  const { bytes } = recorder.sliceFrom(lastCheckpointByte);
+  const id = effectiveLocalRecordingId.value;
+  const startAt = recorder.startedAt.value;
+  if (!id || !startAt) return;
+  const { bytes, startByte } = recorder.sliceFrom(lastCheckpointByte);
+  // `durationSeconds` is wall-clock-derived and not coupled to encoder byte
+  // growth, so a genuine audio-pipeline stall (device drop, callback
+  // starvation) can produce an empty slice at a 300s boundary. Rust's
+  // duplicate-ingest branch no-ops on a zero-length chunk, so this isn't a
+  // correctness fix — it just avoids an IPC round-trip and a disk read on the
+  // webview thread that is simultaneously encoding live audio.
+  if (bytes.length === 0) return;
   checkpointInFlight = true;
   try {
     const result = await local.checkpointRecording(
@@ -445,7 +454,7 @@ async function runCheckpoint(): Promise<void> {
       id,
       startAt,
       timestampTitle(startAt),
-      lastCheckpointByte,
+      startByte,
     );
     if (result.stale) {
       // Finalize (or an append) already owns this recording; nothing more to do.

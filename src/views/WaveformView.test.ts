@@ -59,6 +59,7 @@ vi.mock('../composables/useRecorder', () => ({
     encodedByteLength: () => encoded.bytes.length,
     sliceFrom: (startByte: number) => ({
       bytes: encoded.bytes.slice(startByte),
+      startByte,
       endByte: encoded.bytes.length,
     }),
   }),
@@ -1259,7 +1260,7 @@ describe('mid-recording checkpoints', () => {
     expect((checkpointRecording.mock.calls[1][0] as Uint8Array).length).toBe(2500);
   });
 
-  it('keeps at most one checkpoint in flight', async () => {
+  it('keeps at most one checkpoint in flight, and fires exactly one follow-up once it resolves', async () => {
     mount(WaveformView);
     await flushPromises();
     encoded.bytes = new Uint8Array(1000);
@@ -1274,9 +1275,16 @@ describe('mid-recording checkpoints', () => {
 
     release({ ingestedBytes: 1000, transcriptUpdated: true, stale: false });
     await flushPromises();
+    // New audio since the in-flight checkpoint's offset (1000), so the
+    // follow-up checkpoint carries a real, non-empty payload — the empty-bytes
+    // guard must not swallow it.
+    encoded.bytes = new Uint8Array(1500);
     recorderDuration.value = 601;
     await flushPromises();
     expect(checkpointRecording).toHaveBeenCalledTimes(2);
+    const [audio, , , , startByte] = checkpointRecording.mock.calls[1];
+    expect(startByte).toBe(1000);
+    expect((audio as Uint8Array).length).toBe(500);
   });
 
   it('never checkpoints a cloud recording', async () => {
@@ -1309,6 +1317,44 @@ describe('mid-recording checkpoints', () => {
     recorderDuration.value = 300;
     await flushPromises();
     expect(checkpointRecording).not.toHaveBeenCalled();
+  });
+
+  it('skips a checkpoint (without dropping its scheduled slot) when no new bytes were encoded', async () => {
+    mount(WaveformView);
+    await flushPromises();
+    // No growth: encoded.bytes stays empty, so the 300s checkpoint would carry
+    // a zero-length payload (e.g. a stalled audio pipeline).
+    recorderDuration.value = 300;
+    await flushPromises();
+    expect(checkpointRecording).not.toHaveBeenCalled();
+
+    // The schedule still advanced past the stall, so real audio at 600s fires.
+    encoded.bytes = new Uint8Array(1000);
+    recorderDuration.value = 600;
+    await flushPromises();
+    expect(checkpointRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it('never checkpoints a resumed session after a failed stop', async () => {
+    // Drive the real failed-upload -> Continue path (recorder://continue-recording),
+    // which only acts while uploadResult === 'failed' — not by poking internals.
+    stopRecording.mockResolvedValue(new Blob(['x'], { type: 'audio/mpeg' }));
+    finalizeRecording.mockRejectedValue(new Error('boom'));
+    const wrapper = mount(WaveformView);
+    await flushPromises();
+    await eventHandlers['tray://stop-recording']?.({});
+    await flushPromises();
+    expect(lastPhase()).toBe('failed');
+
+    eventHandlers['recorder://continue-recording']?.({ payload: undefined });
+    await flushPromises();
+    expect(lastPhase()).toBe('recording');
+
+    encoded.bytes = new Uint8Array(1000);
+    recorderDuration.value = 300;
+    await flushPromises();
+    expect(checkpointRecording).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
   it('stops scheduling checkpoints once Stop begins, and still sends the full blob', async () => {
