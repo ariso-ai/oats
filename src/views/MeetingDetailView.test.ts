@@ -111,6 +111,7 @@ function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
     actionItems: [],
     isLocal: false,
     audioClips: [],
+    localSpeakers: [],
     ...over,
   };
 }

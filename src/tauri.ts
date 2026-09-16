@@ -389,6 +389,14 @@ export interface ModelStatus {
   llmReady?: boolean;
 }
 
+/** One diarized voice in a local recording. `id` is stable across clip appends
+ *  (an appended clip's ids are offset, never renumbered), so it — not array
+ *  position — is what a rename matches on. */
+export interface Participant {
+  id: number;
+  label: string;
+}
+
 export const local = {
   finalizeRecording(
     audio: Uint8Array,
@@ -480,6 +488,17 @@ export const local = {
   /** Update a local recording's title in its meta.json (folder id unchanged). */
   renameRecording(id: string, title: string): Promise<void> {
     return invoke('rename_local_recording', { id, title });
+  },
+  /** List a local recording's diarized speakers (id + current label). Empty for
+   *  a recording with no diarized speech. */
+  listSpeakers(id: string): Promise<Participant[]> {
+    return invoke<Participant[]>('list_local_speakers', { id });
+  },
+  /** Rename one diarized speaker in a local recording, updating `meta.json`,
+   *  `segments.json`, and the re-rendered `transcript.md`. Resolves to that new
+   *  transcript markdown so the caller can patch its copy in place. */
+  renameSpeaker(id: string, speakerId: number, label: string): Promise<string> {
+    return invoke<string>('rename_local_speaker', { id, speakerId, label });
   },
   /** Permanently delete a local recording: its vault note + audio attachment
    *  and its whole `~/.ariso/recordings/<id>/` directory. Rejects while the

@@ -6,6 +6,7 @@ import {
   getBackendSetting,
   type NotesStatus,
   type RecordingSummary,
+  type Participant,
 } from '../tauri';
 import {
   useMeetingApi,
@@ -186,6 +187,10 @@ export interface MeetingDetail {
   durationSeconds?: number;
   note?: string;
   transcript?: string;
+  /** Local: this recording's diarized speakers (id + current label), the source
+   *  of the `**Speaker N**` labels in `transcript`. Renaming one rewrites both
+   *  on disk. Always empty for Ariso meetings. */
+  localSpeakers: Participant[];
   /** Ariso: one entry per recorded clip (oldest-first). Empty for local
    *  recordings and imported-transcript meetings. */
   audioClips: MeetingAudioClip[];
@@ -546,6 +551,8 @@ export class ArisoBackend implements Backend {
       hasTranscript: !!data.hasTranscript,
       hasIndividualNote: !!data.individual_note?.content,
       isLocal: false,
+      // Speaker *renaming* is a local surface; Ariso has speaker assignment instead.
+      localSpeakers: [],
       autoJoinScheduled: item.autoJoinScheduled ?? false,
       prepId: item.prepId,
       // The notes payload carries the authoritative status; fall back to the
@@ -677,13 +684,18 @@ export class LocalBackend implements Backend {
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
     // Local recordings have no rich summary — just the generated note and
     // transcript markdown on disk. Read whichever exist (missing → null).
-    const [note, transcript] = await Promise.all([
+    const [note, transcript, localSpeakers] = await Promise.all([
       item.files?.hasNote
         ? local.readRecordingFile(item.id, 'note').catch(() => null)
         : Promise.resolve(null),
       item.files?.hasTranscript
         ? local.readRecordingFile(item.id, 'transcript').catch(() => null)
         : Promise.resolve(null),
+      // Only a transcribed recording has diarized speakers, and a failure here
+      // must not cost the user the whole detail panel — it only hides the chip.
+      item.files?.hasTranscript
+        ? local.listSpeakers(item.id).catch(() => [])
+        : Promise.resolve([]),
     ]);
     return {
       id: item.id,
@@ -699,6 +711,7 @@ export class LocalBackend implements Backend {
       durationSeconds: item.durationSeconds,
       note: note ?? undefined,
       transcript: transcript ?? undefined,
+      localSpeakers,
       hasTranscript: !!item.files?.hasTranscript,
       autoJoinScheduled: false,
       audioClips: [],
