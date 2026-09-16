@@ -1834,11 +1834,14 @@ pub fn local_recording_status(
         meta.notes_error.as_deref(),
         meta.notes_in_progress,
     );
+    let preview_checkpoints = meta.preview.as_ref().map(|p| p.checkpoints).unwrap_or(0);
     Ok(crate::storage::RecordingStatusView {
         status: meta.status,
         has_transcript,
         has_note,
         notes_status,
+        preview_checkpoints,
+        notes_written: meta.notes_written,
     })
 }
 
@@ -3962,6 +3965,48 @@ mod tests {
     #[test]
     fn local_recording_status_rejects_bad_id() {
         assert!(local_recording_status("../escape".to_string()).is_err());
+    }
+
+    #[test]
+    fn local_recording_status_reports_preview_progress() {
+        // SAFETY: command tests run with --test-threads=1, so the process-wide
+        // ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.status = crate::storage::RecordingStatus::Recording;
+        meta.notes_written = Some("2026-06-02T10:05:00Z".into());
+        meta.preview = Some(crate::storage::PreviewState {
+            bytes_ingested: 4096,
+            duration_ms: 600_000,
+            checkpoints: 3,
+            notes_cursor: 12,
+            last_error: None,
+        });
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.preview_checkpoints, 3);
+        assert_eq!(view.notes_written.as_deref(), Some("2026-06-02T10:05:00Z"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn local_recording_status_reports_no_preview_for_an_ordinary_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-03T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.preview_checkpoints, 0);
+        assert_eq!(view.notes_written, None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[test]

@@ -224,6 +224,19 @@ pub struct RecordingStatusView {
     pub has_transcript: bool,
     pub has_note: bool,
     pub notes_status: NotesStatus,
+    /// Preview checkpoints committed so far (0 when the recording was never
+    /// checkpointed). A change while `status == Recording` is the frontend's
+    /// signal that the transcript grew.
+    #[serde(default)]
+    pub preview_checkpoints: u32,
+    /// RFC3339 time oats last wrote this recording's note. A change while
+    /// `status == Recording` means a new preview note landed.
+    ///
+    /// Deliberately no `skip_serializing_if`: the TS type is
+    /// `notesWritten: string | null`, so `None` must reach the frontend as
+    /// `null` rather than as a missing key.
+    #[serde(default)]
+    pub notes_written: Option<String>,
 }
 
 /// Metadata persisted next to a buffered pending upload (`<id>.json`), so a

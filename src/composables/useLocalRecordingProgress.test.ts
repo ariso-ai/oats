@@ -203,6 +203,43 @@ describe('useLocalRecordingProgress polling', () => {
     expect(recordingStatus).toHaveBeenCalledWith('rec-1');
   });
 
+  it('bumps contentRevision when a checkpoint lands mid-recording', async () => {
+    recordingStatus
+      .mockResolvedValueOnce(view({ status: 'recording', previewCheckpoints: 1 }))
+      .mockResolvedValueOnce(view({ status: 'recording', previewCheckpoints: 2 }))
+      .mockResolvedValueOnce(view({ status: 'recording', previewCheckpoints: 2 }))
+      .mockResolvedValueOnce(
+        view({ status: 'recording', previewCheckpoints: 2, notesWritten: '2026-09-15T10:05:00Z' })
+      );
+    const p = useLocalRecordingProgress(() => 'r1');
+    p.begin();
+    await vi.advanceTimersByTimeAsync(0); // 1st poll: seeds, no bump
+    expect(p.contentRevision.value).toBe(0);
+    await vi.advanceTimersByTimeAsync(2000); // 2nd: checkpoints 1 -> 2
+    expect(p.contentRevision.value).toBe(1);
+    await vi.advanceTimersByTimeAsync(2000); // 3rd: unchanged
+    expect(p.contentRevision.value).toBe(1);
+    await vi.advanceTimersByTimeAsync(2000); // 4th: a new preview note landed
+    expect(p.contentRevision.value).toBe(2);
+  });
+
+  it('does not bump contentRevision outside a recording', async () => {
+    recordingStatus
+      .mockResolvedValueOnce({
+        status: 'done', hasTranscript: true, hasNote: false,
+        notesStatus: 'pending', previewCheckpoints: 3, notesWritten: null,
+      })
+      .mockResolvedValueOnce({
+        status: 'done', hasTranscript: true, hasNote: true,
+        notesStatus: 'ready', previewCheckpoints: 3, notesWritten: '2026-09-15T10:30:00Z',
+      });
+    const p = useLocalRecordingProgress(() => 'r1');
+    p.begin();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.contentRevision.value).toBe(0);
+  });
+
   it('reset clears state and stops polling', async () => {
     recordingStatus.mockResolvedValue(view({ status: 'transcribing' }));
     const p = useLocalRecordingProgress(() => 'rec-1');

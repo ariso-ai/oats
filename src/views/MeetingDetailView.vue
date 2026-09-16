@@ -257,8 +257,9 @@
           <div
             v-if="detail.isLocal && localNoteMarkdown"
             class="md"
+            :title="isCapturing ? 'Available after the recording finishes' : undefined"
             @change="onNoteTaskToggle"
-            v-html="renderMarkdown(localNoteMarkdown, { interactiveTasks: true })"
+            v-html="renderMarkdown(localNoteMarkdown, { interactiveTasks: !isCapturing })"
           />
 
           <!-- Ariso rich content -->
@@ -956,6 +957,7 @@ const localNoteMarkdown = computed(() => stripFrontmatter(detail.value?.note ?? 
 // struck-through style. A rejected write (the note changed in Obsidian since it
 // was rendered) reverts the box and re-reads the note.
 async function onNoteTaskToggle(e: Event): Promise<void> {
+  if (isCapturing.value) return;
   const box = e.target;
   const d = detail.value;
   if (!(box instanceof HTMLInputElement) || !box.dataset.taskLine || !d?.isLocal) return;
@@ -992,6 +994,25 @@ watch(
     if (now && !prev && detail.value?.isLocal) void reloadLocalArtifact('note');
   }
 );
+
+// A checkpoint (or a preview note) landed while this recording is still
+// capturing. Re-read ONLY the two artifacts, preserving transcript scroll
+// position — deliberately NOT `load()` or `contentReady`, which refetch the list
+// and reload the whole pane, disrupting the My Note editor the user is likely
+// typing in during the meeting.
+watch(
+  () => progress.contentRevision.value,
+  () => {
+    if (!detail.value?.isLocal) return;
+    void reloadLocalArtifact('transcript');
+    void reloadLocalArtifact('note');
+  }
+);
+
+// Previews overwrite the vault note every checkpoint, and the final pass
+// overwrites it at Stop — so a tick would be lost. Consistent with the vault
+// invariant: oats owns the note body until the recording is finalized.
+const isCapturing = computed(() => progress.stage.value === 'recording');
 
 // Lazy audio loader pinned to the backend that loaded the detail (a Settings
 // backend flip mid-view must not route the fetch through the other backend).
