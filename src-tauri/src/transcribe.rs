@@ -631,11 +631,12 @@ async fn fresh_recording_core(
     };
 
     // Persist the audio into the vault first so it is never lost, even if STT
-    // fails. The attachment is this recording's only audio home. On an in-place
-    // rewrite (a retry re-runs this for the same dir), reuse the existing
-    // attachment rather than deriving a fresh unique name — otherwise every
-    // retry would orphan the prior file and repoint an existing note's embed at
-    // a duplicate. The name derives from the *effective* title resolved above.
+    // fails. The attachment is this recording's only audio home. On an
+    // in-place rewrite (a retry, or a Stop after mid-recording checkpoints),
+    // reuse the existing attachment rather than deriving a fresh unique
+    // name — otherwise every rewrite would orphan the prior file and repoint
+    // an existing note's embed at a duplicate. The name derives from the
+    // *effective* title resolved above.
     let audio_file = match existing.and_then(|m| m.audio_file) {
         Some(existing) => existing, // in-place rewrite (retry): keep the same attachment
         None => format!(
@@ -2990,5 +2991,66 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         unsafe { std::env::remove_var("ARISO_ROOT"); }
         assert!(!dir.join("checkpoint-clip.mp3").exists());
+    }
+
+    /// The end state is unchanged (§ "Goal"): finalizing a checkpointed
+    /// recording must produce the same artifacts as finalizing the same full
+    /// audio with no checkpoints at all.
+    #[tokio::test]
+    async fn finalize_after_checkpoints_matches_finalize_without_them() {
+        let json = r#"{"language":"en","durationSeconds":5.0,"segments":[{"speaker":"model-speaker-0","text":"hello there","start":0.0,"end":2.0},{"speaker":"model-speaker-1","text":"hi back","start":2.0,"end":4.0}]}"#;
+        let a = mp3_chunk(100);
+        let b = mp3_chunk(100);
+        let mut full = a.clone();
+        full.extend_from_slice(&b);
+
+        // (1) Checkpointed, then finalized.
+        let checkpointed = tempfile::tempdir().unwrap();
+        let stub = write_stub(checkpointed.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", checkpointed.path()); }
+        write_stub_meta(checkpointed.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        checkpoint_core(checkpointed.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        checkpoint_core(checkpointed.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", a.len() as u64, &b)
+            .await.unwrap();
+        let (res_a, notes_a) = finalize_core(
+            checkpointed.path(), full.clone(), "T".into(), "2026-06-02T14:30:05.000Z".into(), 5,
+        ).await.unwrap();
+        notes_a.await.unwrap();
+        let dir_a = storage::recordings_dir(checkpointed.path()).join(&res_a.id);
+        let segments_a = std::fs::read_to_string(dir_a.join("segments.json")).unwrap();
+        let transcript_a = std::fs::read_to_string(dir_a.join("transcript.md")).unwrap();
+        let meta_a = read_meta(&dir_a).unwrap();
+        // Vault reads resolve via ARISO_ROOT, so this must run before it is
+        // torn down below (and before the second recording repoints it at a
+        // different tempdir).
+        assert_eq!(
+            crate::vault::read_audio(meta_a.audio_file.as_ref().unwrap()).unwrap(),
+            full,
+            "the checkpoint's attachment is reused, not orphaned",
+        );
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        // (2) The same audio, never checkpointed.
+        let plain = tempfile::tempdir().unwrap();
+        let stub = write_stub(plain.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", plain.path()); }
+        let (res_b, notes_b) = finalize_core(
+            plain.path(), full.clone(), "T".into(), "2026-06-02T14:30:05.000Z".into(), 5,
+        ).await.unwrap();
+        notes_b.await.unwrap();
+        let dir_b = storage::recordings_dir(plain.path()).join(&res_b.id);
+        let segments_b = std::fs::read_to_string(dir_b.join("segments.json")).unwrap();
+        let transcript_b = std::fs::read_to_string(dir_b.join("transcript.md")).unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert_eq!(segments_a, segments_b, "segments.json must be byte-identical");
+        assert_eq!(transcript_a, transcript_b, "transcript.md must be byte-identical");
+        assert!(meta_a.preview.is_none(), "preview state is dropped at Stop");
+        assert_eq!(meta_a.status, RecordingStatus::Done);
     }
 }
