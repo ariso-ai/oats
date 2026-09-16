@@ -44,6 +44,7 @@ function makeDetail(over: Partial<MeetingDetail> = {}): MeetingDetail {
     participants: [{ id: 1, name: 'Ana', email: 'ana@x.com', role: 'host', self: true }],
     audioSpeakers: [],
     audioClips: [],
+    localSpeakers: [],
     visibility: 'private',
     shareMeetingNotesToPublic: 'off',
     ...over,
