@@ -263,6 +263,7 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
             return;
         }
         meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
+        meta.notes_in_progress = false;
         let _ = storage::write_meta(&dir, &meta);
         return;
     }
@@ -276,6 +277,7 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         Ok(output) if output.notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
+            meta.notes_in_progress = false;
             let _ = storage::write_meta(&dir, &meta);
         }
         Ok(output) => {
@@ -284,11 +286,15 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                 // Legacy recording with no vault audio: keep the old location so
                 // its note stays alongside its audio.
                 None => {
-                    if let Err(e) = storage::write_notes(&dir, &output.notes) {
-                        eprintln!("write notes: {e}");
-                        meta.notes_error = Some(e);
-                        let _ = storage::write_meta(&dir, &meta);
+                    match storage::write_notes(&dir, &output.notes) {
+                        Ok(()) => meta.notes_error = None,
+                        Err(e) => {
+                            eprintln!("write notes: {e}");
+                            meta.notes_error = Some(e);
+                        }
                     }
+                    meta.notes_in_progress = false;
+                    let _ = storage::write_meta(&dir, &meta);
                     return;
                 }
             };
@@ -296,6 +302,7 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
             if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &output.notes) {
                 eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
+                meta.notes_in_progress = false;
                 let _ = storage::write_meta(&dir, &meta);
                 return;
             }
@@ -304,11 +311,13 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
             maybe_apply_generated_title(&mut meta, &audio_file, output.title);
             meta.notes_error = None;
             meta.notes_written = Some(now_rfc3339());
+            meta.notes_in_progress = false;
             let _ = storage::write_meta(&dir, &meta);
         }
         Err(e) => {
             eprintln!("notes generation: {e}");
             meta.notes_error = Some(e);
+            meta.notes_in_progress = false;
             let _ = storage::write_meta(&dir, &meta);
         }
     }
@@ -433,6 +442,7 @@ async fn fresh_recording_core(
         last_clip_end_at: None,
         audio_file: Some(audio_file.clone()),
         notes_written: None,
+        notes_in_progress: false,
         title_is_default,
     };
     storage::write_meta(&dir, &meta)?;
@@ -451,6 +461,10 @@ async fn fresh_recording_core(
             })?;
             let md = storage::render_markdown(&meta, &result.segments);
             storage::write_transcript(&dir, &md)?;
+            // Truthful status from the instant the recording reads `Done`: a
+            // preview note may already be in the vault, and `derive_notes_status`
+            // would otherwise call this ready before the real notes exist.
+            meta.notes_in_progress = true;
             meta.status = RecordingStatus::Done;
             storage::write_meta(&dir, &meta)?;
 
@@ -535,6 +549,7 @@ fn save_failed_clip(
                 last_clip_end_at: None,
                 audio_file,
                 notes_written: None,
+                notes_in_progress: false,
                 title_is_default: false,
             };
             let _ = storage::write_meta(&dir, &meta);
@@ -646,6 +661,7 @@ async fn append_recording_core(
     // Clear any stale notes_error from a prior failed attempt (mirrors
     // `retry_notes_core`) and commit: status Done, written last.
     meta.notes_error = None;
+    meta.notes_in_progress = true;
     meta.status = RecordingStatus::Done;
     storage::write_meta(&dir, &meta)?;
     let _ = std::fs::remove_file(&clip_path);
@@ -714,6 +730,7 @@ pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, S
     let mut meta = storage::read_meta(&dir)?;
     meta.notes_error = None;
     meta.notes_written = None;
+    meta.notes_in_progress = true;
     storage::write_meta(&dir, &meta)?;
     // Clear the stale note so regeneration is observable. Remove the vault note
     // (new recordings) and any legacy `~/.ariso/ari-note.md` (pre-feature ones).
@@ -1108,6 +1125,52 @@ mod tests {
         assert_eq!(seg.participants[0].label, "Speaker 1");
     }
 
+    #[tokio::test]
+    async fn finalize_clears_notes_in_progress_when_notes_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        // Set before the detached task is spawned, so the status is honest from
+        // the instant the recording flips to Done.
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(!read_meta(&dir).unwrap().notes_in_progress);
+    }
+
+    #[tokio::test]
+    async fn failed_notes_also_clear_notes_in_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json).with_notes(StubOutcome::failure("boom")),
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        assert!(!meta.notes_in_progress);
+        assert!(meta.notes_error.is_some());
+    }
+
     /// Issue #355: a local recording gets a `meta.json` stub at capture start,
     /// so the user can rename it while it is still recording. Finalize must
     /// treat that rename as intentional instead of stamping the frontend's
@@ -1137,6 +1200,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         }).unwrap();
 
@@ -1195,6 +1259,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some(prior_audio.into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         }).unwrap();
 
@@ -1240,6 +1305,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: true,
         }).unwrap();
 
@@ -1437,6 +1503,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
@@ -1470,7 +1537,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1494,7 +1561,7 @@ mod tests {
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1535,7 +1602,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1922,7 +1989,7 @@ mod tests {
             duration_seconds: 60, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2092,7 +2159,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2119,7 +2186,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2232,6 +2299,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some("2026-06-02 User Title.mp3".into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 User Title.mp3", Some("Generated".into()));
@@ -2255,6 +2323,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some("2026-06-02 default.mp3".into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: true,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", None);
@@ -2278,6 +2347,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some("2026-06-02 default.mp3".into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: true,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", Some("   ".to_string()));

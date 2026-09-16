@@ -368,6 +368,10 @@ export interface RecordingStatusView {
   hasTranscript: boolean;
   hasNote: boolean;
   notesStatus: NotesStatus;
+  /** Preview checkpoints committed so far (0 outside a checkpointed recording). */
+  previewCheckpoints: number;
+  /** RFC3339 time oats last wrote this recording's note, or null. */
+  notesWritten: string | null;
 }
 
 export interface VaultTaskGroup {

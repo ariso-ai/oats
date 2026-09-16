@@ -39,11 +39,18 @@ pub enum NotesStatus {
 pub const NO_SPEECH_NOTES_ERROR: &str =
     "no speech detected in this recording — notes generation skipped";
 
-/// Classify AI-notes generation from the note file's presence and any recorded
-/// `notes_error`. A present `ari-note.md` always means success (a stale error
-/// from a prior attempt is ignored).
-pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
-    if has_note {
+/// Classify AI-notes generation from the note file's presence, any recorded
+/// `notes_error`, and whether a run is currently in flight. An in-flight run
+/// outranks a present note: during a checkpointed recording the note on disk is
+/// a preview, and the final pass will replace it.
+pub fn derive_notes_status(
+    has_note: bool,
+    notes_error: Option<&str>,
+    notes_in_progress: bool,
+) -> NotesStatus {
+    if notes_in_progress {
+        NotesStatus::Pending
+    } else if has_note {
         NotesStatus::Ready
     } else if notes_error == Some(NO_SPEECH_NOTES_ERROR) {
         NotesStatus::EmptyTranscript
@@ -116,6 +123,15 @@ pub struct RecordingMeta {
     /// auto-regeneration guard); v1 does not branch on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_written: Option<String>,
+    /// True from the moment a notes run is spawned until it writes an outcome.
+    /// Without it, a recording that already carries a *preview* note (written
+    /// during capture) reads as "notes ready" the instant Stop flips it to
+    /// `Done` — the poller stops before the final notes land, and the delete
+    /// guard lets the user delete out from under the running pass. A superseded
+    /// run leaves the flag to the run that superseded it. Absent on pre-feature
+    /// meta.json (migrates to `false`).
+    #[serde(default)]
+    pub notes_in_progress: bool,
     /// True while `title` is still the auto-generated default (the frontend
     /// timestamp label). Set when a fresh recording is created; cleared when the
     /// user renames it or when AI notes regenerate the title. Absent on
@@ -152,6 +168,11 @@ pub struct RecordingSummary {
     /// generating. Like `has_note`, this layer only sees the legacy
     /// `ari-note.md`; the command layer's vault overlay upgrades it to `Ready`.
     pub notes_status: NotesStatus,
+    /// Mirrors `RecordingMeta.notes_in_progress`. Not serialized to the
+    /// frontend; the command layer's vault overlay reads it to decide whether
+    /// a present vault note may upgrade this row to `Ready`.
+    #[serde(skip)]
+    pub notes_in_progress: bool,
     /// The recording's vault audio attachment name (from meta), used by the
     /// command layer to verify the attachment still exists. Not serialized to
     /// the frontend.
@@ -629,7 +650,12 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                         || recording_dir.join("recording.mp3").is_file(),
                     has_note,
                     has_transcript: recording_dir.join("transcript.md").is_file(),
-                    notes_status: derive_notes_status(has_note, m.notes_error.as_deref()),
+                    notes_status: derive_notes_status(
+                        has_note,
+                        m.notes_error.as_deref(),
+                        m.notes_in_progress,
+                    ),
+                    notes_in_progress: m.notes_in_progress,
                     audio_file: m.audio_file.clone(),
                 });
             }
@@ -770,7 +796,7 @@ mod tests {
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         }
     }
 
@@ -975,6 +1001,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         };
         let segments = vec![
@@ -997,7 +1024,7 @@ mod tests {
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -1126,19 +1153,19 @@ mod tests {
 
     #[test]
     fn derive_notes_status_ready_when_note_present() {
-        assert_eq!(derive_notes_status(true, None), NotesStatus::Ready);
+        assert_eq!(derive_notes_status(true, None, false), NotesStatus::Ready);
         // A present note wins even if a stale error lingers.
-        assert_eq!(derive_notes_status(true, Some("boom")), NotesStatus::Ready);
+        assert_eq!(derive_notes_status(true, Some("boom"), false), NotesStatus::Ready);
     }
 
     #[test]
     fn derive_notes_status_failed_when_error_and_no_note() {
-        assert_eq!(derive_notes_status(false, Some("boom")), NotesStatus::Failed);
+        assert_eq!(derive_notes_status(false, Some("boom"), false), NotesStatus::Failed);
     }
 
     #[test]
     fn derive_notes_status_pending_when_no_note_no_error() {
-        assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+        assert_eq!(derive_notes_status(false, None, false), NotesStatus::Pending);
     }
 
     #[test]
@@ -1146,8 +1173,48 @@ mod tests {
         // A recording with nothing said isn't a failure to report and retry —
         // the UI names it for what it is.
         assert_eq!(
-            derive_notes_status(false, Some(NO_SPEECH_NOTES_ERROR)),
+            derive_notes_status(false, Some(NO_SPEECH_NOTES_ERROR), false),
             NotesStatus::EmptyTranscript
+        );
+    }
+
+    #[test]
+    fn notes_in_progress_wins_over_a_present_note() {
+        // The final pass is still running over the full audio while a preview
+        // note sits in the vault: the UI must keep polling, not call it ready.
+        assert_eq!(
+            derive_notes_status(true, None, true),
+            NotesStatus::Pending
+        );
+        assert_eq!(
+            derive_notes_status(true, None, false),
+            NotesStatus::Ready
+        );
+    }
+
+    #[test]
+    fn notes_in_progress_defaults_false_when_absent() {
+        let json = r#"{"id":"x","title":"T","createdAt":"2026-06-02T14:30:05.000Z","durationSeconds":12,"status":"done"}"#;
+        let meta: RecordingMeta = serde_json::from_str(json).unwrap();
+        assert!(!meta.notes_in_progress);
+    }
+
+    #[test]
+    fn a_recording_with_notes_in_flight_reads_as_pending_for_the_delete_guard() {
+        // `delete_local_recording` refuses a `Done` recording whose notes are
+        // Pending, precisely so a detached notes task cannot re-create a vault
+        // note after the delete. A preview note being present must not defeat it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = create_recording_dir(tmp.path(), "2026-06-02T14-30-05Z").unwrap();
+        let mut meta = meta_with("2026-06-02T14-30-05Z", "2026-06-02T14:30:05Z");
+        meta.status = RecordingStatus::Done;
+        meta.notes_in_progress = true;
+        write_meta(&dir, &meta).unwrap();
+
+        let m = read_meta(&dir).unwrap();
+        assert_eq!(
+            derive_notes_status(/* has_note */ true, m.notes_error.as_deref(), m.notes_in_progress),
+            NotesStatus::Pending,
         );
     }
 
@@ -1196,6 +1263,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         };
         write_meta(&dir, &meta).unwrap();

@@ -17,7 +17,10 @@ import { deriveStage, useLocalRecordingProgress } from './useLocalRecordingProgr
 import type { RecordingStatusView } from '../tauri';
 
 function view(over: Partial<RecordingStatusView> = {}): RecordingStatusView {
-  return { status: 'done', hasTranscript: false, hasNote: false, notesStatus: 'pending', ...over };
+  return {
+    status: 'done', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    previewCheckpoints: 0, notesWritten: null, ...over,
+  };
 }
 
 describe('deriveStage', () => {
@@ -39,6 +42,8 @@ describe('deriveStage', () => {
         hasTranscript: false,
         hasNote: false,
         notesStatus: 'pending',
+        previewCheckpoints: 0,
+        notesWritten: null,
       }),
     ).toBe('recording');
   });
@@ -59,6 +64,18 @@ describe('deriveStage', () => {
   });
   it('maps done+note ready to ready', () => {
     expect(deriveStage(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready' }))).toBe('ready');
+  });
+  it('reports notes-pending while the final pass runs, even with a preview note', () => {
+    expect(
+      deriveStage({
+        status: 'done',
+        hasTranscript: true,
+        hasNote: true,
+        notesStatus: 'pending',
+        previewCheckpoints: 2,
+        notesWritten: '2026-09-15T10:00:00Z',
+      }),
+    ).toBe('notes-pending');
   });
 });
 

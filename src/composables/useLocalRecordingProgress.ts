@@ -27,6 +27,9 @@ export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (s.status === 'recording') return 'recording';
   if (s.status === 'transcribing') return 'transcribing';
   // status === 'done'
+  // A pending run outranks a present note: during a checkpointed recording the
+  // note on disk is a preview, and the final pass will replace it.
+  if (s.notesStatus === 'pending') return 'notes-pending';
   if (s.hasNote || s.notesStatus === 'ready') return 'ready';
   if (s.notesStatus === 'empty-transcript') return 'notes-empty-transcript';
   if (s.notesStatus === 'failed') return 'notes-failed';
@@ -126,7 +129,10 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     // Optimistic: show "Generating Transcript" immediately. Poll only AFTER the
     // retry RPC resolves — until then the backend still reports the prior
     // terminal state, and a poll would clobber the optimistic stage and stop.
-    status.value = { status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending' };
+    status.value = {
+      status: 'transcribing', hasTranscript: false, hasNote: false,
+      notesStatus: 'pending', previewCheckpoints: 0, notesWritten: null,
+    };
     try {
       await local.retryTranscription(id);
     } catch (e) {
@@ -144,7 +150,10 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     // Optimistic: show "Generating AI Notes" immediately. Poll only AFTER the
     // retry RPC resolves (it clears notes_error), so the first poll reflects the
     // regenerating state instead of the prior failure.
-    status.value = { status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending' };
+    status.value = {
+      status: 'done', hasTranscript: true, hasNote: false,
+      notesStatus: 'pending', previewCheckpoints: 0, notesWritten: null,
+    };
     try {
       await local.retryNotes(id);
     } catch (e) {

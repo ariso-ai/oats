@@ -1758,8 +1758,11 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     for s in &mut summaries {
         if vault_notes.contains_key(&s.id) {
             s.has_note = true;
-            // A present note always wins over a stale `notes_error`.
-            s.notes_status = crate::storage::NotesStatus::Ready;
+            // A present note wins over a stale `notes_error` — but not over a
+            // notes run that is still in flight (the note is a preview).
+            if !s.notes_in_progress {
+                s.notes_status = crate::storage::NotesStatus::Ready;
+            }
         }
         if let Some(af) = &s.audio_file {
             // New recording: audio lives in the vault; reflect real existence
@@ -1826,7 +1829,11 @@ pub fn local_recording_status(
     let has_note =
         dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
     let has_transcript = dir.join("transcript.md").is_file();
-    let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+    let notes_status = crate::storage::derive_notes_status(
+        has_note,
+        meta.notes_error.as_deref(),
+        meta.notes_in_progress,
+    );
     Ok(crate::storage::RecordingStatusView {
         status: meta.status,
         has_transcript,
@@ -2353,6 +2360,7 @@ pub fn local_begin_recording(
         // Audio lands in the vault at finalize; there is nothing to point at yet.
         audio_file: None,
         notes_written: None,
+        notes_in_progress: false,
         title_is_default: true,
     };
     crate::storage::write_meta(&dir, &meta)
@@ -2390,8 +2398,11 @@ pub fn delete_local_recording(id: String) -> Result<(), String> {
         // misread as notes-pending and become permanently undeletable.
         let has_note =
             dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
-        let notes_status =
-            crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+        let notes_status = crate::storage::derive_notes_status(
+            has_note,
+            meta.notes_error.as_deref(),
+            meta.notes_in_progress,
+        );
         if notes_status == crate::storage::NotesStatus::Pending {
             return Err(
                 "AI notes are still generating for this recording — try again once they finish"
@@ -3360,6 +3371,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         }
     }
@@ -3900,6 +3912,7 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
@@ -3973,6 +3986,29 @@ mod tests {
             list.iter().find(|s| s.id == id).unwrap().notes_status,
             crate::storage::NotesStatus::Ready
         );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_local_recordings_keeps_pending_while_notes_are_in_flight() {
+        // SAFETY: command tests run with --test-threads=1, so the process-wide
+        // ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        // A preview note in the vault, with the final pass still running.
+        meta.notes_in_progress = true;
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "preview").unwrap();
+
+        let list = list_local_recordings().unwrap();
+        let row = list.iter().find(|s| s.id == id).unwrap();
+        assert!(row.has_note);
+        assert_eq!(row.notes_status, crate::storage::NotesStatus::Pending);
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
