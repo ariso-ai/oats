@@ -306,3 +306,51 @@ describe('useRecorder mic native capture', () => {
     await rec.stopRecording();
   });
 });
+
+describe('checkpoint slicing', () => {
+  it('reports the encoded byte length and slices from an offset', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    // The stubbed encoder emits one byte per frame.
+    fireAudioFrame();
+    fireAudioFrame();
+    fireAudioFrame();
+    expect(rec.encodedByteLength()).toBe(3);
+
+    const first = rec.sliceFrom(0);
+    expect(first.bytes.length).toBe(3);
+    expect(first.endByte).toBe(3);
+
+    fireAudioFrame();
+    fireAudioFrame();
+    const next = rec.sliceFrom(first.endByte);
+    expect(next.bytes.length).toBe(2);
+    expect(next.endByte).toBe(5);
+  });
+
+  // The invariant Rust depends on: consecutive slices partition the encoded
+  // stream with no gap and no overlap, so the bytes appended to the vault
+  // attachment reconstruct the recording exactly.
+  it('partitions the stream across consecutive slices', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    for (let i = 0; i < 4; i++) fireAudioFrame();
+    const a = rec.sliceFrom(0);
+    for (let i = 0; i < 3; i++) fireAudioFrame();
+    const b = rec.sliceFrom(a.endByte);
+
+    expect(a.bytes.length + b.bytes.length).toBe(rec.encodedByteLength());
+    expect(b.endByte).toBe(7);
+  });
+
+  it('returns an empty slice when nothing new has been encoded', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    fireAudioFrame();
+    fireAudioFrame();
+    const all = rec.sliceFrom(0);
+    const again = rec.sliceFrom(all.endByte);
+    expect(again.bytes.length).toBe(0);
+    expect(again.endByte).toBe(2);
+  });
+});

@@ -515,6 +515,46 @@ export function useRecorder() {
     frameLevels.value = [];
   }
 
+  /** Total mp3 bytes the encoder has emitted so far this session. */
+  function encodedByteLength(): number {
+    let total = 0;
+    for (const chunk of mp3Chunks) total += chunk.length;
+    return total;
+  }
+
+  /**
+   * The encoded bytes from `startByte` up to the latest WHOLE `mp3Chunks` entry.
+   *
+   * Slices are cut only at entry boundaries (complete encoder outputs), never at
+   * an arbitrary byte, so the bytes handed to `local_checkpoint_recording`
+   * always begin on an MP3 frame — which is what lets Rust concatenate them
+   * straight onto the vault attachment and measure them with
+   * `storage::mp3_duration_ms`. `startByte` always comes back from Rust as a
+   * previous `endByte`, so it is already boundary-aligned; an entry that
+   * straddles it (only reachable via a bug) is kept whole rather than split.
+   */
+  function sliceFrom(startByte: number): { bytes: Uint8Array; endByte: number } {
+    let offset = 0;
+    const parts: Int8Array[] = [];
+    let endByte = startByte;
+    for (const chunk of mp3Chunks) {
+      const chunkStart = offset;
+      offset += chunk.length;
+      if (chunkStart < startByte) continue; // already ingested
+      parts.push(chunk);
+      endByte = offset;
+    }
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const bytes = new Uint8Array(total);
+    let written = 0;
+    for (const p of parts) {
+      bytes.set(new Uint8Array(p.buffer, p.byteOffset, p.length), written);
+      written += p.length;
+    }
+    return { bytes, endByte };
+  }
+
   return {
     isRecording,
     isPaused,
@@ -529,5 +569,7 @@ export function useRecorder() {
     pauseRecording,
     resumeRecording,
     stopRecording,
+    encodedByteLength,
+    sliceFrom,
   };
 }
