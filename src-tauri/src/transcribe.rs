@@ -466,11 +466,77 @@ async fn checkpoint_locked(
     meta.duration_seconds = preview.duration_ms / 1000;
     meta.preview = Some(preview.clone());
     storage::write_meta(dir, &meta)?;
-    let _ = chunk_start_ms; // Task 5 offsets the chunk's segments by this
+
+    // 4. Transcribe just this chunk, from a temp file, so a failure can never
+    // touch the recording's own audio.
+    let models = storage::models_dir(&storage::ariso_root()?);
+    let clip_path = dir.join("checkpoint-clip.mp3");
+    if let Err(e) = std::fs::write(&clip_path, new_bytes) {
+        preview.last_error = Some(format!("write checkpoint clip: {e}"));
+        meta.preview = Some(preview.clone());
+        let _ = storage::write_meta(dir, &meta);
+        return Ok(CheckpointResult {
+            ingested_bytes: preview.bytes_ingested,
+            transcript_updated: false,
+            stale: false,
+        });
+    }
+    let transcribed = run_transcribe(&clip_path, &models).await;
+    let _ = std::fs::remove_file(&clip_path);
+
+    let result = match transcribed {
+        Ok(r) => r,
+        Err(e) => {
+            // The audio is persisted and the clock has advanced, so later chunks
+            // keep correct timestamps; the preview transcript simply has a gap
+            // for this window, and the final full pass covers it.
+            eprintln!("checkpoint transcription: {e}");
+            preview.last_error = Some(e);
+            meta.preview = Some(preview.clone());
+            let _ = storage::write_meta(dir, &meta);
+            return Ok(CheckpointResult {
+                ingested_bytes: preview.bytes_ingested,
+                transcript_updated: false,
+                stale: false,
+            });
+        }
+    };
+
+    // Stitch the chunk past the existing preview content, exactly as an append
+    // does: offset its times by the audio already ingested and its speaker ids
+    // past every id in use. Cross-chunk speaker reconciliation is deliberately
+    // out of scope — the final full pass is one diarization run and fixes it.
+    let mut existing = storage::read_segments(dir)?.unwrap_or(storage::SegmentsFile {
+        language: None,
+        participants: vec![],
+        segments: vec![],
+    });
+    let speaker_offset = storage::next_speaker_offset(&existing);
+    let time_offset = chunk_start_ms as f64 / 1000.0;
+    let mut chunk_segments = storage::offset_segments(&result.segments, time_offset, speaker_offset);
+    let mut chunk_participants = storage::offset_participants(&result.participants, speaker_offset);
+    existing.segments.append(&mut chunk_segments);
+    existing.participants.append(&mut chunk_participants);
+    if existing.language.is_none() {
+        existing.language = Some(result.language.clone());
+    }
+
+    meta.participants = existing.participants.clone();
+    if meta.language.is_none() {
+        meta.language = Some(result.language.clone());
+    }
+    storage::write_segments(dir, &existing)?;
+    let md = storage::render_markdown(&meta, &existing.segments);
+    storage::write_transcript(dir, &md)?;
+
+    preview.checkpoints += 1;
+    preview.last_error = None;
+    meta.preview = Some(preview.clone());
+    storage::write_meta(dir, &meta)?;
 
     Ok(CheckpointResult {
         ingested_bytes: preview.bytes_ingested,
-        transcript_updated: false,
+        transcript_updated: true,
         stale: false,
     })
 }
@@ -2835,5 +2901,94 @@ mod tests {
         let err = checkpoint_core(tmp.path(), "../escape", "2026-06-02T14:30:05.000Z", "T", 0, b"x")
             .await.unwrap_err();
         assert!(err.contains("invalid recording id"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_offsets_segments_and_renders_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.3,"segments":[{"speaker":"model-speaker-0","text":"first half","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(100); // 2612 ms
+        let b = mp3_chunk(100);
+
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T",
+            a.len() as u64, &b,
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(res.transcript_updated);
+        let seg = storage::read_segments(&dir).unwrap().expect("segments.json");
+        assert_eq!(seg.segments.len(), 2);
+        assert_eq!(seg.segments[0].speaker, 0);
+        assert_eq!(seg.segments[0].start, 0.0);
+        // Chunk 2 starts at chunk 1's frame-derived duration, and its speaker
+        // ids are offset past chunk 1's so they stay distinct.
+        assert_eq!(seg.segments[1].speaker, 1);
+        assert!((seg.segments[1].start - 2.612).abs() < 0.001, "{:?}", seg.segments[1]);
+        assert_eq!(seg.participants.len(), 2);
+
+        let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        // `offset_participants` shifts ids but COPIES labels, so both chunks
+        // render under "Speaker 1" even though their ids differ. That is the
+        // spec's accepted preview limitation — cross-checkpoint speaker
+        // reconciliation is an explicit non-goal, fixed by the final full pass.
+        // Do not "fix" this by relabelling: the append machinery is reused as-is.
+        assert_eq!(md.matches("**Speaker 1**").count(), 2, "{md}");
+        assert_eq!(md.matches("first half").count(), 2, "{md}");
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.preview.unwrap().checkpoints, 2);
+        assert_eq!(meta.status, RecordingStatus::Recording);
+    }
+
+    #[tokio::test]
+    async fn a_failed_chunk_still_persists_audio_and_advances_the_clock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("chunk boom"));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(100);
+
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a,
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert!(!res.transcript_updated);
+        assert_eq!(res.ingested_bytes, a.len() as u64, "the offset still advances");
+        let meta = read_meta(&dir).unwrap();
+        // Vault reads resolve via ARISO_ROOT, so it must stay set until every
+        // vault-touching assertion below has run.
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), a);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        let preview = meta.preview.unwrap();
+        assert_eq!(preview.duration_ms, 2612);
+        assert_eq!(preview.checkpoints, 0);
+        assert!(preview.last_error.as_deref().unwrap().contains("chunk boom"));
+        assert!(storage::read_segments(&dir).unwrap().is_none(), "segments untouched");
+        assert_eq!(meta.status, RecordingStatus::Recording, "never marked Failed");
+        assert!(meta.notes_error.is_none(), "a preview failure is not a notes failure");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_leaves_no_temp_clip_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &mp3_chunk(10))
+            .await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert!(!dir.join("checkpoint-clip.mp3").exists());
     }
 }
