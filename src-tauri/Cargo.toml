@@ -90,7 +90,7 @@ windows = { version = "=0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 # Direct2D's point/matrix types, which `windows` uses but does not re-export.
-windows-numerics = "=0.3.1"
+windows-numerics = "=0.100.0"
 # Desktop shortcuts should focus the running app instead of creating another
 # hidden tray process. Register this before every other Tauri plugin in main.
 tauri-plugin-single-instance = "=2.4.4"
