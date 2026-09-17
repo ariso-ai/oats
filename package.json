@@ -17,7 +17,7 @@
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
     "@heroicons/vue": "^2.2.0",
-    "@sentry/browser": "^10.73.0",
+    "@sentry/browser": "^10.74.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-notification": "^2.4.0",
@@ -43,7 +43,7 @@
     "tailwindcss": "^4.1.8",
     "tauri-plugin-mcp": "^0.3.1",
     "tauri-plugin-mcp-server": "^0.3.1",
-    "vite": "^8.2.2",
+    "vite": "^8.3.0",
     "vitest": "^5.0.0"
   },
   "optionalDependencies": {
