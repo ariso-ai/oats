@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import FluidAudio
 import MLXLLM
@@ -284,6 +285,61 @@ func stripCodeFence(_ raw: String) -> String {
     return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+// MARK: - Audio (stereo -> mono downmix before FluidAudio)
+
+/// Downmix a multi-channel recording (mic on channel 0, system audio on
+/// channel 1 — see `useRecorder.ts`) to mono by averaging channels, and
+/// return the URL of the resulting file. Mono input is returned unchanged.
+///
+/// FluidAudio builds its internal `AVAudioConverter`s to a mono target
+/// without a `channelMap`, and `AVAudioConverter` does not downmix on a
+/// channel-count reduction without one — it silently keeps channel 0 and
+/// drops the rest. Both `AsrManager.transcribe` and
+/// `AudioConverter.resampleAudioFile` go through that conversion, so a
+/// stereo file fed to either loses the entire system-audio side before it
+/// reaches the model. Averaging the channels ourselves first, entirely with
+/// AVFoundation, sidesteps that dependency defect.
+func downmixToMonoIfNeeded(_ url: URL) throws -> URL {
+    let file = try AVAudioFile(forReading: url)
+    let format = file.processingFormat
+    guard format.channelCount > 1 else { return url }
+
+    guard
+        let sourceBuffer = AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)),
+        let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate,
+            channels: 1, interleaved: false),
+        let monoBuffer = AVAudioPCMBuffer(
+            pcmFormat: monoFormat, frameCapacity: AVAudioFrameCount(file.length)),
+        let sourceChannels = sourceBuffer.floatChannelData,
+        let monoChannel = monoBuffer.floatChannelData?[0]
+    else {
+        return url
+    }
+    try file.read(into: sourceBuffer)
+    monoBuffer.frameLength = sourceBuffer.frameLength
+
+    let channelCount = Int(format.channelCount)
+    let frameCount = Int(sourceBuffer.frameLength)
+    for frame in 0..<frameCount {
+        var sum: Float = 0
+        for channel in 0..<channelCount {
+            sum += sourceChannels[channel][frame]
+        }
+        monoChannel[frame] = sum / Float(channelCount)
+    }
+
+    let outputURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("caf")
+    let outputFile = try AVAudioFile(
+        forWriting: outputURL, settings: monoFormat.settings,
+        commonFormat: .pcmFormatFloat32, interleaved: false)
+    try outputFile.write(from: monoBuffer)
+    return outputURL
+}
+
 // MARK: - Entry
 
 let arguments = CommandLine.arguments
@@ -322,15 +378,23 @@ let audioURL = URL(fileURLWithPath: audioPath)
 
 runToCompletion {
     do {
+        let audioForTranscription = try downmixToMonoIfNeeded(audioURL)
+        defer {
+            if audioForTranscription != audioURL {
+                try? FileManager.default.removeItem(at: audioForTranscription)
+            }
+        }
+
         // ASR: load models and transcribe (resampling handled internally).
         let asrModels = try await AsrModels.load(from: asrDir, version: .v3)
         let asrManager = AsrManager()
         try await asrManager.loadModels(asrModels)
         var decoderState = try TdtDecoderState()
-        let asrResult = try await asrManager.transcribe(audioURL, decoderState: &decoderState)
+        let asrResult = try await asrManager.transcribe(
+            audioForTranscription, decoderState: &decoderState)
 
         // Diarization: needs 16 kHz mono Float samples.
-        let samples = try AudioConverter().resampleAudioFile(audioURL)
+        let samples = try AudioConverter().resampleAudioFile(audioForTranscription)
         let diarizerModels = try await DiarizerModels.downloadIfNeeded(to: diarizerDir)
         let diarizer = DiarizerManager()
         diarizer.initialize(models: diarizerModels)
