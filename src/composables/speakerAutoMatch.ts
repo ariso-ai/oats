@@ -108,25 +108,35 @@ export function rankAutoMatchesByIdentity(
 }
 
 /**
- * Speaker names appearing in transcript lines, in first-seen order.
+ * Split a transcript line into its speaker label and the words that follow.
  *
  * A stored chunk's `content` is `"Speaker 1: …"`, but tolerate a leading
  * `[HH:MM:SS] ` timestamp too — the same transcript text is rendered with one
  * elsewhere, and a line that carried it would otherwise yield a speaker named
  * `"[00:01:12] Speaker 1"`.
+ *
+ * `speaker` is null for a line with no label, which is left as plain text
+ * rather than guessed at. Both backends follow the `"<label>: <text>"`
+ * convention (`parseLocalTranscript` builds it; Ariso serves it).
+ */
+export function splitSpeakerLine(line: string): { speaker: string | null; text: string } {
+  const stripped = line.replace(/^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/, '');
+  const colonIdx = stripped.indexOf(': ');
+  if (colonIdx <= 0) return { speaker: null, text: stripped };
+  return { speaker: stripped.slice(0, colonIdx), text: stripped.slice(colonIdx + 2) };
+}
+
+/**
+ * Speaker names appearing in transcript lines, in first-seen order.
  */
 export function speakersInTranscript(lines: string[]): string[] {
   const seen = new Set<string>();
   const found: string[] = [];
   for (const line of lines) {
-    const stripped = line.replace(/^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/, '');
-    const colonIdx = stripped.indexOf(': ');
-    if (colonIdx > 0) {
-      const name = stripped.slice(0, colonIdx);
-      if (!seen.has(name)) {
-        seen.add(name);
-        found.push(name);
-      }
+    const { speaker } = splitSpeakerLine(line);
+    if (speaker !== null && !seen.has(speaker)) {
+      seen.add(speaker);
+      found.push(speaker);
     }
   }
   return found;

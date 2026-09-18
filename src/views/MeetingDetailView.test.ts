@@ -26,6 +26,7 @@ const fetchSpeakerAudio = vi.fn();
 const pickMarkdownSavePath = vi.fn();
 const copyRecordingFile = vi.fn();
 const setVaultTaskDone = vi.fn();
+const renameSpeaker = vi.fn();
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -94,6 +95,7 @@ vi.mock('../tauri', () => ({
     copyRecordingFile: (id: string, kind: string, dest: string) =>
       copyRecordingFile(id, kind, dest),
     setVaultTaskDone: (...a: unknown[]) => setVaultTaskDone(...a),
+    renameSpeaker: (...a: unknown[]) => renameSpeaker(...a),
   },
 }));
 
@@ -111,6 +113,7 @@ function detail(over: Partial<MeetingDetail> = {}): MeetingDetail {
     actionItems: [],
     isLocal: false,
     audioClips: [],
+    localSpeakers: [],
     ...over,
   };
 }
@@ -166,6 +169,8 @@ beforeEach(() => {
   copyRecordingFile.mockResolvedValue(undefined);
   retryTranscription.mockResolvedValue({ backend: 'local', id: '7', title: 'T', status: 'done' });
   retryNotes.mockResolvedValue(undefined);
+  renameSpeaker.mockReset();
+  renameSpeaker.mockResolvedValue('---\ntitle: "t"\n---\n\n**Priya** [00:00:05]\nHi back\n');
   deleteMeeting.mockResolvedValue(undefined);
   getMeetingPrep.mockResolvedValue(null);
   apiRequest.mockReset();
@@ -345,6 +350,33 @@ describe('MeetingDetailView inline title editing', () => {
     expect(lines[0].find('.transcript-content').text()).toBe('Speaker 1: Five is five bars. Should be');
     expect(lines[1].find('.transcript-ts').text()).toBe('0:03');
     expect(lines[1].find('.transcript-content').text()).toBe('Speaker 1: should be three. Anyway');
+  });
+
+  it('sets the speaker label in its own element so it reads apart from the segment', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'Speaker 1: Five is five bars.' },
+      { chunk_index: 1, start_ms: 3120, content: 'Priya: Should be three.' },
+    ]);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await flushPromises();
+
+    const lines = wrapper.findAll('.transcript-line');
+    expect(lines[0].find('.transcript-speaker').text()).toBe('Speaker 1:');
+    expect(lines[1].find('.transcript-speaker').text()).toBe('Priya:');
+    // The rendered line still reads exactly as before — only its markup changed.
+    expect(lines[0].find('.transcript-content').text()).toBe('Speaker 1: Five is five bars.');
+  });
+
+  it('leaves a chunk with no speaker prefix as plain text', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'Five is five bars.' },
+    ]);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await flushPromises();
+
+    const line = wrapper.findAll('.transcript-line')[0];
+    expect(line.find('.transcript-speaker').exists()).toBe(false);
+    expect(line.find('.transcript-content').text()).toBe('Five is five bars.');
   });
 
   // Parity (#400): a local transcript.md renders through the same transcript
@@ -2327,5 +2359,201 @@ describe('MeetingDetailView Ariso action items', () => {
     await flushPromises();
 
     expect(wrapper.emitted('tasksChanged')).toEqual([[{ id: '7' }]]);
+  });
+});
+
+describe('MeetingDetailView local speaker rename', () => {
+  const localItem: MeetingListItem = {
+    id: '7',
+    title: 'Rec',
+    timestamp: '2026-06-02T10:00:00Z',
+    files: { hasAudio: true, hasNote: false, hasTranscript: true },
+  };
+
+  const TRANSCRIPT =
+    '---\ntitle: "t"\n---\n\n**Speaker 1** [00:00:00]\nHello there\n\n**Speaker 2** [00:00:05]\nHi back\n';
+
+  const localSpeakerDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
+    detail({
+      isLocal: true,
+      hasTranscript: true,
+      transcript: TRANSCRIPT,
+      localSpeakers: [
+        { id: 0, label: 'Speaker 1' },
+        { id: 1, label: 'Speaker 2' },
+      ],
+      ...over,
+    });
+
+  // The panel teleports into <body>, so wrapper.find() cannot see it.
+  const q = (selector: string) => document.querySelector(selector) as HTMLElement | null;
+  const qAll = (selector: string) =>
+    Array.from(document.querySelectorAll(selector)) as HTMLElement[];
+
+  let wrapper: VueWrapper | null = null;
+
+  async function openPanel(d: MeetingDetail) {
+    getMeetingDetail.mockResolvedValue(d);
+    wrapper = mount(MeetingDetailView, { props: { item: localItem }, attachTo: document.body });
+    await flushPromises();
+    await wrapper.find('.speakers-trigger').trigger('click');
+    await flushPromises();
+    return wrapper;
+  }
+
+  afterEach(() => {
+    wrapper?.unmount();
+    wrapper = null;
+    document.body.innerHTML = '';
+  });
+
+  it('shows the speakers chip for a local recording with diarized speakers', async () => {
+    getMeetingDetail.mockResolvedValue(localSpeakerDetail());
+    const w = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+    expect(w.find('.speakers-trigger').exists()).toBe(true);
+    expect(w.find('.speakers-label').text()).toBe('2 Speakers');
+  });
+
+  it('hides the chip for a local recording with nothing diarized', async () => {
+    getMeetingDetail.mockResolvedValue(localSpeakerDetail({ localSpeakers: [] }));
+    const w = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('hides the chip when the transcript has no speech, even though a speaker was diarized', async () => {
+    // A recording of pure silence still renders a well-formed transcript —
+    // frontmatter plus a speaker header with an empty body (see
+    // `transcript_has_speech` in transcribe.rs) — so `localSpeakers` is not
+    // empty. There is nothing attributed to that speaker to rename.
+    getMeetingDetail.mockResolvedValue(
+      localSpeakerDetail({
+        localSpeakers: [{ id: 0, label: 'Speaker 1' }],
+        transcript: '---\ntitle: "t"\n---\n\n**Speaker 1** [00:00:00]\n\n',
+      })
+    );
+    const w = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('hides the chip when a local transcript is not in the rendered speaker-block format', async () => {
+    // An imported/legacy transcript has no `segments.json` behind it, so the
+    // backend would refuse the rename anyway — don't offer it.
+    getMeetingDetail.mockResolvedValue(
+      localSpeakerDetail({
+        localSpeakers: [{ id: 0, label: 'Speaker 1' }],
+        transcript: '# Transcript\nImported text',
+      })
+    );
+    const w = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('opens the rename panel listing every diarized speaker', async () => {
+    await openPanel(localSpeakerDetail());
+    expect(q('.lsp-pop')).not.toBeNull();
+    // The Ariso assignment panel must not be what opened.
+    expect(q('.sp-pop')).toBeNull();
+    expect(qAll('.lsp-name').map((el) => el.textContent?.trim())).toEqual([
+      'Speaker 1',
+      'Speaker 2',
+    ]);
+  });
+
+  it('warns that existing AI Notes keep the old name until regenerated', async () => {
+    // A rename never rewrites generated note prose (spec non-goal), so without
+    // this line the transcript saying "Priya" while the note still says
+    // "Speaker 2" just reads as a bug.
+    await openPanel(localSpeakerDetail());
+    expect(q('.lsp-foot')?.textContent).toContain(
+      'Existing AI Notes keep the old name until you regenerate them.'
+    );
+  });
+
+  it('renames on Enter and updates the panel and the Transcript tab', async () => {
+    const w = await openPanel(localSpeakerDetail());
+
+    await qAll('.lsp-edit')[1].click();
+    await flushPromises();
+    const input = q('.lsp-input') as HTMLInputElement;
+    input.value = 'Priya';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flushPromises();
+
+    expect(renameSpeaker).toHaveBeenCalledWith('7', 1, 'Priya');
+    expect(qAll('.lsp-name').map((el) => el.textContent?.trim())).toEqual(['Speaker 1', 'Priya']);
+
+    // The Transcript tab re-parses `detail.transcript`, which the rename replaced.
+    const transcriptTab = w.findAll('.seg-btn').find((b) => b.text() === 'Transcript')!;
+    await transcriptTab.trigger('click');
+    await flushPromises();
+    expect(w.text()).toContain('Priya');
+    expect(w.text()).not.toContain('Speaker 2');
+  });
+
+  it('shows a rejected rename inline and leaves the field open', async () => {
+    renameSpeaker.mockRejectedValue(
+      "this recording predates structured transcripts and can't be renamed"
+    );
+    await openPanel(localSpeakerDetail());
+
+    await qAll('.lsp-edit')[0].click();
+    await flushPromises();
+    const input = q('.lsp-input') as HTMLInputElement;
+    input.value = 'Priya';
+    input.dispatchEvent(new Event('input'));
+    await flushPromises();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flushPromises();
+
+    expect(q('.lsp-err')?.textContent).toContain('predates structured transcripts');
+    expect(q('.lsp-input')).not.toBeNull();
+    expect(qAll('.lsp-name').map((el) => el.textContent?.trim())).toEqual([
+      'Speaker 1',
+      'Speaker 2',
+    ]);
+  });
+
+  it('abandons the edit on Escape without calling the backend', async () => {
+    await openPanel(localSpeakerDetail());
+
+    await qAll('.lsp-edit')[0].click();
+    await flushPromises();
+    const input = q('.lsp-input') as HTMLInputElement;
+    input.value = 'Priya';
+    input.dispatchEvent(new Event('input'));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flushPromises();
+
+    expect(renameSpeaker).not.toHaveBeenCalled();
+    expect(q('.lsp-input')).toBeNull();
+    // Escape backs out of the field first, not the whole panel.
+    expect(q('.lsp-pop')).not.toBeNull();
+  });
+
+  it('closes the panel when the selected meeting changes', async () => {
+    await openPanel(localSpeakerDetail());
+    expect(q('.lsp-pop')).not.toBeNull();
+
+    // MeetingDetailView is reused across selections (no :key in LibraryView),
+    // so `load()` — driven by this prop change — must reset the local panel
+    // the same way it already resets the Ariso one, or it would stay mounted
+    // showing a stale/empty list at the old anchor position.
+    const otherItem: MeetingListItem = {
+      id: '9',
+      title: 'Other',
+      timestamp: '2026-06-03T10:00:00Z',
+      files: { hasAudio: true, hasNote: false, hasTranscript: true },
+    };
+    getMeetingDetail.mockResolvedValue(localSpeakerDetail({ id: '9' }));
+    await wrapper!.setProps({ item: otherItem });
+    await flushPromises();
+
+    expect(q('.lsp-pop')).toBeNull();
   });
 });

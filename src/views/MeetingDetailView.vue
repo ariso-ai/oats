@@ -141,19 +141,19 @@
              what it edits, and reads as its pair: both open onto a list of
              people. Microphone glyph for the diarized-voice list, the way the
              clock stands in for duration. -->
-        <div v-if="canAssignSpeakers" class="meta-item speakers">
+        <div v-if="canAssignSpeakers || canRenameLocalSpeakers" class="meta-item speakers">
           <button
             ref="speakersBtn"
             type="button"
             class="speakers-trigger"
             aria-haspopup="true"
-            :aria-expanded="speakers.open.value"
-            title="Assign speakers"
+            :aria-expanded="speakersOpen"
+            :title="canRenameLocalSpeakers ? 'Rename speakers' : 'Assign speakers'"
             @click="onSpeakersClick"
           >
             <svg viewBox="0 0 24 24" class="ic"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><path d="M12 19v4" /></svg>
             <span class="speakers-label">{{ speakersLabel }}</span>
-            <svg viewBox="0 0 24 24" class="ic attendees-caret" :class="{ open: speakers.open.value }" aria-hidden="true"><path d="M19 9l-7 7-7-7" /></svg>
+            <svg viewBox="0 0 24 24" class="ic attendees-caret" :class="{ open: speakersOpen }" aria-hidden="true"><path d="M19 9l-7 7-7-7" /></svg>
           </button>
         </div>
 
@@ -171,6 +171,13 @@
       <SpeakerAssignPopover
         v-if="speakers.open.value"
         :assignment="speakers"
+        :anchor="speakersAnchor"
+        @close="closeSpeakers"
+      />
+
+      <LocalSpeakerRenamePopover
+        v-if="localSpeakers.open.value"
+        :rename="localSpeakers"
         :anchor="speakersAnchor"
         @close="closeSpeakers"
       />
@@ -367,9 +374,9 @@
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
           <ol v-else-if="displayedChunks" class="transcript">
-            <li v-for="c in displayedChunks" :key="c.chunk_index" class="transcript-line">
-              <span class="transcript-ts">{{ formatTimestamp(c.start_ms) }}</span>
-              <span class="transcript-content">{{ c.content }}</span>
+            <li v-for="r in transcriptRows" :key="r.key" class="transcript-line">
+              <span class="transcript-ts">{{ r.ts }}</span>
+              <span class="transcript-content"><span v-if="r.speaker" class="transcript-speaker">{{ r.speaker }}:</span> {{ r.text }}</span>
             </li>
           </ol>
           <div v-else class="content-empty">No transcript available.</div>
@@ -451,6 +458,9 @@ import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import SpeakerAssignPopover from './SpeakerAssignPopover.vue';
 import { useSpeakerAssignment } from '../composables/useSpeakerAssignment';
+import { splitSpeakerLine } from '../composables/speakerAutoMatch';
+import LocalSpeakerRenamePopover from './LocalSpeakerRenamePopover.vue';
+import { useLocalSpeakerRename } from '../composables/useLocalSpeakerRename';
 import { avatarColor, initials } from './avatarStyle';
 import ArisoActionItems from './ArisoActionItems.vue';
 import { composeLocalShareText } from './meetingShareText';
@@ -651,6 +661,47 @@ const speakers = useSpeakerAssignment({
   ),
 });
 
+// The local counterpart: offline there is no identity to assign, just a label
+// to edit. The two never both apply (`isLocal` decides), so they share the chip.
+const localSpeakers = useLocalSpeakerRename({
+  recordingId: computed(() => (detail.value?.isLocal ? detail.value.id : null)),
+  speakers: computed({
+    get: () => detail.value?.localSpeakers ?? [],
+    set: (v) => {
+      if (detail.value) detail.value.localSpeakers = v;
+    },
+  }),
+  // The re-rendered transcript comes back from the command; writing it here is
+  // what makes the Transcript tab (which parses this markdown) update at once.
+  transcript: computed({
+    get: () => detail.value?.transcript,
+    set: (v) => {
+      if (detail.value) detail.value.transcript = v;
+    },
+  }),
+});
+
+// Local recordings get the chip purely on having diarized speakers to rename —
+// there is no host/attendee distinction on a recording made on this machine.
+// Diarized speakers alone aren't enough: a recording of pure silence still
+// renders a well-formed transcript — frontmatter plus a speaker header with an
+// empty body (see `transcript_has_speech` in transcribe.rs) — so it reports a
+// "Speaker 1" who never said anything. Gate on the parsed transcript instead,
+// which is empty for that case and null for a transcript that isn't a
+// `render_markdown` output at all (imported or pre-`segments.json`, which the
+// backend refuses to rename anyway).
+const canRenameLocalSpeakers = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    localSpeakers.speakers.value.length > 0 &&
+    (localTranscriptChunks.value?.length ?? 0) > 0
+);
+
+// Whichever surface this backend uses, the chip is one control.
+const speakersOpen = computed(() =>
+  detail.value?.isLocal ? localSpeakers.open.value : speakers.open.value
+);
+
 // Host-only, and only for a cloud meeting that actually has recorded audio —
 // there is nothing to diarize otherwise. Deliberately stays visible once every
 // speaker is resolved: an assignment is as often a correction as a first draft,
@@ -668,6 +719,10 @@ const canAssignSpeakers = computed(
 // outstanding, that count replaces the total — it is the only number worth
 // acting on.
 const speakersLabel = computed(() => {
+  if (detail.value?.isLocal) {
+    const total = localSpeakers.speakers.value.length;
+    return `${total} ${total === 1 ? 'Speaker' : 'Speakers'}`;
+  }
   const unresolved = speakers.unresolved.value.length;
   if (unresolved > 0) return `${unresolved} unassigned`;
   const total = speakers.assignable.value.length;
@@ -680,22 +735,25 @@ function onSpeakersClick(): void {
   showAttendees.value = false;
   const rect = speakersBtn.value?.getBoundingClientRect();
   speakersAnchor.value = rect ? { bottom: rect.bottom, left: rect.left } : null;
-  speakers.open.value = !speakers.open.value;
+  if (detail.value?.isLocal) localSpeakers.open.value = !localSpeakers.open.value;
+  else speakers.open.value = !speakers.open.value;
 }
 
 function closeSpeakers(): void {
   speakers.open.value = false;
   speakers.closeAssignment();
   speakers.stopVoiceSample();
+  localSpeakers.reset();
 }
 
-// Escape backs out one level: the inline assign field first, then the panel.
+// Escape backs out one level: the inline field first, then the panel.
 function onSpeakersKeydown(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return;
   if (speakers.assigningSpeaker.value) speakers.closeAssignment();
+  else if (localSpeakers.editingId.value !== null) localSpeakers.cancelEdit();
   else closeSpeakers();
 }
-watch(speakers.open, (open) => {
+watch(speakersOpen, (open) => {
   if (open) window.addEventListener('keydown', onSpeakersKeydown);
   else window.removeEventListener('keydown', onSpeakersKeydown);
 });
@@ -1020,6 +1078,18 @@ const displayedChunks = computed<TranscriptChunk[] | null>(() => {
   return t.filter((c) => c.transcript_id === activeClipId.value);
 });
 
+// One row per displayed chunk, with the speaker label split off so it can be
+// set apart from the words. Split by the same rule `speakersInTranscript` uses,
+// so the label the transcript emphasizes is always the one the rest of the app
+// treats as a speaker.
+const transcriptRows = computed(() =>
+  (displayedChunks.value ?? []).map((c) => ({
+    key: c.chunk_index,
+    ts: formatTimestamp(c.start_ms),
+    ...splitSpeakerLine(c.content),
+  }))
+);
+
 // Resolve a single clip's audio bytes. Legacy clips use the whole-meeting
 // endpoint (no transcript id).
 function loadClipAudio(clip: MeetingAudioClip): Promise<ArrayBuffer | null> {
@@ -1263,6 +1333,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showAttendees.value = false;
   attendeesAnchor.value = null;
   speakers.reset();
+  localSpeakers.reset();
   speakersAnchor.value = null;
   transcript.value = null;
   transcriptLoaded.value = false;
@@ -1677,6 +1748,7 @@ const hasMeta = computed(
       durationLabel.value ||
       detail.value?.participants.length ||
       canAssignSpeakers.value ||
+      canRenameLocalSpeakers.value ||
       detail.value?.meetingType ||
       detail.value?.autoJoinScheduled ||
       detail.value?.canceled
@@ -2075,6 +2147,9 @@ const durationLabel = computed<string | null>(() => {
 .transcript-line { display: flex; gap: 12px; align-items: baseline; font-size: 14px; line-height: 1.6; }
 .transcript-ts { flex-shrink: 0; min-width: 48px; font-variant-numeric: tabular-nums; font-size: 12px; color: #9a9a9a; padding-top: 1px; }
 .transcript-content { color: #535353; }
+/* The label carries the line's structure, so it takes the weight and the
+   darker ink; the words stay in the body colour. */
+.transcript-speaker { font-weight: 600; color: #1f1f1f; }
 
 /* Rendered markdown */
 .md { color: #535353; font-size: 14px; line-height: 1.6; }

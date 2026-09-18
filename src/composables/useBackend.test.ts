@@ -18,6 +18,8 @@ const bufferPendingAudio = vi.fn();
 const discardPendingAudio = vi.fn();
 const fetchMeetingAudio = vi.fn();
 const readRecordingAudio = vi.fn();
+const readRecordingFile = vi.fn();
+const listSpeakers = vi.fn();
 const getMeetingNotes = vi.fn();
 const deleteMeetingRecordingClip = vi.fn();
 const getMeetingPrepApi = vi.fn();
@@ -38,6 +40,8 @@ vi.mock('../tauri', () => ({
     renameRecording: (...a: unknown[]) => renameRecording(...a),
     deleteRecording: (...a: unknown[]) => deleteRecording(...a),
     readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
+    readRecordingFile: (...a: unknown[]) => readRecordingFile(...a),
+    listSpeakers: (...a: unknown[]) => listSpeakers(...a),
   },
   auth: { checkSession: () => checkSession() },
   api: {
@@ -1070,5 +1074,52 @@ describe('action items', () => {
 
   it('Ariso advertises action items', () => {
     expect(new ArisoBackend().supportsActionItems).toBe(true);
+  });
+});
+
+describe('LocalBackend.getMeetingDetail speakers', () => {
+  beforeEach(() => {
+    readRecordingFile.mockResolvedValue(null);
+    listSpeakers.mockReset();
+  });
+
+  it('loads the recording’s diarized speakers when it has a transcript', async () => {
+    listSpeakers.mockResolvedValue([
+      { id: 0, label: 'Speaker 1' },
+      { id: 1, label: 'Priya' },
+    ]);
+    const d = await new LocalBackend().getMeetingDetail({
+      id: '2026-09-15T10-00-00Z',
+      title: 'Rec',
+      timestamp: '2026-09-15T10:00:00Z',
+      files: { hasAudio: true, hasNote: false, hasTranscript: true },
+    });
+    expect(listSpeakers).toHaveBeenCalledWith('2026-09-15T10-00-00Z');
+    expect(d.localSpeakers).toEqual([
+      { id: 0, label: 'Speaker 1' },
+      { id: 1, label: 'Priya' },
+    ]);
+  });
+
+  it('skips the speaker read entirely when there is no transcript', async () => {
+    const d = await new LocalBackend().getMeetingDetail({
+      id: '2026-09-15T10-00-00Z',
+      title: 'Rec',
+      timestamp: '2026-09-15T10:00:00Z',
+      files: { hasAudio: true, hasNote: false, hasTranscript: false },
+    });
+    expect(listSpeakers).not.toHaveBeenCalled();
+    expect(d.localSpeakers).toEqual([]);
+  });
+
+  it('degrades to no speakers rather than failing the whole detail load', async () => {
+    listSpeakers.mockRejectedValue('read meta: no such file');
+    const d = await new LocalBackend().getMeetingDetail({
+      id: '2026-09-15T10-00-00Z',
+      title: 'Rec',
+      timestamp: '2026-09-15T10:00:00Z',
+      files: { hasAudio: true, hasNote: false, hasTranscript: true },
+    });
+    expect(d.localSpeakers).toEqual([]);
   });
 });
