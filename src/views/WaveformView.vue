@@ -71,6 +71,18 @@ const isStopping = ref(false);
 // late mic-on / quick-off races). Manual recordings are never length-gated.
 const MIN_AUTO_DURATION_S = 15;
 
+// Checkpoint every 5 minutes of RECORDED audio (issue #123). Fixed, matching
+// the house pattern of fixed windows in the local pipeline (APPEND_WINDOW_SECONDS).
+const CHECKPOINT_INTERVAL_S = 300;
+// Bytes of the encoder stream Rust has confirmed it ingested. Advances ONLY to
+// a value Rust returned, so an IPC or Rust error leaves the next checkpoint
+// resending from the same offset (Rust skips any prefix it already has).
+let lastCheckpointByte = 0;
+let checkpointInFlight = false;
+let nextCheckpointAt = CHECKPOINT_INTERVAL_S;
+// Set only for an eligible session (see writeLocalRecordingStub); cleared at Stop.
+let checkpointsEnabled = false;
+
 // Mirror the recording to the library window's embedded recorder strip and the
 // native floating pill. The bars ride on frameLevels, sampled in the audio
 // callback, so the cadence survives this window being hidden.
@@ -187,6 +199,12 @@ async function writeLocalRecordingStub(): Promise<void> {
   pendingStubId = null;
   try {
     await local.beginRecording(id, startAt, timestampTitle(startAt));
+    // Checkpoint eligibility (§1): local backend, this session's OWN new id
+    // (so neither an auto-append target nor an explicit localAppendId — those
+    // resolve to a different, already-Done recording), no held blob from a
+    // failed stop, and a stub that actually exists on disk.
+    checkpointsEnabled =
+      id === localRecordingIdFromStart(startAt) && stoppedBlob.value === null;
   } catch (e) {
     // Cosmetic: without it the rename affordance stays broken until Stop
     // (today's behavior). Never worth aborting a live recording over.
@@ -407,10 +425,72 @@ watch(
   },
 );
 
+// Persist + transcribe the audio captured since the last checkpoint. Errors are
+// swallowed: a recording must never be interrupted by a preview failure.
+async function runCheckpoint(): Promise<void> {
+  if (checkpointInFlight || isStopping.value) return;
+  // Schedule the next one off the current clock BEFORE awaiting (so a
+  // long-running checkpoint doesn't queue up a burst behind it) and BEFORE the
+  // eligibility checks below, so a transient null id/startedAt can't wedge the
+  // watcher into re-entering on every subsequent tick.
+  nextCheckpointAt =
+    Math.floor(recorder.durationSeconds.value / CHECKPOINT_INTERVAL_S) * CHECKPOINT_INTERVAL_S +
+    CHECKPOINT_INTERVAL_S;
+  const id = effectiveLocalRecordingId.value;
+  const startAt = recorder.startedAt.value;
+  if (!id || !startAt) return;
+  const { bytes, startByte } = recorder.sliceFrom(lastCheckpointByte);
+  // `durationSeconds` is wall-clock-derived and not coupled to encoder byte
+  // growth, so a genuine audio-pipeline stall (device drop, callback
+  // starvation) can produce an empty slice at a 300s boundary. Rust's
+  // duplicate-ingest branch no-ops on a zero-length chunk, so this isn't a
+  // correctness fix — it just avoids an IPC round-trip and a disk read on the
+  // webview thread that is simultaneously encoding live audio.
+  if (bytes.length === 0) return;
+  checkpointInFlight = true;
+  try {
+    const result = await local.checkpointRecording(
+      bytes,
+      id,
+      startAt,
+      timestampTitle(startAt),
+      startByte,
+    );
+    if (result.stale) {
+      // Finalize (or an append) already owns this recording; nothing more to do.
+      checkpointsEnabled = false;
+      return;
+    }
+    lastCheckpointByte = result.ingestedBytes;
+  } catch (e) {
+    // Leave lastCheckpointByte where it is: the next checkpoint resends from
+    // the same offset, and Rust skips whatever prefix it already ingested.
+    console.error('Checkpoint failed; resending from the same offset next time', e);
+  } finally {
+    checkpointInFlight = false;
+  }
+}
+
+// Driven by `durationSeconds`, not setTimeout/setInterval. That clock is
+// advanced from the audio callback, so it keeps ticking when this hidden
+// webview's JS timers are throttled — and it excludes pauses, so checkpoints
+// fire every 300 s of RECORDED audio rather than of wall time.
+watch(
+  () => recorder.durationSeconds.value,
+  (seconds) => {
+    if (!checkpointsEnabled || isStopping.value) return;
+    if (seconds < nextCheckpointAt) return;
+    void runCheckpoint();
+  },
+);
+
 // Discard the in-progress capture without uploading, then close.
 async function discardRecording() {
   if (isStopping.value) return;
   isStopping.value = true;
+  // Stop scheduling checkpoints; the in-flight one (if any) is not awaited —
+  // Rust orders it against finalize with the per-recording lock.
+  checkpointsEnabled = false;
   if (closeTimer) {
     clearTimeout(closeTimer);
     closeTimer = null;
@@ -450,6 +530,9 @@ async function handleStop() {
     return;
   }
   isStopping.value = true;
+  // Stop scheduling checkpoints; the in-flight one (if any) is not awaited —
+  // Rust orders it against finalize with the per-recording lock.
+  checkpointsEnabled = false;
   // Tear down the backstop timer so it can't fire post-stop.
   if (silenceTimer) {
     clearInterval(silenceTimer);
@@ -704,6 +787,9 @@ async function resumeFailed() {
   inFlightFinalize = null;
   uploadResult.value = null;
   isStopping.value = false;
+  checkpointsEnabled = false;
+  lastCheckpointByte = 0;
+  nextCheckpointAt = CHECKPOINT_INTERVAL_S;
   await startRecording();
   broadcastState();
 }

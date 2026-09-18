@@ -24,7 +24,7 @@ fn usage() -> &'static str {
     "ariso-stt Windows local inference sidecar\n\n\
      Contract:\n\
        ariso-stt --audio <path> --models <dir> --format json\n\
-       ariso-stt notes --transcript <path> --models <dir>\n"
+       ariso-stt notes --transcript <path> --models <dir> [--previous-notes <path>]\n"
 }
 
 /// Converts rich internal errors into the process contract expected by the
@@ -51,7 +51,11 @@ fn run() -> Result<()> {
     }
 
     match parse_args(&args)? {
-        SidecarCommand::Notes { transcript, models } => run_notes(&transcript, &models),
+        SidecarCommand::Notes {
+            transcript,
+            models,
+            previous_notes,
+        } => run_notes(&transcript, &models, previous_notes.as_deref()),
         SidecarCommand::Transcribe {
             audio,
             models,
@@ -75,6 +79,10 @@ enum SidecarCommand {
     Notes {
         transcript: PathBuf,
         models: PathBuf,
+        /// Merge mode (issue #123): `--transcript` is the delta since these
+        /// notes were written, not the whole transcript. Merge mode is
+        /// preview-only, so it emits an empty title and skips the title pass.
+        previous_notes: Option<PathBuf>,
     },
     Transcribe {
         audio: PathBuf,
@@ -91,6 +99,7 @@ fn parse_args(args: &[String]) -> Result<SidecarCommand> {
         return Ok(SidecarCommand::Notes {
             transcript: required_path_arg(&args[1..], "--transcript")?,
             models: required_path_arg(&args[1..], "--models")?,
+            previous_notes: optional_path_arg(&args[1..], "--previous-notes")?,
         });
     }
 
@@ -110,6 +119,16 @@ fn parse_args(args: &[String]) -> Result<SidecarCommand> {
 /// relative in tests even though production callers send absolute paths.
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(required_string_arg(args, flag)?))
+}
+
+/// Like `required_path_arg`, but `Ok(None)` when the flag is absent. A flag that
+/// is present with no value is still an error — silently ignoring it would make
+/// a merge run degrade into a from-scratch one.
+fn optional_path_arg(args: &[String], flag: &str) -> Result<Option<PathBuf>> {
+    if !args.iter().any(|arg| arg == flag) {
+        return Ok(None);
+    }
+    Ok(Some(required_path_arg(args, flag)?))
 }
 
 /// Centralizes required-value validation so both commands fail in the same
@@ -163,6 +182,47 @@ mod tests {
             SidecarCommand::Notes {
                 transcript: PathBuf::from("transcript.md"),
                 models: PathBuf::from("models"),
+                previous_notes: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_the_merge_mode_contract() {
+        let args = vec![
+            "notes".to_string(),
+            "--transcript".to_string(),
+            "delta.md".to_string(),
+            "--models".to_string(),
+            "models".to_string(),
+            "--previous-notes".to_string(),
+            "prior.md".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            SidecarCommand::Notes {
+                transcript: PathBuf::from("delta.md"),
+                models: PathBuf::from("models"),
+                previous_notes: Some(PathBuf::from("prior.md")),
+            }
+        );
+    }
+
+    #[test]
+    fn notes_without_previous_notes_stays_one_shot() {
+        let args = vec![
+            "notes".to_string(),
+            "--transcript".to_string(),
+            "transcript.md".to_string(),
+            "--models".to_string(),
+            "models".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            SidecarCommand::Notes {
+                transcript: PathBuf::from("transcript.md"),
+                models: PathBuf::from("models"),
+                previous_notes: None,
             }
         );
     }

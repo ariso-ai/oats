@@ -5,6 +5,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // real mic data reached the encoder.  Hoisted so the mock factory can close
 // over it before any import resolves.
 const encodeCalls = vi.hoisted((): Int16Array[] => []);
+// Lets tests control the length and byte value of each encodeBuffer() output,
+// so a straddling-entry slice (which needs multi-byte entries to be
+// distinguishable from an aligned one) is exercisable. Reset in beforeEach.
+const encodeByteLength = vi.hoisted(() => ({ value: 1 }));
+const encodeFillByte = vi.hoisted(() => ({ value: 0x01 }));
 const platformCapabilities = vi.hoisted((): {
   value: {
     os: 'macos' | 'windows';
@@ -26,7 +31,7 @@ vi.mock('@breezystack/lamejs', () => ({
     Mp3Encoder: class {
       encodeBuffer(left: Int16Array): Int8Array {
         encodeCalls.push(new Int16Array(left));
-        return new Int8Array([0x01]);
+        return new Int8Array(encodeByteLength.value).fill(encodeFillByte.value);
       }
       flush(): Int8Array {
         return new Int8Array(0);
@@ -118,6 +123,8 @@ beforeEach(() => {
   // Clear captured listeners, encoder call records, and mock call counts.
   for (const k in listeners) delete listeners[k];
   encodeCalls.length = 0;
+  encodeByteLength.value = 1;
+  encodeFillByte.value = 0x01;
   vi.clearAllMocks();
   platformCapabilities.value = {
     os: 'macos',
@@ -304,5 +311,106 @@ describe('useRecorder mic native capture', () => {
     resolveMic({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
     await starting;
     await rec.stopRecording();
+  });
+});
+
+describe('checkpoint slicing', () => {
+  it('reports the encoded byte length and slices from an offset', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    // The stubbed encoder emits one byte per frame.
+    fireAudioFrame();
+    fireAudioFrame();
+    fireAudioFrame();
+    expect(rec.encodedByteLength()).toBe(3);
+
+    const first = rec.sliceFrom(0);
+    expect(first.bytes.length).toBe(3);
+    expect(first.endByte).toBe(3);
+
+    fireAudioFrame();
+    fireAudioFrame();
+    const next = rec.sliceFrom(first.endByte);
+    expect(next.bytes.length).toBe(2);
+    expect(next.endByte).toBe(5);
+  });
+
+  // The invariant Rust depends on: consecutive slices partition the encoded
+  // stream with no gap and no overlap, so the bytes appended to the vault
+  // attachment reconstruct the recording exactly.
+  it('partitions the stream across consecutive slices', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    for (let i = 0; i < 4; i++) fireAudioFrame();
+    const a = rec.sliceFrom(0);
+    for (let i = 0; i < 3; i++) fireAudioFrame();
+    const b = rec.sliceFrom(a.endByte);
+
+    expect(a.bytes.length + b.bytes.length).toBe(rec.encodedByteLength());
+    expect(b.endByte).toBe(7);
+  });
+
+  it('returns an empty slice when nothing new has been encoded', async () => {
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    fireAudioFrame();
+    fireAudioFrame();
+    const all = rec.sliceFrom(0);
+    const again = rec.sliceFrom(all.endByte);
+    expect(again.bytes.length).toBe(0);
+    expect(again.endByte).toBe(2);
+  });
+
+  // A naive element-wise byte slicer would pass every test above identically,
+  // since 1-byte entries make aligned and mid-entry offsets indistinguishable.
+  // Multi-byte entries expose the real boundary-respecting behavior.
+  it('includes a straddling entry whole, reporting a startByte before the requested offset', async () => {
+    encodeByteLength.value = 3;
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    fireAudioFrame(); // entry 1: bytes [0, 3)
+    fireAudioFrame(); // entry 2: bytes [3, 6)
+    expect(rec.encodedByteLength()).toBe(6);
+
+    // 4 lands inside entry 2 (3–6): the entry must be returned whole, not
+    // split, and the reported startByte must reflect where it truly begins.
+    const result = rec.sliceFrom(4);
+    expect(result.startByte).toBe(3);
+    expect(result.bytes.length).toBe(3);
+    expect(result.endByte).toBe(6);
+  });
+
+  it('partitions a multi-byte-entry stream across chained aligned calls', async () => {
+    encodeByteLength.value = 3;
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    fireAudioFrame();
+    fireAudioFrame();
+    const a = rec.sliceFrom(0);
+    expect(a.startByte).toBe(0);
+    expect(a.bytes.length).toBe(6);
+    expect(a.endByte).toBe(6);
+
+    fireAudioFrame();
+    const b = rec.sliceFrom(a.endByte);
+    expect(b.startByte).toBe(6);
+    expect(b.bytes.length).toBe(3);
+    expect(b.endByte).toBe(9);
+
+    // No gap, no overlap: the two slices reconstruct the whole stream.
+    expect(a.bytes.length + b.bytes.length).toBe(rec.encodedByteLength());
+  });
+
+  it('preserves bytes >= 0x80 through the Int8Array -> Uint8Array conversion', async () => {
+    // 0xFF is -1 as a signed Int8, and is how real MP3 frame headers start
+    // (0xFFFB...). A signed-aware bug would yield 0 or a negative-derived
+    // value instead of 255 in the returned Uint8Array.
+    encodeFillByte.value = 0xff;
+    const rec = useRecorder();
+    await rec.startRecording('mic');
+    fireAudioFrame();
+
+    const result = rec.sliceFrom(0);
+    expect(result.bytes[0]).toBe(255);
   });
 });

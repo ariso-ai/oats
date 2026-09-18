@@ -30,16 +30,22 @@ fn configure_background_process(command: &mut Command) {
 #[cfg(not(windows))]
 fn configure_background_process(_command: &mut Command) {}
 
-/// Per-recording mutex table. Serializes concurrent `append_recording_core`
-/// calls to the same target so two simultaneous finalizations cannot both
-/// see a `Done` target and race on writing audio/segments/meta.
-static APPEND_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> = OnceLock::new();
+/// Per-recording mutex table. Serializes every writer that mutates one
+/// recording's directory: checkpoints (`checkpoint_core`), both finalize paths,
+/// the `process_notes` commit, and `rename_local_recording`. Without it a
+/// checkpoint's STT could land on top of a finalize, or a rename could be
+/// reverted by a notes commit.
+// Paused: preview notes (Task 10) — see issue #123. When that lands, the
+// preview-notes commit will also take this lock; there is no
+// `process_preview_notes` function yet.
+static RECORDING_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
+    OnceLock::new();
 
-fn get_append_lock(target_id: &str) -> Arc<TokioMutex<()>> {
-    let map = APPEND_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("append lock table poisoned");
+pub fn get_recording_lock(id: &str) -> Arc<TokioMutex<()>> {
+    let map = RECORDING_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("recording lock table poisoned");
     guard
-        .entry(target_id.to_string())
+        .entry(id.to_string())
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
 }
@@ -50,6 +56,17 @@ pub struct FinalizeResult {
     pub id: String,
     pub title: String,
     pub status: crate::storage::RecordingStatus,
+}
+
+/// Outcome of one checkpoint. `ingested_bytes` is the frontend's new
+/// `lastCheckpointByte`; it only advances on a committed write, so an error
+/// leaves the frontend resending from the same offset.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointResult {
+    pub ingested_bytes: u64,
+    pub transcript_updated: bool,
+    pub stale: bool,
 }
 
 /// Resolve the platform's `ariso-stt` sidecar from Tauri's externalBin layout.
@@ -244,7 +261,7 @@ fn maybe_apply_generated_title(meta: &mut RecordingMeta, audio_file: &str, title
 /// `Done` status. A third outcome exists: if the transcript changes mid-run
 /// (superseded by a later append/regeneration), this writes neither file and
 /// silently discards its result.
-async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
+async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
     let transcript_path = dir.join("transcript.md");
     // Capture the transcript this run generates from; if it changes while notes
     // run (a later append/regeneration), a newer run owns the result — discard.
@@ -262,6 +279,12 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
         if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
             return;
         }
+        let _guard = get_recording_lock(&meta.id).lock_owned().await;
+        let mut meta = match storage::read_meta(&dir) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        meta.notes_in_progress = false;
         meta.notes_error = Some(storage::NO_SPEECH_NOTES_ERROR.to_string());
         let _ = storage::write_meta(&dir, &meta);
         return;
@@ -270,6 +293,22 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
     if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
         return;
     }
+
+    // Everything below mutates meta.json, so re-read it under the recording lock
+    // and apply only the fields this task owns. The snapshot captured at spawn
+    // is stale by now: a rename (#355 makes them routine mid-recording) would be
+    // reverted, and `audio_file` would point at a file the rename moved away.
+    let _guard = get_recording_lock(&meta.id).lock_owned().await;
+    let mut meta = match storage::read_meta(&dir) {
+        Ok(m) => m,
+        // The recording was deleted while notes ran: nothing to commit.
+        Err(e) => {
+            eprintln!("notes commit: read meta: {e}");
+            return;
+        }
+    };
+    meta.notes_in_progress = false;
+
     match outcome {
         // Empty output is a silent failure: it would write a blank note with
         // notes_error unset, reading as success. Record it.
@@ -284,11 +323,14 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                 // Legacy recording with no vault audio: keep the old location so
                 // its note stays alongside its audio.
                 None => {
-                    if let Err(e) = storage::write_notes(&dir, &output.notes) {
-                        eprintln!("write notes: {e}");
-                        meta.notes_error = Some(e);
-                        let _ = storage::write_meta(&dir, &meta);
+                    match storage::write_notes(&dir, &output.notes) {
+                        Ok(()) => meta.notes_error = None,
+                        Err(e) => {
+                            eprintln!("write notes: {e}");
+                            meta.notes_error = Some(e);
+                        }
                     }
+                    let _ = storage::write_meta(&dir, &meta);
                     return;
                 }
             };
@@ -299,8 +341,8 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
                 let _ = storage::write_meta(&dir, &meta);
                 return;
             }
-            // Regenerate the note title from the notes, but only while the title
-            // is still the auto-generated default (never clobber a user rename).
+            // Only while the title is still the auto-generated default — the
+            // re-read above is what makes "still default" mean *now*, not at spawn.
             maybe_apply_generated_title(&mut meta, &audio_file, output.title);
             meta.notes_error = None;
             meta.notes_written = Some(now_rfc3339());
@@ -315,6 +357,217 @@ async fn process_notes(dir: PathBuf, models: PathBuf, mut meta: RecordingMeta) {
 }
 
 use crate::storage::{self, RecordingMeta, RecordingStatus};
+
+/// Persist and transcribe the audio captured since the last checkpoint of a
+/// still-recording Local recording, merging it into that recording's *preview*
+/// transcript (issue #123). Never touches `status`: the recording stays
+/// `Recording` until Stop, and `local_finalize_recording` then rewrites every
+/// artifact this produced.
+///
+/// Ordering matters. Audio is persisted and `duration_ms` advanced *before* STT
+/// is attempted, so a crash — or a failed chunk — still leaves the audio in the
+/// vault and every later chunk correctly offset. A failed chunk costs the
+/// preview transcript one 5-minute gap; the final full pass covers it.
+///
+/// Paused: preview notes (Task 10) — see issue #123. The return type's
+/// `Option<JoinHandle<()>>` is the seam Task 10 plugs into (a spawned,
+/// detached preview-notes task, mirroring `process_notes`'s handle); today it
+/// is unconditionally `None` because no such task is ever spawned. The shape
+/// is kept so callers (and this signature) don't need to change when Task 10
+/// lands.
+pub async fn checkpoint_core(
+    root: &Path,
+    id: &str,
+    created_at: &str,
+    title: &str,
+    start_byte: u64,
+    chunk: &[u8],
+) -> Result<(CheckpointResult, Option<JoinHandle<()>>), String> {
+    storage::validate_recording_id(id)?;
+    let dir = storage::recordings_dir(root).join(id);
+    let result = {
+        let _guard = get_recording_lock(id).lock_owned().await;
+        checkpoint_locked(&dir, id, created_at, title, start_byte, chunk).await?
+    };
+    // Task 10 spawns the detached preview-notes task here, once the lock is
+    // released — the notes task takes the same lock to commit its result.
+    Ok((result, None))
+}
+
+/// The body of one checkpoint, run with the recording lock held. Split out so
+/// the guard's scope is exactly the mutation, and the caller can spawn the
+/// preview-notes task after releasing it.
+async fn checkpoint_locked(
+    dir: &Path,
+    id: &str,
+    created_at: &str,
+    title: &str,
+    start_byte: u64,
+    chunk: &[u8],
+) -> Result<CheckpointResult, String> {
+    // 1. Load, or recreate the stub the capture-start write may have missed.
+    //
+    // If `meta.json` was lost mid-recording (not merely absent from a missed
+    // initial write), this recreates it with `preview = None` and
+    // `audio_file = None` — i.e. it forgets any audio already ingested. Every
+    // later checkpoint in this same recording will then fail the gap check in
+    // step 2 (their `start_byte` is ahead of the freshly-reset
+    // `bytes_ingested`), and at Stop `fresh_recording_core` mints a brand-new
+    // `… (2).mp3` attachment, orphaning whatever was checkpointed under the
+    // original `audio_file`. Narrow (requires losing `meta.json` after it was
+    // successfully written once), but real; no recovery is attempted here.
+    let mut meta = match storage::read_meta(dir) {
+        Ok(m) => m,
+        Err(_) => {
+            crate::commands::write_recording_stub(dir, id, created_at, title)?;
+            storage::read_meta(dir)?
+        }
+    };
+    // Already finalized, or an append target: a late checkpoint is harmless, but
+    // it must not write anything.
+    if meta.status != RecordingStatus::Recording {
+        return Ok(CheckpointResult {
+            ingested_bytes: meta.preview.as_ref().map(|p| p.bytes_ingested).unwrap_or(0),
+            transcript_updated: false,
+            stale: true,
+        });
+    }
+
+    // 2. Idempotency, keyed on how much of the stream is already persisted.
+    let mut preview = meta.preview.clone().unwrap_or_default();
+    let end_byte = start_byte + chunk.len() as u64;
+    if end_byte <= preview.bytes_ingested {
+        return Ok(CheckpointResult {
+            ingested_bytes: preview.bytes_ingested,
+            transcript_updated: false,
+            stale: false,
+        });
+    }
+    if start_byte > preview.bytes_ingested {
+        return Err(format!(
+            "checkpoint gap: chunk starts at {start_byte} but only {} bytes are ingested",
+            preview.bytes_ingested
+        ));
+    }
+    // Both ends are encoder-output boundaries, so the remainder starts on an
+    // MP3 frame.
+    let new_bytes = &chunk[(preview.bytes_ingested - start_byte) as usize..];
+
+    // 3. Persist audio first, so it survives whatever happens next.
+    let had_existing_attachment = meta.audio_file.is_some();
+    let audio_file = match meta.audio_file.clone() {
+        Some(existing) => existing,
+        None => {
+            // Same derivation as `fresh_recording_core`, so Stop reuses this
+            // exact attachment instead of orphaning it.
+            let name = format!(
+                "{}.mp3",
+                crate::vault::unique_basename(
+                    &crate::vault::ensure_vault()?,
+                    &crate::vault::note_basename(created_at, &meta.title, id),
+                )
+            );
+            meta.audio_file = Some(name.clone());
+            name
+        }
+    };
+    // `vault::write_audio` replaces, so read → extend → write, like
+    // `append_recording_core`.
+    //
+    // Guard against a zero-cursor truncation footgun: start a fresh buffer
+    // only when there is genuinely no existing attachment to read (the
+    // common case, since the stub always writes `audio_file: None`). Gating
+    // this on `preview.bytes_ingested == 0` instead would truncate a real
+    // attachment on the rare/future path where `audio_file` is `Some` with a
+    // zero cursor — read what's there whenever an attachment already exists.
+    let mut combined = if had_existing_attachment {
+        crate::vault::read_audio(&audio_file)?
+    } else {
+        Vec::with_capacity(new_bytes.len())
+    };
+    combined.extend_from_slice(new_bytes);
+    crate::vault::write_audio(&audio_file, &combined)?;
+
+    let chunk_start_ms = preview.duration_ms;
+    preview.bytes_ingested = end_byte;
+    preview.duration_ms += storage::mp3_duration_ms(new_bytes);
+    meta.duration_seconds = preview.duration_ms / 1000;
+    meta.preview = Some(preview.clone());
+    storage::write_meta(dir, &meta)?;
+
+    // 4. Transcribe just this chunk, from a temp file, so a failure can never
+    // touch the recording's own audio.
+    let models = storage::models_dir(&storage::ariso_root()?);
+    let clip_path = dir.join("checkpoint-clip.mp3");
+    if let Err(e) = std::fs::write(&clip_path, new_bytes) {
+        preview.last_error = Some(format!("write checkpoint clip: {e}"));
+        meta.preview = Some(preview.clone());
+        let _ = storage::write_meta(dir, &meta);
+        return Ok(CheckpointResult {
+            ingested_bytes: preview.bytes_ingested,
+            transcript_updated: false,
+            stale: false,
+        });
+    }
+    let transcribed = run_transcribe(&clip_path, &models).await;
+    let _ = std::fs::remove_file(&clip_path);
+
+    let result = match transcribed {
+        Ok(r) => r,
+        Err(e) => {
+            // The audio is persisted and the clock has advanced, so later chunks
+            // keep correct timestamps; the preview transcript simply has a gap
+            // for this window, and the final full pass covers it.
+            eprintln!("checkpoint transcription: {e}");
+            preview.last_error = Some(e);
+            meta.preview = Some(preview.clone());
+            let _ = storage::write_meta(dir, &meta);
+            return Ok(CheckpointResult {
+                ingested_bytes: preview.bytes_ingested,
+                transcript_updated: false,
+                stale: false,
+            });
+        }
+    };
+
+    // Stitch the chunk past the existing preview content, exactly as an append
+    // does: offset its times by the audio already ingested and its speaker ids
+    // past every id in use. Cross-chunk speaker reconciliation is deliberately
+    // out of scope — the final full pass is one diarization run and fixes it.
+    let mut existing = storage::read_segments(dir)?.unwrap_or(storage::SegmentsFile {
+        language: None,
+        participants: vec![],
+        segments: vec![],
+    });
+    let speaker_offset = storage::next_speaker_offset(&existing);
+    let time_offset = chunk_start_ms as f64 / 1000.0;
+    let mut chunk_segments = storage::offset_segments(&result.segments, time_offset, speaker_offset);
+    let mut chunk_participants = storage::offset_participants(&result.participants, speaker_offset);
+    existing.segments.append(&mut chunk_segments);
+    existing.participants.append(&mut chunk_participants);
+    if existing.language.is_none() {
+        existing.language = Some(result.language.clone());
+    }
+
+    meta.participants = existing.participants.clone();
+    if meta.language.is_none() {
+        meta.language = Some(result.language.clone());
+    }
+    storage::write_segments(dir, &existing)?;
+    let md = storage::render_markdown(&meta, &existing.segments);
+    storage::write_transcript(dir, &md)?;
+
+    preview.checkpoints += 1;
+    preview.last_error = None;
+    meta.preview = Some(preview.clone());
+    storage::write_meta(dir, &meta)?;
+
+    Ok(CheckpointResult {
+        ingested_bytes: preview.bytes_ingested,
+        transcript_updated: true,
+        stale: false,
+    })
+}
 
 /// Pure-ish orchestration over an explicit root, so tests use a tempdir.
 ///
@@ -387,6 +640,10 @@ async fn fresh_recording_core(
     let id = storage::sanitize_iso_to_id(&created_at);
     let dir = storage::create_recording_dir(root, &id)?;
 
+    // Wait out any in-flight checkpoint on this recording (a few seconds of STT
+    // at most) so the rewrite below can't interleave with one.
+    let _recording_guard = get_recording_lock(&id).lock_owned().await;
+
     // Read the existing meta once: an in-place rewrite (a retry, or the resume
     // path re-finalizing the same created_at) and a stub written at capture
     // start both leave one behind, and two different fields depend on it.
@@ -402,11 +659,12 @@ async fn fresh_recording_core(
     };
 
     // Persist the audio into the vault first so it is never lost, even if STT
-    // fails. The attachment is this recording's only audio home. On an in-place
-    // rewrite (a retry re-runs this for the same dir), reuse the existing
-    // attachment rather than deriving a fresh unique name — otherwise every
-    // retry would orphan the prior file and repoint an existing note's embed at
-    // a duplicate. The name derives from the *effective* title resolved above.
+    // fails. The attachment is this recording's only audio home. On an
+    // in-place rewrite (a retry, or a Stop after mid-recording checkpoints),
+    // reuse the existing attachment rather than deriving a fresh unique
+    // name — otherwise every rewrite would orphan the prior file and repoint
+    // an existing note's embed at a duplicate. The name derives from the
+    // *effective* title resolved above.
     let audio_file = match existing.and_then(|m| m.audio_file) {
         Some(existing) => existing, // in-place rewrite (retry): keep the same attachment
         None => format!(
@@ -433,7 +691,9 @@ async fn fresh_recording_core(
         last_clip_end_at: None,
         audio_file: Some(audio_file.clone()),
         notes_written: None,
+        notes_in_progress: false,
         title_is_default,
+        preview: None,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -451,6 +711,10 @@ async fn fresh_recording_core(
             })?;
             let md = storage::render_markdown(&meta, &result.segments);
             storage::write_transcript(&dir, &md)?;
+            // Truthful status from the instant the recording reads `Done`: a
+            // preview note may already be in the vault, and `derive_notes_status`
+            // would otherwise call this ready before the real notes exist.
+            meta.notes_in_progress = true;
             meta.status = RecordingStatus::Done;
             storage::write_meta(&dir, &meta)?;
 
@@ -535,7 +799,9 @@ fn save_failed_clip(
                 last_clip_end_at: None,
                 audio_file,
                 notes_written: None,
+                notes_in_progress: false,
                 title_is_default: false,
+                preview: None,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -573,15 +839,25 @@ async fn append_recording_core(
     // Serialize concurrent appends to the same target recording so two
     // simultaneous finalize calls cannot both see Done status and race on
     // writing audio/segments/meta.
-    let _append_guard = get_append_lock(target_id).lock_owned().await;
+    let append_guard = get_recording_lock(target_id).lock_owned().await;
 
     // Re-read meta/segments inside the lock. A concurrent append may have
     // completed (and changed status) since finalize_core's
     // most_recent_appendable check. Fall back to a fresh recording if the
     // target's state is no longer suitable for an append.
     let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
-        (Ok(m), Ok(Some(s))) if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() => (m, s),
-        _ => return fresh_recording_core(root, audio, title, created_at, duration_seconds).await,
+        (Ok(m), Ok(Some(s)))
+            if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() =>
+        {
+            (m, s)
+        }
+        _ => {
+            // The fresh path locks the recording it creates; an explicit
+            // append target can name that same id, and the lock is not
+            // reentrant. Release before falling back.
+            drop(append_guard);
+            return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+        }
     };
 
     // Capture the pre-append duration as the new clip's time offset before
@@ -646,6 +922,7 @@ async fn append_recording_core(
     // Clear any stale notes_error from a prior failed attempt (mirrors
     // `retry_notes_core`) and commit: status Done, written last.
     meta.notes_error = None;
+    meta.notes_in_progress = true;
     meta.status = RecordingStatus::Done;
     storage::write_meta(&dir, &meta)?;
     let _ = std::fs::remove_file(&clip_path);
@@ -714,6 +991,7 @@ pub async fn retry_notes_core(root: &Path, id: &str) -> Result<JoinHandle<()>, S
     let mut meta = storage::read_meta(&dir)?;
     meta.notes_error = None;
     meta.notes_written = None;
+    meta.notes_in_progress = true;
     storage::write_meta(&dir, &meta)?;
     // Clear the stale note so regeneration is observable. Remove the vault note
     // (new recordings) and any legacy `~/.ariso/ari-note.md` (pre-feature ones).
@@ -812,6 +1090,41 @@ pub async fn local_finalize_recording(
     )
         .await
         .map(|(res, _notes)| res)
+}
+
+/// Non-binary arguments of [`local_checkpoint_recording`], carried in the
+/// `x-oats-meta` header because the audio chunk occupies the request body.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointArgs {
+    pub id: String,
+    pub created_at: String,
+    pub title: String,
+    pub start_byte: u64,
+}
+
+/// Persist and transcribe the audio captured since the last checkpoint of a
+/// still-running Local recording (issue #123).
+///
+/// Takes the chunk as a raw IPC body for the same reason as
+/// `local_finalize_recording` (see `raw_ipc`) — and here it matters more: a
+/// 5-minute chunk is ~4.8 MB, and the serialization would run on the webview
+/// thread that is encoding the live audio, so the recording itself would drop
+/// samples.
+#[tauri::command]
+pub async fn local_checkpoint_recording(
+    request: tauri::ipc::Request<'_>,
+) -> Result<CheckpointResult, String> {
+    let chunk = crate::raw_ipc::body_bytes(&request)?;
+    let CheckpointArgs { id, created_at, title, start_byte } = crate::raw_ipc::meta(&request)?;
+    let root = crate::vault::meta_root()?;
+    // Paused: preview notes (Task 10) — see issue #123. `checkpoint_core`
+    // never spawns a preview-notes task today, so this is always `None`; the
+    // `_notes` binding is the seam Task 10 will fill in, at which point this
+    // comment should go back to describing a real dropped JoinHandle.
+    checkpoint_core(&root, &id, &created_at, &title, start_byte, chunk)
+        .await
+        .map(|(result, _notes)| result)
 }
 
 #[cfg(test)]
@@ -1108,6 +1421,52 @@ mod tests {
         assert_eq!(seg.participants[0].label, "Speaker 1");
     }
 
+    #[tokio::test]
+    async fn finalize_clears_notes_in_progress_when_notes_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        // Set before the detached task is spawned, so the status is honest from
+        // the instant the recording flips to Done.
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(!read_meta(&dir).unwrap().notes_in_progress);
+    }
+
+    #[tokio::test]
+    async fn failed_notes_also_clear_notes_in_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json).with_notes(StubOutcome::failure("boom")),
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        assert!(!meta.notes_in_progress);
+        assert!(meta.notes_error.is_some());
+    }
+
     /// Issue #355: a local recording gets a `meta.json` stub at capture start,
     /// so the user can rename it while it is still recording. Finalize must
     /// treat that rename as intentional instead of stamping the frontend's
@@ -1137,7 +1496,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1195,7 +1556,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some(prior_audio.into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1240,7 +1603,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: true,
+            preview: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1437,7 +1802,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1470,7 +1837,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Failed, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1494,7 +1861,7 @@ mod tests {
             participants: vec![], model_version: None, error: None,
             notes_error: Some("prior notes failure".into()),
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1535,7 +1902,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -1815,6 +2182,56 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
+    /// Regression for the self-deadlock this scheme has to avoid: an explicit
+    /// `append_to` that names the very id the fresh path would derive from
+    /// `created_at`. `append_recording_core` takes the recording lock for
+    /// `target_id`; when the target isn't actually appendable (no `Done` meta
+    /// + segments here) it falls back to `fresh_recording_core`, which takes
+    /// the recording lock for the *same* id. `tokio::sync::Mutex` is not
+    /// reentrant, so `append_recording_core` must `drop(append_guard)` before
+    /// calling the fallback — otherwise this hangs forever waiting on a lock
+    /// held by itself.
+    ///
+    /// Today's UI can never actually produce this state ("Continue this
+    /// meeting" always targets a *prior* recording, whose id necessarily
+    /// differs from the new session's derived id) — this test is defense in
+    /// depth so the `drop(append_guard)` guard survives future refactors
+    /// without anyone deleting it as unreachable.
+    #[tokio::test]
+    async fn append_to_its_own_id_falls_back_without_deadlocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let created_at = "2026-06-02T10:01:00.000Z";
+        let self_id = storage::sanitize_iso_to_id(created_at);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            finalize_core_with_target(
+                tmp.path(), b"bbb".to_vec(), "T".into(), created_at.into(), 15,
+                Some(self_id.clone()), false,
+            ),
+        )
+        .await
+        .expect("append-to-self must not deadlock");
+        let (r, h) = result.unwrap();
+        h.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // The fallback must produce a normal finished recording at that id,
+        // not silently error out.
+        assert_eq!(r.id, self_id);
+        assert_eq!(r.status, RecordingStatus::Done);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&self_id);
+        let meta = crate::storage::read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Done);
+        assert!(dir.join("transcript.md").exists(), "transcript must have landed");
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
     #[tokio::test]
     async fn force_new_starts_fresh_recording_even_within_append_window() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1922,7 +2339,7 @@ mod tests {
             duration_seconds: 60, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2092,7 +2509,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2119,7 +2536,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2232,7 +2649,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some("2026-06-02 User Title.mp3".into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 User Title.mp3", Some("Generated".into()));
         assert_eq!(meta.title, "User Title");
@@ -2255,7 +2674,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some("2026-06-02 default.mp3".into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: true,
+            preview: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", None);
         assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
@@ -2278,7 +2699,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: Some("2026-06-02 default.mp3".into()),
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: true,
+            preview: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", Some("   ".to_string()));
         assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
@@ -2317,6 +2740,450 @@ mod tests {
             "expected renamed vault note; vault had: {:?}",
             std::fs::read_dir(&vault).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>()
         );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// A rename that lands while notes are running must survive the notes
+    /// commit. `process_notes` writes the meta snapshot it captured at spawn, so
+    /// without a re-read the rename is reverted and `audio_file` points at a
+    /// file the rename already moved.
+    #[tokio::test]
+    async fn notes_commit_keeps_a_rename_that_landed_mid_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hello there","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "Original".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+
+        // Rename between the spawn and the commit: mutate meta.json directly,
+        // exactly as `rename_local_recording` does.
+        let mut renamed = read_meta(&dir).unwrap();
+        renamed.title = "User Chosen".into();
+        renamed.title_is_default = false;
+        crate::storage::write_meta(&dir, &renamed).unwrap();
+
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "User Chosen", "the rename must survive");
+        assert!(!meta.title_is_default);
+        assert!(meta.notes_written.is_some(), "notes still committed");
+    }
+
+    /// A synthetic MPEG-1 Layer III chunk of `frames` frames (128 kbps, 44.1 kHz,
+    /// mono): 417 bytes and 26.122 ms each. Matches `storage::mp3_duration_ms`.
+    fn mp3_chunk(frames: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..frames {
+            out.extend_from_slice(&[0xFF, 0xFB, 0x90, 0xC0]);
+            out.extend(std::iter::repeat_n(0u8, 417 - 4));
+        }
+        out
+    }
+
+    /// Write the capture-start stub `meta.json` the way `local_begin_recording`
+    /// does, so checkpoint tests start from the real on-disk state.
+    fn write_stub_meta(root: &Path, id: &str, created_at: &str, title: &str) -> PathBuf {
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        let meta = RecordingMeta {
+            id: id.into(),
+            title: title.into(),
+            created_at: created_at.into(),
+            duration_seconds: 0,
+            status: RecordingStatus::Recording,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
+            title_is_default: true,
+            notes_in_progress: false,
+            preview: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn first_checkpoint_persists_audio_and_creates_the_attachment() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let chunk = mp3_chunk(100);
+
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &chunk,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, chunk.len() as u64);
+        assert!(!res.stale);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Recording, "still capturing");
+        let audio_file = meta.audio_file.expect("attachment named on first checkpoint");
+        // Vault reads resolve via ARISO_ROOT, so it must stay set until every
+        // vault-touching assertion below has run.
+        assert_eq!(crate::vault::read_audio(&audio_file).unwrap(), chunk);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        let preview = meta.preview.expect("preview state written");
+        assert_eq!(preview.bytes_ingested, chunk.len() as u64);
+        assert_eq!(preview.duration_ms, 2612); // 100 frames
+        assert_eq!(meta.duration_seconds, 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_creates_the_stub_when_meta_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "My Title", 0,
+            &mp3_chunk(10),
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(!res.stale);
+        let dir = storage::recordings_dir(tmp.path()).join("2026-06-02T14-30-05Z");
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.title, "My Title");
+        assert_eq!(meta.status, RecordingStatus::Recording);
+        assert!(meta.title_is_default);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_appends_successive_chunks_and_accumulates_duration() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(50);
+        let b = mp3_chunk(50);
+
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T",
+            a.len() as u64, &b,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, (a.len() + b.len()) as u64);
+        let meta = read_meta(&dir).unwrap();
+        let mut expected = a.clone();
+        expected.extend_from_slice(&b);
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), expected);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert_eq!(meta.preview.unwrap().duration_ms, 2612);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_checkpoint_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(50);
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        // The frontend never saw the reply and resent the same chunk.
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, a.len() as u64);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), a);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert_eq!(meta.preview.unwrap().duration_ms, 1306);
+    }
+
+    #[tokio::test]
+    async fn an_overlapping_checkpoint_appends_only_its_new_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(50);
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        // A resend from 0 that also carries 20 new frames.
+        let mut overlapping = a.clone();
+        let tail = mp3_chunk(20);
+        overlapping.extend_from_slice(&tail);
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &overlapping,
+        ).await.unwrap();
+
+        assert_eq!(res.ingested_bytes, overlapping.len() as u64);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(
+            crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(),
+            overlapping,
+            "the already-ingested prefix must not be written twice",
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn a_gap_checkpoint_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let err = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 999, &mp3_chunk(5),
+        ).await.unwrap_err();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert!(err.contains("gap"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_against_a_finalized_recording_is_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let mut meta = read_meta(&dir).unwrap();
+        meta.status = RecordingStatus::Done;
+        storage::write_meta(&dir, &meta).unwrap();
+
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &mp3_chunk(5),
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(res.stale);
+        assert!(read_meta(&dir).unwrap().preview.is_none(), "nothing written");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_rejects_a_traversal_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = checkpoint_core(tmp.path(), "../escape", "2026-06-02T14:30:05.000Z", "T", 0, b"x")
+            .await.unwrap_err();
+        assert!(err.contains("invalid recording id"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_offsets_segments_and_renders_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.3,"segments":[{"speaker":"model-speaker-0","text":"first half","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(100); // 2612 ms
+        let b = mp3_chunk(100);
+
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T",
+            a.len() as u64, &b,
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert!(res.transcript_updated);
+        let seg = storage::read_segments(&dir).unwrap().expect("segments.json");
+        assert_eq!(seg.segments.len(), 2);
+        assert_eq!(seg.segments[0].speaker, 0);
+        assert_eq!(seg.segments[0].start, 0.0);
+        // Chunk 2 starts at chunk 1's frame-derived duration, and its speaker
+        // ids are offset past chunk 1's so they stay distinct.
+        assert_eq!(seg.segments[1].speaker, 1);
+        assert!((seg.segments[1].start - 2.612).abs() < 0.001, "{:?}", seg.segments[1]);
+        assert_eq!(seg.participants.len(), 2);
+
+        let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        // `offset_participants` shifts ids but COPIES labels, so both chunks
+        // render under "Speaker 1" even though their ids differ. That is the
+        // spec's accepted preview limitation — cross-checkpoint speaker
+        // reconciliation is an explicit non-goal, fixed by the final full pass.
+        // Do not "fix" this by relabelling: the append machinery is reused as-is.
+        assert_eq!(md.matches("**Speaker 1**").count(), 2, "{md}");
+        assert_eq!(md.matches("first half").count(), 2, "{md}");
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.preview.unwrap().checkpoints, 2);
+        assert_eq!(meta.status, RecordingStatus::Recording);
+    }
+
+    #[tokio::test]
+    async fn a_failed_chunk_still_persists_audio_and_advances_the_clock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("chunk boom"));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        let a = mp3_chunk(100);
+
+        let (res, _notes) = checkpoint_core(
+            tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a,
+        ).await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert!(!res.transcript_updated);
+        assert_eq!(res.ingested_bytes, a.len() as u64, "the offset still advances");
+        let meta = read_meta(&dir).unwrap();
+        // Vault reads resolve via ARISO_ROOT, so it must stay set until every
+        // vault-touching assertion below has run.
+        assert_eq!(crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(), a);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        let preview = meta.preview.unwrap();
+        assert_eq!(preview.duration_ms, 2612);
+        assert_eq!(preview.checkpoints, 0);
+        assert!(preview.last_error.as_deref().unwrap().contains("chunk boom"));
+        assert!(storage::read_segments(&dir).unwrap().is_none(), "segments untouched");
+        assert_eq!(meta.status, RecordingStatus::Recording, "never marked Failed");
+        assert!(meta.notes_error.is_none(), "a preview failure is not a notes failure");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_leaves_no_temp_clip_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let dir = write_stub_meta(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        checkpoint_core(tmp.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &mp3_chunk(10))
+            .await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        assert!(!dir.join("checkpoint-clip.mp3").exists());
+    }
+
+    /// The end state is unchanged (§ "Goal"): finalizing a checkpointed
+    /// recording must produce the same artifacts as finalizing the same full
+    /// audio with no checkpoints at all.
+    #[tokio::test]
+    async fn finalize_after_checkpoints_matches_finalize_without_them() {
+        let json = r#"{"language":"en","durationSeconds":5.0,"segments":[{"speaker":"model-speaker-0","text":"hello there","start":0.0,"end":2.0},{"speaker":"model-speaker-1","text":"hi back","start":2.0,"end":4.0}]}"#;
+        let a = mp3_chunk(100);
+        let b = mp3_chunk(100);
+        let mut full = a.clone();
+        full.extend_from_slice(&b);
+
+        // (1) Checkpointed, then finalized.
+        let checkpointed = tempfile::tempdir().unwrap();
+        let stub = write_stub(checkpointed.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", checkpointed.path()); }
+        write_stub_meta(checkpointed.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T");
+        checkpoint_core(checkpointed.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", 0, &a)
+            .await.unwrap();
+        checkpoint_core(checkpointed.path(), "2026-06-02T14-30-05Z", "2026-06-02T14:30:05.000Z", "T", a.len() as u64, &b)
+            .await.unwrap();
+        let (res_a, notes_a) = finalize_core(
+            checkpointed.path(), full.clone(), "T".into(), "2026-06-02T14:30:05.000Z".into(), 5,
+        ).await.unwrap();
+        notes_a.await.unwrap();
+        let dir_a = storage::recordings_dir(checkpointed.path()).join(&res_a.id);
+        let segments_a = std::fs::read_to_string(dir_a.join("segments.json")).unwrap();
+        let transcript_a = std::fs::read_to_string(dir_a.join("transcript.md")).unwrap();
+        let meta_a = read_meta(&dir_a).unwrap();
+        // Vault reads resolve via ARISO_ROOT, so this must run before it is
+        // torn down below (and before the second recording repoints it at a
+        // different tempdir).
+        assert_eq!(
+            crate::vault::read_audio(meta_a.audio_file.as_ref().unwrap()).unwrap(),
+            full,
+            "the checkpoint's attachment is reused, not orphaned",
+        );
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        // (2) The same audio, never checkpointed.
+        let plain = tempfile::tempdir().unwrap();
+        let stub = write_stub(plain.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", plain.path()); }
+        let (res_b, notes_b) = finalize_core(
+            plain.path(), full.clone(), "T".into(), "2026-06-02T14:30:05.000Z".into(), 5,
+        ).await.unwrap();
+        notes_b.await.unwrap();
+        let dir_b = storage::recordings_dir(plain.path()).join(&res_b.id);
+        let segments_b = std::fs::read_to_string(dir_b.join("segments.json")).unwrap();
+        let transcript_b = std::fs::read_to_string(dir_b.join("transcript.md")).unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        assert_eq!(segments_a, segments_b, "segments.json must be byte-identical");
+        assert_eq!(transcript_a, transcript_b, "transcript.md must be byte-identical");
+        assert!(meta_a.preview.is_none(), "preview state is dropped at Stop");
+        assert_eq!(meta_a.status, RecordingStatus::Done);
+    }
+
+    /// The branch's highest-risk emergent behavior — the recording-lock
+    /// ordering between checkpoints and finalize (§2 of the design spec) — is
+    /// otherwise never exercised under real contention: every other test drives
+    /// checkpoint and finalize strictly sequentially. Here a checkpoint's lock
+    /// is held deliberately while Stop (`finalize_core`) runs concurrently, to
+    /// prove finalize *blocks* on the lock and then completes correctly,
+    /// instead of deadlocking or interleaving with the in-flight checkpoint.
+    /// `multi_thread` because a current-thread runtime would only ever advance
+    /// the spawned task at the test's own await points, which is too easy to
+    /// pass by accident even if the real lock ordering were broken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_blocks_on_a_checkpoint_holding_the_recording_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":2.0,"segments":[{"speaker":"model-speaker-0","text":"hello there","start":0.0,"end":2.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+
+        let id = "2026-06-02T14-30-05Z";
+        let created_at = "2026-06-02T14:30:05.000Z";
+        write_stub_meta(tmp.path(), id, created_at, "T");
+
+        // Simulate a checkpoint in flight: take the exact per-recording lock
+        // `fresh_recording_core` waits on, and hold it across the assertions
+        // below.
+        let guard = get_recording_lock(id).lock_owned().await;
+
+        let root = tmp.path().to_path_buf();
+        let full = mp3_chunk(100);
+        let mut handle = tokio::spawn(async move {
+            finalize_core(&root, full, "T".into(), created_at.into(), 2).await
+        });
+
+        // While the lock is held, finalize must be blocked ON the lock — not
+        // deadlocked forever, not interleaved with the "checkpoint". A short
+        // timeout that is EXPECTED to elapse is how we observe "still blocked"
+        // without hanging the test if this assumption is wrong.
+        let still_blocked = tokio::time::timeout(Duration::from_millis(300), &mut handle).await;
+        assert!(
+            still_blocked.is_err(),
+            "finalize_core completed while the recording lock was held — \
+             it should have been waiting on get_recording_lock"
+        );
+
+        // Release the simulated checkpoint's hold on the lock.
+        drop(guard);
+
+        // finalize must now actually finish. Wrapped in its own timeout so a
+        // real regression (a deadlock, not just slowness) FAILS LOUDLY here
+        // instead of hanging the whole suite — a hang reads as CI flake and
+        // gets retried instead of fixed.
+        let (res, notes) = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("finalize_core did not complete after the lock was released — deadlock?")
+            .expect("finalize task panicked")
+            .expect("finalize_core returned an error");
+        notes.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let dir = storage::recordings_dir(tmp.path()).join(&res.id);
+        let meta = read_meta(&dir).unwrap();
+        // Not just "unblocked" — correct: a real finalize, not a truncated or
+        // interleaved one.
+        assert_eq!(meta.status, RecordingStatus::Done);
+        assert!(meta.preview.is_none(), "preview state is dropped at Stop");
+        let transcript = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        assert!(transcript.contains("hello there"), "{transcript}");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }

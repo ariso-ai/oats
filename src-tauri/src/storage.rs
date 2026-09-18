@@ -39,11 +39,18 @@ pub enum NotesStatus {
 pub const NO_SPEECH_NOTES_ERROR: &str =
     "no speech detected in this recording — notes generation skipped";
 
-/// Classify AI-notes generation from the note file's presence and any recorded
-/// `notes_error`. A present `ari-note.md` always means success (a stale error
-/// from a prior attempt is ignored).
-pub fn derive_notes_status(has_note: bool, notes_error: Option<&str>) -> NotesStatus {
-    if has_note {
+/// Classify AI-notes generation from the note file's presence, any recorded
+/// `notes_error`, and whether a run is currently in flight. An in-flight run
+/// outranks a present note: during a checkpointed recording the note on disk is
+/// a preview, and the final pass will replace it.
+pub fn derive_notes_status(
+    has_note: bool,
+    notes_error: Option<&str>,
+    notes_in_progress: bool,
+) -> NotesStatus {
+    if notes_in_progress {
+        NotesStatus::Pending
+    } else if has_note {
         NotesStatus::Ready
     } else if notes_error == Some(NO_SPEECH_NOTES_ERROR) {
         NotesStatus::EmptyTranscript
@@ -82,6 +89,42 @@ pub struct SegmentsFile {
     pub segments: Vec<Segment>,
 }
 
+/// Mid-recording checkpoint state for a Local recording (issue #123). Present
+/// only while a recording is being checkpointed; `fresh_recording_core` builds a
+/// brand-new `RecordingMeta` at Stop, which drops it, so its absence is exactly
+/// "this recording has no preview artifacts to reason about".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewState {
+    /// Bytes of the recorder's mp3 stream already persisted into the vault
+    /// attachment. The idempotency key: a chunk ending at or before this is a
+    /// duplicate, one starting after it is a gap.
+    #[serde(default)]
+    pub bytes_ingested: u64,
+    /// Duration of those bytes, from `mp3_duration_ms`. The next chunk's segment
+    /// time offset.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Committed checkpoints. Surfaced to the frontend so an open detail pane
+    /// can tell that the transcript grew.
+    #[serde(default)]
+    pub checkpoints: u32,
+    /// Number of segments in `segments.json` already covered by the preview
+    /// note. Segments past it are the delta the next preview-notes run merges.
+    ///
+    /// Paused: preview notes (Task 10) — see issue #123. This field is
+    /// written into every checkpointed `meta.json` (always `0`, since nothing
+    /// ever advances it) but never read: no preview-notes task exists yet to
+    /// consume it. Kept, rather than removed, because it's the seam Task 10
+    /// plugs into.
+    #[serde(default)]
+    pub notes_cursor: usize,
+    /// Last checkpoint/preview-notes failure. Deliberately *not* `notes_error`:
+    /// a preview failure must not surface as a user-facing "AI Notes failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingMeta {
@@ -116,6 +159,15 @@ pub struct RecordingMeta {
     /// auto-regeneration guard); v1 does not branch on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_written: Option<String>,
+    /// True from the moment a notes run is spawned until it writes an outcome.
+    /// Without it, a recording that already carries a *preview* note (written
+    /// during capture) reads as "notes ready" the instant Stop flips it to
+    /// `Done` — the poller stops before the final notes land, and the delete
+    /// guard lets the user delete out from under the running pass. A superseded
+    /// run leaves the flag to the run that superseded it. Absent on pre-feature
+    /// meta.json (migrates to `false`).
+    #[serde(default)]
+    pub notes_in_progress: bool,
     /// True while `title` is still the auto-generated default (the frontend
     /// timestamp label). Set when a fresh recording is created; cleared when the
     /// user renames it or when AI notes regenerate the title. Absent on
@@ -123,6 +175,10 @@ pub struct RecordingMeta {
     /// auto-retitled).
     #[serde(default)]
     pub title_is_default: bool,
+    /// Mid-recording checkpoint state (issue #123). `None` for every recording
+    /// that was never checkpointed, and for every recording after Stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PreviewState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -152,6 +208,11 @@ pub struct RecordingSummary {
     /// generating. Like `has_note`, this layer only sees the legacy
     /// `ari-note.md`; the command layer's vault overlay upgrades it to `Ready`.
     pub notes_status: NotesStatus,
+    /// Mirrors `RecordingMeta.notes_in_progress`. Not serialized to the
+    /// frontend; the command layer's vault overlay reads it to decide whether
+    /// a present vault note may upgrade this row to `Ready`.
+    #[serde(skip)]
+    pub notes_in_progress: bool,
     /// The recording's vault audio attachment name (from meta), used by the
     /// command layer to verify the attachment still exists. Not serialized to
     /// the frontend.
@@ -169,6 +230,19 @@ pub struct RecordingStatusView {
     pub has_transcript: bool,
     pub has_note: bool,
     pub notes_status: NotesStatus,
+    /// Preview checkpoints committed so far (0 when the recording was never
+    /// checkpointed). A change while `status == Recording` is the frontend's
+    /// signal that the transcript grew.
+    #[serde(default)]
+    pub preview_checkpoints: u32,
+    /// RFC3339 time oats last wrote this recording's note. A change while
+    /// `status == Recording` means a new preview note landed.
+    ///
+    /// Deliberately no `skip_serializing_if`: the TS type is
+    /// `notesWritten: string | null`, so `None` must reach the frontend as
+    /// `null` rather than as a missing key.
+    #[serde(default)]
+    pub notes_written: Option<String>,
 }
 
 /// Metadata persisted next to a buffered pending upload (`<id>.json`), so a
@@ -370,6 +444,86 @@ pub fn format_hms(secs: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// MPEG-1 Layer III bitrates (kbps) by header bitrate index 1..=14.
+const MP3_BITRATES_V1: [u32; 15] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+];
+/// MPEG-2 / 2.5 Layer III bitrates (kbps) by header bitrate index 1..=14.
+const MP3_BITRATES_V2: [u32; 15] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160,
+];
+
+/// Total duration, in milliseconds, of the MPEG audio frames in `bytes`.
+///
+/// Checkpoints derive every chunk's time offset from this rather than from the
+/// recorder's whole-second UI clock: the offset is cumulative, so a sub-second
+/// error per chunk would drift the preview transcript's timestamps further out
+/// with every checkpoint. Walks frame headers only — no decoding, no new
+/// dependency. Bytes that are not a valid frame header (an ID3 tag, a truncated
+/// tail) are skipped one byte at a time, so a chunk that does not start on a
+/// frame boundary still measures correctly.
+pub fn mp3_duration_ms(bytes: &[u8]) -> u64 {
+    // Accumulated in MICROseconds, not milliseconds. A frame is 1152/44100 s =
+    // 26.122 ms, so rounding each frame to whole milliseconds would lose
+    // 0.122 ms per frame — 1.4 s over a 5-minute chunk — and the error is
+    // cumulative across checkpoints, which is the exact drift this function
+    // exists to avoid. At microsecond granularity the loss is under 1 µs per
+    // frame (~5 µs over five minutes).
+    let mut total_us: u64 = 0;
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        let (h0, h1, h2) = (bytes[i], bytes[i + 1], bytes[i + 2]);
+        // Frame sync: 11 set bits.
+        if h0 != 0xFF || (h1 & 0xE0) != 0xE0 {
+            i += 1;
+            continue;
+        }
+        // Version: 00 = MPEG-2.5, 10 = MPEG-2, 11 = MPEG-1 (01 is reserved).
+        let version = (h1 >> 3) & 0x03;
+        // Layer: 01 = Layer III (the only layer lamejs emits).
+        let layer = (h1 >> 1) & 0x03;
+        if version == 0x01 || layer != 0x01 {
+            i += 1;
+            continue;
+        }
+        let bitrate_index = (h2 >> 4) as usize;
+        let rate_index = ((h2 >> 2) & 0x03) as usize;
+        if bitrate_index == 0 || bitrate_index == 15 || rate_index == 3 {
+            i += 1;
+            continue;
+        }
+        let is_v1 = version == 0x03;
+        let bitrate = if is_v1 {
+            MP3_BITRATES_V1[bitrate_index]
+        } else {
+            MP3_BITRATES_V2[bitrate_index]
+        } * 1000;
+        let sample_rate = match (version, rate_index) {
+            (0x03, 0) => 44_100,
+            (0x03, 1) => 48_000,
+            (0x03, 2) => 32_000,
+            (0x02, 0) => 22_050,
+            (0x02, 1) => 24_000,
+            (0x02, 2) => 16_000,
+            (_, 0) => 11_025,
+            (_, 1) => 12_000,
+            _ => 8_000,
+        };
+        let padding = ((h2 >> 1) & 0x01) as u32;
+        let samples_per_frame: u32 = if is_v1 { 1152 } else { 576 };
+        // Layer III: MPEG-1 packs 144 bytes per kbit-second, MPEG-2/2.5 packs 72.
+        let frame_len =
+            ((samples_per_frame / 8) * bitrate / sample_rate + padding) as usize;
+        if frame_len == 0 || i + frame_len > bytes.len() {
+            // Truncated final frame: it carries no complete audio, so stop.
+            break;
+        }
+        total_us += (samples_per_frame as u64) * 1_000_000 / (sample_rate as u64);
+        i += frame_len;
+    }
+    total_us / 1000
+}
+
 /// Reject recording ids that could escape the recordings dir. Ids are normally
 /// sanitized timestamps (e.g. `2026-06-02T14-30-05Z`); this mirrors the guard
 /// in `commands::recording_dir` so retry/status commands can validate ids that
@@ -550,7 +704,12 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
                         || recording_dir.join("recording.mp3").is_file(),
                     has_note,
                     has_transcript: recording_dir.join("transcript.md").is_file(),
-                    notes_status: derive_notes_status(has_note, m.notes_error.as_deref()),
+                    notes_status: derive_notes_status(
+                        has_note,
+                        m.notes_error.as_deref(),
+                        m.notes_in_progress,
+                    ),
+                    notes_in_progress: m.notes_in_progress,
                     audio_file: m.audio_file.clone(),
                 });
             }
@@ -561,6 +720,69 @@ pub fn list_recordings(root: &Path) -> Result<Vec<RecordingSummary>, String> {
     // is a consistently-formatted UTC ISO-8601 timestamp.
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(out)
+}
+
+/// Message stamped on a recording that oats was still capturing when it quit.
+pub const INTERRUPTED_RECORDING_ERROR: &str =
+    "oats quit while recording — audio up to the last checkpoint was kept";
+/// Message stamped on a recording that oats was still transcribing when it quit.
+pub const INTERRUPTED_TRANSCRIBE_ERROR: &str =
+    "oats quit while transcribing — the audio was kept, so Retry can transcribe it again";
+
+/// Settle every recording left mid-pipeline by a crash or a quit, at startup.
+/// No recorder and no notes task survives a relaunch, so an in-progress status
+/// on disk is always a lie.
+///
+/// `Recording` / `Transcribing` → `Failed` (audio retained). `Failed` is what
+/// unlocks the existing affordances: `retry_transcription_core` re-runs the full
+/// pipeline over the vault audio — whose `duration_seconds` checkpoints keep
+/// current — and `delete_local_recording` accepts it. Without this the recording
+/// is stranded: undeletable, un-retryable, and the detail poller never stops.
+/// `notes_in_progress` is cleared wherever it is set. Returns how many
+/// recordings changed.
+pub fn reconcile_interrupted_recordings(root: &Path) -> Result<usize, String> {
+    let dir = recordings_dir(root);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut changed = 0usize;
+    for entry in fs::read_dir(&dir).map_err(|e| format!("read recordings dir: {e}"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Unreadable meta.json is skipped with the same tolerance as
+        // `list_recordings` — a junk folder must not block startup.
+        let Ok(mut meta) = read_meta(&path) else { continue };
+        let mut dirty = false;
+        match meta.status {
+            RecordingStatus::Recording => {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(INTERRUPTED_RECORDING_ERROR.to_string());
+                dirty = true;
+            }
+            RecordingStatus::Transcribing => {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(INTERRUPTED_TRANSCRIBE_ERROR.to_string());
+                dirty = true;
+            }
+            _ => {}
+        }
+        if meta.notes_in_progress {
+            meta.notes_in_progress = false;
+            dirty = true;
+        }
+        if dirty {
+            // Best-effort per recording: one unwritable meta.json must not stop
+            // the sweep over the rest.
+            if let Err(e) = write_meta(&path, &meta) {
+                eprintln!("reconcile {}: {e}", path.display());
+                continue;
+            }
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 /// Compute the RFC3339 wall-clock end of a clip given its start timestamp and
@@ -691,7 +913,7 @@ mod tests {
             duration_seconds: 1, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         }
     }
 
@@ -896,7 +1118,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -918,7 +1142,7 @@ mod tests {
             duration_seconds: 0, status: RecordingStatus::Done, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            title_is_default: false,
+            notes_in_progress: false, title_is_default: false, preview: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -1047,19 +1271,19 @@ mod tests {
 
     #[test]
     fn derive_notes_status_ready_when_note_present() {
-        assert_eq!(derive_notes_status(true, None), NotesStatus::Ready);
+        assert_eq!(derive_notes_status(true, None, false), NotesStatus::Ready);
         // A present note wins even if a stale error lingers.
-        assert_eq!(derive_notes_status(true, Some("boom")), NotesStatus::Ready);
+        assert_eq!(derive_notes_status(true, Some("boom"), false), NotesStatus::Ready);
     }
 
     #[test]
     fn derive_notes_status_failed_when_error_and_no_note() {
-        assert_eq!(derive_notes_status(false, Some("boom")), NotesStatus::Failed);
+        assert_eq!(derive_notes_status(false, Some("boom"), false), NotesStatus::Failed);
     }
 
     #[test]
     fn derive_notes_status_pending_when_no_note_no_error() {
-        assert_eq!(derive_notes_status(false, None), NotesStatus::Pending);
+        assert_eq!(derive_notes_status(false, None, false), NotesStatus::Pending);
     }
 
     #[test]
@@ -1067,8 +1291,48 @@ mod tests {
         // A recording with nothing said isn't a failure to report and retry —
         // the UI names it for what it is.
         assert_eq!(
-            derive_notes_status(false, Some(NO_SPEECH_NOTES_ERROR)),
+            derive_notes_status(false, Some(NO_SPEECH_NOTES_ERROR), false),
             NotesStatus::EmptyTranscript
+        );
+    }
+
+    #[test]
+    fn notes_in_progress_wins_over_a_present_note() {
+        // The final pass is still running over the full audio while a preview
+        // note sits in the vault: the UI must keep polling, not call it ready.
+        assert_eq!(
+            derive_notes_status(true, None, true),
+            NotesStatus::Pending
+        );
+        assert_eq!(
+            derive_notes_status(true, None, false),
+            NotesStatus::Ready
+        );
+    }
+
+    #[test]
+    fn notes_in_progress_defaults_false_when_absent() {
+        let json = r#"{"id":"x","title":"T","createdAt":"2026-06-02T14:30:05.000Z","durationSeconds":12,"status":"done"}"#;
+        let meta: RecordingMeta = serde_json::from_str(json).unwrap();
+        assert!(!meta.notes_in_progress);
+    }
+
+    #[test]
+    fn a_recording_with_notes_in_flight_reads_as_pending_for_the_delete_guard() {
+        // `delete_local_recording` refuses a `Done` recording whose notes are
+        // Pending, precisely so a detached notes task cannot re-create a vault
+        // note after the delete. A preview note being present must not defeat it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = create_recording_dir(tmp.path(), "2026-06-02T14-30-05Z").unwrap();
+        let mut meta = meta_with("2026-06-02T14-30-05Z", "2026-06-02T14:30:05Z");
+        meta.status = RecordingStatus::Done;
+        meta.notes_in_progress = true;
+        write_meta(&dir, &meta).unwrap();
+
+        let m = read_meta(&dir).unwrap();
+        assert_eq!(
+            derive_notes_status(/* has_note */ true, m.notes_error.as_deref(), m.notes_in_progress),
+            NotesStatus::Pending,
         );
     }
 
@@ -1117,7 +1381,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();
@@ -1167,5 +1433,102 @@ mod tests {
     fn next_speaker_offset_zero_when_empty() {
         let empty = SegmentsFile { language: None, participants: vec![], segments: vec![] };
         assert_eq!(next_speaker_offset(&empty), 0);
+    }
+
+    /// Build `count` MPEG-1 Layer III frames at 128 kbps / 44.1 kHz.
+    /// Frame length = 144 * 128000 / 44100 = 417 bytes (no padding).
+    fn mp3_frames(count: usize, stereo: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..count {
+            // 0xFF 0xFB = sync + MPEG-1 + Layer III + no CRC.
+            // 0x90 = bitrate index 9 (128 kbps), sample-rate index 0 (44.1 kHz).
+            // 0x00 = stereo, 0xC0 = mono (channel mode in the top two bits).
+            out.extend_from_slice(&[0xFF, 0xFB, 0x90, if stereo { 0x00 } else { 0xC0 }]);
+            out.extend(std::iter::repeat_n(0u8, 417 - 4));
+        }
+        out
+    }
+
+    #[test]
+    fn mp3_duration_counts_mono_frames() {
+        // 10 frames * 1152 samples / 44100 Hz = 261.2 ms
+        assert_eq!(mp3_duration_ms(&mp3_frames(10, false)), 261);
+    }
+
+    #[test]
+    fn mp3_duration_is_channel_mode_independent() {
+        assert_eq!(
+            mp3_duration_ms(&mp3_frames(10, true)),
+            mp3_duration_ms(&mp3_frames(10, false)),
+        );
+    }
+
+    #[test]
+    fn mp3_duration_of_a_long_chunk_matches_the_frame_count() {
+        // ~5 minutes at 128 kbps: 11 490 frames.
+        let ms = mp3_duration_ms(&mp3_frames(11_490, false));
+        assert!((299_000..=301_000).contains(&ms), "got {ms} ms");
+    }
+
+    #[test]
+    fn mp3_duration_ignores_leading_garbage_and_trailing_partial_frames() {
+        let mut bytes = vec![b'I', b'D', b'3', 0, 0, 0, 0, 0];
+        bytes.extend(mp3_frames(4, false));
+        bytes.extend_from_slice(&[0xFF, 0xFB]); // truncated final header
+        assert_eq!(mp3_duration_ms(&bytes), 104); // 4 frames
+    }
+
+    #[test]
+    fn mp3_duration_of_non_audio_is_zero() {
+        assert_eq!(mp3_duration_ms(b"not audio at all"), 0);
+    }
+
+    #[test]
+    fn reconcile_fails_recordings_interrupted_by_a_quit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (id, status) in [
+            ("2026-06-01T10-00-00Z", RecordingStatus::Recording),
+            ("2026-06-02T10-00-00Z", RecordingStatus::Transcribing),
+            ("2026-06-03T10-00-00Z", RecordingStatus::Done),
+            ("2026-06-04T10-00-00Z", RecordingStatus::Failed),
+        ] {
+            let dir = create_recording_dir(root, id).unwrap();
+            let mut meta = meta_with(id, "2026-06-01T10:00:00Z");
+            meta.status = status;
+            write_meta(&dir, &meta).unwrap();
+        }
+
+        assert_eq!(reconcile_interrupted_recordings(root).unwrap(), 2);
+
+        let read = |id: &str| read_meta(&recordings_dir(root).join(id)).unwrap();
+        assert_eq!(read("2026-06-01T10-00-00Z").status, RecordingStatus::Failed);
+        assert!(read("2026-06-01T10-00-00Z").error.unwrap().contains("quit while recording"));
+        assert_eq!(read("2026-06-02T10-00-00Z").status, RecordingStatus::Failed);
+        assert_eq!(read("2026-06-03T10-00-00Z").status, RecordingStatus::Done, "untouched");
+        assert_eq!(read("2026-06-04T10-00-00Z").status, RecordingStatus::Failed);
+        assert!(read("2026-06-04T10-00-00Z").error.is_none(), "not re-stamped");
+    }
+
+    #[test]
+    fn reconcile_clears_a_stranded_notes_in_progress_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = create_recording_dir(root, "2026-06-03T10-00-00Z").unwrap();
+        let mut meta = meta_with("2026-06-03T10-00-00Z", "2026-06-03T10:00:00Z");
+        meta.status = RecordingStatus::Done;
+        meta.notes_in_progress = true;
+        write_meta(&dir, &meta).unwrap();
+
+        assert_eq!(reconcile_interrupted_recordings(root).unwrap(), 1);
+        let after = read_meta(&dir).unwrap();
+        assert!(!after.notes_in_progress, "no notes task survives a restart");
+        assert_eq!(after.status, RecordingStatus::Done, "status is not touched");
+    }
+
+    #[test]
+    fn reconcile_on_a_missing_recordings_dir_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(reconcile_interrupted_recordings(tmp.path()).unwrap(), 0);
     }
 }

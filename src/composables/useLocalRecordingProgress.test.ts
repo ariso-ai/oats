@@ -17,7 +17,10 @@ import { deriveStage, useLocalRecordingProgress } from './useLocalRecordingProgr
 import type { RecordingStatusView } from '../tauri';
 
 function view(over: Partial<RecordingStatusView> = {}): RecordingStatusView {
-  return { status: 'done', hasTranscript: false, hasNote: false, notesStatus: 'pending', ...over };
+  return {
+    status: 'done', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    previewCheckpoints: 0, notesWritten: null, ...over,
+  };
 }
 
 describe('deriveStage', () => {
@@ -39,6 +42,8 @@ describe('deriveStage', () => {
         hasTranscript: false,
         hasNote: false,
         notesStatus: 'pending',
+        previewCheckpoints: 0,
+        notesWritten: null,
       }),
     ).toBe('recording');
   });
@@ -59,6 +64,18 @@ describe('deriveStage', () => {
   });
   it('maps done+note ready to ready', () => {
     expect(deriveStage(view({ status: 'done', hasTranscript: true, hasNote: true, notesStatus: 'ready' }))).toBe('ready');
+  });
+  it('reports notes-pending while the final pass runs, even with a preview note', () => {
+    expect(
+      deriveStage({
+        status: 'done',
+        hasTranscript: true,
+        hasNote: true,
+        notesStatus: 'pending',
+        previewCheckpoints: 2,
+        notesWritten: '2026-09-15T10:00:00Z',
+      }),
+    ).toBe('notes-pending');
   });
 });
 
@@ -184,6 +201,43 @@ describe('useLocalRecordingProgress polling', () => {
     resolveRetry!();
     await vi.advanceTimersByTimeAsync(0);
     expect(recordingStatus).toHaveBeenCalledWith('rec-1');
+  });
+
+  it('bumps contentRevision when a checkpoint lands mid-recording', async () => {
+    recordingStatus
+      .mockResolvedValueOnce(view({ status: 'recording', previewCheckpoints: 1 }))
+      .mockResolvedValueOnce(view({ status: 'recording', previewCheckpoints: 2 }))
+      .mockResolvedValueOnce(view({ status: 'recording', previewCheckpoints: 2 }))
+      .mockResolvedValueOnce(
+        view({ status: 'recording', previewCheckpoints: 2, notesWritten: '2026-09-15T10:05:00Z' })
+      );
+    const p = useLocalRecordingProgress(() => 'r1');
+    p.begin();
+    await vi.advanceTimersByTimeAsync(0); // 1st poll: seeds, no bump
+    expect(p.contentRevision.value).toBe(0);
+    await vi.advanceTimersByTimeAsync(2000); // 2nd: checkpoints 1 -> 2
+    expect(p.contentRevision.value).toBe(1);
+    await vi.advanceTimersByTimeAsync(2000); // 3rd: unchanged
+    expect(p.contentRevision.value).toBe(1);
+    await vi.advanceTimersByTimeAsync(2000); // 4th: a new preview note landed
+    expect(p.contentRevision.value).toBe(2);
+  });
+
+  it('does not bump contentRevision outside a recording', async () => {
+    recordingStatus
+      .mockResolvedValueOnce({
+        status: 'done', hasTranscript: true, hasNote: false,
+        notesStatus: 'pending', previewCheckpoints: 3, notesWritten: null,
+      })
+      .mockResolvedValueOnce({
+        status: 'done', hasTranscript: true, hasNote: true,
+        notesStatus: 'ready', previewCheckpoints: 3, notesWritten: '2026-09-15T10:30:00Z',
+      });
+    const p = useLocalRecordingProgress(() => 'r1');
+    p.begin();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.contentRevision.value).toBe(0);
   });
 
   it('reset clears state and stops polling', async () => {

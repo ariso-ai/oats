@@ -1126,6 +1126,21 @@ describe('MeetingDetailView local generation progress', () => {
     expect(wrapper.find('.tab-regen').exists()).toBe(false);
   });
 
+  it('hides the Regenerate notes button while the recording is still capturing, even with a note present', async () => {
+    // Guards a latent trap once preview notes land mid-recording: clicking
+    // Regenerate while `status === 'recording'` would delete the vault note
+    // and set `notes_in_progress` while checkpoints keep rewriting
+    // transcript.md underneath it, leaving "Generating AI Notes" stuck
+    // forever. See issue #123.
+    recordingStatus.mockResolvedValue({
+      status: 'recording', hasTranscript: true, hasNote: true, notesStatus: 'ready',
+    });
+    readRecordingFile.mockResolvedValue('AI body');
+    const wrapper = await mountLocal(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
+    await flushPromises();
+    expect(wrapper.find('.tab-regen').exists()).toBe(false);
+  });
+
   it('hides the Regenerate notes button while notes are regenerating, showing the chip instead', async () => {
     recordingStatus.mockResolvedValue({
       status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',
@@ -1178,6 +1193,87 @@ describe('MeetingDetailView local generation progress', () => {
     await vi.advanceTimersByTimeAsync(2000);
 
     expect(wrapper.emitted('contentReady')).toEqual([[{ id: '7' }]]);
+  });
+
+  it('re-reads the transcript and note when a checkpoint lands, without reloading the pane', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'recording', hasTranscript: true, hasNote: true,
+      notesStatus: 'ready', previewCheckpoints: 1, notesWritten: null,
+    });
+    readRecordingFile.mockResolvedValue('AI body');
+    const wrapper = await mountLocalFaked(
+      detail({ isLocal: true, note: 'AI body', hasTranscript: true }),
+    );
+    readRecordingFile.mockClear();
+    getMeetingDetail.mockClear();
+
+    // The next poll sees a second checkpoint.
+    recordingStatus.mockResolvedValue({
+      status: 'recording', hasTranscript: true, hasNote: true,
+      notesStatus: 'ready', previewCheckpoints: 2, notesWritten: null,
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(readRecordingFile.mock.calls.map(([, kind]) => kind).sort()).toEqual([
+      'note',
+      'transcript',
+    ]);
+    // Deliberately NOT a full reload: that refetches the list and reloads the
+    // pane, which would disrupt the My Note editor mid-meeting.
+    expect(getMeetingDetail).not.toHaveBeenCalled();
+    expect(wrapper.emitted('contentReady')).toBeUndefined();
+  });
+
+  it('does not re-read when nothing changed between polls', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'recording', hasTranscript: true, hasNote: true,
+      notesStatus: 'ready', previewCheckpoints: 2, notesWritten: null,
+    });
+    readRecordingFile.mockResolvedValue('AI body');
+    await mountLocalFaked(detail({ isLocal: true, note: 'AI body', hasTranscript: true }));
+    readRecordingFile.mockClear();
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(readRecordingFile).not.toHaveBeenCalled();
+  });
+
+  it('disables AI-notes task checkboxes while the recording is still capturing', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'recording', hasTranscript: true, hasNote: true,
+      notesStatus: 'ready', previewCheckpoints: 1, notesWritten: null,
+    });
+    // The pre-existing hasNote watcher reloads the note the moment it first
+    // reports true (matching the local-note pattern elsewhere in this file);
+    // give it the same body the fixture already carries.
+    readRecordingFile.mockResolvedValue('- [ ] Follow up with Sam');
+    const wrapper = await mountLocal(
+      detail({ isLocal: true, note: '- [ ] Follow up with Sam', hasTranscript: true }),
+    );
+    await flushPromises();
+
+    const box = wrapper.find('.tab-pane input[type="checkbox"]');
+    expect(box.exists()).toBe(true);
+    expect(box.attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.tab-pane .md').attributes('title')).toBe(
+      'Available after the recording finishes',
+    );
+  });
+
+  it('leaves them interactive once the recording has finished', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: true,
+      notesStatus: 'ready', previewCheckpoints: 0, notesWritten: '2026-09-15T10:30:00Z',
+    });
+    readRecordingFile.mockResolvedValue('- [ ] Follow up with Sam');
+    const wrapper = await mountLocal(
+      detail({ isLocal: true, note: '- [ ] Follow up with Sam', hasTranscript: true }),
+    );
+    await flushPromises();
+
+    const box = wrapper.find('.tab-pane input[type="checkbox"]');
+    expect(box.attributes('disabled')).toBeUndefined();
+    expect(wrapper.find('.tab-pane .md').attributes('title')).toBeUndefined();
   });
 
   // Also fires on the very first poll: a row that was listed while the recording

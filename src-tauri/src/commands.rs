@@ -1758,8 +1758,11 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     for s in &mut summaries {
         if vault_notes.contains_key(&s.id) {
             s.has_note = true;
-            // A present note always wins over a stale `notes_error`.
-            s.notes_status = crate::storage::NotesStatus::Ready;
+            // A present note wins over a stale `notes_error` — but not over a
+            // notes run that is still in flight (the note is a preview).
+            if !s.notes_in_progress {
+                s.notes_status = crate::storage::NotesStatus::Ready;
+            }
         }
         if let Some(af) = &s.audio_file {
             // New recording: audio lives in the vault; reflect real existence
@@ -1826,12 +1829,19 @@ pub fn local_recording_status(
     let has_note =
         dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
     let has_transcript = dir.join("transcript.md").is_file();
-    let notes_status = crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+    let notes_status = crate::storage::derive_notes_status(
+        has_note,
+        meta.notes_error.as_deref(),
+        meta.notes_in_progress,
+    );
+    let preview_checkpoints = meta.preview.as_ref().map(|p| p.checkpoints).unwrap_or(0);
     Ok(crate::storage::RecordingStatusView {
         status: meta.status,
         has_transcript,
         has_note,
         notes_status,
+        preview_checkpoints,
+        notes_written: meta.notes_written,
     })
 }
 
@@ -2275,8 +2285,12 @@ const MAX_TITLE_CHARS: usize = 40;
 
 /// Rename a local recording by updating `title` in its `meta.json`. The folder
 /// id stays immutable; serde_json escapes quotes/special characters natively.
+///
+/// Async, and holding the recording lock: a rename can land while a checkpoint
+/// or a notes commit is mid-write, and a sync Tauri command runs on the main
+/// thread — it must never block there on a lock held across STT.
 #[tauri::command]
-pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
+pub async fn rename_local_recording(id: String, title: String) -> Result<(), String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("title must not be empty".to_string());
@@ -2285,6 +2299,7 @@ pub fn rename_local_recording(id: String, title: String) -> Result<(), String> {
         return Err(format!("title must be {MAX_TITLE_CHARS} characters or fewer"));
     }
     let dir = recording_dir(&id)?;
+    let _guard = crate::transcribe::get_recording_lock(&id).lock_owned().await;
     let mut meta = crate::storage::read_meta(&dir)?;
     meta.title = title.to_string();
     // A user rename makes the title intentional — never auto-retitle again.
@@ -2462,29 +2477,26 @@ pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Resul
 /// The stub's `status: Recording` deliberately fails
 /// `storage::most_recent_appendable`'s `status == Done` check, so a recording
 /// can never pick *itself* as an append target.
-#[tauri::command]
-pub fn local_begin_recording(
-    id: String,
-    created_at: String,
-    title: String,
+/// Write a capture-start `meta.json` stub (`status: Recording`) into `dir`.
+/// Shared by `local_begin_recording` and `transcribe::checkpoint_core`, which
+/// recreates the stub when the capture-start write failed.
+pub fn write_recording_stub(
+    dir: &std::path::Path,
+    id: &str,
+    created_at: &str,
+    title: &str,
 ) -> Result<(), String> {
-    // Rejects traversal ids before any path join (same guard as the note writers).
-    let dir = recording_dir(&id)?;
-    if crate::storage::read_meta(&dir).is_ok() {
-        return Ok(()); // append target, or a re-entrant call: keep what's there
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create recording dir: {e}"))?;
-
+    std::fs::create_dir_all(dir).map_err(|e| format!("create recording dir: {e}"))?;
     let trimmed = title.trim();
-    let title = if trimmed.is_empty() {
-        id.clone()
+    let title: String = if trimmed.is_empty() {
+        id.to_string()
     } else {
         trimmed.chars().take(MAX_TITLE_CHARS).collect()
     };
     let meta = crate::storage::RecordingMeta {
-        id: id.clone(),
+        id: id.to_string(),
         title,
-        created_at,
+        created_at: created_at.to_string(),
         duration_seconds: 0,
         status: crate::storage::RecordingStatus::Recording,
         language: None,
@@ -2496,9 +2508,25 @@ pub fn local_begin_recording(
         // Audio lands in the vault at finalize; there is nothing to point at yet.
         audio_file: None,
         notes_written: None,
+        notes_in_progress: false,
         title_is_default: true,
+        preview: None,
     };
-    crate::storage::write_meta(&dir, &meta)
+    crate::storage::write_meta(dir, &meta)
+}
+
+#[tauri::command]
+pub fn local_begin_recording(
+    id: String,
+    created_at: String,
+    title: String,
+) -> Result<(), String> {
+    // Rejects traversal ids before any path join (same guard as the note writers).
+    let dir = recording_dir(&id)?;
+    if crate::storage::read_meta(&dir).is_ok() {
+        return Ok(()); // append target, or a re-entrant call: keep what's there
+    }
+    write_recording_stub(&dir, &id, &created_at, &title)
 }
 
 /// Permanently delete a local recording: its vault note and audio attachment,
@@ -2533,8 +2561,11 @@ pub fn delete_local_recording(id: String) -> Result<(), String> {
         // misread as notes-pending and become permanently undeletable.
         let has_note =
             dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
-        let notes_status =
-            crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+        let notes_status = crate::storage::derive_notes_status(
+            has_note,
+            meta.notes_error.as_deref(),
+            meta.notes_in_progress,
+        );
         if notes_status == crate::storage::NotesStatus::Pending {
             return Err(
                 "AI notes are still generating for this recording — try again once they finish"
@@ -3503,12 +3534,14 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         }
     }
 
-    #[test]
-    fn rename_clears_title_is_default() {
+    #[tokio::test]
+    async fn rename_clears_title_is_default() {
         // SAFETY: command tests run with --test-threads=1 (see plan conventions),
         // so the process-wide ARISO_ROOT mutation below has no concurrent writer.
         let tmp = tempfile::tempdir().unwrap();
@@ -3520,7 +3553,7 @@ mod tests {
         meta.audio_file = None; // legacy path: skip vault propagation
         crate::storage::write_meta(&dir, &meta).unwrap();
 
-        rename_local_recording(id.to_string(), "My Real Title".to_string()).unwrap();
+        rename_local_recording(id.to_string(), "My Real Title".to_string()).await.unwrap();
 
         let after = crate::storage::read_meta(&dir).unwrap();
         unsafe { std::env::remove_var("ARISO_ROOT"); }
@@ -3557,8 +3590,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_recording_updates_title_in_meta() {
+    #[tokio::test]
+    async fn rename_local_recording_updates_title_in_meta() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: env mutation requires `--test-threads=1` so no concurrent
         // env access races with these calls (same convention as transcribe).
@@ -3569,7 +3602,7 @@ mod tests {
 
         // Quotes round-trip through meta.json (serde escapes them); whitespace
         // is trimmed before saving. Only `title` changes.
-        rename_local_recording(id.to_string(), "  Team sync \"Q2\"  ".to_string()).unwrap();
+        rename_local_recording(id.to_string(), "  Team sync \"Q2\"  ".to_string()).await.unwrap();
 
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.title, "Team sync \"Q2\"");
@@ -3578,8 +3611,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_recording_propagates_to_vault() {
+    #[tokio::test]
+    async fn rename_local_recording_propagates_to_vault() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: env mutation requires `--test-threads=1`.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -3591,7 +3624,7 @@ mod tests {
         crate::vault::write_audio("2026-06-02 Old.mp3", b"aud").unwrap();
         crate::vault::write_note("2026-06-02 Old", &meta, "2026-06-02 Old.mp3", "kept body").unwrap();
 
-        rename_local_recording(id.to_string(), "Q2 Sync".to_string()).unwrap();
+        rename_local_recording(id.to_string(), "Q2 Sync".to_string()).await.unwrap();
 
         // meta.audio_file now points at the renamed attachment.
         let meta2 = crate::storage::read_meta(&dir).unwrap();
@@ -3606,15 +3639,15 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_recording_rejects_empty_title() {
+    #[tokio::test]
+    async fn rename_local_recording_rejects_empty_title() {
         // Validation runs before any filesystem access, so no ARISO_ROOT needed.
-        assert!(rename_local_recording("any-id".to_string(), "".to_string()).is_err());
-        assert!(rename_local_recording("any-id".to_string(), "   ".to_string()).is_err());
+        assert!(rename_local_recording("any-id".to_string(), "".to_string()).await.is_err());
+        assert!(rename_local_recording("any-id".to_string(), "   ".to_string()).await.is_err());
     }
 
-    #[test]
-    fn rename_local_recording_rejects_over_limit_title_but_allows_40() {
+    #[tokio::test]
+    async fn rename_local_recording_rejects_over_limit_title_but_allows_40() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: see above.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -3623,21 +3656,21 @@ mod tests {
         crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
 
         // 41 characters is rejected without touching the file.
-        assert!(rename_local_recording(id.to_string(), "x".repeat(41)).is_err());
+        assert!(rename_local_recording(id.to_string(), "x".repeat(41)).await.is_err());
         assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "Old");
 
         // Exactly 40 characters saves.
-        rename_local_recording(id.to_string(), "x".repeat(40)).unwrap();
+        rename_local_recording(id.to_string(), "x".repeat(40)).await.unwrap();
         assert_eq!(crate::storage::read_meta(&dir).unwrap().title, "x".repeat(40));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_recording_rejects_missing_recording() {
+    #[tokio::test]
+    async fn rename_local_recording_rejects_missing_recording() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: see above.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
-        let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string());
+        let res = rename_local_recording("2026-06-02T14-30-05Z".to_string(), "New".to_string()).await;
         assert!(res.is_err());
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
@@ -3820,8 +3853,8 @@ mod tests {
 
     /// The bug this whole feature exists to fix: before the stub, a rename
     /// during capture failed with "read meta: No such file or directory".
-    #[test]
-    fn rename_local_recording_succeeds_on_a_stub() {
+    #[tokio::test]
+    async fn rename_local_recording_succeeds_on_a_stub() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: see above.
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -3833,7 +3866,7 @@ mod tests {
         )
         .unwrap();
 
-        rename_local_recording(id.to_string(), "Budget sync".to_string()).unwrap();
+        rename_local_recording(id.to_string(), "Budget sync".to_string()).await.unwrap();
 
         let meta = crate::storage::read_meta(&recording_dir(id).unwrap()).unwrap();
         assert_eq!(meta.title, "Budget sync");
@@ -4043,7 +4076,9 @@ mod tests {
             last_clip_end_at: None,
             audio_file: None,
             notes_written: None,
+            notes_in_progress: false,
             title_is_default: false,
+            preview: None,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();
@@ -4073,6 +4108,48 @@ mod tests {
     #[test]
     fn local_recording_status_rejects_bad_id() {
         assert!(local_recording_status("../escape".to_string()).is_err());
+    }
+
+    #[test]
+    fn local_recording_status_reports_preview_progress() {
+        // SAFETY: command tests run with --test-threads=1, so the process-wide
+        // ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.status = crate::storage::RecordingStatus::Recording;
+        meta.notes_written = Some("2026-06-02T10:05:00Z".into());
+        meta.preview = Some(crate::storage::PreviewState {
+            bytes_ingested: 4096,
+            duration_ms: 600_000,
+            checkpoints: 3,
+            notes_cursor: 12,
+            last_error: None,
+        });
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.preview_checkpoints, 3);
+        assert_eq!(view.notes_written.as_deref(), Some("2026-06-02T10:05:00Z"));
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn local_recording_status_reports_no_preview_for_an_ordinary_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-03T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        crate::storage::write_meta(&dir, &test_meta(id)).unwrap();
+
+        let view = local_recording_status(id.to_string()).unwrap();
+        assert_eq!(view.preview_checkpoints, 0);
+        assert_eq!(view.notes_written, None);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
     #[test]
@@ -4116,6 +4193,29 @@ mod tests {
             list.iter().find(|s| s.id == id).unwrap().notes_status,
             crate::storage::NotesStatus::Ready
         );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn list_local_recordings_keeps_pending_while_notes_are_in_flight() {
+        // SAFETY: command tests run with --test-threads=1, so the process-wide
+        // ARISO_ROOT mutation below has no concurrent writer.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("clip.mp3".into());
+        // A preview note in the vault, with the final pass still running.
+        meta.notes_in_progress = true;
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        crate::vault::write_note("2026-06-02 clip", &meta, "clip.mp3", "preview").unwrap();
+
+        let list = list_local_recordings().unwrap();
+        let row = list.iter().find(|s| s.id == id).unwrap();
+        assert!(row.has_note);
+        assert_eq!(row.notes_status, crate::storage::NotesStatus::Pending);
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 

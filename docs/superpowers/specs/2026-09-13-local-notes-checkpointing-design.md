@@ -272,6 +272,15 @@ only if `title_is_default` is still true.
 
 ### 4. Sidecar merge mode (both platforms)
 
+> **NOT YET ADOPTED.** This section describes the originally designed merge
+> mode. Testing against the real macOS MLX sidecar found that Gemma 3 1B
+> cannot merge notes in place — see the resolved "Merge-prompt quality"
+> finding under [Open questions](#open-questions). Task 9 (macOS merge mode)
+> and Task 10 (host-side preview notes) are paused pending a decision on the
+> documented fallback. The Windows sidecar's `--previous-notes` mode (Task 8)
+> has landed but currently has no host caller. The prose below is kept as a
+> record of what was attempted.
+
 `notes` gains an optional `--previous-notes <path>`. When it is present,
 `--transcript` is the delta, not the whole transcript. The output keeps the
 `{ "title": ..., "notes": ... }` contract. Merge mode is preview-only, so it
@@ -474,13 +483,24 @@ network call is introduced, so the offline-mode privacy guarantee
 
 ## Open questions
 
-- **Merge-prompt quality.** The biggest unknown: Gemma 3 1B already needs a
-  repetition penalty for one-shot summaries, and merging is harder. If it
-  doesn't hold up, the fallback stays incremental without a merge prompt:
-  summarize each checkpoint's delta once (cache the summaries in the recording
-  dir), and re-run only the reduce step over the cached summaries. That reuses
-  the Windows sidecar's existing `chunk_summary_prompt` /
-  `summary_reduction_prompt` pipeline.
+- **Merge-prompt quality — RESOLVED, failed.** Tested against the real macOS
+  MLX sidecar (Gemma 3 1B), not just reasoned about: every call whose input
+  contained *both* the current notes and the new transcript returned the
+  current notes byte-identically. This held across 9 prompt variants,
+  spanning system-vs-user-message framing, both orderings of notes and
+  transcript, chain-of-thought, two-turn decomposition, fact-routing, and a
+  diff-only format. Every delta-only call (no previous notes in the input)
+  produced good notes. So merge-in-place is not viable with this model as
+  currently prompted, on either platform (Windows uses the same Gemma 3 1B).
+  §4 ("Sidecar merge mode") is therefore not yet adopted; Task 9 (macOS merge
+  mode) and Task 10 (host-side preview notes) are paused. The fallback stays
+  incremental without a merge prompt: summarize each checkpoint's delta once
+  (cache the summaries in the recording dir), and re-run only the reduce step
+  over the cached summaries. That reuses the Windows sidecar's existing
+  `chunk_summary_prompt` / `summary_reduction_prompt` pipeline. This is the
+  path forward, pending a decision on when to pick it up. See
+  `.superpowers/sdd/2026-09-15-local-notes-checkpointing/task-9-prompt-experiment.md`
+  for the experiment log (gitignored, not tracked in this repo).
 - **Final notes replace the preview.** The final pass regenerates notes from
   the full, consistently diarized transcript, so the notes a user watched evolve
   can read differently after stop. The alternative — one last merge pass on top

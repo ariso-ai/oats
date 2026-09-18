@@ -515,6 +515,65 @@ export function useRecorder() {
     frameLevels.value = [];
   }
 
+  /** Total mp3 bytes the encoder has emitted so far this session. */
+  function encodedByteLength(): number {
+    let total = 0;
+    for (const chunk of mp3Chunks) total += chunk.length;
+    return total;
+  }
+
+  /**
+   * The encoded bytes from `startByte` up to the latest WHOLE `mp3Chunks` entry.
+   *
+   * Slices are cut only at entry boundaries (complete encoder outputs), never at
+   * an arbitrary byte, so the bytes handed to `local_checkpoint_recording`
+   * always begin on an MP3 frame — which is what lets Rust concatenate them
+   * straight onto the vault attachment and measure them with
+   * `storage::mp3_duration_ms`. `startByte` normally comes back from Rust as a
+   * previous `endByte`, so it is already boundary-aligned, but an entry can
+   * straddle it (e.g. Rust reports a partial ingest). Such an entry is included
+   * WHOLE rather than split — splitting would hand Rust bytes that don't start
+   * on a frame — so the returned `startByte` reflects where the slice actually
+   * begins, which may be LESS than the requested `startByte`. Callers must pass
+   * the returned `startByte` (not the requested one) on to Rust. When nothing
+   * new has been encoded, the requested `startByte` is echoed back unchanged
+   * and `endByte` equals the current total, so the caller's offset never
+   * regresses.
+   */
+  function sliceFrom(
+    startByte: number
+  ): { bytes: Uint8Array; startByte: number; endByte: number } {
+    let offset = 0;
+    const parts: Int8Array[] = [];
+    let resolvedStart = startByte;
+    let endByte = startByte;
+    let included = false;
+    for (const chunk of mp3Chunks) {
+      const chunkStart = offset;
+      const chunkEnd = offset + chunk.length;
+      offset = chunkEnd;
+      if (chunkEnd <= startByte) continue; // fully consumed already
+      if (!included) {
+        resolvedStart = chunkStart;
+        included = true;
+      }
+      parts.push(chunk);
+      endByte = chunkEnd;
+    }
+    if (!included) {
+      endByte = offset; // current total — never regress the caller's offset
+    }
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const bytes = new Uint8Array(total);
+    let written = 0;
+    for (const p of parts) {
+      bytes.set(new Uint8Array(p.buffer, p.byteOffset, p.length), written);
+      written += p.length;
+    }
+    return { bytes, startByte: resolvedStart, endByte };
+  }
+
   return {
     isRecording,
     isPaused,
@@ -529,5 +588,7 @@ export function useRecorder() {
     pauseRecording,
     resumeRecording,
     stopRecording,
+    encodedByteLength,
+    sliceFrom,
   };
 }

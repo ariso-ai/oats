@@ -27,6 +27,9 @@ export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (s.status === 'recording') return 'recording';
   if (s.status === 'transcribing') return 'transcribing';
   // status === 'done'
+  // A pending run outranks a present note: during a checkpointed recording the
+  // note on disk is a preview, and the final pass will replace it.
+  if (s.notesStatus === 'pending') return 'notes-pending';
   if (s.hasNote || s.notesStatus === 'ready') return 'ready';
   if (s.notesStatus === 'empty-transcript') return 'notes-empty-transcript';
   if (s.notesStatus === 'failed') return 'notes-failed';
@@ -53,6 +56,10 @@ export interface LocalRecordingProgress {
   stop: () => void;
   retryTranscription: () => Promise<void>;
   retryNotes: () => Promise<void>;
+  /** Increments whenever a checkpoint or a preview note lands while the
+   *  recording is still capturing. The detail pane watches it to re-read the
+   *  transcript and note in place. */
+  contentRevision: Ref<number>;
 }
 
 /**
@@ -65,6 +72,10 @@ export interface LocalRecordingProgress {
 export function useLocalRecordingProgress(getId: () => string | null): LocalRecordingProgress {
   const status = ref<RecordingStatusView | null>(null);
   const retrying = ref(false);
+  const contentRevision = ref(0);
+  // The previous poll's preview signature, or null outside a recording. Null on
+  // the first tick so seeding the signature never counts as a change.
+  let lastPreviewSignature: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let token = 0;
 
@@ -87,6 +98,17 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
       const s = await local.recordingStatus(id);
       if (my !== token) return;
       status.value = s;
+      // Only while capture is running: after Stop the final pass rewrites
+      // everything, and `hasTranscript` / `hasNote` already drive that reload.
+      if (s.status === 'recording') {
+        const signature = `${s.previewCheckpoints}:${s.notesWritten ?? ''}`;
+        if (lastPreviewSignature !== null && signature !== lastPreviewSignature) {
+          contentRevision.value += 1;
+        }
+        lastPreviewSignature = signature;
+      } else {
+        lastPreviewSignature = null;
+      }
       shouldContinue = IN_FLIGHT_STAGES.includes(stage.value);
     } catch (e) {
       if (my !== token) return;
@@ -112,6 +134,7 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     token++;
     clearTimer();
     status.value = null;
+    lastPreviewSignature = null;
   }
 
   function stop(): void {
@@ -126,7 +149,10 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     // Optimistic: show "Generating Transcript" immediately. Poll only AFTER the
     // retry RPC resolves — until then the backend still reports the prior
     // terminal state, and a poll would clobber the optimistic stage and stop.
-    status.value = { status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending' };
+    status.value = {
+      status: 'transcribing', hasTranscript: false, hasNote: false,
+      notesStatus: 'pending', previewCheckpoints: 0, notesWritten: null,
+    };
     try {
       await local.retryTranscription(id);
     } catch (e) {
@@ -144,7 +170,10 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     // Optimistic: show "Generating AI Notes" immediately. Poll only AFTER the
     // retry RPC resolves (it clears notes_error), so the first poll reflects the
     // regenerating state instead of the prior failure.
-    status.value = { status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending' };
+    status.value = {
+      status: 'done', hasTranscript: true, hasNote: false,
+      notesStatus: 'pending', previewCheckpoints: 0, notesWritten: null,
+    };
     try {
       await local.retryNotes(id);
     } catch (e) {
@@ -157,5 +186,17 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
 
   onUnmounted(stop);
 
-  return { status, stage, hasTranscript, hasNote, retrying, begin, reset, stop, retryTranscription, retryNotes };
+  return {
+    status,
+    stage,
+    hasTranscript,
+    hasNote,
+    retrying,
+    begin,
+    reset,
+    stop,
+    retryTranscription,
+    retryNotes,
+    contentRevision,
+  };
 }
