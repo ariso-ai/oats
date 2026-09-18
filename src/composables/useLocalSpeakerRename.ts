@@ -134,8 +134,15 @@ export function useLocalSpeakerRename(deps: {
       // `reset()` is the only thing that bumps it, and it clears `saving`
       // itself — so skipping this write is exactly what keeps a disowned
       // request from clearing `saving` out from under a newer one.
-      if (myGeneration !== generation) return;
-      saving.value = false;
+      //
+      // Written as a conditional rather than an early `return`: a `return` in
+      // `finally` discards whatever completion is pending, which is harmless
+      // today (every throw is caught above, and both paths return `undefined`)
+      // but turns into a silent bug the moment this function returns a value or
+      // the `catch` rethrows.
+      if (myGeneration === generation) {
+        saving.value = false;
+      }
     }
   }
 
