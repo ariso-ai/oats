@@ -181,6 +181,49 @@ describe('useLocalSpeakerRename', () => {
     expect(rename.draft.value).toBe('Speaker 2');
   });
 
+  it('disowns a rename that reset() abandoned, even on the same recording', async () => {
+    // Regression: the recording-id guards can't see a close-and-reopen on the
+    // *same* recording — the id still matches. Without a generation counter the
+    // abandoned request patches over the reopened panel and, worse, its
+    // `finally` clears `saving` while a second rename is still in flight,
+    // re-enabling the input mid-save.
+    const pending: Array<(markdown: string) => void> = [];
+    renameSpeaker.mockImplementation(
+      () => new Promise<string>((resolve) => pending.push(resolve))
+    );
+    const { rename, list, md } = setup();
+
+    rename.startEdit(0);
+    rename.draft.value = 'Priya';
+    const abandoned = rename.commit();
+
+    // Panel closed and reopened on the same recording, then a second rename
+    // starts before the first one has resolved.
+    rename.reset();
+    rename.startEdit(1);
+    rename.draft.value = 'Sam';
+    const current = rename.commit();
+
+    const listBefore = [...list.value];
+    const mdBefore = md.value;
+
+    // The abandoned request resolves last.
+    pending[0]('---\n---\n\n**Priya** [00:00:00]\nHi\n');
+    await abandoned;
+
+    // It touched nothing, and left the in-flight rename's `saving` alone.
+    expect(list.value).toEqual(listBefore);
+    expect(md.value).toBe(mdBefore);
+    expect(rename.editingId.value).toBe(1);
+    expect(rename.saving.value).toBe(true);
+
+    // The current request still lands normally.
+    pending[1]('---\n---\n\n**Sam** [00:00:00]\nHi\n');
+    await current;
+    expect(list.value[1].label).toBe('Sam');
+    expect(rename.saving.value).toBe(false);
+  });
+
   it('ignores a commit with no recording loaded', async () => {
     const { rename, recordingId } = setup();
     rename.startEdit(0);

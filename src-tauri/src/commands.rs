@@ -2345,7 +2345,15 @@ pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Resul
     // the frontend's `parseLocalTranscript` fails its HEADER regex on the broken
     // line and drops the *whole* Transcript tab back to raw markdown. The UI's
     // `<input type="text">` can't produce one, but invoke is a trust boundary.
-    if label.chars().any(char::is_control) {
+    //
+    // U+2028/U+2029 are checked explicitly because `char::is_control` covers
+    // only the `Cc` category, while JavaScript counts both as line terminators
+    // that its `.` never matches — so they break the HEADER regex exactly like
+    // `\n` does, and a paste can carry them into the field.
+    if label
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
         return Err("label must not contain line breaks or control characters".to_string());
     }
     let dir = recording_dir(&id)?;
@@ -4493,7 +4501,10 @@ mod tests {
         let dir = seed_two_speaker_recording(&root, id);
         let before = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
 
-        for bad in ["Pri\nya", "Pri\rya", "Pri\tya", "Pri\u{0}ya"] {
+        // U+2028/U+2029 are not `Cc`, so `char::is_control` alone misses them —
+        // but JavaScript treats them as line terminators, so they break the
+        // frontend's HEADER regex just like `\n`.
+        for bad in ["Pri\nya", "Pri\rya", "Pri\tya", "Pri\u{0}ya", "Pri\u{2028}ya", "Pri\u{2029}ya"] {
             let err = rename_local_speaker(id.into(), 0, bad.into()).unwrap_err();
             assert!(
                 err.contains("control characters"),

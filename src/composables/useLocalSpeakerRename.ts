@@ -48,6 +48,13 @@ export function useLocalSpeakerRename(deps: {
 
   const speakers = computed(() => deps.speakers.value);
 
+  // Bumped by `reset()` to disown any request still in flight. The recording-id
+  // checks below can't catch a close-and-reopen on the *same* recording: the id
+  // still matches, so a stale result would patch over a newer edit session and,
+  // worse, its `finally` would clear `saving` while a second rename is still
+  // pending — re-enabling the input mid-save.
+  let generation = 0;
+
   function startEdit(speakerId: number): void {
     error.value = null;
     editingId.value = speakerId;
@@ -61,6 +68,7 @@ export function useLocalSpeakerRename(deps: {
   }
 
   function reset(): void {
+    generation++;
     open.value = false;
     saving.value = false;
     cancelEdit();
@@ -85,8 +93,11 @@ export function useLocalSpeakerRename(deps: {
 
     saving.value = true;
     error.value = null;
+    const myGeneration = generation;
     try {
       const markdown = await local.renameSpeaker(id, speakerId, label);
+      // Disowned by a `reset()` that happened while this was in flight.
+      if (myGeneration !== generation) return;
       // The displayed recording can change while this request is in flight
       // (user picks a different meeting before it resolves). Applying a
       // stale result would clobber the new recording's speakers/transcript
@@ -107,6 +118,7 @@ export function useLocalSpeakerRename(deps: {
         draft.value = '';
       }
     } catch (e) {
+      if (myGeneration !== generation) return;
       // Same stale-meeting guard as the success path above. `load()` calls
       // reset() on a meeting switch, so without this a rename that failed on
       // meeting A would paint A's error banner into the panel the next time it
@@ -116,11 +128,13 @@ export function useLocalSpeakerRename(deps: {
       // own wording (e.g. the "predates structured transcripts" case).
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
-      // Deliberately NOT id-guarded, unlike the two branches above. `saving`
-      // only ever gates this panel's own input; leaving it stuck `true` after a
-      // meeting switch would disable the field for good, which is a worse
-      // failure than the transient it would prevent — and `reset()` (called by
-      // `load()` on every switch) clears it anyway.
+      // Generation-guarded, but deliberately NOT id-guarded. An id guard here
+      // could strand `saving` at `true` and disable the field for good, which
+      // is worse than the transient it prevents. A generation bump can't:
+      // `reset()` is the only thing that bumps it, and it clears `saving`
+      // itself — so skipping this write is exactly what keeps a disowned
+      // request from clearing `saving` out from under a newer one.
+      if (myGeneration !== generation) return;
       saving.value = false;
     }
   }

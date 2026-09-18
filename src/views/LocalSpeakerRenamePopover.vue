@@ -24,7 +24,6 @@
             class="lsp-input"
             type="text"
             :value="rename.draft.value"
-            :maxlength="MAX_SPEAKER_LABEL_CHARS"
             :disabled="rename.saving.value"
             :aria-label="`Rename ${s.label}`"
             @input="rename.draft.value = ($event.target as HTMLInputElement).value"
@@ -54,11 +53,12 @@
 // Shaped like the panels it sits beside (fixed panel over a full-viewport
 // click-catcher, teleported to <body> so the card's `overflow: hidden` can't
 // clip it).
+// The input deliberately carries no `maxlength`: HTML counts it in UTF-16 code
+// units, while `commit()` (and Rust) count Unicode code points, so an
+// astral-plane label would be cut off at half the real limit. Over-length input
+// is caught by `commit()` and reported in the panel's error line instead.
 import { computed, nextTick, ref } from 'vue';
-import {
-  MAX_SPEAKER_LABEL_CHARS,
-  type LocalSpeakerRename,
-} from '../composables/useLocalSpeakerRename';
+import type { LocalSpeakerRename } from '../composables/useLocalSpeakerRename';
 
 interface AnchorRect { bottom: number; left: number }
 
