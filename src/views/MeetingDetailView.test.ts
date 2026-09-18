@@ -352,6 +352,33 @@ describe('MeetingDetailView inline title editing', () => {
     expect(lines[1].find('.transcript-content').text()).toBe('Speaker 1: should be three. Anyway');
   });
 
+  it('sets the speaker label in its own element so it reads apart from the segment', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'Speaker 1: Five is five bars.' },
+      { chunk_index: 1, start_ms: 3120, content: 'Priya: Should be three.' },
+    ]);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await flushPromises();
+
+    const lines = wrapper.findAll('.transcript-line');
+    expect(lines[0].find('.transcript-speaker').text()).toBe('Speaker 1:');
+    expect(lines[1].find('.transcript-speaker').text()).toBe('Priya:');
+    // The rendered line still reads exactly as before — only its markup changed.
+    expect(lines[0].find('.transcript-content').text()).toBe('Speaker 1: Five is five bars.');
+  });
+
+  it('leaves a chunk with no speaker prefix as plain text', async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'Five is five bars.' },
+    ]);
+    const wrapper = await mountWith(detail({ hasTranscript: true }));
+    await flushPromises();
+
+    const line = wrapper.findAll('.transcript-line')[0];
+    expect(line.find('.transcript-speaker').exists()).toBe(false);
+    expect(line.find('.transcript-content').text()).toBe('Five is five bars.');
+  });
+
   // Parity (#400): a local transcript.md renders through the same transcript
   // list as Ariso chunks, so equivalent data looks identical on both backends.
   function transcriptRows(wrapper: Awaited<ReturnType<typeof mountWith>>) {

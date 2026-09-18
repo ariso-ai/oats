@@ -374,9 +374,9 @@
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
           <ol v-else-if="displayedChunks" class="transcript">
-            <li v-for="c in displayedChunks" :key="c.chunk_index" class="transcript-line">
-              <span class="transcript-ts">{{ formatTimestamp(c.start_ms) }}</span>
-              <span class="transcript-content">{{ c.content }}</span>
+            <li v-for="r in transcriptRows" :key="r.key" class="transcript-line">
+              <span class="transcript-ts">{{ r.ts }}</span>
+              <span class="transcript-content"><span v-if="r.speaker" class="transcript-speaker">{{ r.speaker }}:</span> {{ r.text }}</span>
             </li>
           </ol>
           <div v-else class="content-empty">No transcript available.</div>
@@ -458,6 +458,7 @@ import RecordingDeleteConfirmDialog from './RecordingDeleteConfirmDialog.vue';
 import ShareMeetingPopover from './ShareMeetingPopover.vue';
 import SpeakerAssignPopover from './SpeakerAssignPopover.vue';
 import { useSpeakerAssignment } from '../composables/useSpeakerAssignment';
+import { splitSpeakerLine } from '../composables/speakerAutoMatch';
 import LocalSpeakerRenamePopover from './LocalSpeakerRenamePopover.vue';
 import { useLocalSpeakerRename } from '../composables/useLocalSpeakerRename';
 import { avatarColor, initials } from './avatarStyle';
@@ -1076,6 +1077,18 @@ const displayedChunks = computed<TranscriptChunk[] | null>(() => {
   if (audioClips.value.length <= 1 || !activeClipId.value) return t;
   return t.filter((c) => c.transcript_id === activeClipId.value);
 });
+
+// One row per displayed chunk, with the speaker label split off so it can be
+// set apart from the words. Split by the same rule `speakersInTranscript` uses,
+// so the label the transcript emphasizes is always the one the rest of the app
+// treats as a speaker.
+const transcriptRows = computed(() =>
+  (displayedChunks.value ?? []).map((c) => ({
+    key: c.chunk_index,
+    ts: formatTimestamp(c.start_ms),
+    ...splitSpeakerLine(c.content),
+  }))
+);
 
 // Resolve a single clip's audio bytes. Legacy clips use the whole-meeting
 // endpoint (no transcript id).
@@ -2134,6 +2147,9 @@ const durationLabel = computed<string | null>(() => {
 .transcript-line { display: flex; gap: 12px; align-items: baseline; font-size: 14px; line-height: 1.6; }
 .transcript-ts { flex-shrink: 0; min-width: 48px; font-variant-numeric: tabular-nums; font-size: 12px; color: #9a9a9a; padding-top: 1px; }
 .transcript-content { color: #535353; }
+/* The label carries the line's structure, so it takes the weight and the
+   darker ink; the words stay in the body colour. */
+.transcript-speaker { font-weight: 600; color: #1f1f1f; }
 
 /* Rendered markdown */
 .md { color: #535353; font-size: 14px; line-height: 1.6; }
