@@ -2416,8 +2416,11 @@ pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Resul
     if meta.status == crate::storage::RecordingStatus::Done {
         let has_note =
             dir.join("ari-note.md").is_file() || crate::vault::find_note(&id)?.is_some();
-        let notes_status =
-            crate::storage::derive_notes_status(has_note, meta.notes_error.as_deref());
+        let notes_status = crate::storage::derive_notes_status(
+            has_note,
+            meta.notes_error.as_deref(),
+            meta.notes_in_progress,
+        );
         if notes_status == crate::storage::NotesStatus::Pending {
             return Err(
                 "AI notes are still generating for this recording — try again once they finish"
@@ -4653,6 +4656,34 @@ mod tests {
             crate::storage::read_segments(&dir).unwrap().unwrap().participants[1].label,
             "Speaker 2"
         );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn rename_local_speaker_rejects_while_a_checkpointed_preview_note_is_in_flight() {
+        // Regression: `derive_notes_status` outranks a present note with an
+        // in-flight run (a checkpointed recording's on-disk note is only a
+        // preview), but this guard once called it with just
+        // (has_note, notes_error) — dropping `notes_in_progress` — so a preview
+        // note made renames look safe to allow while the final notes pass was
+        // still running and would overwrite the transcript's speaker labels.
+        // SAFETY: see above — --test-threads=1.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-15T17-30-00Z";
+        let dir = seed_two_speaker_recording(&root, id);
+        let mut meta = crate::storage::read_meta(&dir).unwrap();
+        meta.notes_in_progress = true;
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        assert_eq!(
+            local_recording_status(id.into()).unwrap().notes_status,
+            crate::storage::NotesStatus::Pending
+        );
+
+        let err = rename_local_speaker(id.into(), 1, "Priya".into()).unwrap_err();
+        assert!(err.contains("AI notes are still generating"), "unexpected error: {err}");
+        assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[1].label, "Speaker 2");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
