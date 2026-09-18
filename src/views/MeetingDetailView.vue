@@ -682,8 +682,18 @@ const localSpeakers = useLocalSpeakerRename({
 
 // Local recordings get the chip purely on having diarized speakers to rename —
 // there is no host/attendee distinction on a recording made on this machine.
+// Diarized speakers alone aren't enough: a recording of pure silence still
+// renders a well-formed transcript — frontmatter plus a speaker header with an
+// empty body (see `transcript_has_speech` in transcribe.rs) — so it reports a
+// "Speaker 1" who never said anything. Gate on the parsed transcript instead,
+// which is empty for that case and null for a transcript that isn't a
+// `render_markdown` output at all (imported or pre-`segments.json`, which the
+// backend refuses to rename anyway).
 const canRenameLocalSpeakers = computed(
-  () => !!detail.value?.isLocal && localSpeakers.speakers.value.length > 0
+  () =>
+    !!detail.value?.isLocal &&
+    localSpeakers.speakers.value.length > 0 &&
+    (localTranscriptChunks.value?.length ?? 0) > 0
 );
 
 // Whichever surface this backend uses, the chip is one control.

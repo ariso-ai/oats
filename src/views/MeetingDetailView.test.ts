@@ -2395,6 +2395,36 @@ describe('MeetingDetailView local speaker rename', () => {
     expect(w.find('.speakers-trigger').exists()).toBe(false);
   });
 
+  it('hides the chip when the transcript has no speech, even though a speaker was diarized', async () => {
+    // A recording of pure silence still renders a well-formed transcript —
+    // frontmatter plus a speaker header with an empty body (see
+    // `transcript_has_speech` in transcribe.rs) — so `localSpeakers` is not
+    // empty. There is nothing attributed to that speaker to rename.
+    getMeetingDetail.mockResolvedValue(
+      localSpeakerDetail({
+        localSpeakers: [{ id: 0, label: 'Speaker 1' }],
+        transcript: '---\ntitle: "t"\n---\n\n**Speaker 1** [00:00:00]\n\n',
+      })
+    );
+    const w = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
+  it('hides the chip when a local transcript is not in the rendered speaker-block format', async () => {
+    // An imported/legacy transcript has no `segments.json` behind it, so the
+    // backend would refuse the rename anyway — don't offer it.
+    getMeetingDetail.mockResolvedValue(
+      localSpeakerDetail({
+        localSpeakers: [{ id: 0, label: 'Speaker 1' }],
+        transcript: '# Transcript\nImported text',
+      })
+    );
+    const w = mount(MeetingDetailView, { props: { item: localItem } });
+    await flushPromises();
+    expect(w.find('.speakers-trigger').exists()).toBe(false);
+  });
+
   it('opens the rename panel listing every diarized speaker', async () => {
     await openPanel(localSpeakerDetail());
     expect(q('.lsp-pop')).not.toBeNull();
