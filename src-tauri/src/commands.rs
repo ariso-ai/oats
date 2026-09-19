@@ -2344,8 +2344,17 @@ pub fn list_local_speakers(id: String) -> Result<Vec<crate::storage::Participant
 /// Refuses while the recording is still `Recording`/`Transcribing`, or while AI
 /// notes are `Pending` on an otherwise-`Done` recording — see the guard below
 /// for why that is a correctness requirement, not a UX nicety.
+///
+/// Async, and holding the recording lock (mirrors `rename_local_recording`):
+/// `transcribe::append_recording_core` reads meta/segments, then runs STT, and
+/// only flips the target to `Transcribing` *after* STT returns — so the status
+/// guard below can't see an append that is mid-STT, and a rename landing in
+/// that window would be silently reverted by the append's stale in-memory
+/// write-back. Taking the same lock the append path already holds across that
+/// whole window serializes the two: whichever gets here first completes and
+/// persists before the other reads `meta`.
 #[tauri::command]
-pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Result<String, String> {
+pub async fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Result<String, String> {
     let label = label.trim();
     if label.is_empty() {
         return Err("label must not be empty".to_string());
@@ -2372,6 +2381,7 @@ pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Resul
         return Err("label must not contain line breaks or control characters".to_string());
     }
     let dir = recording_dir(&id)?;
+    let _guard = crate::transcribe::get_recording_lock(&id).lock_owned().await;
     let mut meta = crate::storage::read_meta(&dir)?;
 
     // This command is the first writer of `transcript.md` outside the
@@ -2399,12 +2409,10 @@ pub fn rename_local_speaker(id: String, speaker_id: u32, label: String) -> Resul
     // notes generation, so checking it would make a failed transcription
     // permanently unrenamable.
     //
-    // Residual gap, deliberately not widened here: the clip-append path
-    // (`transcribe::append_recording_core`) reads meta/segments, then runs STT,
-    // and only flips the target to `Transcribing` *after* STT returns. A rename
-    // during that STT window sees `Done` and is later overwritten by the
-    // append's stale in-memory copies. Tracked separately; closing it needs a
-    // change in the append path (flip earlier, or re-read after STT).
+    // The clip-append path's STT window (`transcribe::append_recording_core`
+    // reads meta/segments, then runs STT, and only flips status to
+    // `Transcribing` *after* STT returns, so this status check alone can't see
+    // it) is closed by the recording-lock guard above, not by this check.
     if matches!(
         meta.status,
         crate::storage::RecordingStatus::Recording | crate::storage::RecordingStatus::Transcribing
@@ -4441,8 +4449,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_updates_meta_segments_and_transcript() {
+    #[tokio::test]
+    async fn rename_local_speaker_updates_meta_segments_and_transcript() {
         // SAFETY: see above — --test-threads=1.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -4451,7 +4459,7 @@ mod tests {
         let dir = seed_two_speaker_recording(&root, id);
 
         // Padding is trimmed, exactly like the title rename.
-        let md = rename_local_speaker(id.into(), 1, "  Priya  ".into()).unwrap();
+        let md = rename_local_speaker(id.into(), 1, "  Priya  ".into()).await.unwrap();
 
         // Returned markdown carries the new label and leaves the text alone.
         assert!(md.contains("**Priya** ["), "returned markdown missing new label: {md}");
@@ -4474,8 +4482,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_matches_by_id_not_position() {
+    #[tokio::test]
+    async fn rename_local_speaker_matches_by_id_not_position() {
         // An appended clip shifts ids via `offset_participants`, so the list can
         // start at a non-zero id — indexing by position would rename the wrong voice.
         // SAFETY: see above — --test-threads=1.
@@ -4501,7 +4509,7 @@ mod tests {
         crate::storage::write_meta(&dir, &meta).unwrap();
         settle_notes(&dir);
 
-        rename_local_speaker(id.into(), 7, "Priya".into()).unwrap();
+        rename_local_speaker(id.into(), 7, "Priya".into()).await.unwrap();
 
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.participants[0].label, "Speaker 4");
@@ -4509,8 +4517,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_rejects_empty_and_overlong_labels_without_touching_disk() {
+    #[tokio::test]
+    async fn rename_local_speaker_rejects_empty_and_overlong_labels_without_touching_disk() {
         // SAFETY: see above — --test-threads=1.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -4519,17 +4527,17 @@ mod tests {
         let dir = seed_two_speaker_recording(&root, id);
         let before = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
 
-        let err = rename_local_speaker(id.into(), 0, "   ".into()).unwrap_err();
+        let err = rename_local_speaker(id.into(), 0, "   ".into()).await.unwrap_err();
         assert!(err.contains("must not be empty"), "unexpected error: {err}");
 
         // 61 chars — one past the limit. Counted in chars, not bytes.
         let long: String = "é".repeat(61);
-        let err = rename_local_speaker(id.into(), 0, long).unwrap_err();
+        let err = rename_local_speaker(id.into(), 0, long).await.unwrap_err();
         assert!(err.contains("60 characters or fewer"), "unexpected error: {err}");
 
         // Exactly 60 is accepted.
         let ok: String = "é".repeat(60);
-        rename_local_speaker(id.into(), 0, ok.clone()).unwrap();
+        rename_local_speaker(id.into(), 0, ok.clone()).await.unwrap();
         assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[0].label, ok);
 
         // The two rejections left the pre-existing render untouched.
@@ -4537,8 +4545,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_rejects_unknown_speaker_id() {
+    #[tokio::test]
+    async fn rename_local_speaker_rejects_unknown_speaker_id() {
         // SAFETY: see above — --test-threads=1.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -4546,14 +4554,14 @@ mod tests {
         let id = "2026-09-15T13-00-00Z";
         let dir = seed_two_speaker_recording(&root, id);
 
-        let err = rename_local_speaker(id.into(), 99, "Priya".into()).unwrap_err();
+        let err = rename_local_speaker(id.into(), 99, "Priya".into()).await.unwrap_err();
         assert!(err.contains("unknown speaker id"), "unexpected error: {err}");
         assert!(!std::fs::read_to_string(dir.join("transcript.md")).unwrap().contains("Priya"));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_errors_when_segments_json_is_absent() {
+    #[tokio::test]
+    async fn rename_local_speaker_errors_when_segments_json_is_absent() {
         // SAFETY: see above — --test-threads=1.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -4565,15 +4573,15 @@ mod tests {
         crate::storage::write_meta(&dir, &meta).unwrap();
         settle_notes(&dir);
 
-        let err = rename_local_speaker(id.into(), 0, "Priya".into()).unwrap_err();
+        let err = rename_local_speaker(id.into(), 0, "Priya".into()).await.unwrap_err();
         assert!(err.contains("predates structured transcripts"), "unexpected error: {err}");
         // meta.json must be left alone — a half-applied rename is worse than none.
         assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[0].label, "Speaker 1");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_escapes_quotes_in_front_matter() {
+    #[tokio::test]
+    async fn rename_local_speaker_escapes_quotes_in_front_matter() {
         // SAFETY: see above — --test-threads=1.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -4581,7 +4589,7 @@ mod tests {
         let id = "2026-09-15T15-00-00Z";
         seed_two_speaker_recording(&root, id);
 
-        let md = rename_local_speaker(id.into(), 0, "Priya \"P\" Rao".into()).unwrap();
+        let md = rename_local_speaker(id.into(), 0, "Priya \"P\" Rao".into()).await.unwrap();
 
         // The front-matter list is quoted, so the label's own quotes must be escaped
         // there; the body header prints the label literally.
@@ -4590,8 +4598,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_rejects_control_characters() {
+    #[tokio::test]
+    async fn rename_local_speaker_rejects_control_characters() {
         // A newline breaks `**label** [hh:mm:ss]` across two lines, which fails
         // the frontend HEADER regex and drops the entire Transcript tab to raw
         // markdown. Not reachable from `<input type="text">`, but invoke is a
@@ -4608,7 +4616,7 @@ mod tests {
         // but JavaScript treats them as line terminators, so they break the
         // frontend's HEADER regex just like `\n`.
         for bad in ["Pri\nya", "Pri\rya", "Pri\tya", "Pri\u{0}ya", "Pri\u{2028}ya", "Pri\u{2029}ya"] {
-            let err = rename_local_speaker(id.into(), 0, bad.into()).unwrap_err();
+            let err = rename_local_speaker(id.into(), 0, bad.into()).await.unwrap_err();
             assert!(
                 err.contains("control characters"),
                 "unexpected error for {bad:?}: {err}"
@@ -4621,8 +4629,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_rejects_while_ai_notes_are_pending() {
+    #[tokio::test]
+    async fn rename_local_speaker_rejects_while_ai_notes_are_pending() {
         // Regression: rewriting `transcript.md` mid-notes-run makes
         // `process_notes` discard its own result (it treats a changed
         // transcript as "a newer run owns this"), with no replacement run
@@ -4644,7 +4652,7 @@ mod tests {
             crate::storage::NotesStatus::Pending
         );
 
-        let err = rename_local_speaker(id.into(), 1, "Priya".into()).unwrap_err();
+        let err = rename_local_speaker(id.into(), 1, "Priya".into()).await.unwrap_err();
         assert!(err.contains("AI notes are still generating"), "unexpected error: {err}");
 
         // The pending notes run's input is intact, so it will still commit, and
@@ -4659,8 +4667,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_rejects_while_a_checkpointed_preview_note_is_in_flight() {
+    #[tokio::test]
+    async fn rename_local_speaker_rejects_while_a_checkpointed_preview_note_is_in_flight() {
         // Regression: `derive_notes_status` outranks a present note with an
         // in-flight run (a checkpointed recording's on-disk note is only a
         // preview), but this guard once called it with just
@@ -4681,14 +4689,14 @@ mod tests {
             crate::storage::NotesStatus::Pending
         );
 
-        let err = rename_local_speaker(id.into(), 1, "Priya".into()).unwrap_err();
+        let err = rename_local_speaker(id.into(), 1, "Priya".into()).await.unwrap_err();
         assert!(err.contains("AI notes are still generating"), "unexpected error: {err}");
         assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[1].label, "Speaker 2");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_rejects_while_recording_or_transcribing() {
+    #[tokio::test]
+    async fn rename_local_speaker_rejects_while_recording_or_transcribing() {
         // SAFETY: see above — --test-threads=1.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
@@ -4708,7 +4716,7 @@ mod tests {
             meta.status = status;
             crate::storage::write_meta(&dir, &meta).unwrap();
 
-            let err = rename_local_speaker(id.clone(), 1, "Priya".into()).unwrap_err();
+            let err = rename_local_speaker(id.clone(), 1, "Priya".into()).await.unwrap_err();
             assert!(err.contains("still being processed"), "unexpected error: {err}");
             assert_eq!(std::fs::read_to_string(dir.join("transcript.md")).unwrap(), before);
             assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[1].label, "Speaker 2");
@@ -4716,8 +4724,8 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
-    #[test]
-    fn rename_local_speaker_allows_a_failed_recording_and_a_failed_notes_run() {
+    #[tokio::test]
+    async fn rename_local_speaker_allows_a_failed_recording_and_a_failed_notes_run() {
         // The notes check is scoped to `Done` on purpose: a `Failed` recording
         // never reached notes generation, so treating its (absent note, absent
         // notes_error) as Pending would make it permanently unrenamable. A
@@ -4733,7 +4741,7 @@ mod tests {
         let mut meta = crate::storage::read_meta(&dir).unwrap();
         meta.status = crate::storage::RecordingStatus::Failed;
         crate::storage::write_meta(&dir, &meta).unwrap();
-        rename_local_speaker(failed_id.into(), 1, "Priya".into()).unwrap();
+        rename_local_speaker(failed_id.into(), 1, "Priya".into()).await.unwrap();
         assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[1].label, "Priya");
 
         let errored_id = "2026-09-15T19-05-00Z";
@@ -4742,7 +4750,7 @@ mod tests {
         let mut meta = crate::storage::read_meta(&dir).unwrap();
         meta.notes_error = Some("notes generation produced empty output".into());
         crate::storage::write_meta(&dir, &meta).unwrap();
-        rename_local_speaker(errored_id.into(), 1, "Priya".into()).unwrap();
+        rename_local_speaker(errored_id.into(), 1, "Priya".into()).await.unwrap();
         assert_eq!(crate::storage::read_meta(&dir).unwrap().participants[1].label, "Priya");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
