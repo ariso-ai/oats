@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.25.0](https://github.com/ariso-ai/oats/compare/v0.24.0...v0.25.0) (2026-09-19)
+
+
+### Features
+
+* add local speaker rename commands ([2c342a7](https://github.com/ariso-ai/oats/commit/2c342a74db792d4680332411dad20c8a7502ea61))
+* add local speaker rename composable ([cf0fea7](https://github.com/ariso-ai/oats/commit/cf0fea7c459e01fb9e28f795336f7f813dddbf7e))
+* checkpoint a local recording every 5 minutes of captured audio ([5d60ea3](https://github.com/ariso-ai/oats/commit/5d60ea320c9794b0dfc24ef3e0bada204b9fe411))
+* derive mp3 chunk duration from frame headers ([2cee0ad](https://github.com/ariso-ai/oats/commit/2cee0ada11f366e7b8eb7a574d0d5fce5fb30bae))
+* drop preview state when finalize rewrites the recording ([2eaa292](https://github.com/ariso-ai/oats/commit/2eaa2922f0a9da07b7765ede0487ba247880d088))
+* expose boundary-aligned encoded-audio slices from useRecorder ([6fe5f9c](https://github.com/ariso-ai/oats/commit/6fe5f9c2f1e6778dd5b5d2cfdd542f04ad8028c8))
+* expose local speakers on the meeting detail ([07efa20](https://github.com/ariso-ai/oats/commit/07efa20db4daeb3c2135738f920e7879005e4e2e))
+* expose local_checkpoint_recording over the raw IPC body ([c3dd949](https://github.com/ariso-ai/oats/commit/c3dd949075aceb83d8a61239a89deedb8ed6c55a))
+* incremental local transcript checkpointing ([#123](https://github.com/ariso-ai/oats/issues/123)) ([dc75095](https://github.com/ariso-ai/oats/commit/dc750957559d70da46ea549341274eec4898231f))
+* merge each checkpoint's chunk into the preview transcript ([23715cb](https://github.com/ariso-ai/oats/commit/23715cb6404c5042f557821ba03fc3fd390b0df1))
+* persist checkpoint audio for an in-progress local recording ([50f4ab0](https://github.com/ariso-ai/oats/commit/50f4ab0eebf7ca67a79ef455345dad573a9f2c3c))
+* refresh an open recording's transcript and notes on each checkpoint ([025d65b](https://github.com/ariso-ai/oats/commit/025d65b32d457a3b9b02935bb266a2d48ad86928))
+* rename diarized speakers on local recordings ([a86a42b](https://github.com/ariso-ai/oats/commit/a86a42bfab27770d10d7c34993fdede048273071))
+* rename local speakers from the meeting detail ([cf68ad9](https://github.com/ariso-ai/oats/commit/cf68ad9788d2ab31c7bfd543aa701c449dbd1c2f))
+* set the speaker label apart from its words in the transcript ([69a3916](https://github.com/ariso-ai/oats/commit/69a39164dfed3c6ac41ff1c8ddcd019e989b84a1))
+* settle interrupted local recordings at startup ([c593a2e](https://github.com/ariso-ai/oats/commit/c593a2e5f89c0cc974e872e3828f8ab8f3672ec2))
+* **sidecar:** add --previous-notes merge mode to the Windows notes path ([e2bd754](https://github.com/ariso-ai/oats/commit/e2bd754cc8e13c679c11ecb4dee22abd4c7d060f))
+* track notes_in_progress so notes status stays truthful ([891fcbd](https://github.com/ariso-ai/oats/commit/891fcbd127dab643acbf4079cfa29cb7e3945c05))
+
+
+### Bug Fixes
+
+* add missing localSpeakers to ShareMeetingPopover's MeetingDetail fixture ([5072ec1](https://github.com/ariso-ai/oats/commit/5072ec1602dcf058c542913536f5be062bf3cd0d))
+* address final review wave for local notes checkpointing ([#123](https://github.com/ariso-ai/oats/issues/123)) ([c827154](https://github.com/ariso-ai/oats/commit/c827154f2bd7055c90fab4dc4ef489cf6e9c17a7))
+* apply CodeRabbit findings on local speaker rename ([fe64eb4](https://github.com/ariso-ai/oats/commit/fe64eb46fb61f2ce699640541ea399f800438571))
+* close checkpoint-slice/loop contract gaps between Task 12 and 13 ([6fd10ab](https://github.com/ariso-ai/oats/commit/6fd10ab6429c8bc3dedca0eb82d37cb564d0e036))
+* downmix stereo recordings to mono before handing them to FluidAudio ([4365ce4](https://github.com/ariso-ai/oats/commit/4365ce4dc484f6cf1dcddd93a6ca0273df48d7a8))
+* downmix stereo recordings to mono before handing them to FluidAudio ([baba890](https://github.com/ariso-ai/oats/commit/baba89090d6c60e42b1c9c5c6cf17c0c3158ef8f)), closes [#413](https://github.com/ariso-ai/oats/issues/413)
+* guard local speaker rename against a stale-recording race ([7c24f1c](https://github.com/ariso-ai/oats/commit/7c24f1cbfde1be79b7cb6ddef82a002d95571301))
+* hide the speaker rename chip when a local transcript has no speech ([44fba03](https://github.com/ariso-ai/oats/commit/44fba03b407612811d321fea2c54e9b899b516ad))
+* pass notes_in_progress to derive_notes_status in rename_local_speaker ([8def64c](https://github.com/ariso-ai/oats/commit/8def64c9818a5c76296320ad218f6ada47102c6c))
+* pass notes_in_progress to derive_notes_status in rename_local_speaker ([22359c7](https://github.com/ariso-ai/oats/commit/22359c72dbb868d9aa542d5123c0707b219d0c07))
+* refuse a local speaker rename while the pipeline still owns the files ([cc63143](https://github.com/ariso-ai/oats/commit/cc63143942916939554f3f823104d84e8b3ad128))
+* render local transcripts through the Ariso transcript list ([48ede69](https://github.com/ariso-ai/oats/commit/48ede69e8b9eab627ea831c1ebea91c17e560b22))
+* render local transcripts through the Ariso transcript list ([7c4f1a2](https://github.com/ariso-ai/oats/commit/7c4f1a27c19ad1a2ec555c8aea86787b31d9ab5f)), closes [#400](https://github.com/ariso-ai/oats/issues/400)
+* reset the local speaker rename panel on meeting switch ([4281e41](https://github.com/ariso-ai/oats/commit/4281e4118ed42cdb7dc47da7f35655cb4654aec4))
+* scope rename errors to their meeting and warn that notes go stale ([35c6d25](https://github.com/ariso-ai/oats/commit/35c6d252e3182a5c6d623c940c311da1cbc8374c))
+* serialize recording writers and commit notes against fresh meta ([879c5e8](https://github.com/ariso-ai/oats/commit/879c5e837c0cd1dcb12cabbfa2f004cc50273191))
+
 ## [0.24.0](https://github.com/ariso-ai/oats/compare/v0.23.0...v0.24.0) (2026-09-13)
 
 
