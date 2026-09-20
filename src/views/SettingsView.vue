@@ -164,7 +164,12 @@
               @click="onRowClick(row)"
             >
               <td class="model-name">
-                <span class="cell-flex">
+                <button
+                  type="button"
+                  class="cell-flex"
+                  :aria-pressed="isActiveModel(row)"
+                  @click.stop="onRowClick(row)"
+                >
                   {{ row.name }}
                   <span
                     v-if="isActiveModel(row)"
@@ -172,7 +177,7 @@
                     title="Currently in use"
                     aria-label="Currently in use"
                   >✓</span>
-                </span>
+                </button>
               </td>
               <td class="model-type">
                 <span class="help">
@@ -925,6 +930,7 @@ async function selectBackend(next: 'ariso' | 'local') {
 
 async function afterSwitchToLocal() {
   await refreshModelStatus();
+  await loadModelSizes();
   // First time only: ask before fetching the (large) on-device models.
   const prompted = await hasPromptedLocalModels().catch(() => true);
   if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
@@ -988,6 +994,7 @@ async function onInstallStt() {
   try {
     await local.downloadStt();
     await refreshModelStatus();
+    await loadModelSizes();
     sttBusy.value = 'idle';
   } catch (e) {
     console.error('STT model download failed', e);
@@ -1001,6 +1008,7 @@ async function onInstallLlm() {
   try {
     await local.downloadLlm();
     await refreshModelStatus();
+    await loadModelSizes();
     llmBusy.value = 'idle';
   } catch (e) {
     console.error('LLM model download failed', e);
@@ -1638,6 +1646,19 @@ async function refreshCalendarAccess() {
 .cell-flex--end {
   justify-content: flex-end;
   gap: 12px;
+}
+
+/* The name cell's flex row is a real <button> for keyboard access — strip the
+   native button chrome so it still reads as plain row text. */
+button.cell-flex {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .model-name {
