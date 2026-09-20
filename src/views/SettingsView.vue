@@ -2,14 +2,49 @@
   <div class="settings">
     <div v-if="showDownloadConfirm" class="download-confirm" role="dialog" aria-modal="true" aria-labelledby="download-confirm-title">
       <div class="download-confirm__card">
-        <h2 id="download-confirm-title" class="download-confirm__title">Download on-device models?</h2>
+        <h2 id="download-confirm-title" class="download-confirm__title">Download local models?</h2>
         <p class="download-confirm__body">
-          Local transcription needs the speech and language models (~750&nbsp;MB).
+          Local transcription needs the speech and notes models (~750&nbsp;MB).
           They download once and run entirely on your device.
         </p>
         <div class="download-confirm__actions">
           <button class="secondary-btn download-confirm__cancel" @click="cancelDownloadModels">Cancel</button>
           <button class="primary-btn download-confirm__confirm" @click="confirmDownloadModels">Download</button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="removeTarget"
+      class="download-confirm"
+      data-test="remove-confirm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="remove-confirm-title"
+    >
+      <div class="download-confirm__card">
+        <h2 id="remove-confirm-title" class="download-confirm__title">
+          Remove {{ removeTarget.name }}?
+        </h2>
+        <p class="download-confirm__body">
+          Its files are deleted from this device. Recording in Local mode needs
+          this model, so it has to be downloaded again before the next meeting.
+        </p>
+        <div class="download-confirm__actions">
+          <button
+            class="secondary-btn download-confirm__cancel"
+            data-test="remove-confirm-cancel"
+            @click="cancelRemove"
+          >
+            Cancel
+          </button>
+          <button
+            class="primary-btn download-confirm__confirm"
+            data-test="remove-confirm-ok"
+            @click="confirmRemove"
+          >
+            Remove
+          </button>
         </div>
       </div>
     </div>
@@ -100,42 +135,117 @@
       </div>
     </section>
 
-    <!-- On-device models card -->
-    <section v-if="backend === 'local'" class="section">
-      <h2 class="section-title">On-device models</h2>
+    <!-- Language models -->
+    <section v-if="backend === 'local'" class="section" data-test="models-section">
+      <h2 class="section-title">Language models</h2>
       <div class="card">
         <div v-if="showModelBanner" class="signin-banner">
-          Both on-device models must finish downloading before you can record.
+          Both local models must finish downloading before you can record.
         </div>
+        <table class="model-table">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col" class="model-type-head">Type</th>
+              <th scope="col" class="model-runtime-head">Runtime</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in catalog"
+              :key="row.key"
+              class="model-row"
+              :class="{
+                'model-row--selectable': true,
+                'model-row--active': isActiveModel(row),
+              }"
+              data-test="model-row"
+              :aria-selected="isActiveModel(row)"
+              @click="onRowClick(row)"
+            >
+              <td class="model-name">
+                <span class="cell-flex">
+                  {{ row.name }}
+                  <span
+                    v-if="isActiveModel(row)"
+                    class="model-tick model-tick--on"
+                    title="Currently in use"
+                    aria-label="Currently in use"
+                  >✓</span>
+                </span>
+              </td>
+              <td class="model-type">
+                <span class="help">
+                  <span
+                    class="model-type-icon"
+                    data-test="model-type-icon"
+                    role="img"
+                    tabindex="0"
+                    :aria-label="`${row.type === 'Speech' ? 'Speech model' : 'Language model'}. ${row.details}`"
+                  >
+                    <!-- Speech: a microphone. Language: lines of text. -->
+                    <svg v-if="row.type === 'Speech'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                      <line x1="12" y1="19" x2="12" y2="23" />
+                    </svg>
+                    <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="8" y1="13" x2="16" y2="13" />
+                      <line x1="8" y1="17" x2="13" y2="17" />
+                    </svg>
+                  </span>
+                  <span role="tooltip" class="help-tooltip" data-test="model-details">{{ row.details }}</span>
+                </span>
+              </td>
+              <td class="model-runtime">
+                <span class="cell-flex cell-flex--end">
+                <template v-if="row.runtime === 'local'">
+                  <span class="model-size" data-test="model-size">{{ rowSize(row) }}</span>
+                  <span v-if="rowDetail(row)" class="model-status">{{ rowDetail(row) }}</span>
+                  <button
+                    v-if="rowInstalled(row)"
+                    class="icon-btn"
+                    data-test="remove-model"
+                    title="Delete"
+                    aria-label="Delete"
+                    :disabled="recordingActive || anyDownloading"
+                    @click.stop="onRemoveRow(row)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                    </svg>
+                  </button>
+                  <button
+                    v-else-if="!unsupported"
+                    class="secondary-btn"
+                    :disabled="anyDownloading"
+                    @click.stop="onInstallRow(row)"
+                  >
+                    {{ rowBusy(row) === 'downloading' ? 'Downloading' : 'Install' }}
+                  </button>
+                </template>
+                <span v-else>Remote</span>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="removeError" class="setting-hint" style="color: var(--danger, #c0392b)">
+          {{ removeError }}
+        </p>
+      </div>
+    </section>
+
+    <!-- Vault -->
+    <section v-if="backend === 'local'" class="section" data-test="vault-section">
+      <h2 class="section-title">Vault</h2>
+      <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Speech voice model</span>
-          <div class="model-controls">
-            <span v-if="sttInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
-            <span v-else class="model-status">{{ sttStatusText }}</span>
-            <button
-              class="secondary-btn"
-              :disabled="unsupported || sttInstalled || anyDownloading"
-              @click="onInstallStt"
-            >
-              {{ sttInstalled ? 'Installed' : sttBusy === 'downloading' ? 'Downloading' : 'Install' }}
-            </button>
-          </div>
-        </div>
-        <div class="setting-row" style="margin-top: 16px">
-          <span class="setting-label">Language model</span>
-          <div class="model-controls">
-            <span v-if="llmInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
-            <span v-else class="model-status">{{ llmStatusText }}</span>
-            <button
-              class="secondary-btn"
-              :disabled="unsupported || llmInstalled || anyDownloading"
-              @click="onInstallLlm"
-            >
-              {{ llmInstalled ? 'Installed' : llmBusy === 'downloading' ? 'Downloading' : 'Install' }}
-            </button>
-          </div>
-        </div>
-        <div class="setting-row" style="margin-top: 16px">
           <span class="label-with-help">
             <span class="setting-label">Vault location</span>
             <span class="help">
@@ -443,8 +553,10 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
-import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
+import { DEFAULT_NOTES_MODEL, notesModelKey, type NotesModelId } from '../notesModels';
+import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
+import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import { isDiagnosticsEnabled, setDiagnosticsEnabled } from '../composables/useDiagnostics';
@@ -590,6 +702,130 @@ async function onChangeVault() {
     // ensure/persist, so resync the displayed path with the true active
     // vault rather than assuming the old one is still correct.
     await loadVaultDir();
+  }
+}
+
+// --- Language models table (Local backend only) ----------------------------
+// The table is the single control: clicking a Notes row makes that model the
+// one that writes notes, and each local row carries its own install button.
+const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
+const catalog = modelCatalog();
+
+async function loadNotesModel() {
+  try {
+    notesModel.value = await getNotesModelSetting();
+  } catch (e) {
+    console.error('Failed to read notes model setting', e);
+  }
+}
+
+const speechModelKey = ref<string>(DEFAULT_SPEECH_MODEL_KEY);
+
+async function loadSpeechModel() {
+  try {
+    speechModelKey.value = await getSpeechModelSetting();
+  } catch (e) {
+    console.error('Failed to read speech model setting', e);
+  }
+}
+
+/** The tick marks the model of each type that is actually in use: one speech
+ *  model transcribes, one notes model writes the notes. */
+function isActiveModel(row: CatalogModel): boolean {
+  if (row.type === 'Speech') return row.key === speechModelKey.value;
+  return (
+    !!row.notesModel && notesModelKey(row.notesModel) === notesModelKey(notesModel.value)
+  );
+}
+
+/** Speech rows read the STT download state; every other row is a notes model. */
+function rowInstalled(row: CatalogModel): boolean {
+  return row.type === 'Speech' ? sttInstalled.value : llmInstalled.value;
+}
+
+function rowBusy(row: CatalogModel): Busy {
+  return row.type === 'Speech' ? sttBusy.value : llmBusy.value;
+}
+
+/** Text beside the size: progress while downloading, and failures — but not
+ *  "not downloaded", which the missing tick and the Install button already say. */
+function rowDetail(row: CatalogModel): string {
+  const progress = row.type === 'Speech' ? sttProgress.value : llmProgress.value;
+  return rowDetailText(rowBusy(row), progress, rowInstalled(row), unsupported.value);
+}
+
+const modelSizes = ref<ModelSizes>({ notes: null, speech: null });
+const removeTarget = ref<CatalogModel | null>(null);
+const removeError = ref('');
+
+async function loadModelSizes() {
+  try {
+    modelSizes.value = await local.modelSizes();
+  } catch (e) {
+    console.error('Failed to read model sizes', e);
+    modelSizes.value = { notes: null, speech: null };
+  }
+}
+
+function rowKind(row: CatalogModel): LocalModelKind {
+  return row.type === 'Speech' ? 'speech' : 'notes';
+}
+
+function rowSize(row: CatalogModel): string {
+  return formatModelSize(modelSizes.value[rowKind(row)]);
+}
+
+function onRemoveRow(row: CatalogModel) {
+  removeError.value = '';
+  removeTarget.value = row;
+}
+
+function cancelRemove() {
+  removeTarget.value = null;
+}
+
+async function confirmRemove() {
+  const row = removeTarget.value;
+  removeTarget.value = null;
+  if (!row) return;
+  try {
+    await local.deleteModel(rowKind(row));
+  } catch (e) {
+    // The backend refuses mid-recording and mid-download; say which, rather
+    // than leaving the row looking installed for no stated reason.
+    removeError.value = e instanceof Error ? e.message : String(e);
+  }
+  await refreshModelStatus();
+  await loadModelSizes();
+}
+
+function onInstallRow(row: CatalogModel) {
+  if (row.runtime !== 'local') return;
+  if (row.type === 'Speech') void onInstallStt();
+  else void onInstallLlm();
+}
+
+async function onRowClick(row: CatalogModel) {
+  if (row.type === 'Speech') {
+    const previousKey = speechModelKey.value;
+    if (row.key === previousKey) return;
+    speechModelKey.value = row.key;
+    try {
+      await setSpeechModelSetting(row.key);
+    } catch (e) {
+      console.error('Failed to persist speech model', e);
+      speechModelKey.value = previousKey;
+    }
+    return;
+  }
+  if (!row.notesModel) return;
+  const previous = notesModel.value;
+  notesModel.value = row.notesModel;
+  try {
+    await setNotesModelSetting(row.notesModel);
+  } catch (e) {
+    console.error('Failed to persist notes model', e);
+    notesModel.value = previous;
   }
 }
 
@@ -802,12 +1038,6 @@ const showModelBanner = computed(() =>
   ),
 );
 
-const sttStatusText = computed(() =>
-  unsupported.value ? 'Unsupported on this platform' : rowStatusText(sttBusy.value, sttProgress.value),
-);
-const llmStatusText = computed(() =>
-  unsupported.value ? 'Unsupported on this platform' : rowStatusText(llmBusy.value, llmProgress.value),
-);
 
 const checking = ref(false);
 const autoCheck = ref(true);
@@ -1093,6 +1323,9 @@ onMounted(async () => {
     console.error('Failed to read backend setting; defaulting to Ariso', e);
   }
   if (backend.value === 'local') await refreshModelStatus();
+  await loadNotesModel();
+  await loadSpeechModel();
+  if (backend.value === 'local') await loadModelSizes();
   await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited
@@ -1354,6 +1587,166 @@ async function refreshCalendarAccess() {
   color: #1c1c1c;
 }
 
+.model-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.model-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: #6f6f6f;
+  padding: 0 8px 8px;
+  border-bottom: 1px solid #e5e6e3;
+}
+
+.model-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid #f1f1ef;
+  color: #1c1c1c;
+  vertical-align: middle;
+}
+
+.model-table tr:last-child td {
+  border-bottom: none;
+}
+
+.model-row--selectable {
+  cursor: pointer;
+}
+
+.model-row--selectable:hover td {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.model-row--active td {
+  background: #f5f5f7;
+}
+
+/* The cells stay real table-cells — `display: flex` on a <td> drops it out of
+   table layout, so its height stops tracking the rest of the row. The flex row
+   lives on an inner span instead. */
+.cell-flex {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.cell-flex--end {
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.model-name {
+  /* Flush with the card's own padding — no extra inset before the name. */
+  padding-left: 0;
+}
+
+/* Qualified with the table + element selector so it outranks `.model-table th`
+   (which sets text-align: left and would otherwise win on specificity). */
+.model-table th.model-runtime-head {
+  text-align: center;
+}
+
+/* `width: 1%` on a full-width table collapses a column to its content width,
+   so Type (an icon) and Runtime (size + button) stay tight and Name absorbs
+   the remaining space. */
+.model-table th.model-type-head,
+.model-table td.model-type,
+.model-table th.model-runtime-head,
+.model-table td.model-runtime {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.model-table th:first-child {
+  padding-left: 0;
+}
+
+/* Only renders when the model is actually in use. `margin-left: auto` pushes
+   it to the far end of the name cell rather than letting it sit against the
+   name, so the ticks line up down the column whatever the names are. */
+.model-tick {
+  display: inline-block;
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #2e8b4f;
+}
+
+.model-type {
+  color: #6f6f6f;
+}
+
+.model-type-icon {
+  display: inline-flex;
+  cursor: help;
+}
+
+.model-type-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.model-type-icon:focus-visible + .help-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* The Settings window is a fixed 450px and `.settings` clips on both axes
+   (it scrolls vertically), so a left-anchored 260px bubble would run off the
+   right edge from this middle column. Center it on the icon and narrow it:
+   at this width that keeps both edges inside the card. */
+.model-type .help-tooltip {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: 200px;
+}
+
+/* Icon-only action (delete). The native title supplies the "Delete" tip. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #d6d6d6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #6f6f6f;
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.icon-btn:hover:not(:disabled),
+.icon-btn:focus-visible:not(:disabled) {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.model-runtime {
+  white-space: nowrap;
+}
+
+.model-size {
+  color: #6f6f6f;
+  font-variant-numeric: tabular-nums;
+}
+
 .model-controls {
   display: flex;
   align-items: center;
@@ -1417,6 +1810,9 @@ async function refreshCalendarAccess() {
 
 /* Description is revealed only when the "?" is hovered or keyboard-focused. */
 .help-tooltip {
+  /* Always wrap inside the bubble: a tooltip can sit inside a nowrap cell
+     (the models table) and would otherwise inherit it and overflow. */
+  white-space: normal;
   position: absolute;
   top: calc(100% + 6px);
   left: 0;

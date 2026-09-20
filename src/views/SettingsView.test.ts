@@ -4,12 +4,29 @@ import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 
 const getAllWebviewWindows = vi.fn(() => Promise.resolve([] as { label: string }[]));
 const emit = vi.fn((..._a: unknown[]) => Promise.resolve());
-const getBackendSetting = vi.fn(() => Promise.resolve('ariso' as const));
+const getBackendSetting = vi.fn(
+  (): Promise<'ariso' | 'local'> => Promise.resolve('ariso')
+);
 const setBackendSetting = vi.fn((_b: unknown) => Promise.resolve());
 const hasPromptedLocalModels = vi.fn(() => Promise.resolve(false));
 const setPromptedLocalModels = vi.fn((_v: unknown) => Promise.resolve());
+type ModelStatusShape = { state: string; version?: string; llmReady?: boolean };
+const modelStatus = vi.fn(
+  (): Promise<ModelStatusShape> => Promise.resolve({ state: 'not_downloaded' })
+);
+const modelSizes = vi.fn(
+  (): Promise<{ notes: number | null; speech: number | null }> =>
+    Promise.resolve({ notes: null, speech: null })
+);
+const deleteModel = vi.fn((_k: unknown) => Promise.resolve());
 const downloadStt = vi.fn(() => Promise.resolve());
 const downloadLlm = vi.fn(() => Promise.resolve());
+const getNotesModelSetting = vi.fn(() =>
+  Promise.resolve({ kind: 'local', id: 'gemma-3-1b-it-qat-4bit' } as const)
+);
+const setNotesModelSetting = vi.fn((_m: unknown) => Promise.resolve());
+const getSpeechModelSetting = vi.fn(() => Promise.resolve('speech:parakeet-tdt-0.6b-v3'));
+const setSpeechModelSetting = vi.fn((_k: unknown) => Promise.resolve());
 const checkSession = vi.fn((): Promise<unknown> => Promise.resolve(null));
 const apiRequest = vi.fn(
   (
@@ -77,13 +94,19 @@ vi.mock('../tauri', () => ({
   setBackendSetting: (b: unknown) => setBackendSetting(b),
   hasPromptedLocalModels: () => hasPromptedLocalModels(),
   setPromptedLocalModels: (v: unknown) => setPromptedLocalModels(v),
+  getNotesModelSetting: () => getNotesModelSetting(),
+  setNotesModelSetting: (m: unknown) => setNotesModelSetting(m),
+  getSpeechModelSetting: () => getSpeechModelSetting(),
+  setSpeechModelSetting: (k: unknown) => setSpeechModelSetting(k),
   getVaultDir: () => getVaultDir(),
   setVaultDir: (path: string) => setVaultDir(path),
   pickVaultFolder: (current?: string) => pickVaultFolder(current),
   local: {
-    modelStatus: () => Promise.resolve({ state: 'not_downloaded' }),
+    modelStatus: () => modelStatus(),
     downloadStt: () => downloadStt(),
     downloadLlm: () => downloadLlm(),
+    modelSizes: () => modelSizes(),
+    deleteModel: (k: unknown) => deleteModel(k),
   },
 }));
 const loadRecordingEnabled = vi.fn(() => Promise.resolve({ mic: false, systemAudio: false }));
@@ -160,6 +183,11 @@ beforeEach(() => {
     Promise.resolve({ status: 200, data: {} })
   );
   getBackendSetting.mockResolvedValue('ariso');
+  getNotesModelSetting.mockResolvedValue({ kind: 'local', id: 'gemma-3-1b-it-qat-4bit' });
+  modelStatus.mockResolvedValue({ state: 'not_downloaded' });
+  modelSizes.mockResolvedValue({ notes: null, speech: null });
+  getSpeechModelSetting.mockResolvedValue('speech:parakeet-tdt-0.6b-v3');
+  deleteModel.mockResolvedValue(undefined);
   isDiagnosticsEnabled.mockResolvedValue(false);
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
@@ -288,7 +316,7 @@ describe('SettingsView first-time local models prompt', () => {
     await switchToLocal(wrapper);
 
     expect(wrapper.find('.download-confirm').exists()).toBe(true);
-    expect(wrapper.text()).toContain('Download on-device models');
+    expect(wrapper.text()).toContain('Download local models');
   });
 
   it('broadcasts a backend-changed event so other windows can react', async () => {
@@ -1116,5 +1144,268 @@ describe('SettingsView auto-record depends on the microphone', () => {
     await mic.trigger('change');
     await flushPromises();
     expect(autoRecordToggle(wrapper).attributes('disabled')).toBeUndefined();
+  });
+});
+describe('SettingsView language models table', () => {
+  const ROW = '[data-test="model-row"]';
+
+  function rows(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll(ROW);
+  }
+
+  it('has no model table on the Ariso backend', async () => {
+    getBackendSetting.mockResolvedValue('ariso');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find(ROW).exists()).toBe(false);
+  });
+
+  it('names the section "Language models"', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Language models');
+    expect(wrapper.text()).not.toContain('On-device models');
+    expect(wrapper.text()).not.toContain('Local models');
+  });
+
+  it('lists each model with its name, type and runtime', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const all = rows(wrapper);
+    expect(all).toHaveLength(2);
+    expect(all[0].text()).toContain('Gemma 3 1B');
+    expect(all[0].get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
+      'Language model',
+    );
+    // A local model is shown by its size on disk; only remote rows are labelled.
+    expect(all[0].get('[data-test="model-size"]').exists()).toBe(true);
+    expect(all[1].text()).toContain('Parakeet TDT 0.6B v3');
+    expect(all[1].get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
+      'Speech model',
+    );
+  });
+
+  it('ticks the in-use model of each type', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    // One notes model writes notes, one speech model transcribes — both in use.
+    expect(rows(wrapper)[0].find('.model-tick--on').exists()).toBe(true);
+    expect(rows(wrapper)[1].find('.model-tick--on').exists()).toBe(true);
+  });
+
+  it('selects a notes model when its row is clicked', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rows(wrapper)[0].trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).toHaveBeenCalledWith({
+      kind: 'local',
+      id: 'gemma-3-1b-it-qat-4bit',
+    });
+  });
+
+  it('does not touch the notes selection when a speech row is clicked', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rows(wrapper)[1].trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).not.toHaveBeenCalled();
+  });
+
+  it('shows the model type as an icon, with details on hover', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const icon = rows(wrapper)[0].get('[data-test="model-type-icon"]');
+    expect(icon.find('svg').exists()).toBe(true);
+    expect(icon.attributes('aria-label')).toContain('Language model');
+    // Same styled bubble the vault "?" uses, revealed on hover/focus.
+    expect(rows(wrapper)[0].get('[data-test="model-details"]').text()).toContain(
+      'gemma-3-1b-it-qat-4bit',
+    );
+    const speechIcon = rows(wrapper)[1].get('[data-test="model-type-icon"]');
+    expect(speechIcon.attributes('aria-label')).toContain('Speech model');
+    expect(rows(wrapper)[1].get('[data-test="model-details"]').text()).toContain(
+      'parakeet-tdt-0.6b-v3',
+    );
+  });
+
+  it('installs a model from its own row', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rows(wrapper)[0].get('button.secondary-btn').trigger('click');
+    await flushPromises();
+    expect(downloadLlm).toHaveBeenCalledTimes(1);
+
+    await rows(wrapper)[1].get('button.secondary-btn').trigger('click');
+    await flushPromises();
+    expect(downloadStt).toHaveBeenCalledTimes(1);
+  });
+
+  it('installing does not also change the notes selection', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rows(wrapper)[1].get('button.secondary-btn').trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).not.toHaveBeenCalled();
+  });
+
+  it('drops the install button once a model is installed', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(rows(wrapper)[0].find('button.secondary-btn').exists()).toBe(false);
+    expect(rows(wrapper)[1].find('button.secondary-btn').exists()).toBe(false);
+    expect(rows(wrapper)[0].find('[data-test="remove-model"]').exists()).toBe(true);
+  });
+
+  it('shows a dash for a size the backend cannot report yet', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(rows(wrapper)[0].get('[data-test="model-size"]').text()).toBe('—');
+  });
+
+  it('keeps the vault out of the models section', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    const models = wrapper.get('[data-test="models-section"]');
+    const vault = wrapper.get('[data-test="vault-section"]');
+    expect(models.find('[data-test="vault-path"]').exists()).toBe(false);
+    expect(vault.find('[data-test="vault-path"]').exists()).toBe(true);
+  });
+});
+
+describe('SettingsView model size and removal', () => {
+  const ROW = '[data-test="model-row"]';
+  const MB = 1024 * 1024;
+
+  function rows(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll(ROW);
+  }
+
+  async function mountInstalled() {
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
+    modelSizes.mockResolvedValue({ notes: 750 * MB, speech: 900 * MB });
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('shows each model size on disk', async () => {
+    const wrapper = await mountInstalled();
+
+    expect(rows(wrapper)[0].get('[data-test="model-size"]').text()).toBe('750 MB');
+    expect(rows(wrapper)[1].get('[data-test="model-size"]').text()).toBe('900 MB');
+  });
+
+  it('offers a Delete icon for an installed model and Install for a missing one', async () => {
+    const installed = await mountInstalled();
+    const remove = rows(installed)[0].get('[data-test="remove-model"]');
+    expect(remove.attributes('aria-label')).toBe('Delete');
+    expect(remove.attributes('title')).toBe('Delete');
+    expect(remove.text()).toBe('');
+    expect(remove.find('svg').exists()).toBe(true);
+
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
+    const missing = mount(SettingsView);
+    await flushPromises();
+    expect(missing.find('[data-test="remove-model"]').exists()).toBe(false);
+    expect(rows(missing)[0].get('button.secondary-btn').text()).toBe('Install');
+  });
+
+  it('asks before removing a model', async () => {
+    const wrapper = await mountInstalled();
+
+    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="remove-confirm"]').exists()).toBe(true);
+    expect(deleteModel).not.toHaveBeenCalled();
+  });
+
+  it('removes the files once confirmed', async () => {
+    const wrapper = await mountInstalled();
+    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(deleteModel).toHaveBeenCalledWith('notes');
+  });
+
+  it('names the speech model kind when removing that row', async () => {
+    const wrapper = await mountInstalled();
+    await rows(wrapper)[1].get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(deleteModel).toHaveBeenCalledWith('speech');
+  });
+
+  it('keeps the model when the confirm is dismissed', async () => {
+    const wrapper = await mountInstalled();
+    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+
+    await wrapper.get('[data-test="remove-confirm-cancel"]').trigger('click');
+    await flushPromises();
+
+    expect(deleteModel).not.toHaveBeenCalled();
+    expect(wrapper.find('[data-test="remove-confirm"]').exists()).toBe(false);
+  });
+
+  it('re-reads status and sizes after a removal', async () => {
+    const wrapper = await mountInstalled();
+    modelStatus.mockClear();
+    modelSizes.mockClear();
+
+    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(modelStatus).toHaveBeenCalled();
+    expect(modelSizes).toHaveBeenCalled();
+  });
+
+  it('surfaces a refused removal instead of failing silently', async () => {
+    const wrapper = await mountInstalled();
+    deleteModel.mockRejectedValue(new Error('Can\'t remove a model while a recording is in progress.'));
+
+    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Can\'t remove a model while a recording is in progress.');
   });
 });

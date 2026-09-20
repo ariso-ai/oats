@@ -67,3 +67,22 @@ export function modelBannerVisible(
 ): boolean {
   return prompted && (!sttSatisfied || !llmSatisfied);
 }
+
+/**
+ * The text shown beside a model's size in the Settings table, or '' for none.
+ * Deliberately silent about a model that is simply not downloaded yet — the
+ * row's Install button and missing tick already say that — but never silent
+ * about a failure or an unsupported platform.
+ */
+export function rowDetailText(
+  busy: Busy,
+  progress: number | null,
+  installed: boolean,
+  unsupported: boolean,
+): string {
+  if (unsupported) return 'Unsupported on this platform';
+  if (installed) return '';
+  if (busy === 'downloading') return rowStatusText(busy, progress);
+  if (busy === 'error') return 'Download failed';
+  return '';
+}

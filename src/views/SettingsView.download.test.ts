@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible } from './settingsDownload';
+import { shouldPromptDownload, rowStatusText, rowDetailText, pendingInstalls, modelBannerVisible } from './settingsDownload';
 
 describe('shouldPromptDownload', () => {
   it('prompts for local on first switch when models are missing', () => {
@@ -77,5 +77,29 @@ describe('modelBannerVisible', () => {
 
   it('is hidden once both models are installed', () => {
     expect(modelBannerVisible(true, true, true)).toBe(false);
+  });
+});
+
+describe('rowDetailText', () => {
+  it('says nothing about an installed model', () => {
+    expect(rowDetailText('idle', null, true, false)).toBe('');
+  });
+
+  it('says nothing about a model that is merely not downloaded yet', () => {
+    // The grayed-out label carries that state; no text repeats it.
+    expect(rowDetailText('idle', null, false, false)).toBe('');
+  });
+
+  it('shows progress while a download runs', () => {
+    expect(rowDetailText('downloading', 0.42, false, false)).toBe('42%');
+    expect(rowDetailText('downloading', null, false, false)).toBe('Starting…');
+  });
+
+  it('surfaces a failed download rather than hiding it', () => {
+    expect(rowDetailText('error', null, false, false)).toBe('Download failed');
+  });
+
+  it('explains a platform that cannot run the model at all', () => {
+    expect(rowDetailText('idle', null, false, true)).toBe('Unsupported on this platform');
   });
 });
