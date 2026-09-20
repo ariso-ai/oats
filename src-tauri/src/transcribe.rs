@@ -1195,6 +1195,7 @@ mod tests {
         transcribe: StubOutcome,
         notes: StubOutcome,
         notes_transcript_replacement: Option<String>,
+        gate_transcribe: bool,
     }
 
     impl StubBehavior {
@@ -1203,6 +1204,7 @@ mod tests {
                 transcribe: StubOutcome::success(stdout),
                 notes: StubOutcome::success("# Notes"),
                 notes_transcript_replacement: None,
+                gate_transcribe: false,
             }
         }
 
@@ -1211,6 +1213,7 @@ mod tests {
                 transcribe: StubOutcome::failure(stderr),
                 notes: StubOutcome::success("# Notes"),
                 notes_transcript_replacement: None,
+                gate_transcribe: false,
             }
         }
 
@@ -1219,6 +1222,7 @@ mod tests {
                 transcribe: StubOutcome::failure("unexpected transcription invocation"),
                 notes,
                 notes_transcript_replacement: None,
+                gate_transcribe: false,
             }
         }
 
@@ -1231,6 +1235,34 @@ mod tests {
             self.notes_transcript_replacement = Some(replacement.into());
             self
         }
+
+        /// Park the *transcribe* branch (never the notes branch) until the test
+        /// releases it, so a caller can be held inside `run_transcribe` while
+        /// something else races it. See [`wait_for_stt_start`]/[`release_stt`].
+        fn gating_transcribe(mut self) -> Self {
+            self.gate_transcribe = true;
+            self
+        }
+    }
+
+    /// Block until the gated stub announces it has entered its transcribe
+    /// branch. A real child process has to spawn first, so this polls rather
+    /// than checking once. Fails loudly instead of hanging the suite.
+    async fn wait_for_stt_start(stub_dir: &Path) {
+        let started = stub_dir.join("stt-started");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !started.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the gated STT stub never reached its transcribe branch"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Let a gated stub finish, releasing whoever is parked in `run_transcribe`.
+    fn release_stt(stub_dir: &Path) {
+        std::fs::write(stub_dir.join("stt-release"), b"").unwrap();
     }
 
     /// Materializes a data-driven sidecar double for either host shell. Payloads
@@ -1256,8 +1288,13 @@ mod tests {
             } else {
                 ""
             };
+            let gate = if behavior.gate_transcribe {
+                "echo.> \"%~dp0stt-started\"\r\n:oats_stt_gate\r\nif exist \"%~dp0stt-release\" goto oats_stt_go\r\nping -n 2 127.0.0.1 >nul\r\ngoto oats_stt_gate\r\n:oats_stt_go\r\n"
+            } else {
+                ""
+            };
             let script = format!(
-                "@echo off\r\nif \"%~1\"==\"notes\" (\r\n{replacement}type \"%~dp0notes-stdout.txt\"\r\ntype \"%~dp0notes-stderr.txt\" 1>&2\r\nexit /b {notes_exit}\r\n)\r\ntype \"%~dp0transcribe-stdout.txt\"\r\ntype \"%~dp0transcribe-stderr.txt\" 1>&2\r\nexit /b {transcribe_exit}\r\n"
+                "@echo off\r\nif \"%~1\"==\"notes\" (\r\n{replacement}type \"%~dp0notes-stdout.txt\"\r\ntype \"%~dp0notes-stderr.txt\" 1>&2\r\nexit /b {notes_exit}\r\n)\r\n{gate}type \"%~dp0transcribe-stdout.txt\"\r\ntype \"%~dp0transcribe-stderr.txt\" 1>&2\r\nexit /b {transcribe_exit}\r\n"
             );
             std::fs::write(&path, script).unwrap();
             path
@@ -1271,8 +1308,13 @@ mod tests {
             } else {
                 ""
             };
+            let gate = if behavior.gate_transcribe {
+                ": > \"$dir/stt-started\"\nwhile [ ! -f \"$dir/stt-release\" ]; do sleep 0.05; done\n"
+            } else {
+                ""
+            };
             let script = format!(
-                "#!/bin/sh\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nif [ \"$1\" = notes ]; then\n{replacement}cat \"$dir/notes-stdout.txt\"\ncat \"$dir/notes-stderr.txt\" >&2\nexit {notes_exit}\nfi\ncat \"$dir/transcribe-stdout.txt\"\ncat \"$dir/transcribe-stderr.txt\" >&2\nexit {transcribe_exit}\n"
+                "#!/bin/sh\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nif [ \"$1\" = notes ]; then\n{replacement}cat \"$dir/notes-stdout.txt\"\ncat \"$dir/notes-stderr.txt\" >&2\nexit {notes_exit}\nfi\n{gate}cat \"$dir/transcribe-stdout.txt\"\ncat \"$dir/transcribe-stderr.txt\" >&2\nexit {transcribe_exit}\n"
             );
             std::fs::write(&path, script).unwrap();
             let mut perms = std::fs::metadata(&path).unwrap().permissions();
@@ -3184,6 +3226,183 @@ mod tests {
         assert!(meta.preview.is_none(), "preview state is dropped at Stop");
         let transcript = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
         assert!(transcript.contains("hello there"), "{transcript}");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// Seed a `Done` recording with one diarized speaker through the real
+    /// pipeline, so it has genuine vault audio and `segments.json` for an
+    /// append to read back. Returns its id and directory.
+    ///
+    /// `root` must be `vault::meta_root()`, not the tempdir: these tests also
+    /// call `commands::rename_local_speaker`, which resolves the recording
+    /// through `meta_root()` rather than taking an explicit root.
+    async fn seed_done_recording_with_a_speaker(root: &Path, stub_dir: &Path) -> (String, PathBuf) {
+        let stub = clip_stub(stub_dir);
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let (res, notes) = finalize_core(
+            root, b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        notes.await.unwrap();
+        let dir = storage::recordings_dir(root).join(&res.id);
+        assert_eq!(
+            read_meta(&dir).unwrap().participants[0].label,
+            "Speaker 1",
+            "seed should start on the model's default label"
+        );
+        (res.id, dir)
+    }
+
+    /// #420: a local speaker rename issued while a clip append is inside its
+    /// STT window was accepted, written to all three files, and then silently
+    /// reverted when the append wrote back the `meta`/`segments` it had read
+    /// *before* the rename.
+    ///
+    /// The status guard alone cannot see this: `append_recording_core` flips the
+    /// target to `Transcribing` only after STT returns, so it is persisted as
+    /// `Done` for the whole window. What closes it is that the append holds
+    /// `get_recording_lock(target_id)` across its entire read-STT-write span and
+    /// `rename_local_speaker` now takes the same lock before reading `meta` —
+    /// which is exactly what this test pins.
+    ///
+    /// `multi_thread` for the same reason as
+    /// `finalize_blocks_on_a_checkpoint_holding_the_recording_lock`: on a
+    /// current-thread runtime the spawned tasks only advance at the test's own
+    /// await points, which passes too easily even if the locking were broken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_during_an_appends_stt_window_is_never_accepted_then_reverted() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let (id, dir) = seed_done_recording_with_a_speaker(&root, tmp.path()).await;
+
+        // A second stub, in its own directory so the seed's payloads are left
+        // alone, which parks inside the transcribe branch until released.
+        let gate = tmp.path().join("gate");
+        std::fs::create_dir_all(&gate).unwrap();
+        let json = r#"{"language":"en","durationSeconds":3.0,"segments":[{"speaker":"model-speaker-0","text":"second clip","start":0.0,"end":3.0}]}"#;
+        let gated = write_stub(&gate, StubBehavior::transcribe_success(json).gating_transcribe());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &gated); }
+
+        let target = id.clone();
+        let append = tokio::spawn(async move {
+            finalize_core_with_target(
+                &root, b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+                Some(target), false,
+            ).await
+        });
+
+        // The append is now blocked in STT with the target still `Done` on disk
+        // — the exact window the bug lived in.
+        wait_for_stt_start(&gate).await;
+
+        let renaming = id.clone();
+        let mut rename = tokio::spawn(async move {
+            crate::commands::rename_local_speaker(renaming, 0, "Priya".into()).await
+        });
+
+        // A short timeout that is EXPECTED to elapse is how we observe "still
+        // waiting on the lock" without hanging if that assumption is wrong.
+        // Capture the result when it *does* finish, so the handle is never
+        // polled twice and the assertions below get to speak for themselves.
+        let inside_the_window =
+            match tokio::time::timeout(Duration::from_millis(300), &mut rename).await {
+                Ok(joined) => Some(joined.expect("rename task panicked")),
+                Err(_) => None,
+            };
+
+        // The heart of #420. Finishing inside the window is only acceptable as
+        // a refusal — an `Ok` here means the rename wrote `meta`/`segments`/
+        // `transcript.md` that the append, still holding its pre-rename copies,
+        // is about to overwrite. Deliberately phrased as "not Ok" rather than
+        // "must block" so a future redesign that refuses outright instead of
+        // waiting stays passing; waiting is just what the lock happens to do.
+        assert!(
+            !matches!(inside_the_window, Some(Ok(_))),
+            "rename_local_speaker reported success while an append held the \
+             recording lock mid-STT — the append is about to revert it"
+        );
+
+        release_stt(&gate);
+
+        // Both must finish. Own timeouts so a real deadlock fails loudly here
+        // instead of hanging the suite (a hang reads as CI flake, not a bug).
+        let (_, notes) = tokio::time::timeout(Duration::from_secs(10), append)
+            .await
+            .expect("the append did not complete after STT was released — deadlock?")
+            .expect("append task panicked")
+            .expect("append returned an error");
+        let renamed = match inside_the_window {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(10), rename)
+                .await
+                .expect("rename did not complete after the append finished — deadlock?")
+                .expect("rename task panicked"),
+        };
+        notes.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // Either outcome is legitimate (the issue asks for "blocks, or is
+        // refused with a clear message"), and which one happens depends on
+        // whether the rename or the append's spawned notes task reaches the
+        // released lock first. What must never happen is a reported success
+        // that disk then contradicts. Assert the two agree — in all three
+        // files the append rewrites.
+        let expected = match &renamed {
+            Ok(_) => "Priya",
+            Err(e) => {
+                assert!(
+                    e.contains("AI notes are still generating"),
+                    "a refusal is fine, but not with this message: {e}"
+                );
+                "Speaker 1"
+            }
+        };
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.participants[0].label, expected, "meta.json disagrees with the rename's result");
+        let seg = storage::read_segments(&dir).unwrap().unwrap();
+        assert_eq!(seg.participants[0].label, expected, "segments.json disagrees with the rename's result");
+        let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        assert!(md.contains(&format!("**{expected}** [")), "transcript.md disagrees with the rename's result: {md}");
+
+        // And the append itself still landed — serializing must not cost a clip.
+        assert_eq!(seg.segments.len(), 2, "both clips stitched into the target");
+        assert_eq!(meta.status, RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// The uncontended half of #420: once a rename has landed, a later clip
+    /// append must carry the new label through rather than reverting it to the
+    /// model's default. The append rebuilds `meta.participants` from
+    /// `segments.json`, so this pins that file as the label's source of truth.
+    #[tokio::test]
+    async fn a_renamed_speaker_survives_a_later_clip_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let (id, dir) = seed_done_recording_with_a_speaker(&root, tmp.path()).await;
+
+        crate::commands::rename_local_speaker(id.clone(), 0, "Priya".into())
+            .await
+            .unwrap();
+
+        // A second clip inside the append window, stitched onto the renamed target.
+        let (res, notes) = finalize_core_with_target(
+            &root, b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+            Some(id.clone()), false,
+        ).await.unwrap();
+        notes.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        assert_eq!(res.id, id, "the clip must have appended, not started a new recording");
+
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.participants[0].label, "Priya", "the rename was reverted in meta.json");
+        // The clip's own speaker is offset past the renamed one and keeps its default.
+        assert_eq!(meta.participants[1].label, "Speaker 1");
+        let seg = storage::read_segments(&dir).unwrap().unwrap();
+        assert_eq!(seg.participants[0].label, "Priya", "the rename was reverted in segments.json");
+        assert_eq!(seg.segments.len(), 2);
+        let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+        assert!(md.contains("**Priya** ["), "the rename was reverted in transcript.md: {md}");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 }
