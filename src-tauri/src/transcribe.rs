@@ -1265,6 +1265,37 @@ mod tests {
         std::fs::write(stub_dir.join("stt-release"), b"").unwrap();
     }
 
+    /// Releases a gated stub on drop, so a panic between arming the gate and
+    /// the normal `release_stt` call (e.g. a failed assertion on the racing
+    /// task) doesn't leave the stubbed child process parked forever — it's
+    /// spawned via `tokio::process::Command` without `kill_on_drop(true)`.
+    struct SttGateGuard<'a> {
+        stub_dir: &'a Path,
+        armed: bool,
+    }
+
+    impl<'a> SttGateGuard<'a> {
+        fn new(stub_dir: &'a Path) -> Self {
+            Self {
+                stub_dir,
+                armed: true,
+            }
+        }
+
+        fn release(mut self) {
+            self.armed = false;
+            release_stt(self.stub_dir);
+        }
+    }
+
+    impl Drop for SttGateGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                release_stt(self.stub_dir);
+            }
+        }
+    }
+
     /// Materializes a data-driven sidecar double for either host shell. Payloads
     /// live in files so JSON, Markdown, and shell metacharacters are never parsed
     /// as script source.
@@ -3279,6 +3310,7 @@ mod tests {
         // alone, which parks inside the transcribe branch until released.
         let gate = tmp.path().join("gate");
         std::fs::create_dir_all(&gate).unwrap();
+        let gate_guard = SttGateGuard::new(&gate);
         let json = r#"{"language":"en","durationSeconds":3.0,"segments":[{"speaker":"model-speaker-0","text":"second clip","start":0.0,"end":3.0}]}"#;
         let gated = write_stub(&gate, StubBehavior::transcribe_success(json).gating_transcribe());
         unsafe { std::env::set_var("ARISO_STT_BIN", &gated); }
@@ -3322,7 +3354,7 @@ mod tests {
              recording lock mid-STT — the append is about to revert it"
         );
 
-        release_stt(&gate);
+        gate_guard.release();
 
         // Both must finish. Own timeouts so a real deadlock fails loudly here
         // instead of hanging the suite (a hang reads as CI flake, not a bug).
