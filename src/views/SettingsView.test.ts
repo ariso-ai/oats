@@ -1382,7 +1382,7 @@ describe('SettingsView remote model API keys', () => {
   it('lists the remote models alongside the on-device ones', async () => {
     const wrapper = await mountLocal();
 
-    for (const name of ['Claude Haiku 4.5', 'GPT-5.1', 'Gemini 3.0 Flash']) {
+    for (const name of ['Claude Haiku 4.5', 'GPT-5.1', 'Gemini 3.7 Flash']) {
       expect(rowNamed(wrapper, name).find('[data-test="connect-key"]').exists()).toBe(true);
     }
   });

@@ -36,7 +36,9 @@ pub enum RemoteProvider {
 impl RemoteProvider {
     pub const ALL: [RemoteProvider; 3] = [Self::OpenAi, Self::Gemini, Self::Anthropic];
 
-    fn as_str(self) -> &'static str {
+    /// The provider's wire name — the frontend's value, the keychain account
+    /// suffix, and the prefix a note's model tag carries.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
             Self::Gemini => "gemini",
@@ -97,6 +99,12 @@ fn set_api_key(provider: RemoteProvider, key: String) -> Result<(), String> {
 /// The stored key, or `None` when the user has not connected this provider.
 /// Crate-internal on purpose — no `#[tauri::command]` exposes a key's value.
 pub fn get_api_key(provider: RemoteProvider) -> Result<Option<String>, String> {
+    // Tests stand in a key here rather than writing one into the developer's
+    // real login keychain.
+    #[cfg(test)]
+    if let Some(key) = testing::stored_key(provider) {
+        return Ok(Some(key));
+    }
     match entry(provider)?.get_password() {
         Ok(key) => Ok(Some(key)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -140,6 +148,38 @@ pub fn llm_api_key_providers() -> Result<Vec<RemoteProvider>, String> {
 #[tauri::command]
 pub fn clear_llm_api_key(provider: RemoteProvider) -> Result<(), String> {
     clear_api_key(provider)
+}
+
+/// Test-only stand-in for the OS keychain, so tests covering the code paths
+/// that *read* a key never touch the developer's real credential store. The
+/// keychain itself is exercised by the ignored round-trip test below.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::RemoteProvider;
+
+    static KEYS: std::sync::RwLock<Vec<(RemoteProvider, String)>> =
+        std::sync::RwLock::new(Vec::new());
+
+    pub(crate) fn stored_key(provider: RemoteProvider) -> Option<String> {
+        KEYS.read()
+            .ok()?
+            .iter()
+            .find(|(p, _)| *p == provider)
+            .map(|(_, k)| k.clone())
+    }
+
+    pub(crate) fn set_key(provider: RemoteProvider, key: &str) {
+        if let Ok(mut keys) = KEYS.write() {
+            keys.retain(|(p, _)| *p != provider);
+            keys.push((provider, key.to_string()));
+        }
+    }
+
+    pub(crate) fn clear_keys() {
+        if let Ok(mut keys) = KEYS.write() {
+            keys.clear();
+        }
+    }
 }
 
 #[cfg(test)]

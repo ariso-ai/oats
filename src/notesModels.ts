@@ -50,10 +50,6 @@ export const NOTES_MODEL_OPTIONS: NotesModelOption[] = [
   { value: { kind: 'remote', provider: 'openai', id: 'gpt-5.1' }, label: 'GPT-5.1' },
   { value: { kind: 'remote', provider: 'openai', id: 'gpt-5.1-mini' }, label: 'GPT-5.1 mini' },
   {
-    value: { kind: 'remote', provider: 'gemini', id: 'gemini-3.0-flash' },
-    label: 'Gemini 3.0 Flash',
-  },
-  {
     value: { kind: 'remote', provider: 'gemini', id: 'gemini-3.5-flash' },
     label: 'Gemini 3.5 Flash',
   },

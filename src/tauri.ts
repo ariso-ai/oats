@@ -661,9 +661,12 @@ export async function getNotesModelSetting(): Promise<NotesModelId> {
   return parseNotesModel(await store.get<unknown>('notesModel'));
 }
 
+/** The backend owns this write. Notes generation runs detached from any window
+ *  and reads the selection from a process global that only this command
+ *  updates, so writing the store directly here would leave the two disagreeing
+ *  until the next launch. */
 export async function setNotesModelSetting(model: NotesModelId): Promise<void> {
-  const store = await load('settings.json', { autoSave: true });
-  await store.set('notesModel', model);
+  return invoke('set_notes_model', { model });
 }
 
 /** Which speech model transcribes. Stored as the catalog key; an unrecognized

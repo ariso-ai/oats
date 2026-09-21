@@ -175,6 +175,11 @@ pub struct RecordingMeta {
     /// auto-retitled).
     #[serde(default)]
     pub title_is_default: bool,
+    /// Which model wrote the notes that are on disk, as `local:<id>` or
+    /// `<provider>:<id>` (see `notes_model::tag`). `None` for a recording whose
+    /// notes failed, are still running, or predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_model: Option<String>,
     /// Mid-recording checkpoint state (issue #123). `None` for every recording
     /// that was never checkpointed, and for every recording after Stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -914,7 +919,52 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         }
+    }
+
+    #[test]
+    fn meta_carries_the_model_that_wrote_the_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = create_recording_dir(tmp.path(), "2026-06-01T10-00-00Z").unwrap();
+        let mut meta = meta_with("2026-06-01T10-00-00Z", "2026-06-01T10:00:00Z");
+        meta.notes_model = Some("openai:gpt-5.1".into());
+        write_meta(&dir, &meta).unwrap();
+
+        assert_eq!(
+            read_meta(&dir).unwrap().notes_model.as_deref(),
+            Some("openai:gpt-5.1")
+        );
+        let raw = std::fs::read_to_string(dir.join("meta.json")).unwrap();
+        assert!(
+            raw.contains("\"notesModel\": \"openai:gpt-5.1\""),
+            "meta.json was: {raw}"
+        );
+    }
+
+    #[test]
+    fn meta_written_before_the_field_existed_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = create_recording_dir(tmp.path(), "2026-06-01T10-00-00Z").unwrap();
+        let legacy = r#"{"id":"2026-06-01T10-00-00Z","title":"T","createdAt":"2026-06-01T10:00:00Z",
+            "durationSeconds":1,"status":"done"}"#;
+        std::fs::write(dir.join("meta.json"), legacy).unwrap();
+
+        assert_eq!(read_meta(&dir).unwrap().notes_model, None);
+    }
+
+    #[test]
+    fn meta_without_a_model_writes_no_key_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = create_recording_dir(tmp.path(), "2026-06-01T10-00-00Z").unwrap();
+        write_meta(
+            &dir,
+            &meta_with("2026-06-01T10-00-00Z", "2026-06-01T10:00:00Z"),
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(dir.join("meta.json")).unwrap();
+        assert!(!raw.contains("notesModel"), "meta.json was: {raw}");
     }
 
     #[test]
@@ -1121,6 +1171,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         };
         let segments = vec![
             Segment { speaker: 0, text: "Hello there".into(), start: 3.0, end: 9.0 },
@@ -1143,6 +1194,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         let segments = vec![Segment { speaker: 5, text: "hi".into(), start: 0.0, end: 1.0 }];
         let md = render_markdown(&meta, &segments);
@@ -1384,6 +1436,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         };
         write_meta(&dir, &meta).unwrap();
         let read = read_meta(&dir).unwrap();
