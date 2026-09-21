@@ -333,6 +333,23 @@ fn main() {
                 Err(e) => eprintln!("reconcile interrupted recordings: {e}"),
             }
 
+            // Best-effort: resume any recording left pending on a model that
+            // happens to already be ready by this launch (e.g. it finished
+            // downloading in a session oats wasn't running to observe).
+            if let Ok(root) = crate::vault::meta_root() {
+                if crate::model_manager::is_ready(&root) {
+                    let root2 = root.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::transcribe::retry_recordings_pending_stt(&root2).await;
+                    });
+                }
+                if crate::model_manager::llm_is_ready(&root) {
+                    tauri::async_runtime::spawn(async move {
+                        crate::transcribe::retry_recordings_pending_llm(&root).await;
+                    });
+                }
+            }
+
             // Managed state must exist before the tray is created: tray menu
             // rebuilds and the title refresher read RecordingState and
             // FeaturedMeetingState.
