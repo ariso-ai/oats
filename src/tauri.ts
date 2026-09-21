@@ -350,7 +350,7 @@ export interface RecordingSummary {
   title: string;
   createdAt: string;
   durationSeconds: number;
-  status: 'recording' | 'transcribing' | 'done' | 'failed';
+  status: 'recording' | 'transcribing' | 'done' | 'failed' | 'pending-models';
   hasAudio: boolean;
   hasNote: boolean;
   hasTranscript: boolean;
@@ -358,8 +358,10 @@ export interface RecordingSummary {
 }
 
 /** `empty-transcript`: nothing was said, so notes were deliberately skipped —
- *  not a failure, and nothing a retry can fix. */
-export type NotesStatus = 'pending' | 'ready' | 'failed' | 'empty-transcript';
+ *  not a failure, and nothing a retry can fix. `pending-model`: the transcript
+ *  exists but the on-device notes model isn't downloaded yet — also not a
+ *  failure, and resolves on its own once the download finishes. */
+export type NotesStatus = 'pending' | 'ready' | 'failed' | 'empty-transcript' | 'pending-model';
 
 /** Mirrors the Rust `RecordingStatusView`. Drives the detail panel's local
  *  generation poller (tab enable/disable + the inline status chip). */
@@ -383,7 +385,7 @@ export interface LocalFinalizeResult {
   backend: 'local';
   id: string;
   title: string;
-  status: 'recording' | 'transcribing' | 'done' | 'failed';
+  status: 'recording' | 'transcribing' | 'done' | 'failed' | 'pending-models';
 }
 
 /** Mirrors the Rust `CheckpointResult`. `ingestedBytes` is the recorder's new
