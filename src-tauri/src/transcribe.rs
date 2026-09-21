@@ -2116,6 +2116,73 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
+    /// Regression guard for the models-root/recordings-root mix-up: the models
+    /// root (`storage::ariso_root()`, holding `manifest.json`) and the
+    /// recordings root (`vault::meta_root()`, holding `recordings/<id>/`) are
+    /// two genuinely different paths in production — a custom Vault Location
+    /// moves the latter anywhere on disk while the former never moves. A caller
+    /// that (wrongly) passes the models root to `retry_recordings_pending_stt`
+    /// would scan an empty (or unrelated) directory and silently resume
+    /// nothing. This test points `ARISO_ROOT` (models root) and the vault
+    /// override (recordings root, via `vault::meta_root()`) at two *different*
+    /// tempdirs and proves the scan only succeeds when given the recordings
+    /// root, the way a correctly-fixed call site does.
+    #[tokio::test]
+    async fn retry_recordings_pending_stt_resumes_when_given_the_recordings_root() {
+        let models_tmp = tempfile::tempdir().unwrap();
+        let vault_tmp = tempfile::tempdir().unwrap();
+        assert_ne!(
+            models_tmp.path(),
+            vault_tmp.path(),
+            "models root and recordings root must be genuinely different paths"
+        );
+
+        unsafe { std::env::set_var("ARISO_ROOT", models_tmp.path()) };
+        crate::vault::set_vault_override(vault_tmp.path().to_path_buf());
+        let meta_root = crate::vault::meta_root().unwrap();
+        assert!(
+            meta_root.starts_with(vault_tmp.path()),
+            "meta_root must resolve under the vault override, not ARISO_ROOT"
+        );
+
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(models_tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub) };
+
+        // Seed a recording pending on the STT model under the *recordings*
+        // root — this is where production actually stores it.
+        let pending_id = "2026-06-05T10-00-00Z";
+        let pending_dir = crate::storage::create_recording_dir(&meta_root, pending_id).unwrap();
+        let mut pending_meta = test_meta_for(pending_id, "2026-06-05T10:00:00Z");
+        pending_meta.status = RecordingStatus::PendingModels;
+        pending_meta.audio_file = Some("2026-06-05T10-00-00Z.mp3".into());
+        crate::vault::write_audio(pending_meta.audio_file.as_ref().unwrap(), b"aud").unwrap();
+        storage::write_meta(&pending_dir, &pending_meta).unwrap();
+
+        // Seed STT readiness under the *models* root, exactly like the real
+        // manifest at `~/.ariso/models/manifest.json`.
+        crate::model_manager::mark_stt_ready_for_test(models_tmp.path());
+
+        // The regression guard: call with the recordings root, as a
+        // correctly-fixed call site does. Calling this with `models_tmp.path()`
+        // instead (the pre-fix bug) would find no recordings at all, since
+        // nothing was ever written under the models root.
+        retry_recordings_pending_stt(&meta_root).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        unsafe { std::env::remove_var("ARISO_STT_BIN") };
+
+        let resumed = read_meta(&pending_dir).unwrap();
+        assert_eq!(
+            resumed.status,
+            RecordingStatus::Done,
+            "pending recording must resume when scanned with the recordings root"
+        );
+        assert!(pending_dir.join("transcript.md").exists());
+
+        crate::vault::clear_vault_override();
+        unsafe { std::env::remove_var("ARISO_ROOT") };
+    }
+
     #[tokio::test]
     async fn retry_recordings_pending_llm_resumes_only_matching_recordings() {
         let tmp = tempfile::tempdir().unwrap();

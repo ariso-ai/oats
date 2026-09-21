@@ -270,9 +270,10 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     match result {
         Ok(()) => {
             let _ = app.emit("model://stt/done", ());
-            let root2 = root.clone();
             tauri::async_runtime::spawn(async move {
-                crate::transcribe::retry_recordings_pending_stt(&root2).await;
+                if let Ok(meta_root) = crate::vault::meta_root() {
+                    crate::transcribe::retry_recordings_pending_stt(&meta_root).await;
+                }
             });
             Ok(())
         }
@@ -462,9 +463,10 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     match result {
         Ok(()) => {
             let _ = app.emit("model://llm/done", ());
-            let root2 = root.clone();
             tauri::async_runtime::spawn(async move {
-                crate::transcribe::retry_recordings_pending_llm(&root2).await;
+                if let Ok(meta_root) = crate::vault::meta_root() {
+                    crate::transcribe::retry_recordings_pending_llm(&meta_root).await;
+                }
             });
             Ok(())
         }
