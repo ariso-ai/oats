@@ -32,7 +32,7 @@ export function recordingStartErrorMessage(error: unknown): string {
     return 'Oats could not start system audio. Connect or enable an output device, then try again.';
   }
   if (/sign-in required/i.test(detail)) {
-    return 'Recording is not ready. Sign in or finish installing the local models in Settings, then try again.';
+    return 'Recording is not ready. Sign in to Ariso in Settings, then try again.';
   }
   return 'Oats could not start recording. Check that your audio devices are connected and available, then try again.';
 }
