@@ -35,7 +35,8 @@ export function rowStatusText(busy: Busy, progress: number | null): string {
  * Which on-device models still need a download kicked off. A model is "pending"
  * when it is not already installed and not already mid-download. STT is never
  * pending on an unsupported platform (its download would fail). Used by the
- * recording gate's `tray://show-model-prompt` handler to auto-start downloads.
+ * `tray://show-model-prompt` handler (fired whenever a local recording starts
+ * with a model missing) to auto-start downloads.
  */
 export function pendingInstalls(
   status: ModelStatus,
