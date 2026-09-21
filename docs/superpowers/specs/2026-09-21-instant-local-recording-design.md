@@ -177,54 +177,73 @@ that branch, so nothing is mid-write. This is intentional, not a gap to close.
 
 ### Rust — `transcribe.rs`
 
-**`fresh_recording_core`** (`transcribe.rs:633-743`): today it always builds `meta` with
-`status: RecordingStatus::Transcribing`, writes it, *then* resolves `root`/`models` and
-unconditionally awaits `run_transcribe`. Reorder so the STT-readiness check happens
-before `meta` is first written, so the recording's status is correct from the start
-(no `Transcribing` → `PendingModels` flicker/double-write):
+**Implementation strategy — reclassify on failure, don't pre-check.** `fresh_recording_core`,
+`finalize_core`/`finalize_core_with_target`, and `retry_transcription_core` are exercised
+directly (bypassing any command layer, with a stubbed sidecar via the `ARISO_STT_BIN`
+test seam) by ~40 existing tests in this file, none of which set up a real STT-ready
+marker in their tempdir — they rely purely on the stub's exit code/stdout, not on
+`model_manager::is_ready`. Gating *before* the `run_transcribe`/`run_notes` call (i.e.
+skip the call entirely when not ready) would silently flip every one of those tests
+from exercising real transcribe/notes logic to hitting the new pending branch instead,
+since none of their tempdirs have a `manifest.json`. Gating *after* an actual failure
+instead — attempt the call exactly as today, and only when it returns `Err` ask "is
+this because the model isn't downloaded, or a genuine failure?" — preserves every
+existing success-path test unchanged (they never reach the `Err` arm) and only touches
+tests that specifically stub a *failure* and then assert the resulting status. A repo
+grep confirms there's exactly one such test to update (see Testing). This is also
+cheap at runtime: a sidecar invoked against a missing/incomplete model directory fails
+fast (missing files), not after real model-load work.
+
+**`fresh_recording_core`** (`transcribe.rs:633-743`), inside the existing
+`match run_transcribe(&audio_path, &models).await { ... }`, change only the `Err` arm
+(`:736-741`):
 
 ```rust
-let root = storage::ariso_root()?; // was already computed later; hoisted up
-let initial_status = if crate::model_manager::is_ready(&root) {
-    RecordingStatus::Transcribing
-} else {
-    RecordingStatus::PendingModels
-};
-let mut meta = RecordingMeta { ..., status: initial_status, ... };
-storage::write_meta(&dir, &meta)?;
-
-if initial_status == RecordingStatus::PendingModels {
-    return Ok((
-        FinalizeResult { backend: "local".into(), id, title, status: RecordingStatus::PendingModels },
-        tokio::spawn(async {}), // nothing to await
-    ));
-}
-
-let models = storage::models_dir(&root);
-let audio_path = ...;
-match run_transcribe(&audio_path, &models).await { ... as today ... }
-```
-
-Nothing calls `download_local_stt`/`download_local_llm` from here — the download was
-already nudged when the recording *started* (decision 3), not when it finalizes, so by
-Stop time it's either already in flight or already done.
-
-**`process_notes`** (`transcribe.rs:264-377`): before calling `run_notes`, check the
-notes model:
-
-```rust
-if let Ok(root) = crate::storage::ariso_root()
-    && !crate::model_manager::llm_is_ready(&root)
-{
-    meta.notes_in_progress = false;
-    meta.notes_error = Some(storage::MODELS_NOT_READY_NOTES_ERROR.to_string());
+Err(e) => {
+    if !crate::model_manager::is_ready(&root) {
+        meta.status = RecordingStatus::PendingModels;
+        let _ = storage::write_meta(&dir, &meta);
+        return Ok((
+            FinalizeResult {
+                backend: "local".to_string(), id, title,
+                status: RecordingStatus::PendingModels,
+            },
+            tokio::spawn(async {}), // nothing to await
+        ));
+    }
+    meta.status = RecordingStatus::Failed;
+    meta.error = Some(e.clone());
     let _ = storage::write_meta(&dir, &meta);
-    return;
+    Err(e)
 }
 ```
 
-placed right after the existing empty-transcript short-circuit, before the sidecar
-call — so a missing notes model never even attempts the `ariso-stt notes` exec.
+(`root` is already in scope a few lines up, from the existing
+`let models = storage::models_dir(&storage::ariso_root()?);` — bind it to a local
+`root` first so both that line and the new check can use it.) The `Ok` arm is
+untouched. Nothing here calls `download_local_stt`/`download_local_llm` — the download
+was already nudged when the recording *started* (decision 3), not when it finalizes,
+so by Stop time it's either already in flight or already done.
+
+**`process_notes`** (`transcribe.rs:264-377`), same strategy, inside the existing
+`match outcome { ... }`, change only the `Err` arm (`:351-355`):
+
+```rust
+Err(e) => {
+    eprintln!("notes generation: {e}");
+    let models_ready = crate::storage::ariso_root()
+        .is_ok_and(|root| crate::model_manager::llm_is_ready(&root));
+    meta.notes_error = Some(if models_ready {
+        e
+    } else {
+        storage::MODELS_NOT_READY_NOTES_ERROR.to_string()
+    });
+    let _ = storage::write_meta(&dir, &meta);
+}
+```
+
+`meta.notes_in_progress = false` a few lines above this match is untouched — it already
+runs unconditionally before the match, exactly as today.
 
 **New retry-scan helpers**, next to `retry_transcription_core`/`retry_notes_core`:
 
@@ -523,9 +542,9 @@ its session gate, and its meeting-picker flow are untouched; `RecordingStatus`/
 
 | Situation | Behavior |
 | --- | --- |
-| Recording stops, STT model not downloaded | Audio saved (unchanged); `meta.status = PendingModels`; no sidecar exec attempted; Library row + detail chip show "Waiting for on-device models…"; auto-resumes when `download_local_stt` next succeeds. |
-| Recording stops, STT ready but notes/LLM model not downloaded | Transcript generates normally (`status = Done`); `process_notes` sets `notes_error = MODELS_NOT_READY_NOTES_ERROR` without attempting the sidecar; row/chip show the notes-specific pending copy; auto-resumes when `download_local_llm` next succeeds. |
-| Both models missing | Both behaviors apply independently — transcript is `PendingModels` first; once STT finishes and transcription runs, if the notes model is *still* missing, `process_notes` (spawned from the now-successful `fresh_recording_core`) immediately lands in the `MODELS_NOT_READY_NOTES_ERROR` case rather than attempting notes. |
+| Recording stops, STT model not downloaded | Audio saved (unchanged); `run_transcribe` is attempted and fails fast (missing model files) exactly as any STT failure does today, but is reclassified: `meta.status = PendingModels` instead of `Failed`; Library row + detail chip show "Waiting for on-device models…"; auto-resumes when `download_local_stt` next succeeds. |
+| Recording stops, STT ready but notes/LLM model not downloaded | Transcript generates normally (`status = Done`); `run_notes` is attempted and fails fast, reclassified: `process_notes` sets `notes_error = MODELS_NOT_READY_NOTES_ERROR` instead of the raw sidecar error; row/chip show the notes-specific pending copy; auto-resumes when `download_local_llm` next succeeds. |
+| Both models missing | Both behaviors apply independently — transcript is `PendingModels` first; once STT finishes and transcription runs, if the notes model is *still* missing, `process_notes` (spawned from the now-successful `fresh_recording_core`) attempts notes, fails fast, and lands in the `MODELS_NOT_READY_NOTES_ERROR` case. |
 | Model download itself fails (network error, corrupt download) | Unchanged existing behavior (`model://stt/error` / `model://llm/error`, Settings shows "Download failed"). A recording stays `PendingModels`/notes-`pending-model` until the user retries the install from Settings — this spec adds no new give-up path, matching "recording works, the rest resolves whenever the download eventually succeeds." |
 | User manually deletes a `PendingModels` recording | Falls through the existing delete guard exactly like a `Failed` recording (guard only blocks `Recording`/`Transcribing`) — succeeds immediately, no special-casing needed. If a delayed retry-scan spawn already fired for that id before the delete, `retry_transcription_core` re-reads meta from a now-missing directory and returns an `Err` that its caller (the detached spawn) already discards — no crash, no resurrected recording. |
 | App restarted while `PendingModels` | `reconcile_interrupted_recordings`'s catch-all leaves it untouched (correct — it's an at-rest state, not an interrupted one); the new startup sweep additionally retries it immediately if the model in question is, by then, already ready. |
@@ -541,19 +560,39 @@ as the existing `EmptyTranscript` case); `reconcile_interrupted_recordings` leav
 `reconcile_fails_recordings_interrupted_by_a_quit`'s fixture with a `PendingModels`
 entry and assert it survives unchanged, mirroring how `Done` already does).
 
-**Rust (`transcribe.rs`)**: `fresh_recording_core` against a tempdir with no STT
-manifest present → returns `Ok` with `status: PendingModels`, writes the audio
-attachment, does not create `transcript.md`. `process_notes` against a `Done` meta with
-no LLM `.complete` marker present → sets `notes_error =
-Some(MODELS_NOT_READY_NOTES_ERROR)`, `notes_in_progress = false`, does not invoke the
-sidecar (assert via the same mock/stub pattern the existing sidecar-failure tests use).
-`retry_recordings_pending_stt`/`retry_recordings_pending_llm`: seed a tempdir with a mix
-of statuses, write the readiness marker, call the retry-scan, assert only the matching
-recording(s) got re-processed (poll/await the spawned tasks the way existing tests
-await notes `JoinHandle`s, or assert on resulting `meta.json` state after a short
-`tokio::time` yield/join). Extend `commands.rs`'s delete/rename guard tests with a
-`PendingModels` fixture asserting delete/rename succeed (mirroring the existing
-`Failed`-fixture cases).
+**Rust (`transcribe.rs`)**: `fresh_recording_core` (via `finalize_core`) against a
+tempdir with a failing stub and no STT manifest present → returns `Ok` with
+`status: PendingModels`, writes the audio attachment (assert the vault attachment
+round-trips exactly as `finalize_writes_transcript_and_marks_done` already checks for
+the success case), does not create `transcript.md`. Same setup but *with* a manifest
+present (`model_manager::write_manifest(root, &model_manager::stt_model_version())`) →
+still `Failed` with the stub's error (regression guard for the reclassify branch).
+`process_notes` (via `finalize_core` with a notes-failure stub) against a tempdir with
+no LLM `.complete` marker → `notes_error == Some(MODELS_NOT_READY_NOTES_ERROR)`; same
+setup with the marker present → `notes_error` is the stub's raw error text (unchanged
+existing behavior). `retry_recordings_pending_stt`/`retry_recordings_pending_llm`: seed
+a tempdir with a mix of statuses, write the readiness marker, call the retry-scan,
+assert only the matching recording(s) got re-processed (poll/await the spawned tasks
+the way existing tests await notes `JoinHandle`s, or assert on resulting `meta.json`
+state after a short `tokio::time` yield/join). Extend `commands.rs`'s delete/rename
+guard tests with a `PendingModels` fixture asserting delete/rename succeed (mirroring
+the existing `Failed`-fixture cases), and a `notes_status == PendingModel` fixture
+asserting delete/rename succeed despite `Done` status (mirroring the existing
+non-`Pending` `Done` cases).
+
+**Regression note**: `transcribe.rs`'s existing
+`finalize_marks_failed_but_keeps_audio_on_stt_error` test stubs a transcribe failure
+against a tempdir with no manifest — after this change it would flip from `Failed` to
+`PendingModels` unless updated. Fix it by writing a real STT-ready manifest in its
+setup (`model_manager::write_manifest(tmp.path(), &model_manager::stt_model_version())`
+right after the existing `ARISO_ROOT` env-var line), which correctly narrows its intent
+to "STT is ready but the sidecar itself failed" — matching what the test's name and
+assertions (`meta.status == Failed`, `meta.error.is_some()`) already claim to test. No
+other existing test needs this: `append_stt_failure_leaves_target_untouched_and_saves_failed_clip`
+exercises `save_failed_clip`, a different, unchanged code path (see Non-goals); the
+three existing notes-failure tests (`failed_notes_also_clear_notes_in_progress`,
+and the two `retry_notes_core` failure tests) only assert `notes_error.is_some()`, which
+still holds under the new `MODELS_NOT_READY_NOTES_ERROR` classification.
 
 **Rust (`model_manager.rs`)**: existing readiness/marker tests are unaffected structurally;
 no new coverage needed there beyond confirming `download_local_stt`/`download_local_llm`
