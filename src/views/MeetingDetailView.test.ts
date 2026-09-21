@@ -1023,6 +1023,32 @@ describe('MeetingDetailView local generation progress', () => {
     expect(wrapper.find('.tab-retry').exists()).toBe(false);
   });
 
+  it('shows a pending-models chip with no Retry while capture finished but STT is not ready', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'pending-models', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true }));
+
+    expect(wrapper.find('.tab-status-label').text()).toBe(
+      'Waiting for on-device models to finish downloading…'
+    );
+    expect(wrapper.find('.tab-status .spinner').exists()).toBe(true);
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+  });
+
+  it('shows a notes-pending-model chip with no Retry once the transcript exists', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending-model',
+    });
+    const wrapper = await mountLocal(detail({ isLocal: true, hasTranscript: true }));
+
+    expect(wrapper.find('.tab-status-label').text()).toBe(
+      'Waiting for the notes model to finish downloading…'
+    );
+    expect(wrapper.find('.tab-status .spinner').exists()).toBe(true);
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+  });
+
   it('shows "Generating AI Notes" with the Transcript tab enabled once the transcript is ready', async () => {
     recordingStatus.mockResolvedValue({
       status: 'done', hasTranscript: true, hasNote: false, notesStatus: 'pending',
