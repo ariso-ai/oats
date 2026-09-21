@@ -6,8 +6,14 @@ export type LocalProgressStage =
   | 'idle'
   | 'recording'
   | 'transcribing'
+  /** Capture finished but the STT model isn't downloaded yet — resolves on its
+   *  own, no manual Retry. */
+  | 'pending-models'
   | 'transcript-failed'
   | 'notes-pending'
+  /** Transcript exists, but the notes model isn't downloaded yet — resolves on
+   *  its own, no manual Retry. */
+  | 'notes-pending-model'
   | 'notes-failed'
   /** Nothing was said: notes were skipped, and no retry can change that. */
   | 'notes-empty-transcript'
@@ -18,6 +24,7 @@ export type LocalProgressStage =
 export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   if (!s) return 'idle';
   if (s.status === 'failed') return 'transcript-failed';
+  if (s.status === 'pending-models') return 'pending-models';
   // 'recording' means capture is still running (the stub meta.json written at
   // start, issue #355) — no generation has begun, and the recorder pill / strip
   // already communicate "recording", so the detail pane shows no status chip.
@@ -30,6 +37,7 @@ export function deriveStage(s: RecordingStatusView | null): LocalProgressStage {
   // A pending run outranks a present note: during a checkpointed recording the
   // note on disk is a preview, and the final pass will replace it.
   if (s.notesStatus === 'pending') return 'notes-pending';
+  if (s.notesStatus === 'pending-model') return 'notes-pending-model';
   if (s.hasNote || s.notesStatus === 'ready') return 'ready';
   if (s.notesStatus === 'empty-transcript') return 'notes-empty-transcript';
   if (s.notesStatus === 'failed') return 'notes-failed';
@@ -40,7 +48,8 @@ const POLL_MS = 2000;
 
 /** Stages that are not terminal: capture is still running, or the generation
  *  pipeline is still working. Polling continues while the stage is one of these. */
-const IN_FLIGHT_STAGES: readonly LocalProgressStage[] = ['recording', 'transcribing', 'notes-pending'];
+const IN_FLIGHT_STAGES: readonly LocalProgressStage[] =
+  ['recording', 'transcribing', 'pending-models', 'notes-pending', 'notes-pending-model'];
 
 export interface LocalRecordingProgress {
   status: Ref<RecordingStatusView | null>;
