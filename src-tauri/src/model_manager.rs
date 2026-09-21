@@ -270,6 +270,10 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     match result {
         Ok(()) => {
             let _ = app.emit("model://stt/done", ());
+            let root2 = root.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::transcribe::retry_recordings_pending_stt(&root2).await;
+            });
             Ok(())
         }
         Err(e) => {
@@ -458,6 +462,10 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     match result {
         Ok(()) => {
             let _ = app.emit("model://llm/done", ());
+            let root2 = root.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::transcribe::retry_recordings_pending_llm(&root2).await;
+            });
             Ok(())
         }
         Err(e) => {
@@ -936,6 +944,13 @@ fn now_marker() -> String {
 #[cfg(test)]
 pub(crate) fn mark_stt_ready_for_test(root: &Path) {
     write_manifest(root, "2026-01-01T00:00:00Z").expect("write STT manifest for test");
+}
+
+/// Test-only: write the LLM `.complete` readiness marker directly.
+#[cfg(test)]
+pub(crate) fn mark_llm_ready_for_test(root: &Path) {
+    std::fs::create_dir_all(llm_dir(root)).expect("create llm dir for test");
+    std::fs::write(llm_marker_path(root), llm_model_version()).expect("write llm marker for test");
 }
 
 #[cfg(test)]
