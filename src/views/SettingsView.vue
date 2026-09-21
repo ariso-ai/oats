@@ -207,7 +207,16 @@
               <td class="model-runtime">
                 <span class="cell-flex cell-flex--end">
                 <template v-if="row.runtime === 'local'">
-                  <span class="model-size" data-test="model-size">{{ rowSize(row) }}</span>
+                  <!-- Size or status, never both: the size is unknown while a model
+                       is downloading (it would only ever be the "—" placeholder) and
+                       beside the point when one failed or cannot run here. Ceding the
+                       space also keeps those longer messages readable in a column
+                       that no longer widens to fit them. -->
+                  <span
+                    v-if="!rowDetail(row)"
+                    class="model-size"
+                    data-test="model-size"
+                  >{{ rowSize(row) }}</span>
                   <span v-if="rowDetail(row)" class="model-status">{{ rowDetail(row) }}</span>
                   <button
                     v-if="rowInstalled(row)"
@@ -227,11 +236,20 @@
                   </button>
                   <button
                     v-else-if="!unsupported"
-                    class="secondary-btn"
+                    class="icon-btn icon-btn--install"
+                    data-test="install-model"
+                    :title="rowBusy(row) === 'downloading' ? 'Downloading' : 'Install'"
+                    :aria-label="rowBusy(row) === 'downloading' ? 'Downloading' : 'Install'"
                     :disabled="anyDownloading"
                     @click.stop="onInstallRow(row)"
                   >
-                    {{ rowBusy(row) === 'downloading' ? 'Downloading' : 'Install' }}
+                    <!-- Arrow into a tray: download. The label lives in the
+                         native tooltip, so the row stays icon-only. -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 3v12" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <path d="M4 19h16" />
+                    </svg>
                   </button>
                 </template>
                 <span v-else>Remote</span>
@@ -735,8 +753,12 @@ async function loadSpeechModel() {
 }
 
 /** The tick marks the model of each type that is actually in use: one speech
- *  model transcribes, one notes model writes the notes. */
+ *  model transcribes, one notes model writes the notes. Holding the selection
+ *  is not enough — a local model that is not on disk cannot run, so a deleted
+ *  model loses its tick even though it stays selected, and with no other model
+ *  of that type installed the column shows no tick at all. */
 function isActiveModel(row: CatalogModel): boolean {
+  if (row.runtime === 'local' && !rowInstalled(row)) return false;
   if (row.type === 'Speech') return row.key === speechModelKey.value;
   return (
     !!row.notesModel && notesModelKey(row.notesModel) === notesModelKey(notesModel.value)
@@ -1595,8 +1617,12 @@ async function refreshCalendarAccess() {
   color: #1c1c1c;
 }
 
+/* `table-layout: fixed` so the column widths below are binding. Under the
+   default `auto`, a width is only a suggestion — the column still grows to its
+   widest content, which is exactly the jumping this is meant to stop. */
 .model-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -1645,7 +1671,7 @@ async function refreshCalendarAccess() {
 
 .cell-flex--end {
   justify-content: flex-end;
-  gap: 12px;
+  gap: 8px;
 }
 
 /* The name cell's flex row is a real <button> for keyboard access — strip the
@@ -1672,15 +1698,23 @@ button.cell-flex {
   text-align: center;
 }
 
-/* `width: 1%` on a full-width table collapses a column to its content width,
-   so Type (an icon) and Runtime (size + button) stay tight and Name absorbs
-   the remaining space. */
+/* Type holds a single 16px icon; the rest is the cell's own padding. Name
+   carries no width and absorbs whatever these two leave. */
 .model-table th.model-type-head,
-.model-table td.model-type,
+.model-table td.model-type {
+  width: 32px;
+  white-space: nowrap;
+}
+
+/* Runtime is pinned instead of content-sized: its text changes while a model
+   downloads ("Starting…" → "9%" → "90%"), and a content-sized column would
+   resize on every tick, dragging the Type column sideways with it. 134px is
+   what is left once Name fits its longest entry ("Parakeet TDT 0.6B v3" plus
+   its in-use tick) in this fixed-width window — enough for size + status +
+   the icon button, with the long status strings wrapping instead. */
 .model-table th.model-runtime-head,
 .model-table td.model-runtime {
-  width: 1%;
-  white-space: nowrap;
+  width: 134px;
 }
 
 .model-table th:first-child {
@@ -1727,11 +1761,15 @@ button.cell-flex {
   width: 200px;
 }
 
-/* Icon-only action (delete). The native title supplies the "Delete" tip. */
+/* Icon-only row actions (delete, install). The native title supplies the tip,
+   so neither button spells its verb out in the row. */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* Never let a long status beside it shrink the hit target: as a flex item it
+     would otherwise compress well below 28px. */
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -1759,6 +1797,13 @@ button.cell-flex {
   cursor: not-allowed;
 }
 
+/* Install is not destructive, so it does not take the delete button's red. */
+.icon-btn--install:hover:not(:disabled),
+.icon-btn--install:focus-visible:not(:disabled) {
+  border-color: #1c1c1c;
+  color: #1c1c1c;
+}
+
 .model-runtime {
   white-space: nowrap;
 }
@@ -1774,9 +1819,19 @@ button.cell-flex {
   gap: 12px;
 }
 
+/* The one thing in this column that changes on its own, so it gets a slot at
+   least as wide as its widest progress text ("Starting…"). Every percentage is
+   narrower, so the slot does not resize as the download advances — the text
+   stays pinned to the same right edge the size occupies when idle. The longer
+   one-shot states ("Download failed", "Unsupported on this platform") exceed
+   the slot and wrap instead of widening the column. */
 .model-status {
+  min-width: 54px;
+  text-align: right;
+  white-space: normal;
   font-size: 13px;
   color: #6f6f6f;
+  font-variant-numeric: tabular-nums;
 }
 
 .model-ready {

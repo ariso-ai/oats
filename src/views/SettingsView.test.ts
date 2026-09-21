@@ -1192,6 +1192,8 @@ describe('SettingsView language models table', () => {
 
   it('ticks the in-use model of each type', async () => {
     getBackendSetting.mockResolvedValue('local');
+    // Only an installed model can be in use, so the tick needs both downloaded.
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
     const wrapper = mount(SettingsView);
     await flushPromises();
 
@@ -1249,11 +1251,11 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[0].get('button.secondary-btn').trigger('click');
+    await rows(wrapper)[0].get('[data-test="install-model"]').trigger('click');
     await flushPromises();
     expect(downloadLlm).toHaveBeenCalledTimes(1);
 
-    await rows(wrapper)[1].get('button.secondary-btn').trigger('click');
+    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
     await flushPromises();
     expect(downloadStt).toHaveBeenCalledTimes(1);
   });
@@ -1263,7 +1265,7 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[1].get('button.secondary-btn').trigger('click');
+    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
     await flushPromises();
 
     expect(setNotesModelSetting).not.toHaveBeenCalled();
@@ -1275,8 +1277,8 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    expect(rows(wrapper)[0].find('button.secondary-btn').exists()).toBe(false);
-    expect(rows(wrapper)[1].find('button.secondary-btn').exists()).toBe(false);
+    expect(rows(wrapper)[0].find('[data-test="install-model"]').exists()).toBe(false);
+    expect(rows(wrapper)[1].find('[data-test="install-model"]').exists()).toBe(false);
     expect(rows(wrapper)[0].find('[data-test="remove-model"]').exists()).toBe(true);
   });
 
@@ -1324,20 +1326,82 @@ describe('SettingsView model size and removal', () => {
     expect(rows(wrapper)[1].get('[data-test="model-size"]').text()).toBe('900 MB');
   });
 
-  it('offers a Delete icon for an installed model and Install for a missing one', async () => {
+  it('offers a Delete icon for an installed model and a download icon for a missing one', async () => {
     const installed = await mountInstalled();
     const remove = rows(installed)[0].get('[data-test="remove-model"]');
     expect(remove.attributes('aria-label')).toBe('Delete');
     expect(remove.attributes('title')).toBe('Delete');
     expect(remove.text()).toBe('');
     expect(remove.find('svg').exists()).toBe(true);
+    expect(installed.find('[data-test="install-model"]').exists()).toBe(false);
 
     getBackendSetting.mockResolvedValue('local');
     modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
     const missing = mount(SettingsView);
     await flushPromises();
     expect(missing.find('[data-test="remove-model"]').exists()).toBe(false);
-    expect(rows(missing)[0].get('button.secondary-btn').text()).toBe('Install');
+
+    // Icon only: "Install" is the hover tip, never a label in the row.
+    const install = rows(missing)[0].get('[data-test="install-model"]');
+    expect(install.text()).toBe('');
+    expect(install.find('svg').exists()).toBe(true);
+    expect(install.attributes('title')).toBe('Install');
+    expect(install.attributes('aria-label')).toBe('Install');
+    expect(missing.text()).not.toContain('Install');
+  });
+
+  it('calls the tip Downloading while the model downloads', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
+    // Never settles, so the row stays in its mid-download state.
+    downloadStt.mockReturnValue(new Promise(() => {}));
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
+    await flushPromises();
+
+    const install = rows(wrapper)[1].get('[data-test="install-model"]');
+    expect(install.attributes('title')).toBe('Downloading');
+    expect(install.attributes('aria-label')).toBe('Downloading');
+    expect(install.text()).toBe('');
+
+    // The size is only ever the "—" placeholder mid-download, so it is dropped
+    // and the progress text takes the space.
+    expect(rows(wrapper)[1].find('[data-test="model-size"]').exists()).toBe(false);
+    expect(rows(wrapper)[1].text()).not.toContain('—');
+    // The row that is not downloading keeps its size.
+    expect(rows(wrapper)[0].find('[data-test="model-size"]').exists()).toBe(true);
+  });
+
+  it('yields the size to a failure message rather than showing both', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
+    modelSizes.mockResolvedValue({ notes: 750 * MB, speech: 900 * MB });
+    downloadStt.mockRejectedValue(new Error('network'));
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
+    await flushPromises();
+
+    // The column is a fixed width, so a size beside this message would squeeze
+    // it into an unreadable ribbon; the status gets the space instead.
+    expect(rows(wrapper)[1].text()).toContain('Download failed');
+    expect(rows(wrapper)[1].find('[data-test="model-size"]').exists()).toBe(false);
+  });
+
+  it('drops the in-use tick when the selected model is not installed', async () => {
+    const installed = await mountInstalled();
+    expect(installed.findAll('.model-tick--on').length).toBe(2);
+
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
+    const missing = mount(SettingsView);
+    await flushPromises();
+
+    // No other model of either type ships today, so no row claims the tick.
+    expect(missing.find('.model-tick--on').exists()).toBe(false);
   });
 
   it('asks before removing a model', async () => {
