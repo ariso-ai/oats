@@ -19,6 +19,9 @@ const modelSizes = vi.fn(
     Promise.resolve({ notes: null, speech: null })
 );
 const deleteModel = vi.fn((_k: unknown) => Promise.resolve());
+const llmApiKeyProviders = vi.fn((): Promise<string[]> => Promise.resolve([]));
+const setLlmApiKey = vi.fn((_p: unknown, _k: unknown) => Promise.resolve());
+const clearLlmApiKey = vi.fn((_p: unknown) => Promise.resolve());
 const downloadStt = vi.fn(() => Promise.resolve());
 const downloadLlm = vi.fn(() => Promise.resolve());
 const getNotesModelSetting = vi.fn(() =>
@@ -108,6 +111,11 @@ vi.mock('../tauri', () => ({
     modelSizes: () => modelSizes(),
     deleteModel: (k: unknown) => deleteModel(k),
   },
+  llmKeys: {
+    providers: () => llmApiKeyProviders(),
+    set: (p: unknown, k: unknown) => setLlmApiKey(p, k),
+    clear: (p: unknown) => clearLlmApiKey(p),
+  },
 }));
 const loadRecordingEnabled = vi.fn(() => Promise.resolve({ mic: false, systemAudio: false }));
 const ensureMicPermission = vi.fn(() => Promise.resolve(true));
@@ -188,6 +196,9 @@ beforeEach(() => {
   modelSizes.mockResolvedValue({ notes: null, speech: null });
   getSpeechModelSetting.mockResolvedValue('speech:parakeet-tdt-0.6b-v3');
   deleteModel.mockResolvedValue(undefined);
+  llmApiKeyProviders.mockResolvedValue([]);
+  setLlmApiKey.mockResolvedValue(undefined);
+  clearLlmApiKey.mockResolvedValue(undefined);
   isDiagnosticsEnabled.mockResolvedValue(false);
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
@@ -1148,9 +1159,19 @@ describe('SettingsView auto-record depends on the microphone', () => {
 });
 describe('SettingsView language models table', () => {
   const ROW = '[data-test="model-row"]';
+  const GEMMA = 'Gemma 3 1B';
+  const PARAKEET = 'Parakeet TDT 0.6B v3';
 
   function rows(wrapper: ReturnType<typeof mount>) {
     return wrapper.findAll(ROW);
+  }
+
+  /** Rows are addressed by name: the table also lists the remote models, so a
+   *  position says nothing about which model a row is. */
+  function rowNamed(wrapper: ReturnType<typeof mount>, name: string) {
+    const row = rows(wrapper).find((r) => r.text().includes(name));
+    if (!row) throw new Error(`no model row named ${name}`);
+    return row;
   }
 
   it('has no model table on the Ariso backend', async () => {
@@ -1161,12 +1182,13 @@ describe('SettingsView language models table', () => {
     expect(wrapper.find(ROW).exists()).toBe(false);
   });
 
-  it('names the section "Language models"', async () => {
+  it('names the section "AI Models"', async () => {
     getBackendSetting.mockResolvedValue('local');
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    expect(wrapper.text()).toContain('Language models');
+    expect(wrapper.text()).toContain('AI Models');
+    expect(wrapper.text()).not.toContain('Language models');
     expect(wrapper.text()).not.toContain('On-device models');
     expect(wrapper.text()).not.toContain('Local models');
   });
@@ -1176,16 +1198,14 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    const all = rows(wrapper);
-    expect(all).toHaveLength(2);
-    expect(all[0].text()).toContain('Gemma 3 1B');
-    expect(all[0].get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
+    const gemma = rowNamed(wrapper, GEMMA);
+    expect(gemma.get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
       'Language model',
     );
     // A local model is shown by its size on disk; only remote rows are labelled.
-    expect(all[0].get('[data-test="model-size"]').exists()).toBe(true);
-    expect(all[1].text()).toContain('Parakeet TDT 0.6B v3');
-    expect(all[1].get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
+    expect(gemma.find('[data-test="model-size"]').exists()).toBe(true);
+    const parakeet = rowNamed(wrapper, PARAKEET);
+    expect(parakeet.get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
       'Speech model',
     );
   });
@@ -1198,22 +1218,37 @@ describe('SettingsView language models table', () => {
     await flushPromises();
 
     // One notes model writes notes, one speech model transcribes — both in use.
-    expect(rows(wrapper)[0].find('.model-tick--on').exists()).toBe(true);
-    expect(rows(wrapper)[1].find('.model-tick--on').exists()).toBe(true);
+    expect(rowNamed(wrapper, GEMMA).find('.model-tick--on').exists()).toBe(true);
+    expect(rowNamed(wrapper, PARAKEET).find('.model-tick--on').exists()).toBe(true);
   });
 
-  it('selects a notes model when its row is clicked', async () => {
+  it('selects an installed notes model when its row is clicked', async () => {
     getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[0].trigger('click');
+    await rowNamed(wrapper, GEMMA).trigger('click');
     await flushPromises();
 
     expect(setNotesModelSetting).toHaveBeenCalledWith({
       kind: 'local',
       id: 'gemma-3-1b-it-qat-4bit',
     });
+  });
+
+  it('cannot put a model that is not downloaded into use', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await rowNamed(wrapper, GEMMA).trigger('click');
+    await flushPromises();
+
+    // Nothing on disk to run, so the row cannot claim the tick.
+    expect(setNotesModelSetting).not.toHaveBeenCalled();
+    expect(rowNamed(wrapper, GEMMA).find('.model-tick--on').exists()).toBe(false);
   });
 
   it('does not touch the notes selection when a speech row is clicked', async () => {
@@ -1232,16 +1267,16 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    const icon = rows(wrapper)[0].get('[data-test="model-type-icon"]');
+    const icon = rowNamed(wrapper, GEMMA).get('[data-test="model-type-icon"]');
     expect(icon.find('svg').exists()).toBe(true);
     expect(icon.attributes('aria-label')).toContain('Language model');
     // Same styled bubble the vault "?" uses, revealed on hover/focus.
-    expect(rows(wrapper)[0].get('[data-test="model-details"]').text()).toContain(
+    expect(rowNamed(wrapper, GEMMA).get('[data-test="model-details"]').text()).toContain(
       'gemma-3-1b-it-qat-4bit',
     );
-    const speechIcon = rows(wrapper)[1].get('[data-test="model-type-icon"]');
+    const speechIcon = rowNamed(wrapper, PARAKEET).get('[data-test="model-type-icon"]');
     expect(speechIcon.attributes('aria-label')).toContain('Speech model');
-    expect(rows(wrapper)[1].get('[data-test="model-details"]').text()).toContain(
+    expect(rowNamed(wrapper, PARAKEET).get('[data-test="model-details"]').text()).toContain(
       'parakeet-tdt-0.6b-v3',
     );
   });
@@ -1251,11 +1286,11 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[0].get('[data-test="install-model"]').trigger('click');
+    await rowNamed(wrapper, GEMMA).get('[data-test="install-model"]').trigger('click');
     await flushPromises();
     expect(downloadLlm).toHaveBeenCalledTimes(1);
 
-    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
+    await rowNamed(wrapper, PARAKEET).get('[data-test="install-model"]').trigger('click');
     await flushPromises();
     expect(downloadStt).toHaveBeenCalledTimes(1);
   });
@@ -1265,7 +1300,7 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
+    await rowNamed(wrapper, PARAKEET).get('[data-test="install-model"]').trigger('click');
     await flushPromises();
 
     expect(setNotesModelSetting).not.toHaveBeenCalled();
@@ -1277,9 +1312,9 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    expect(rows(wrapper)[0].find('[data-test="install-model"]').exists()).toBe(false);
-    expect(rows(wrapper)[1].find('[data-test="install-model"]').exists()).toBe(false);
-    expect(rows(wrapper)[0].find('[data-test="remove-model"]').exists()).toBe(true);
+    expect(rowNamed(wrapper, GEMMA).find('[data-test="install-model"]').exists()).toBe(false);
+    expect(rowNamed(wrapper, PARAKEET).find('[data-test="install-model"]').exists()).toBe(false);
+    expect(rowNamed(wrapper, GEMMA).find('[data-test="remove-model"]').exists()).toBe(true);
   });
 
   it('shows a dash for a size the backend cannot report yet', async () => {
@@ -1287,7 +1322,19 @@ describe('SettingsView language models table', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    expect(rows(wrapper)[0].get('[data-test="model-size"]').text()).toBe('—');
+    expect(rowNamed(wrapper, GEMMA).get('[data-test="model-size"]').text()).toBe('—');
+  });
+
+  it('scrolls the list rather than growing past six rows', async () => {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    // More models ship than fit, so the list is a scroll box sized in rows.
+    expect(rows(wrapper).length).toBeGreaterThan(6);
+    const scroller = wrapper.get('[data-test="model-scroll"]');
+    expect(scroller.attributes('style')).toContain('--model-visible-rows: 6');
+    expect(scroller.find('.model-table').exists()).toBe(true);
   });
 
   it('keeps the vault out of the models section', async () => {
@@ -1302,12 +1349,251 @@ describe('SettingsView language models table', () => {
   });
 });
 
+describe('SettingsView remote model API keys', () => {
+  const ROW = '[data-test="model-row"]';
+  const GEMMA = 'Gemma 3 1B';
+
+  function rowNamed(wrapper: ReturnType<typeof mount>, name: string) {
+    const row = wrapper.findAll(ROW).find((r) => r.text().includes(name));
+    if (!row) throw new Error(`no model row named ${name}`);
+    return row;
+  }
+
+  async function mountLocal() {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  /** Walk a provider's row from "Connect" through a saved key. */
+  async function connect(
+    wrapper: ReturnType<typeof mount>,
+    name: string,
+    key: string,
+  ) {
+    await rowNamed(wrapper, name).get('[data-test="connect-key"]').trigger('click');
+    const input = wrapper.get('[data-test="api-key-input"]');
+    await input.setValue(key);
+    await wrapper.get('[data-test="save-key"]').trigger('click');
+    await flushPromises();
+  }
+
+  it('lists the remote models alongside the on-device ones', async () => {
+    const wrapper = await mountLocal();
+
+    for (const name of ['Claude Haiku 4.5', 'GPT-5.1', 'Gemini 3.0 Flash']) {
+      expect(rowNamed(wrapper, name).find('[data-test="connect-key"]').exists()).toBe(true);
+    }
+  });
+
+  it('marks a model as remote with its type icon, not a word in the row', async () => {
+    const wrapper = await mountLocal();
+
+    const remote = rowNamed(wrapper, 'Claude Haiku 4.5');
+    expect(remote.text()).not.toContain('Remote');
+    expect(remote.get('[data-test="model-type-icon"]').attributes('aria-label')).toContain(
+      'Remote language model',
+    );
+    // The on-device rows keep the icon they had.
+    expect(rowNamed(wrapper, GEMMA).get('[data-test="model-type-icon"]').attributes('aria-label'))
+      .toContain('Language model');
+  });
+
+  it('offers to connect a provider that has no key stored', async () => {
+    const wrapper = await mountLocal();
+
+    // Icon only, like Install and Delete: the word is the hover tip.
+    const row = rowNamed(wrapper, 'Claude Haiku 4.5');
+    const connectBtn = row.get('[data-test="connect-key"]');
+    expect(connectBtn.text()).toBe('');
+    expect(connectBtn.find('svg').exists()).toBe(true);
+    expect(connectBtn.attributes('title')).toBe('Connect');
+    expect(connectBtn.attributes('aria-label')).toBe('Connect Anthropic');
+    expect(row.find('[data-test="remove-key"]').exists()).toBe(false);
+  });
+
+  it('asks for the key in a masked field, never a plain one', async () => {
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').get('[data-test="connect-key"]').trigger('click');
+
+    const input = wrapper.get('[data-test="api-key-input"]');
+    expect(input.attributes('type')).toBe('password');
+  });
+
+  it('discloses where the transcript goes before a key is entered', async () => {
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').get('[data-test="connect-key"]').trigger('click');
+
+    const disclosure = wrapper.get('[data-test="remote-disclosure"]').text();
+    expect(disclosure).toContain('Anthropic');
+    expect(disclosure).toContain('stay on this device');
+  });
+
+  it('stores an entered key against its provider', async () => {
+    const wrapper = await mountLocal();
+
+    await connect(wrapper, 'Claude Haiku 4.5', 'sk-ant-test');
+
+    expect(setLlmApiKey).toHaveBeenCalledWith('anthropic', 'sk-ant-test');
+  });
+
+  it('shows the provider as connected once its key is saved', async () => {
+    const wrapper = await mountLocal();
+
+    await connect(wrapper, 'Claude Haiku 4.5', 'sk-ant-test');
+
+    const row = rowNamed(wrapper, 'Claude Haiku 4.5');
+    // The swapped icon is the whole signal — no "Connected" word in the row.
+    expect(row.find('[data-test="connect-key"]').exists()).toBe(false);
+    const disconnect = row.get('[data-test="remove-key"]');
+    expect(disconnect.attributes('title')).toBe('Disconnect');
+    expect(disconnect.text()).toBe('');
+    expect(row.text()).not.toContain('Connected');
+    expect(wrapper.find('[data-test="api-key-input"]').exists()).toBe(false);
+  });
+
+  it('connects every model of a provider from one key', async () => {
+    const wrapper = await mountLocal();
+
+    await connect(wrapper, 'Claude Haiku 4.5', 'sk-ant-test');
+
+    // One keychain entry per provider, not per model.
+    expect(rowNamed(wrapper, 'Claude Sonnet 5').find('[data-test="remove-key"]').exists()).toBe(
+      true,
+    );
+    expect(rowNamed(wrapper, 'GPT-5.1').find('[data-test="remove-key"]').exists()).toBe(false);
+  });
+
+  it('shows a provider connected on a previous run without asking again', async () => {
+    llmApiKeyProviders.mockResolvedValue(['openai']);
+    const wrapper = await mountLocal();
+
+    expect(rowNamed(wrapper, 'GPT-5.1').find('[data-test="remove-key"]').exists()).toBe(true);
+    expect(rowNamed(wrapper, 'Claude Haiku 4.5').find('[data-test="remove-key"]').exists()).toBe(
+      false,
+    );
+  });
+
+  it('forgets a key when the provider is disconnected', async () => {
+    llmApiKeyProviders.mockResolvedValue(['anthropic']);
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').get('[data-test="remove-key"]').trigger('click');
+    await flushPromises();
+
+    expect(clearLlmApiKey).toHaveBeenCalledWith('anthropic');
+    expect(rowNamed(wrapper, 'Claude Haiku 4.5').find('[data-test="connect-key"]').exists()).toBe(
+      true,
+    );
+  });
+
+  it('keeps the field open and says why when the backend rejects a key', async () => {
+    setLlmApiKey.mockRejectedValue(new Error('That API key contains characters a key can’t hold.'));
+    const wrapper = await mountLocal();
+
+    await connect(wrapper, 'Claude Haiku 4.5', 'bad key');
+
+    expect(wrapper.get('[data-test="key-error"]').text()).toContain('characters');
+    expect(wrapper.find('[data-test="api-key-input"]').exists()).toBe(true);
+    expect(rowNamed(wrapper, 'Claude Haiku 4.5').find('[data-test="remove-key"]').exists()).toBe(
+      false,
+    );
+  });
+
+  it('makes a connected remote model the one in use when its row is clicked', async () => {
+    llmApiKeyProviders.mockResolvedValue(['anthropic']);
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).toHaveBeenCalledWith({
+      kind: 'remote',
+      provider: 'anthropic',
+      id: 'claude-haiku-4-5',
+    });
+    expect(rowNamed(wrapper, 'Claude Haiku 4.5').find('.model-tick--on').exists()).toBe(true);
+    // One notes model at a time: the on-device row gives the tick up.
+    expect(rowNamed(wrapper, 'Gemma 3 1B').find('.model-tick--on').exists()).toBe(false);
+  });
+
+  it('asks for a key instead of selecting a provider that has none', async () => {
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').trigger('click');
+    await flushPromises();
+
+    // Nothing to call the model with yet, so the click opens the key field.
+    expect(setNotesModelSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('[data-test="api-key-input"]').exists()).toBe(true);
+    expect(rowNamed(wrapper, 'Gemma 3 1B').find('.model-tick--on').exists()).toBe(true);
+  });
+
+  it('selects a remote model as soon as its key is saved and its row clicked', async () => {
+    const wrapper = await mountLocal();
+
+    await connect(wrapper, 'Claude Haiku 4.5', 'sk-ant-test');
+    await rowNamed(wrapper, 'Claude Haiku 4.5').trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).toHaveBeenCalledWith({
+      kind: 'remote',
+      provider: 'anthropic',
+      id: 'claude-haiku-4-5',
+    });
+  });
+
+  it('says a remote model in use is not generating notes yet', async () => {
+    llmApiKeyProviders.mockResolvedValue(['anthropic']);
+    getNotesModelSetting.mockResolvedValue({
+      kind: 'remote',
+      provider: 'anthropic',
+      id: 'claude-haiku-4-5',
+    } as never);
+    const wrapper = await mountLocal();
+
+    expect(wrapper.get('[data-test="models-section"]').text()).toContain(
+      'Notes are still written on this device',
+    );
+  });
+
+  it('keeps that caveat out of the way while notes stay on-device', async () => {
+    llmApiKeyProviders.mockResolvedValue(['anthropic']);
+    const wrapper = await mountLocal();
+
+    // A connected provider that is not the model in use says nothing.
+    expect(wrapper.find('[data-test="remote-pending"]').exists()).toBe(false);
+  });
+
+  it('leaves the remote rows out of the Ariso backend entirely', async () => {
+    getBackendSetting.mockResolvedValue('ariso');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="connect-key"]').exists()).toBe(false);
+    expect(llmApiKeyProviders).not.toHaveBeenCalled();
+  });
+});
+
 describe('SettingsView model size and removal', () => {
   const ROW = '[data-test="model-row"]';
   const MB = 1024 * 1024;
+  const GEMMA = 'Gemma 3 1B';
+  const PARAKEET = 'Parakeet TDT 0.6B v3';
 
   function rows(wrapper: ReturnType<typeof mount>) {
     return wrapper.findAll(ROW);
+  }
+
+  function rowNamed(wrapper: ReturnType<typeof mount>, name: string) {
+    const row = rows(wrapper).find((r) => r.text().includes(name));
+    if (!row) throw new Error(`no model row named ${name}`);
+    return row;
   }
 
   async function mountInstalled() {
@@ -1322,13 +1608,13 @@ describe('SettingsView model size and removal', () => {
   it('shows each model size on disk', async () => {
     const wrapper = await mountInstalled();
 
-    expect(rows(wrapper)[0].get('[data-test="model-size"]').text()).toBe('750 MB');
-    expect(rows(wrapper)[1].get('[data-test="model-size"]').text()).toBe('900 MB');
+    expect(rowNamed(wrapper, GEMMA).get('[data-test="model-size"]').text()).toBe('750 MB');
+    expect(rowNamed(wrapper, PARAKEET).get('[data-test="model-size"]').text()).toBe('900 MB');
   });
 
   it('offers a Delete icon for an installed model and a download icon for a missing one', async () => {
     const installed = await mountInstalled();
-    const remove = rows(installed)[0].get('[data-test="remove-model"]');
+    const remove = rowNamed(installed, GEMMA).get('[data-test="remove-model"]');
     expect(remove.attributes('aria-label')).toBe('Delete');
     expect(remove.attributes('title')).toBe('Delete');
     expect(remove.text()).toBe('');
@@ -1342,7 +1628,7 @@ describe('SettingsView model size and removal', () => {
     expect(missing.find('[data-test="remove-model"]').exists()).toBe(false);
 
     // Icon only: "Install" is the hover tip, never a label in the row.
-    const install = rows(missing)[0].get('[data-test="install-model"]');
+    const install = rowNamed(missing, GEMMA).get('[data-test="install-model"]');
     expect(install.text()).toBe('');
     expect(install.find('svg').exists()).toBe(true);
     expect(install.attributes('title')).toBe('Install');
@@ -1358,20 +1644,20 @@ describe('SettingsView model size and removal', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
+    await rowNamed(wrapper, PARAKEET).get('[data-test="install-model"]').trigger('click');
     await flushPromises();
 
-    const install = rows(wrapper)[1].get('[data-test="install-model"]');
+    const install = rowNamed(wrapper, PARAKEET).get('[data-test="install-model"]');
     expect(install.attributes('title')).toBe('Downloading');
     expect(install.attributes('aria-label')).toBe('Downloading');
     expect(install.text()).toBe('');
 
     // The size is only ever the "—" placeholder mid-download, so it is dropped
     // and the progress text takes the space.
-    expect(rows(wrapper)[1].find('[data-test="model-size"]').exists()).toBe(false);
-    expect(rows(wrapper)[1].text()).not.toContain('—');
+    expect(rowNamed(wrapper, PARAKEET).find('[data-test="model-size"]').exists()).toBe(false);
+    expect(rowNamed(wrapper, PARAKEET).text()).not.toContain('—');
     // The row that is not downloading keeps its size.
-    expect(rows(wrapper)[0].find('[data-test="model-size"]').exists()).toBe(true);
+    expect(rowNamed(wrapper, GEMMA).find('[data-test="model-size"]').exists()).toBe(true);
   });
 
   it('yields the size to a failure message rather than showing both', async () => {
@@ -1382,13 +1668,13 @@ describe('SettingsView model size and removal', () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
 
-    await rows(wrapper)[1].get('[data-test="install-model"]').trigger('click');
+    await rowNamed(wrapper, PARAKEET).get('[data-test="install-model"]').trigger('click');
     await flushPromises();
 
     // The column is a fixed width, so a size beside this message would squeeze
     // it into an unreadable ribbon; the status gets the space instead.
-    expect(rows(wrapper)[1].text()).toContain('Download failed');
-    expect(rows(wrapper)[1].find('[data-test="model-size"]').exists()).toBe(false);
+    expect(rowNamed(wrapper, PARAKEET).text()).toContain('Download failed');
+    expect(rowNamed(wrapper, PARAKEET).find('[data-test="model-size"]').exists()).toBe(false);
   });
 
   it('drops the in-use tick when the selected model is not installed', async () => {
@@ -1407,7 +1693,7 @@ describe('SettingsView model size and removal', () => {
   it('asks before removing a model', async () => {
     const wrapper = await mountInstalled();
 
-    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await rowNamed(wrapper, GEMMA).get('[data-test="remove-model"]').trigger('click');
     await flushPromises();
 
     expect(wrapper.find('[data-test="remove-confirm"]').exists()).toBe(true);
@@ -1416,7 +1702,7 @@ describe('SettingsView model size and removal', () => {
 
   it('removes the files once confirmed', async () => {
     const wrapper = await mountInstalled();
-    await rows(wrapper)[0].get('[data-test="remove-model"]').trigger('click');
+    await rowNamed(wrapper, GEMMA).get('[data-test="remove-model"]').trigger('click');
     await flushPromises();
 
     await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
@@ -1427,7 +1713,7 @@ describe('SettingsView model size and removal', () => {
 
   it('names the speech model kind when removing that row', async () => {
     const wrapper = await mountInstalled();
-    await rows(wrapper)[1].get('[data-test="remove-model"]').trigger('click');
+    await rowNamed(wrapper, PARAKEET).get('[data-test="remove-model"]').trigger('click');
     await flushPromises();
     await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
     await flushPromises();

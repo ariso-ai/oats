@@ -2,10 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { parseNotesModel, type NotesModelId } from './notesModels';
+import { parseNotesModel, type NotesModelId, type RemoteProvider } from './notesModels';
 import { parseSpeechModelKey } from './modelCatalog';
 
-export type { NotesModelId };
+export type { NotesModelId, RemoteProvider };
 
 // Broadcast by the backend to every window whenever the stored session changes:
 // sign-in or sign-out from any window, or a native path clearing a session the
@@ -570,6 +570,25 @@ export const local = {
   },
   openLibraryWindow(): Promise<void> {
     return invoke('create_library_window');
+  },
+};
+
+/** The user's own API keys for the remote notes models, kept by the Rust
+ *  `credentials` module in the OS keychain.
+ *
+ *  There is deliberately no read: a key's value never comes back to a webview.
+ *  The UI only needs to know which providers have one. */
+export const llmKeys = {
+  /** Providers with a key stored — everything Settings needs to render
+   *  "Connected" without handling a secret. */
+  providers(): Promise<RemoteProvider[]> {
+    return invoke<RemoteProvider[]>('llm_api_key_providers');
+  },
+  set(provider: RemoteProvider, key: string): Promise<void> {
+    return invoke('set_llm_api_key', { provider, key });
+  },
+  clear(provider: RemoteProvider): Promise<void> {
+    return invoke('clear_llm_api_key', { provider });
   },
 };
 

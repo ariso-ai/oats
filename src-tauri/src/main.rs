@@ -6,6 +6,7 @@ mod audio_util;
 mod audio_capture;
 mod mic_capture;
 mod commands;
+mod credentials;
 mod deep_link;
 mod meeting_notifications;
 mod mic_monitor;
@@ -246,6 +247,9 @@ fn main() {
             model_manager::download_local_llm,
             model_manager::local_model_sizes,
             model_manager::delete_local_model,
+            credentials::set_llm_api_key,
+            credentials::llm_api_key_providers,
+            credentials::clear_llm_api_key,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
             meeting_notifications::take_pending_meeting_prep,

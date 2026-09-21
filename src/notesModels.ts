@@ -1,16 +1,29 @@
 /**
  * Which model generates meeting notes on the Local backend.
  *
- * Today the registry holds exactly one entry — the on-device Gemma that
- * `model_manager.rs` already downloads and `transcribe.rs::run_notes` already
- * runs. The `remote` variant exists so the picker, the persisted setting, and
- * the parser are shaped for the OpenAI/Gemini/Anthropic options that land in a
- * later increment; no remote model is registered yet, so `parseNotesModel`
- * rejects every one of them.
+ * On-device entries run through `model_manager.rs` / `transcribe.rs::run_notes`
+ * and cost nothing but disk. Remote entries call a provider's API with a key
+ * the user supplies, which the Rust `credentials` module keeps in the OS
+ * keychain — so a remote entry is pickable only once its provider is connected.
  *
  * See docs/superpowers/specs/2026-09-19-local-notes-model-picker-design.md.
  */
 export type RemoteProvider = 'openai' | 'gemini' | 'anthropic';
+
+/** Every provider a key can be stored for, in display order. Mirrors the Rust
+ *  `RemoteProvider::ALL` — both sides must agree on these wire names. */
+export const REMOTE_PROVIDERS: RemoteProvider[] = ['openai', 'gemini', 'anthropic'];
+
+const REMOTE_PROVIDER_LABELS: Record<RemoteProvider, string> = {
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+  anthropic: 'Anthropic',
+};
+
+/** The provider's own name, for the key prompt and the disclosure line. */
+export function remoteProviderLabel(provider: RemoteProvider): string {
+  return REMOTE_PROVIDER_LABELS[provider];
+}
 
 export type NotesModelId =
   | { kind: 'local'; id: string }
@@ -34,6 +47,28 @@ export const DEFAULT_NOTES_MODEL: NotesModelId = {
  */
 export const NOTES_MODEL_OPTIONS: NotesModelOption[] = [
   { value: DEFAULT_NOTES_MODEL, label: 'Gemma 3 1B' },
+  { value: { kind: 'remote', provider: 'openai', id: 'gpt-5.1' }, label: 'GPT-5.1' },
+  { value: { kind: 'remote', provider: 'openai', id: 'gpt-5.1-mini' }, label: 'GPT-5.1 mini' },
+  {
+    value: { kind: 'remote', provider: 'gemini', id: 'gemini-3.0-flash' },
+    label: 'Gemini 3.0 Flash',
+  },
+  {
+    value: { kind: 'remote', provider: 'gemini', id: 'gemini-3.5-flash' },
+    label: 'Gemini 3.5 Flash',
+  },
+  {
+    value: { kind: 'remote', provider: 'gemini', id: 'gemini-3.7-flash' },
+    label: 'Gemini 3.7 Flash',
+  },
+  {
+    value: { kind: 'remote', provider: 'anthropic', id: 'claude-haiku-4-5' },
+    label: 'Claude Haiku 4.5',
+  },
+  {
+    value: { kind: 'remote', provider: 'anthropic', id: 'claude-sonnet-5' },
+    label: 'Claude Sonnet 5',
+  },
 ];
 
 /** A stable identity for a selection — safe as a `v-for` key and for equality. */
