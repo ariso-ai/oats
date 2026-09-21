@@ -427,7 +427,16 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
         }
         Err(e) => {
             eprintln!("notes generation: {e}");
-            meta.notes_error = Some(e);
+            // Only an on-device model can be "not downloaded yet"; a remote
+            // provider's failure is a real error and is reported as-is.
+            let models_ready = !matches!(model, crate::notes_model::NotesModelId::Local { .. })
+                || crate::storage::ariso_root()
+                    .is_ok_and(|root| crate::model_manager::llm_is_ready(&root));
+            meta.notes_error = Some(if models_ready {
+                e
+            } else {
+                storage::MODELS_NOT_READY_NOTES_ERROR.to_string()
+            });
             // No notes were written, so no model may claim them.
             meta.notes_model = None;
             let _ = storage::write_meta(&dir, &meta);
@@ -777,7 +786,8 @@ async fn fresh_recording_core(
     };
     storage::write_meta(&dir, &meta)?;
 
-    let models = storage::models_dir(&storage::ariso_root()?);
+    let root = storage::ariso_root()?;
+    let models = storage::models_dir(&root);
     let audio_path = crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file);
     let speech_model = crate::speech_model::selected();
     match run_transcribe(&audio_path, &models, speech_model).await {
@@ -815,6 +825,19 @@ async fn fresh_recording_core(
             ))
         }
         Err(e) => {
+            if !crate::model_manager::speech_is_ready(&root, speech_model) {
+                meta.status = RecordingStatus::PendingModels;
+                let _ = storage::write_meta(&dir, &meta);
+                return Ok((
+                    FinalizeResult {
+                        backend: "local".to_string(),
+                        id,
+                        title,
+                        status: RecordingStatus::PendingModels,
+                    },
+                    tokio::spawn(async {}),
+                ));
+            }
             meta.status = RecordingStatus::Failed;
             meta.error = Some(e.clone());
             let _ = storage::write_meta(&dir, &meta);
@@ -1847,11 +1870,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_marks_pending_models_when_stt_is_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        // Deliberately no STT manifest written: models are "not ready".
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05Z".into(), 5,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.status, RecordingStatus::PendingModels);
+        let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
+        let meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::PendingModels);
+        assert!(!dir.join("transcript.md").exists(), "no transcript when STT never ran");
+        assert_eq!(
+            crate::vault::read_audio(meta.audio_file.as_ref().unwrap()).unwrap(),
+            b"audio",
+            "audio must still be saved"
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
     async fn finalize_marks_failed_but_keeps_audio_on_stt_error() {
         let tmp = tempfile::tempdir().unwrap();
         let stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::model_manager::mark_stt_ready_for_test(tmp.path());
 
         let err = finalize_core(
             tmp.path(), b"audio".to_vec(),
@@ -1963,6 +2015,33 @@ mod tests {
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
         assert!(meta.notes_error.is_some());
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn process_notes_reports_pending_model_when_llm_is_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(
+            tmp.path(),
+            StubBehavior::transcribe_success(json).with_notes(StubOutcome::failure("boom")),
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::model_manager::mark_stt_ready_for_test(tmp.path());
+        // Deliberately no LLM marker: the notes model is "not ready".
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(res.status, RecordingStatus::Done, "transcript still generates");
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        assert_eq!(meta.notes_error.as_deref(), Some(crate::storage::MODELS_NOT_READY_NOTES_ERROR));
+        assert!(!meta.notes_in_progress);
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
