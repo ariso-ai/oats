@@ -930,6 +930,14 @@ fn now_marker() -> String {
     format!("unix:{secs}")
 }
 
+/// Test-only: write the STT readiness manifest directly, bypassing the network
+/// download path. `transcribe.rs`'s tests use this instead of duplicating
+/// `manifest_path`/`stt_model_version` (both private to this module).
+#[cfg(test)]
+pub(crate) fn mark_stt_ready_for_test(root: &Path) {
+    write_manifest(root, "2026-01-01T00:00:00Z").expect("write STT manifest for test");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
