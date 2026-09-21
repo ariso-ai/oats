@@ -20,8 +20,8 @@ export function shouldPromptDownload(
 /**
  * Status text shown beside a model that is NOT yet installed. (An installed
  * model is shown with a green tick in the template instead of any text.) While
- * downloading, this is the bare progress percentage (e.g. "90%") — the button
- * itself carries the "Downloading" label.
+ * downloading, this is the bare progress percentage (e.g. "90%") — the install
+ * button is icon-only, so this text is the only visible "it is downloading".
  */
 export function rowStatusText(busy: Busy, progress: number | null): string {
   if (busy === 'downloading') {
@@ -66,4 +66,23 @@ export function modelBannerVisible(
   llmSatisfied: boolean,
 ): boolean {
   return prompted && (!sttSatisfied || !llmSatisfied);
+}
+
+/**
+ * The text shown beside a model's size in the Settings table, or '' for none.
+ * Deliberately silent about a model that is simply not downloaded yet — the
+ * row's download icon and missing tick already say that — but never silent
+ * about a failure or an unsupported platform.
+ */
+export function rowDetailText(
+  busy: Busy,
+  progress: number | null,
+  installed: boolean,
+  unsupported: boolean,
+): string {
+  if (unsupported) return 'Unsupported on this platform';
+  if (installed) return '';
+  if (busy === 'downloading') return rowStatusText(busy, progress);
+  if (busy === 'error') return 'Download failed';
+  return '';
 }

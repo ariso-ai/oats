@@ -2,6 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { parseNotesModel, type NotesModelId } from './notesModels';
+import { parseSpeechModelKey } from './modelCatalog';
+
+export type { NotesModelId };
 
 // Broadcast by the backend to every window whenever the stored session changes:
 // sign-in or sign-out from any window, or a native path clearing a session the
@@ -397,6 +401,15 @@ export interface LocalCheckpointResult {
   stale: boolean;
 }
 
+/** Which downloadable local model a size/delete call names. Mirrors the Rust
+ *  `LocalModelKind` — a closed set, never a path. */
+export type LocalModelKind = 'notes' | 'speech';
+
+export interface ModelSizes {
+  notes: number | null;
+  speech: number | null;
+}
+
 export interface ModelStatus {
   state: 'not_downloaded' | 'downloading' | 'ready' | 'error' | 'unsupported';
   version?: string;
@@ -547,6 +560,14 @@ export const local = {
   downloadLlm(): Promise<void> {
     return invoke('download_local_llm');
   },
+  /** Bytes each local model occupies; `null` for one that isn't installed. */
+  modelSizes(): Promise<ModelSizes> {
+    return invoke<ModelSizes>('local_model_sizes');
+  },
+  /** Delete a local model's files. Rejects while recording or mid-download. */
+  deleteModel(kind: LocalModelKind): Promise<void> {
+    return invoke('delete_local_model', { kind });
+  },
   openLibraryWindow(): Promise<void> {
     return invoke('create_library_window');
   },
@@ -611,6 +632,31 @@ export async function isOnboarded(): Promise<boolean> {
 export async function setOnboarded(value: boolean): Promise<void> {
   const store = await load('settings.json', { autoSave: true });
   await store.set('onboarded', value);
+}
+
+/** Which model generates notes on the Local backend. An unrecognized persisted
+ *  value (an older build's entry, hand-edited JSON) falls back to the default
+ *  rather than being trusted — the id reaches a model directory path. */
+export async function getNotesModelSetting(): Promise<NotesModelId> {
+  const store = await load('settings.json', { autoSave: true });
+  return parseNotesModel(await store.get<unknown>('notesModel'));
+}
+
+export async function setNotesModelSetting(model: NotesModelId): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('notesModel', model);
+}
+
+/** Which speech model transcribes. Stored as the catalog key; an unrecognized
+ *  value falls back to the shipped default, same as the notes model. */
+export async function getSpeechModelSetting(): Promise<string> {
+  const store = await load('settings.json', { autoSave: true });
+  return parseSpeechModelKey(await store.get<unknown>('speechModel'));
+}
+
+export async function setSpeechModelSetting(key: string): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('speechModel', key);
 }
 
 /** Whether the first-time "download local models?" dialog has been confirmed. */

@@ -244,6 +244,8 @@ fn main() {
             model_manager::local_model_status,
             model_manager::download_local_stt,
             model_manager::download_local_llm,
+            model_manager::local_model_sizes,
+            model_manager::delete_local_model,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
             meeting_notifications::take_pending_meeting_prep,
