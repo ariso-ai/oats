@@ -146,9 +146,16 @@
              at once, so the list scrolls inside the card instead of pushing
              the sections below it out of reach. -->
         <div
+          class="model-list"
+          @mouseenter="onModelListEnter"
+          @mouseleave="modelListHovered = false"
+        >
+        <div
+          ref="modelScrollEl"
           class="model-table-scroll"
           data-test="model-scroll"
           :style="{ '--model-visible-rows': MODEL_ROWS_VISIBLE }"
+          @scroll="measureModelList"
         >
         <table class="model-table">
           <thead>
@@ -308,6 +315,21 @@
             </tr>
           </tbody>
         </table>
+        </div>
+        <!-- Our own scrollbar: see modelListScrollbar.ts for why the native
+             one cannot fade in on hover in this webview. -->
+        <div
+          v-if="modelThumb"
+          class="model-scrollbar"
+          :class="{ 'model-scrollbar--visible': modelListHovered }"
+          data-test="model-scrollbar"
+          aria-hidden="true"
+        >
+          <div
+            class="model-scrollbar__thumb"
+            :style="{ height: `${modelThumb.height}px`, transform: `translateY(${modelThumb.offset}px)` }"
+          />
+        </div>
         </div>
         <!-- Asking for a key is a one-at-a-time affair, so the field lives
              under the table rather than inside whichever row started it. -->
@@ -675,6 +697,7 @@ import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
 import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
 import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
+import { thumbGeometry, type ScrollMetrics } from './modelListScrollbar';
 import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -832,6 +855,35 @@ const catalog = modelCatalog();
 
 /** How many rows the list shows before it scrolls. */
 const MODEL_ROWS_VISIBLE = 6;
+
+/** Whether the pointer is over the list, which is what reveals its scrollbar. */
+const modelListHovered = ref(false);
+const modelScrollEl = ref<HTMLElement | null>(null);
+const modelScrollMetrics = ref<ScrollMetrics>({
+  scrollTop: 0,
+  scrollHeight: 0,
+  clientHeight: 0,
+});
+
+/** Where the thumb sits, or null while everything fits on screen. */
+const modelThumb = computed(() => thumbGeometry(modelScrollMetrics.value));
+
+function measureModelList() {
+  const el = modelScrollEl.value;
+  if (!el) return;
+  modelScrollMetrics.value = {
+    scrollTop: el.scrollTop,
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+  };
+}
+
+function onModelListEnter() {
+  modelListHovered.value = true;
+  // Rows arrive and depart (a download finishes, a key is removed), so measure
+  // when the pointer shows up rather than trusting a stale measurement.
+  measureModelList();
+}
 
 async function loadNotesModel() {
   try {
@@ -1850,7 +1902,7 @@ async function refreshCalendarAccess() {
      edge, then give the rows that padding back minus the bar's own 6px, so
      the table's right edge lands exactly where it did before. */
   margin-right: -16px;
-  padding-right: 10px;
+  padding-right: 16px;
   /* No `scrollbar-width` here, deliberately: setting it to any value (even
      `thin`) puts this webview's scroller in legacy mode — a permanent 13-17px
      bar that also ignores the ::-webkit-scrollbar width below. Measured in the
@@ -1861,20 +1913,36 @@ async function refreshCalendarAccess() {
    for inner scrollers whatever macOS's Show-scroll-bars setting says, so the
    thumb is transparent until the pointer is over the list. The 6px gutter is
    reserved either way, so revealing it never shifts the rows. */
+/* The native bar is hidden outright; `.model-scrollbar` below replaces it. */
 .model-table-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.model-list {
+  position: relative;
+}
+
+/* Sits in the card's own right padding, so it overlays nothing and shifts no
+   rows when it appears. */
+.model-scrollbar {
+  position: absolute;
+  top: var(--model-head-height, 27px);
+  right: 4px;
+  bottom: 0;
   width: 6px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
 }
 
-.model-table-scroll::-webkit-scrollbar-track {
-  background: transparent;
+.model-scrollbar--visible {
+  opacity: 1;
 }
 
-.model-table-scroll::-webkit-scrollbar-thumb {
-  background: transparent;
+.model-scrollbar__thumb {
+  width: 100%;
   border-radius: 3px;
-}
-
-.model-table-scroll:hover::-webkit-scrollbar-thumb {
   background: #c9c9c9;
 }
 
@@ -1955,17 +2023,30 @@ button.cell-flex {
   padding-left: 0;
 }
 
+/* The tick rides the right edge of the Name column rather than trailing the
+   text, so it lands in the same place on every row instead of wherever that
+   row's name happens to end. */
+.model-name button.cell-flex {
+  width: 100%;
+}
+
+.model-name .model-tick {
+  margin-left: auto;
+  padding-left: 8px;
+}
+
 /* Qualified with the table + element selector so it outranks `.model-table th`
    (which sets text-align: left and would otherwise win on specificity). */
 .model-table th.model-runtime-head {
   text-align: center;
 }
 
-/* Type holds a single 16px icon; the rest is the cell's own padding. Name
-   carries no width and absorbs whatever these two leave. */
+/* Wide enough for the "Type" header itself (~30px at 12px, plus the cell's
+   8px padding either side) — at the icon's own 32px the label was clipped.
+   Name carries no width and absorbs whatever these two leave. */
 .model-table th.model-type-head,
 .model-table td.model-type {
-  width: 32px;
+  width: 52px;
   white-space: nowrap;
 }
 

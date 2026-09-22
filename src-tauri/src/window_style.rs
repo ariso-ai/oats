@@ -22,7 +22,10 @@ where
     let builder = builder.title_bar_style(TitleBarStyle::Transparent);
     builder
         .background_color(SETTINGS_BACKGROUND)
-        .inner_size(450.0, 800.0)
+        // Taller, same width: the models list and the sections under it no
+        // longer have to share 800px. Held under ~930 so the window still fits
+        // the usable height of a 13" laptop (956pt minus the menu bar).
+        .inner_size(450.0, 880.0)
         .resizable(false)
         .center()
         .skip_taskbar(true)

@@ -26,9 +26,23 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Anthropic's API is versioned by header; this is the current stable version.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Mirrors what the sidecar asks its local model for, so both paths produce the
-/// same shape of note.
-const SYSTEM_PROMPT: &str = "You write meeting notes from a transcript. Reply with a single JSON object and nothing else: {\"title\": a short specific title for the meeting, \"notes\": the notes in Markdown}. The notes should open with a one-paragraph summary, then key points, decisions, and action items as Markdown sections. Use only what the transcript supports.";
+/// The note format the vault renders and the sidecar already asks its on-device
+/// model for (`ariso-stt/macos/Sources/ariso-stt/main.swift`). Both paths must
+/// produce the same shape, and the flatness rules are not cosmetic:
+/// `vault::render_action_items` rewrites every bullet under "Action Items" as a
+/// dated task at any depth, so a model that groups them under category or owner
+/// bullets turns those labels into checkboxes.
+const SYSTEM_PROMPT: &str = "You are a meeting-notes assistant. You are given a meeting transcript and you write concise meeting notes in Markdown.
+
+Rules:
+- Use only facts stated in the transcript. Never invent details, names, or speakers.
+- The transcript labels speakers generically (e.g. \"Speaker 1\", \"Speaker 2\"). Do not invent any speaker or person who does not appear in the transcript.
+- Use these level-2 (##) sections, in this order: Summary, Key Points, Decisions, Action Items. Use no other headings, and no sub-headings.
+- \"Summary\" is 2-3 sentences describing what the meeting was about. The other sections are flat bullet lists: every bullet starts at the left margin, and no bullet is nested under another.
+- Write one action item per bullet, stating the task. Never add bullets that group action items by theme or owner. Only attribute a task to a speaker if that exact speaker explicitly committed to it in the transcript; otherwise give the task with no owner.
+- Omit any section that has no real content in the transcript (for example, if no decisions were made, leave out the Decisions section entirely). Never write placeholder text under a heading.
+
+Reply with a single JSON object and nothing else: {\"title\": a short specific title for the meeting, \"notes\": the Markdown notes described above}. Do not wrap the JSON in a code fence.";
 
 fn provider_base_url(provider: RemoteProvider) -> String {
     // Tests point this at a local stub. Deliberately `cfg(test)`: a release
@@ -357,6 +371,39 @@ mod tests {
         let out = result.unwrap();
         assert_eq!(out.title.as_deref(), Some("Ship It"));
         assert_eq!(out.notes, "## Summary");
+    }
+
+    #[tokio::test]
+    async fn the_prompt_asks_for_the_note_shape_the_vault_renders() {
+        // The vault turns every bullet under "Action Items" into a dated task,
+        // at any depth (vault.rs::render_action_items), so a model that groups
+        // them under category and owner bullets produces checkboxes like
+        // "- [ ] **Owner: Speaker 1**". The remote prompt has to ask for the
+        // same flat shape the sidecar asks for (ariso-stt main.swift).
+        let (_, seen) = run_against(
+            RemoteProvider::OpenAi,
+            "gpt-5.1",
+            200,
+            r###"{"choices":[{"message":{"content":"{\"title\":\"T\",\"notes\":\"## Summary\"}"}}]}"###,
+        )
+        .await;
+
+        let system = seen.body["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            system.contains("level-2"),
+            "prompt must pin the heading level: {system}"
+        );
+        for section in ["Summary", "Key Points", "Decisions", "Action Items"] {
+            assert!(system.contains(section), "prompt omits {section}: {system}");
+        }
+        assert!(
+            system.to_lowercase().contains("flat"),
+            "prompt must forbid nested bullets: {system}"
+        );
+        assert!(
+            system.to_lowercase().contains("one action item"),
+            "prompt must ask for one task per bullet: {system}"
+        );
     }
 
     #[tokio::test]

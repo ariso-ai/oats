@@ -2732,6 +2732,7 @@ mod tests {
 
         process_notes(dir.clone(), storage::models_dir(root), meta).await;
         crate::remote_notes::testing::clear_base_url();
+        crate::credentials::testing::clear_keys();
         crate::notes_model::set_selected(crate::notes_model::default_model());
 
         let written = storage::read_meta(&dir).unwrap();
