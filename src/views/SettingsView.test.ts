@@ -1270,15 +1270,18 @@ describe('SettingsView language models table', () => {
     const icon = rowNamed(wrapper, GEMMA).get('[data-test="model-type-icon"]');
     expect(icon.find('svg').exists()).toBe(true);
     expect(icon.attributes('aria-label')).toContain('Language model');
-    // Same styled bubble the vault "?" uses, revealed on hover/focus.
-    expect(rowNamed(wrapper, GEMMA).get('[data-test="model-details"]').text()).toContain(
-      'gemma-3-1b-it-qat-4bit',
-    );
+    // Same styled bubble the vault "?" uses, but rendered outside the scrolling
+    // list so its bottom edge cannot clip it — so it exists only while hovered.
+    expect(wrapper.find('[data-test="model-details"]').exists()).toBe(false);
+    await icon.trigger('mouseenter');
+    expect(wrapper.get('[data-test="model-details"]').text()).toContain('gemma-3-1b-it-qat-4bit');
+    await icon.trigger('mouseleave');
+    expect(wrapper.find('[data-test="model-details"]').exists()).toBe(false);
+
     const speechIcon = rowNamed(wrapper, PARAKEET).get('[data-test="model-type-icon"]');
     expect(speechIcon.attributes('aria-label')).toContain('Speech model');
-    expect(rowNamed(wrapper, PARAKEET).get('[data-test="model-details"]').text()).toContain(
-      'parakeet-tdt-0.6b-v3',
-    );
+    await speechIcon.trigger('mouseenter');
+    expect(wrapper.get('[data-test="model-details"]').text()).toContain('parakeet-tdt-0.6b-v3');
   });
 
   it('installs a model from its own row', async () => {

@@ -202,6 +202,10 @@
                     role="img"
                     tabindex="0"
                     :aria-label="`${modelTypeLabel(row)}. ${row.details}`"
+                    @mouseenter="showModelDetails($event, row)"
+                    @mouseleave="modelDetails = null"
+                    @focus="showModelDetails($event, row)"
+                    @blur="modelDetails = null"
                   >
                     <!-- Speech: a microphone. Language: lines of text, or a
                          cloud when the model is a provider's rather than ours. -->
@@ -221,7 +225,6 @@
                       <line x1="8" y1="17" x2="13" y2="17" />
                     </svg>
                   </span>
-                  <span role="tooltip" class="help-tooltip" data-test="model-details">{{ row.details }}</span>
                 </span>
               </td>
               <td class="model-runtime">
@@ -316,6 +319,16 @@
           </tbody>
         </table>
         </div>
+        <!-- Outside the scroll container on purpose: a bubble rendered inside
+             it is clipped by its bottom edge. Fixed-positioned to the icon it
+             describes. -->
+        <div
+          v-if="modelDetails"
+          role="tooltip"
+          class="help-tooltip help-tooltip--floating"
+          data-test="model-details"
+          :style="{ left: `${modelDetails.x}px`, top: `${modelDetails.y}px` }"
+        >{{ modelDetails.text }}</div>
         <!-- Our own scrollbar: see modelListScrollbar.ts for why the native
              one cannot fade in on hover in this webview. -->
         <div
@@ -868,7 +881,34 @@ const modelScrollMetrics = ref<ScrollMetrics>({
 /** Where the thumb sits, or null while everything fits on screen. */
 const modelThumb = computed(() => thumbGeometry(modelScrollMetrics.value));
 
+/** The hovered model's description, pinned to the icon it belongs to. */
+const modelDetails = ref<{ text: string; x: number; y: number } | null>(null);
+
+/** Pinned to the viewport, so anything that moves the icon leaves the bubble
+ *  behind: drop it instead. Capture phase catches the Settings page's own
+ *  scroller as well as the window's. */
+function dropModelDetails() {
+  modelDetails.value = null;
+}
+
+onMounted(() => window.addEventListener('scroll', dropModelDetails, true));
+onUnmounted(() => window.removeEventListener('scroll', dropModelDetails, true));
+
+function showModelDetails(event: Event, row: CatalogModel) {
+  const icon = event.currentTarget as HTMLElement | null;
+  if (!icon) return;
+  const rect = icon.getBoundingClientRect();
+  modelDetails.value = {
+    text: row.details,
+    x: rect.left + rect.width / 2,
+    y: rect.top,
+  };
+}
+
 function measureModelList() {
+  // The bubble is pinned to where the icon was; scrolling moves the icon out
+  // from under it.
+  modelDetails.value = null;
   const el = modelScrollEl.value;
   if (!el) return;
   modelScrollMetrics.value = {
@@ -2099,11 +2139,16 @@ button.cell-flex {
    (it scrolls vertically), so a left-anchored 260px bubble would run off the
    right edge from this middle column. Center it on the icon and narrow it:
    at this width that keeps both edges inside the card. */
-.model-type .help-tooltip {
-  left: 50%;
-  right: auto;
-  transform: translateX(-50%);
+/* Positioned against the viewport, so no ancestor's overflow can clip it, and
+   drawn above the icon it describes. */
+.help-tooltip.help-tooltip--floating {
+  position: fixed;
+  top: 0;
+  left: 0;
   width: 200px;
+  transform: translate(-50%, calc(-100% - 8px));
+  opacity: 1;
+  visibility: visible;
 }
 
 /* Icon-only row actions (delete, install). The native title supplies the tip,

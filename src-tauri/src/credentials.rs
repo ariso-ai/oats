@@ -82,13 +82,27 @@ fn store_error(err: keyring::Error) -> String {
     }
 }
 
+/// The keychain service to file entries under. Tests use a service of their
+/// own: the round-trip test writes and deletes real entries, and must never be
+/// able to touch the ones the app stored for the person running the suite.
+fn keychain_service() -> &'static str {
+    #[cfg(test)]
+    {
+        "ai.ariso.desktop.tests"
+    }
+    #[cfg(not(test))]
+    {
+        KEYCHAIN_SERVICE
+    }
+}
+
 fn entry(provider: RemoteProvider) -> Result<Entry, String> {
     // `keyring` initializes the platform store on first use; surface a failure
     // here rather than reporting a key as saved when nothing persisted it.
     Entry::store_status()
         .as_ref()
         .map_err(|e| format!("This device has no usable credential store ({e})."))?;
-    Entry::new(KEYCHAIN_SERVICE, &provider.account()).map_err(store_error)
+    Entry::new(keychain_service(), &provider.account()).map_err(store_error)
 }
 
 fn set_api_key(provider: RemoteProvider, key: String) -> Result<(), String> {
