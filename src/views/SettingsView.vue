@@ -1898,10 +1898,8 @@ async function refreshCalendarAccess() {
   overflow-y: auto;
   /* The sticky header needs a positioned scroll container of its own. */
   position: relative;
-  /* Reach past the card's 16px padding so the bar rides the section's right
-     edge, then give the rows that padding back minus the bar's own 6px, so
-     the table's right edge lands exactly where it did before. */
-  margin-right: -16px;
+  /* The wrapper reaches the card's edge (see .model-list); the rows keep their
+     inset so the table's right edge lands where it always did. */
   padding-right: 16px;
   /* No `scrollbar-width` here, deliberately: setting it to any value (even
      `thin`) puts this webview's scroller in legacy mode — a permanent 13-17px
@@ -1921,6 +1919,9 @@ async function refreshCalendarAccess() {
 
 .model-list {
   position: relative;
+  /* Past the card's 16px padding, so the list's right edge — and the scrollbar
+     pinned to it — is the section's own edge. */
+  margin-right: -16px;
 }
 
 /* Sits in the card's own right padding, so it overlays nothing and shifts no
@@ -1928,7 +1929,7 @@ async function refreshCalendarAccess() {
 .model-scrollbar {
   position: absolute;
   top: var(--model-head-height, 27px);
-  right: 4px;
+  right: 0;
   bottom: 0;
   width: 6px;
   opacity: 0;
