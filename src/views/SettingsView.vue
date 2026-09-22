@@ -135,13 +135,21 @@
       </div>
     </section>
 
-    <!-- Language models -->
+    <!-- AI models -->
     <section v-if="backend === 'local'" class="section" data-test="models-section">
-      <h2 class="section-title">Language models</h2>
+      <h2 class="section-title">AI Models</h2>
       <div class="card">
         <div v-if="showModelBanner" class="signin-banner">
           Both local models must finish downloading before you can record.
         </div>
+        <!-- Sized in rows, not pixels: more models ship than belong on screen
+             at once, so the list scrolls inside the card instead of pushing
+             the sections below it out of reach. -->
+        <div
+          class="model-table-scroll"
+          data-test="model-scroll"
+          :style="{ '--model-visible-rows': MODEL_ROWS_VISIBLE }"
+        >
         <table class="model-table">
           <thead>
             <tr>
@@ -186,13 +194,18 @@
                     data-test="model-type-icon"
                     role="img"
                     tabindex="0"
-                    :aria-label="`${row.type === 'Speech' ? 'Speech model' : 'Language model'}. ${row.details}`"
+                    :aria-label="`${modelTypeLabel(row)}. ${row.details}`"
                   >
-                    <!-- Speech: a microphone. Language: lines of text. -->
+                    <!-- Speech: a microphone. Language: lines of text, or a
+                         cloud when the model is a provider's rather than ours. -->
                     <svg v-if="row.type === 'Speech'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
                       <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
                       <line x1="12" y1="19" x2="12" y2="23" />
+                    </svg>
+                    <svg v-else-if="row.runtime === 'remote'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M17.5 19a4.5 4.5 0 0 0 .3-9 6.5 6.5 0 0 0-12.5 2A4 4 0 0 0 6 19z" />
+                      <line x1="8" y1="14" x2="14" y2="14" />
                     </svg>
                     <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -252,12 +265,95 @@
                     </svg>
                   </button>
                 </template>
-                <span v-else>Remote</span>
+                <template v-else>
+                  <!-- No "Remote" label: the cloud type icon already says it.
+                       Nor a "Connected" one: a connected provider is the row
+                       whose key icon has become a struck-through one. -->
+                  <button
+                    v-if="rowConnected(row)"
+                    class="icon-btn"
+                    data-test="remove-key"
+                    title="Disconnect"
+                    :aria-label="`Disconnect ${rowProviderLabel(row)}`"
+                    @click.stop="onRemoveKey(row)"
+                  >
+                    <!-- A link with a stroke through it: connected, click to
+                         break it. -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
+                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
+                      <line x1="9" y1="12" x2="15" y2="12" />
+                      <line x1="4" y1="20" x2="20" y2="4" />
+                    </svg>
+                  </button>
+                  <button
+                    v-else
+                    class="icon-btn"
+                    data-test="connect-key"
+                    title="Connect"
+                    :aria-label="`Connect ${rowProviderLabel(row)}`"
+                    @click.stop="onConnectRow(row)"
+                  >
+                    <!-- A link about to be made. Like Install and Delete, the
+                         word lives in the native tooltip. -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
+                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
+                      <line x1="9" y1="12" x2="15" y2="12" />
+                    </svg>
+                  </button>
+                </template>
                 </span>
               </td>
             </tr>
           </tbody>
         </table>
+        </div>
+        <!-- Asking for a key is a one-at-a-time affair, so the field lives
+             under the table rather than inside whichever row started it. -->
+        <div v-if="keyProvider" class="key-prompt" data-test="key-prompt">
+          <p class="setting-hint" data-test="remote-disclosure">
+            Notes for new recordings are sent to {{ keyProviderLabel }}. Recording,
+            transcription, and audio stay on this device.
+          </p>
+          <div class="key-prompt__row">
+            <input
+              v-model="keyInput"
+              class="key-input"
+              data-test="api-key-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              :placeholder="`${keyProviderLabel} API key`"
+              :aria-label="`${keyProviderLabel} API key`"
+              @keyup.enter="onSaveKey"
+            />
+            <button
+              class="primary-btn"
+              data-test="save-key"
+              :disabled="savingKey"
+              @click="onSaveKey"
+            >
+              Save
+            </button>
+            <button class="secondary-btn" @click="cancelKeyPrompt">Cancel</button>
+          </div>
+          <p class="setting-hint">
+            Stored in your {{ keychainName }}, never in oats' settings file.
+          </p>
+          <p
+            v-if="keyError"
+            class="setting-hint"
+            data-test="key-error"
+            style="color: var(--danger, #c0392b)"
+          >
+            {{ keyError }}
+          </p>
+        </div>
+        <p v-if="remoteModelInUse" class="setting-hint" data-test="remote-pending">
+          Notes are still written on this device — the selected remote model starts
+          writing them in a later update.
+        </p>
         <p v-if="removeError" class="setting-hint" style="color: var(--danger, #c0392b)">
           {{ removeError }}
         </p>
@@ -576,8 +672,8 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
-import { DEFAULT_NOTES_MODEL, notesModelKey, type NotesModelId } from '../notesModels';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
+import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
 import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
 import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
@@ -728,11 +824,14 @@ async function onChangeVault() {
   }
 }
 
-// --- Language models table (Local backend only) ----------------------------
+// --- AI models table (Local backend only) ----------------------------------
 // The table is the single control: clicking a Notes row makes that model the
 // one that writes notes, and each local row carries its own install button.
 const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
 const catalog = modelCatalog();
+
+/** How many rows the list shows before it scrolls. */
+const MODEL_ROWS_VISIBLE = 6;
 
 async function loadNotesModel() {
   try {
@@ -757,12 +856,27 @@ async function loadSpeechModel() {
  *  is not enough — a local model that is not on disk cannot run, so a deleted
  *  model loses its tick even though it stays selected, and with no other model
  *  of that type installed the column shows no tick at all. */
+/** Whether this model could run right now: downloaded, for an on-device one;
+ *  a key stored for its provider, for a remote one. Only a usable model can be
+ *  the one in use. */
+function rowUsable(row: CatalogModel): boolean {
+  return row.runtime === 'remote' ? rowConnected(row) : rowInstalled(row);
+}
+
 function isActiveModel(row: CatalogModel): boolean {
-  if (row.runtime === 'local' && !rowInstalled(row)) return false;
+  if (!rowUsable(row)) return false;
   if (row.type === 'Speech') return row.key === speechModelKey.value;
   return (
     !!row.notesModel && notesModelKey(row.notesModel) === notesModelKey(notesModel.value)
   );
+}
+
+/** What the type icon announces. A remote model is called out here rather than
+ *  with a word in the row — the cloud icon carries it visually, this carries it
+ *  for a screen reader and the hover tip. */
+function modelTypeLabel(row: CatalogModel): string {
+  if (row.type === 'Speech') return 'Speech model';
+  return row.runtime === 'remote' ? 'Remote language model' : 'Language model';
 }
 
 /** Speech rows read the STT download state; every other row is a notes model. */
@@ -832,7 +946,105 @@ function onInstallRow(row: CatalogModel) {
   else void onInstallLlm();
 }
 
+// --- Remote provider API keys ----------------------------------------------
+// A key lives in the OS keychain, reachable only from Rust; the webview learns
+// which providers have one and nothing more.
+const connectedProviders = ref<RemoteProvider[]>([]);
+const keyProvider = ref<RemoteProvider | null>(null);
+const keyInput = ref('');
+const keyError = ref('');
+const savingKey = ref(false);
+
+const keyProviderLabel = computed(() =>
+  keyProvider.value ? remoteProviderLabel(keyProvider.value) : '',
+);
+/** The caveat belongs to the model actually in use, not to every stored key:
+ *  connecting a provider you haven't selected changes nothing about notes. */
+const remoteModelInUse = computed(() => notesModel.value.kind === 'remote');
+const keychainName = computed(() =>
+  platformCapabilities.value.os === 'windows' ? 'Windows Credential Manager' : 'macOS Keychain',
+);
+
+async function loadConnectedProviders() {
+  try {
+    connectedProviders.value = await llmKeys.providers();
+  } catch (e) {
+    console.error('Failed to read stored API keys', e);
+    connectedProviders.value = [];
+  }
+}
+
+function rowProvider(row: CatalogModel): RemoteProvider | null {
+  return row.notesModel?.kind === 'remote' ? row.notesModel.provider : null;
+}
+
+function rowProviderLabel(row: CatalogModel): string {
+  const provider = rowProvider(row);
+  return provider ? remoteProviderLabel(provider) : '';
+}
+
+/** One key per provider, so every model behind it reads as connected. */
+function rowConnected(row: CatalogModel): boolean {
+  const provider = rowProvider(row);
+  return !!provider && connectedProviders.value.includes(provider);
+}
+
+function onConnectRow(row: CatalogModel) {
+  const provider = rowProvider(row);
+  if (!provider) return;
+  keyProvider.value = provider;
+  keyInput.value = '';
+  keyError.value = '';
+}
+
+function cancelKeyPrompt() {
+  keyProvider.value = null;
+  keyInput.value = '';
+  keyError.value = '';
+}
+
+async function onSaveKey() {
+  const provider = keyProvider.value;
+  if (!provider || savingKey.value) return;
+  keyError.value = '';
+  savingKey.value = true;
+  try {
+    await llmKeys.set(provider, keyInput.value);
+    // The backend accepted the write, so the provider is connected; its value
+    // is never read back to confirm it.
+    if (!connectedProviders.value.includes(provider)) {
+      connectedProviders.value = [...connectedProviders.value, provider];
+    }
+    cancelKeyPrompt();
+  } catch (e) {
+    // Keep the field (and the unsaved key) in place so a rejected paste can be
+    // corrected rather than retyped.
+    keyError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    savingKey.value = false;
+  }
+}
+
+async function onRemoveKey(row: CatalogModel) {
+  const provider = rowProvider(row);
+  if (!provider) return;
+  keyError.value = '';
+  try {
+    await llmKeys.clear(provider);
+    connectedProviders.value = connectedProviders.value.filter((p) => p !== provider);
+  } catch (e) {
+    keyError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function onRowClick(row: CatalogModel) {
+  // A model can only be put into use once it can actually run: downloaded for
+  // an on-device one, a key stored for a remote one. A click on a row that
+  // isn't there yet asks for the missing half instead of selecting it.
+  if (!rowUsable(row)) {
+    if (row.runtime === 'remote') onConnectRow(row);
+    return;
+  }
   if (row.type === 'Speech') {
     const previousKey = speechModelKey.value;
     if (row.key === previousKey) return;
@@ -953,6 +1165,7 @@ async function selectBackend(next: 'ariso' | 'local') {
 async function afterSwitchToLocal() {
   await refreshModelStatus();
   await loadModelSizes();
+  await loadConnectedProviders();
   // First time only: ask before fetching the (large) on-device models.
   const prompted = await hasPromptedLocalModels().catch(() => true);
   if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
@@ -1356,6 +1569,9 @@ onMounted(async () => {
   await loadNotesModel();
   await loadSpeechModel();
   if (backend.value === 'local') await loadModelSizes();
+  // Ariso generates notes server-side, so it needs no provider keys — and must
+  // not touch the keychain to find that out.
+  if (backend.value === 'local') await loadConnectedProviders();
   await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited
@@ -1620,6 +1836,48 @@ async function refreshCalendarAccess() {
 /* `table-layout: fixed` so the column widths below are binding. Under the
    default `auto`, a width is only a suggestion — the column still grows to its
    widest content, which is exactly the jumping this is meant to stop. */
+/* Row height (a 28px icon button, 10px of padding either side, and the 1px
+   rule) and the header's own height — both measured in the running app — so
+   the box is sized in whole rows and the sixth one is never clipped. */
+.model-table-scroll {
+  --model-row-height: 49px;
+  --model-head-height: 27px;
+  max-height: calc(var(--model-visible-rows, 6) * var(--model-row-height) + var(--model-head-height));
+  overflow-y: auto;
+  /* The sticky header needs a positioned scroll container of its own. */
+  position: relative;
+  /* Reach past the card's 16px padding so the bar rides the section's right
+     edge, then give the rows that padding back minus the bar's own 6px, so
+     the table's right edge lands exactly where it did before. */
+  margin-right: -16px;
+  padding-right: 10px;
+  /* No `scrollbar-width` here, deliberately: setting it to any value (even
+     `thin`) puts this webview's scroller in legacy mode — a permanent 13-17px
+     bar that also ignores the ::-webkit-scrollbar width below. Measured in the
+     running app: plain scroller 17px, `thin` 13px, pseudo-element only 6px. */
+}
+
+/* An overlay-style bar of our own: this webview draws a persistent scrollbar
+   for inner scrollers whatever macOS's Show-scroll-bars setting says, so the
+   thumb is transparent until the pointer is over the list. The 6px gutter is
+   reserved either way, so revealing it never shifts the rows. */
+.model-table-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.model-table-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.model-table-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+.model-table-scroll:hover::-webkit-scrollbar-thumb {
+  background: #c9c9c9;
+}
+
 .model-table {
   width: 100%;
   table-layout: fixed;
@@ -1634,6 +1892,11 @@ async function refreshCalendarAccess() {
   color: #6f6f6f;
   padding: 0 8px 8px;
   border-bottom: 1px solid #e5e6e3;
+  /* Stays put while the rows scroll under it. Opaque, or rows show through. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #ffffff;
 }
 
 .model-table td {
@@ -1832,6 +2095,32 @@ button.cell-flex {
   font-size: 13px;
   color: #6f6f6f;
   font-variant-numeric: tabular-nums;
+}
+
+/* The key field sits under the table, so it gets the table's own gutter. */
+.key-prompt {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #ececec;
+}
+
+.key-prompt__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.key-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #d6d6d6;
+  border-radius: 6px;
+  background: #ffffff;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1c1c1c;
 }
 
 .model-ready {

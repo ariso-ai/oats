@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_NOTES_MODEL,
   NOTES_MODEL_OPTIONS,
+  REMOTE_PROVIDERS,
   notesModelKey,
   notesModelLabel,
   parseNotesModel,
+  remoteProviderLabel,
   type NotesModelId,
 } from './notesModels';
 
@@ -26,6 +28,39 @@ describe('notes model registry', () => {
     const local: NotesModelId = { kind: 'local', id: 'x' };
     const remote: NotesModelId = { kind: 'remote', provider: 'anthropic', id: 'x' };
     expect(notesModelKey(local)).not.toBe(notesModelKey(remote));
+  });
+
+  it('offers at least one model from every provider a key can be stored for', () => {
+    for (const provider of REMOTE_PROVIDERS) {
+      const offered = NOTES_MODEL_OPTIONS.filter(
+        (o) => o.value.kind === 'remote' && o.value.provider === provider,
+      );
+      expect(offered.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('lists every on-device model before any remote one', () => {
+    const firstRemote = NOTES_MODEL_OPTIONS.findIndex((o) => o.value.kind === 'remote');
+    const lastLocal = NOTES_MODEL_OPTIONS.map((o) => o.value.kind).lastIndexOf('local');
+    expect(firstRemote).toBeGreaterThan(lastLocal);
+  });
+
+  it('names no provider outside the closed set the keychain accepts', () => {
+    for (const option of NOTES_MODEL_OPTIONS) {
+      if (option.value.kind === 'remote') {
+        expect(REMOTE_PROVIDERS).toContain(option.value.provider);
+      }
+    }
+  });
+});
+
+describe('remoteProviderLabel', () => {
+  it('names every provider for the disclosure and the key prompt', () => {
+    expect(REMOTE_PROVIDERS.map(remoteProviderLabel)).toEqual([
+      'OpenAI',
+      'Google Gemini',
+      'Anthropic',
+    ]);
   });
 });
 
@@ -56,10 +91,22 @@ describe('parseNotesModel', () => {
     );
   });
 
-  it('rejects a remote model until one is actually registered', () => {
+  it('round-trips a registered remote selection', () => {
+    const remote = NOTES_MODEL_OPTIONS.find((o) => o.value.kind === 'remote')!.value;
+    expect(parseNotesModel(remote)).toEqual(remote);
+  });
+
+  it('rejects a remote id this build does not ship', () => {
+    // The id reaches a provider request; only pinned ids may be persisted.
     expect(
-      parseNotesModel({ kind: 'remote', provider: 'anthropic', id: 'claude-haiku-4-5' }),
+      parseNotesModel({ kind: 'remote', provider: 'anthropic', id: 'claude-not-shipped' }),
     ).toEqual(DEFAULT_NOTES_MODEL);
+  });
+
+  it('rejects a provider this build has no keychain entry for', () => {
+    expect(parseNotesModel({ kind: 'remote', provider: 'mistral', id: 'large' })).toEqual(
+      DEFAULT_NOTES_MODEL,
+    );
   });
 
   it('rejects malformed persisted values', () => {
