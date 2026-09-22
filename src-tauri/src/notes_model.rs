@@ -33,7 +33,7 @@ const LOCAL_IDS: [&str; 1] = [DEFAULT_LOCAL_ID];
 
 const REMOTE_MODELS: [(RemoteProvider, &str); 6] = [
     (RemoteProvider::OpenAi, "gpt-5.1"),
-    (RemoteProvider::OpenAi, "gpt-5.1-mini"),
+    (RemoteProvider::OpenAi, "gpt-5-mini"),
     (RemoteProvider::Gemini, "gemini-3.5-flash"),
     (RemoteProvider::Gemini, "gemini-3.7-flash"),
     (RemoteProvider::Anthropic, "claude-haiku-4-5"),

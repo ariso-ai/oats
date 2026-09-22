@@ -48,7 +48,7 @@ export const DEFAULT_NOTES_MODEL: NotesModelId = {
 export const NOTES_MODEL_OPTIONS: NotesModelOption[] = [
   { value: DEFAULT_NOTES_MODEL, label: 'Gemma 3 1B' },
   { value: { kind: 'remote', provider: 'openai', id: 'gpt-5.1' }, label: 'GPT-5.1' },
-  { value: { kind: 'remote', provider: 'openai', id: 'gpt-5.1-mini' }, label: 'GPT-5.1 mini' },
+  { value: { kind: 'remote', provider: 'openai', id: 'gpt-5-mini' }, label: 'GPT-5 mini' },
   {
     value: { kind: 'remote', provider: 'gemini', id: 'gemini-3.5-flash' },
     label: 'Gemini 3.5 Flash',
