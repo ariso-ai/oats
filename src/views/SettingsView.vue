@@ -332,13 +332,14 @@
         <!-- Our own scrollbar: see modelListScrollbar.ts for why the native
              one cannot fade in on hover in this webview. -->
         <div
-          v-if="modelThumb"
+          ref="modelTrackEl"
           class="model-scrollbar"
-          :class="{ 'model-scrollbar--visible': modelListHovered || draggingThumb }"
+          :class="{ 'model-scrollbar--visible': (modelListHovered || draggingThumb) && !!modelThumb }"
           data-test="model-scrollbar"
           aria-hidden="true"
         >
           <div
+            v-if="modelThumb"
             class="model-scrollbar__thumb"
             data-test="model-scrollbar-thumb"
             :style="{ height: `${modelThumb.height}px`, transform: `translateY(${modelThumb.offset}px)` }"
@@ -877,6 +878,10 @@ const MODEL_ROWS_VISIBLE = 6;
 /** Whether the pointer is over the list, which is what reveals its scrollbar. */
 const modelListHovered = ref(false);
 const modelScrollEl = ref<HTMLElement | null>(null);
+const modelTrackEl = ref<HTMLElement | null>(null);
+/** The bar's own height. It starts below the sticky header, so it is shorter
+ *  than the scroller's viewport and the thumb must be sized against it. */
+const modelTrackHeight = ref(0);
 const modelScrollMetrics = ref<ScrollMetrics>({
   scrollTop: 0,
   scrollHeight: 0,
@@ -884,7 +889,9 @@ const modelScrollMetrics = ref<ScrollMetrics>({
 });
 
 /** Where the thumb sits, or null while everything fits on screen. */
-const modelThumb = computed(() => thumbGeometry(modelScrollMetrics.value));
+const modelThumb = computed(() =>
+  thumbGeometry(modelScrollMetrics.value, modelTrackHeight.value || undefined),
+);
 
 /** The hovered model's description, pinned to the icon it belongs to. */
 const modelDetails = ref<{ text: string; x: number; y: number } | null>(null);
@@ -921,6 +928,7 @@ function measureModelList() {
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,
   };
+  modelTrackHeight.value = modelTrackEl.value?.clientHeight ?? 0;
 }
 
 // Dragging the thumb scrolls the list, the way a real scrollbar does.
@@ -950,6 +958,7 @@ function onThumbPointerMove(event: PointerEvent) {
     deltaY: event.clientY - dragStartY,
     metrics: modelScrollMetrics.value,
     thumbHeight: thumb.height,
+    trackLength: modelTrackHeight.value || undefined,
   });
   measureModelList();
 }
@@ -1976,8 +1985,6 @@ async function refreshCalendarAccess() {
    rule) and the header's own height — both measured in the running app — so
    the box is sized in whole rows and the sixth one is never clipped. */
 .model-table-scroll {
-  --model-row-height: 49px;
-  --model-head-height: 27px;
   max-height: calc(var(--model-visible-rows, 6) * var(--model-row-height) + var(--model-head-height));
   overflow-y: auto;
   /* The sticky header needs a positioned scroll container of its own. */
@@ -2002,6 +2009,10 @@ async function refreshCalendarAccess() {
 }
 
 .model-list {
+  /* Shared by the scroller's max-height and the track's inset, so the bar can
+     never disagree with the rows about where the list starts. */
+  --model-row-height: 49px;
+  --model-head-height: 27px;
   position: relative;
   /* Past the card's 16px padding, so the list's right edge — and the scrollbar
      pinned to it — is the section's own edge. */
@@ -2012,7 +2023,7 @@ async function refreshCalendarAccess() {
    rows when it appears. */
 .model-scrollbar {
   position: absolute;
-  top: var(--model-head-height, 27px);
+  top: var(--model-head-height);
   right: 0;
   bottom: 0;
   width: 6px;

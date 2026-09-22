@@ -34,6 +34,8 @@ export interface DragToScroll {
   metrics: ScrollMetrics;
   /** The thumb's height, which sets how much track the drag has to work with. */
   thumbHeight: number;
+  /** The track's own height; defaults to the scroller's viewport. */
+  trackLength?: number;
 }
 
 /**
@@ -48,9 +50,10 @@ export function scrollTopForDrag({
   deltaY,
   metrics,
   thumbHeight,
+  trackLength = metrics.clientHeight,
 }: DragToScroll): number {
   const scrollable = metrics.scrollHeight - metrics.clientHeight;
-  const travel = metrics.clientHeight - thumbHeight;
+  const travel = trackLength - thumbHeight;
   if (scrollable <= 0 || travel <= 0) return startScrollTop;
   const next = startScrollTop + (deltaY * scrollable) / travel;
   return Math.min(scrollable, Math.max(0, next));
@@ -59,17 +62,21 @@ export function scrollTopForDrag({
 /**
  * Where the thumb sits for a given scroll position, or `null` when everything
  * fits and no scrollbar belongs on screen.
+ *
+ * `trackLength` is the bar's own height, which is not the scroller's: the track
+ * starts below the sticky header. Sizing against the viewport instead would
+ * hang the thumb past the bottom of the track — and of the card — at the end of
+ * the list.
  */
-export function thumbGeometry({
-  scrollTop,
-  scrollHeight,
-  clientHeight,
-}: ScrollMetrics): ThumbGeometry | null {
-  if (!(scrollHeight > clientHeight) || clientHeight <= 0) return null;
+export function thumbGeometry(
+  { scrollTop, scrollHeight, clientHeight }: ScrollMetrics,
+  trackLength: number = clientHeight,
+): ThumbGeometry | null {
+  if (!(scrollHeight > clientHeight) || clientHeight <= 0 || trackLength <= 0) return null;
 
-  const proportional = (clientHeight / scrollHeight) * clientHeight;
-  const height = Math.min(clientHeight, Math.max(MIN_THUMB_PX, proportional));
-  const travel = clientHeight - height;
+  const proportional = (clientHeight / scrollHeight) * trackLength;
+  const height = Math.min(trackLength, Math.max(MIN_THUMB_PX, proportional));
+  const travel = trackLength - height;
   const scrollable = scrollHeight - clientHeight;
   // Clamp: momentum scrolling overshoots both ends, and a thumb that runs past
   // the track reads as a rendering bug.

@@ -81,3 +81,42 @@ describe('scrollTopForDrag', () => {
     );
   });
 });
+
+describe('a track shorter than the list it describes', () => {
+  // The track starts below the sticky header, so it is shorter than the
+  // scroller's own viewport; a thumb sized against the viewport would hang
+  // past the bottom of the card.
+  const metrics = { scrollTop: 0, scrollHeight: 519, clientHeight: 321 };
+  const TRACK = 294;
+
+  it('keeps the thumb inside the track at the bottom of the list', () => {
+    const { height, offset } = thumbGeometry(
+      { ...metrics, scrollTop: metrics.scrollHeight - metrics.clientHeight },
+      TRACK,
+    )!;
+    expect(offset + height).toBeLessThanOrEqual(TRACK);
+    expect(offset + height).toBe(TRACK);
+  });
+
+  it('sizes the thumb against the track, not the viewport', () => {
+    const { height } = thumbGeometry(metrics, TRACK)!;
+    expect(height).toBeCloseTo((321 / 519) * TRACK, 5);
+  });
+
+  it('still defaults to the viewport when no track length is given', () => {
+    expect(thumbGeometry(metrics)).toEqual(thumbGeometry(metrics, metrics.clientHeight));
+  });
+
+  it('maps a drag against the track it is dragged along', () => {
+    const { height } = thumbGeometry(metrics, TRACK)!;
+    const scrollable = metrics.scrollHeight - metrics.clientHeight;
+    const top = scrollTopForDrag({
+      startScrollTop: 0,
+      deltaY: TRACK - height,
+      metrics,
+      thumbHeight: height,
+      trackLength: TRACK,
+    });
+    expect(top).toBe(scrollable);
+  });
+});
