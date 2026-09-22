@@ -334,13 +334,18 @@
         <div
           v-if="modelThumb"
           class="model-scrollbar"
-          :class="{ 'model-scrollbar--visible': modelListHovered }"
+          :class="{ 'model-scrollbar--visible': modelListHovered || draggingThumb }"
           data-test="model-scrollbar"
           aria-hidden="true"
         >
           <div
             class="model-scrollbar__thumb"
+            data-test="model-scrollbar-thumb"
             :style="{ height: `${modelThumb.height}px`, transform: `translateY(${modelThumb.offset}px)` }"
+            @pointerdown="onThumbPointerDown"
+            @pointermove="onThumbPointerMove"
+            @pointerup="onThumbPointerUp"
+            @pointercancel="onThumbPointerUp"
           />
         </div>
         </div>
@@ -710,7 +715,7 @@ import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
 import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
 import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
-import { thumbGeometry, type ScrollMetrics } from './modelListScrollbar';
+import { thumbGeometry, scrollTopForDrag, type ScrollMetrics } from './modelListScrollbar';
 import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -916,6 +921,45 @@ function measureModelList() {
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,
   };
+}
+
+// Dragging the thumb scrolls the list, the way a real scrollbar does.
+const draggingThumb = ref(false);
+let dragStartY = 0;
+let dragStartScrollTop = 0;
+
+function onThumbPointerDown(event: PointerEvent) {
+  const el = modelScrollEl.value;
+  if (!el) return;
+  draggingThumb.value = true;
+  dragStartY = event.clientY;
+  dragStartScrollTop = el.scrollTop;
+  // Capture so the drag survives the pointer leaving the 6px-wide thumb, which
+  // it does almost immediately.
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  // Don't let the gesture start a text selection across the rows.
+  event.preventDefault();
+}
+
+function onThumbPointerMove(event: PointerEvent) {
+  const el = modelScrollEl.value;
+  const thumb = modelThumb.value;
+  if (!draggingThumb.value || !el || !thumb) return;
+  el.scrollTop = scrollTopForDrag({
+    startScrollTop: dragStartScrollTop,
+    deltaY: event.clientY - dragStartY,
+    metrics: modelScrollMetrics.value,
+    thumbHeight: thumb.height,
+  });
+  measureModelList();
+}
+
+function onThumbPointerUp(event: PointerEvent) {
+  draggingThumb.value = false;
+  const target = event.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(event.pointerId)) {
+    target.releasePointerCapture(event.pointerId);
+  }
 }
 
 function onModelListEnter() {
@@ -1974,6 +2018,8 @@ async function refreshCalendarAccess() {
   width: 6px;
   opacity: 0;
   transition: opacity 120ms ease;
+  /* The track stays inert so it never steals a click meant for a row; the
+     thumb takes pointer events back so it can be dragged. */
   pointer-events: none;
 }
 
@@ -1985,6 +2031,15 @@ async function refreshCalendarAccess() {
   width: 100%;
   border-radius: 3px;
   background: #c9c9c9;
+  pointer-events: auto;
+  cursor: default;
+  /* A drag that wanders off the thumb must not select the rows behind it. */
+  user-select: none;
+  touch-action: none;
+}
+
+.model-scrollbar__thumb:hover {
+  background: #b0b0b0;
 }
 
 .model-table {

@@ -26,6 +26,36 @@ export interface ThumbGeometry {
 /** Short enough to stay a thumb rather than a line, on a long list. */
 const MIN_THUMB_PX = 24;
 
+export interface DragToScroll {
+  /** Where the list was scrolled when the drag began. */
+  startScrollTop: number;
+  /** How far the pointer has moved since, in px. */
+  deltaY: number;
+  metrics: ScrollMetrics;
+  /** The thumb's height, which sets how much track the drag has to work with. */
+  thumbHeight: number;
+}
+
+/**
+ * Where to scroll the list to for a thumb dragged `deltaY` from its start.
+ *
+ * The thumb covers the track in proportion to what is on screen, so a pixel of
+ * travel is worth more than a pixel of content: the ratio is the scrollable
+ * height over the track's own length.
+ */
+export function scrollTopForDrag({
+  startScrollTop,
+  deltaY,
+  metrics,
+  thumbHeight,
+}: DragToScroll): number {
+  const scrollable = metrics.scrollHeight - metrics.clientHeight;
+  const travel = metrics.clientHeight - thumbHeight;
+  if (scrollable <= 0 || travel <= 0) return startScrollTop;
+  const next = startScrollTop + (deltaY * scrollable) / travel;
+  return Math.min(scrollable, Math.max(0, next));
+}
+
 /**
  * Where the thumb sits for a given scroll position, or `null` when everything
  * fits and no scrollbar belongs on screen.
