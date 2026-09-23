@@ -1099,15 +1099,39 @@ async function confirmRemove() {
   const row = removeTarget.value;
   removeTarget.value = null;
   if (!row) return;
+  let removed = false;
   try {
     await local.deleteModel(rowKind(row), row.speechModel);
+    removed = true;
   } catch (e) {
     // The backend refuses mid-recording and mid-download; say which, rather
     // than leaving the row looking installed for no stated reason.
     removeError.value = e instanceof Error ? e.message : String(e);
   }
   await refreshModelStatus();
+  if (removed && row.type === 'Speech' && row.key === speechModelKey.value) {
+    await selectInstalledSpeechFallback();
+  }
   await loadModelSizes();
+}
+
+/** Removing the speech model in use would otherwise leave the selection on a
+ *  model that is gone: recording stays blocked and the tray's download prompt
+ *  re-fetches what was just removed. Another installed one takes over. */
+async function selectInstalledSpeechFallback() {
+  const fallback = visibleCatalog.value.find(
+    (r) => r.type === 'Speech' && r.key !== speechModelKey.value && speechReady(r.speechModel!)
+  );
+  if (!fallback) return;
+  try {
+    await setSpeechModelSetting(fallback.key);
+    speechModelKey.value = fallback.key;
+  } catch (e) {
+    console.error('Failed to persist speech model', e);
+    return;
+  }
+  // Overall readiness follows the selected model.
+  await refreshModelStatus();
 }
 
 function onInstallRow(row: CatalogModel) {

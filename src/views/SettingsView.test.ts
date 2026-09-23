@@ -1853,6 +1853,78 @@ describe('SettingsView Qwen3-ASR speech row', () => {
     expect(deleteModel).toHaveBeenCalledWith('speech', 'qwen3-asr-0.6b-4bit');
   });
 
+  function bothSpeechModels(qwenReady: boolean) {
+    return {
+      state: 'ready',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: true },
+        { id: 'qwen3-asr-0.6b-4bit', ready: qwenReady },
+      ],
+    };
+  }
+
+  async function removeRow(wrapper: ReturnType<typeof mount>, name: string) {
+    await rowNamed(wrapper, name).get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+  }
+
+  it('moves the selection to the other installed speech model when the selected one is removed', async () => {
+    getSpeechModelSetting.mockResolvedValue('speech:qwen3-asr-0.6b-4bit');
+    modelStatus.mockResolvedValue(bothSpeechModels(true));
+    // The backend reports Qwen3 gone once its files are deleted.
+    deleteModel.mockImplementation(() => {
+      modelStatus.mockResolvedValue(bothSpeechModels(false));
+      return Promise.resolve();
+    });
+    const wrapper = await mountLocal();
+    const statusReadsBefore = modelStatus.mock.calls.length;
+
+    await removeRow(wrapper, QWEN);
+
+    expect(setSpeechModelSetting).toHaveBeenCalledWith('speech:parakeet-tdt-0.6b-v3');
+    // Readiness follows the selection, so status is read again after the switch.
+    expect(modelStatus.mock.calls.length).toBeGreaterThanOrEqual(statusReadsBefore + 2);
+    expect(rowNamed(wrapper, PARAKEET).find('.model-tick--on').exists()).toBe(true);
+  });
+
+  it('keeps the selection when the removed speech model was not the selected one', async () => {
+    modelStatus.mockResolvedValue(bothSpeechModels(true));
+    deleteModel.mockImplementation(() => {
+      modelStatus.mockResolvedValue(bothSpeechModels(false));
+      return Promise.resolve();
+    });
+    const wrapper = await mountLocal();
+
+    await removeRow(wrapper, QWEN);
+
+    expect(setSpeechModelSetting).not.toHaveBeenCalled();
+  });
+
+  it('keeps the selection when no other speech model is installed', async () => {
+    getSpeechModelSetting.mockResolvedValue('speech:qwen3-asr-0.6b-4bit');
+    const onlyQwen = (qwenReady: boolean) => ({
+      state: qwenReady ? 'ready' : 'not_downloaded',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: false },
+        { id: 'qwen3-asr-0.6b-4bit', ready: qwenReady },
+      ],
+    });
+    modelStatus.mockResolvedValue(onlyQwen(true));
+    deleteModel.mockImplementation(() => {
+      modelStatus.mockResolvedValue(onlyQwen(false));
+      return Promise.resolve();
+    });
+    const wrapper = await mountLocal();
+
+    await removeRow(wrapper, QWEN);
+
+    expect(setSpeechModelSetting).not.toHaveBeenCalled();
+  });
+
   it("keeps each speech model's size on its own row", async () => {
     modelSizes.mockResolvedValue({
       notes: null,
