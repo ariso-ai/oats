@@ -93,15 +93,29 @@ pub fn load_selected(app: &tauri::AppHandle) {
     set_selected(stored.as_ref().map(parse).unwrap_or_else(default_model));
 }
 
+/// Whether `model` may become the selection now. Refused mid-recording: the
+/// session's checkpoints and final pass must all run on one model.
+fn check_selectable(model: SpeechModelId, recording_active: bool) -> Result<(), String> {
+    if recording_active {
+        return Err("Can't change the speech model while a recording is in progress.".to_string());
+    }
+    if !model.is_available() {
+        return Err("That speech model isn't available on this platform.".to_string());
+    }
+    Ok(())
+}
+
 /// Persist the choice and make it live for the next transcription. The
 /// frontend goes through here so the process global and `settings.json`
 /// never disagree within a session.
 #[tauri::command]
 pub fn set_speech_model(app: tauri::AppHandle, model: SpeechModelId) -> Result<(), String> {
+    use tauri::Manager as _;
     use tauri_plugin_store::StoreExt as _;
-    if !model.is_available() {
-        return Err("That speech model isn't available on this platform.".to_string());
-    }
+    let recording_active = app
+        .state::<crate::recording_state::RecordingState>()
+        .is_active();
+    check_selectable(model, recording_active)?;
     let store = app.store(SETTINGS_PATH).map_err(|e| e.to_string())?;
     store.set(SETTINGS_KEY, Value::String(settings_value(model)));
     store.save().map_err(|e| e.to_string())?;
@@ -155,6 +169,15 @@ mod tests {
             json!(null),
         ] {
             assert_eq!(parse(&raw), default_model(), "rejecting {raw}");
+        }
+    }
+
+    #[test]
+    fn switching_models_is_refused_while_recording() {
+        let err = check_selectable(SpeechModelId::Parakeet, true).unwrap_err();
+        assert_eq!(err, "Can't change the speech model while a recording is in progress.");
+        for model in available() {
+            assert_eq!(check_selectable(model, false), Ok(()));
         }
     }
 

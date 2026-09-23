@@ -270,7 +270,10 @@ struct SttProgress {
 /// shares one guard: models can share on-disk directories (the diarizer), and
 /// two concurrent downloads would race on its `.part` files.
 #[tauri::command]
-pub async fn download_local_stt(app: tauri::AppHandle, model: Option<SpeechModelId>) -> Result<(), String> {
+pub async fn download_local_stt(
+    app: tauri::AppHandle,
+    model: Option<SpeechModelId>,
+) -> Result<(), String> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
         let msg = "Local STT is not supported on this platform".to_string();
         let _ = app.emit("model://stt/error", msg.clone());
@@ -301,9 +304,14 @@ pub async fn download_local_stt(app: tauri::AppHandle, model: Option<SpeechModel
     } else {
         MODELS_CDN_BASE.to_string()
     };
-    let result = download_model_bundles(&cdn_base, &models, &speech_bundles(model), &move |fraction| {
-        let _ = app2.emit("model://stt/progress", SttProgress { model, fraction });
-    })
+    let result = download_model_bundles(
+        &cdn_base,
+        &models,
+        &speech_bundles(model),
+        &move |fraction| {
+            let _ = app2.emit("model://stt/progress", SttProgress { model, fraction });
+        },
+    )
     .await
     .and_then(|()| write_speech_marker(&root, model));
 
@@ -697,14 +705,16 @@ fn macos_qwen3_bundles() -> Vec<ModelBundle> {
             folder: QWEN3_ASR_DIR.into(),
             prefix: "313d85018176".into(),
             install_path: QWEN3_ASR_DIR.into(),
-            manifest_sha256: "e67be63dffa605fe9332adebeb34a4e53096c0c9a6540ef24ae53a1cb7fef5a3".into(),
+            manifest_sha256: "e67be63dffa605fe9332adebeb34a4e53096c0c9a6540ef24ae53a1cb7fef5a3"
+                .into(),
             files: None,
         },
         ModelBundle {
             folder: QWEN3_ALIGNER_DIR.into(),
             prefix: "2f652af86ae0".into(),
             install_path: QWEN3_ALIGNER_DIR.into(),
-            manifest_sha256: "930c0dbb18b0ac19bb2df027f03436062487d91ec9c1ea97125d9cb30db82cdf".into(),
+            manifest_sha256: "930c0dbb18b0ac19bb2df027f03436062487d91ec9c1ea97125d9cb30db82cdf"
+                .into(),
             files: None,
         },
         macos_diarizer_bundle(),
@@ -1036,9 +1046,11 @@ fn speech_dirs(root: &Path, model: SpeechModelId) -> Vec<PathBuf> {
 fn speech_marker_path(root: &Path, model: SpeechModelId) -> Option<PathBuf> {
     match model {
         SpeechModelId::Parakeet => None,
-        SpeechModelId::Qwen3Asr => {
-            Some(crate::storage::models_dir(root).join(QWEN3_ASR_DIR).join(".complete"))
-        }
+        SpeechModelId::Qwen3Asr => Some(
+            crate::storage::models_dir(root)
+                .join(QWEN3_ASR_DIR)
+                .join(".complete"),
+        ),
     }
 }
 
@@ -1059,7 +1071,8 @@ fn write_speech_marker(root: &Path, model: SpeechModelId) -> Result<(), String> 
         None => write_manifest(root, &now_marker()),
         Some(path) => {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create {}: {e}", parent.display()))?;
             }
             std::fs::write(&path, speech_model_version(model))
                 .map_err(|e| format!("write {}: {e}", path.display()))
@@ -1072,7 +1085,9 @@ fn write_speech_marker(root: &Path, model: SpeechModelId) -> Result<(), String> 
 fn clear_speech_marker(root: &Path, model: SpeechModelId) -> Result<(), String> {
     let path = speech_marker_path(root, model).unwrap_or_else(|| manifest_path(root));
     match std::fs::remove_file(&path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("remove {}: {e}", path.display())),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("remove {}: {e}", path.display()))
+        }
         _ => Ok(()),
     }
 }
@@ -1203,6 +1218,10 @@ pub fn delete_local_model(
     {
         return Err("Can't remove a model while a recording is in progress.".into());
     }
+    let speech_model = speech_model.unwrap_or_else(crate::speech_model::selected);
+    if kind == LocalModelKind::Speech && !speech_model.is_available() {
+        return Err("That speech model isn't available on this platform".into());
+    }
     let flag = match kind {
         LocalModelKind::Notes => &LLM_DOWNLOAD_IN_PROGRESS,
         LocalModelKind::Speech => &STT_DOWNLOAD_IN_PROGRESS,
@@ -1212,9 +1231,7 @@ pub fn delete_local_model(
     let root = crate::storage::ariso_root()?;
     match kind {
         LocalModelKind::Notes => delete_notes(&root),
-        LocalModelKind::Speech => {
-            delete_speech_model(&root, speech_model.unwrap_or_else(crate::speech_model::selected))
-        }
+        LocalModelKind::Speech => delete_speech_model(&root, speech_model),
     }
 }
 
@@ -1247,7 +1264,9 @@ mod tests {
     fn install_parakeet(root: &Path, bytes_each: usize) {
         for bundle in speech_bundles(SpeechModelId::Parakeet) {
             write_bytes(
-                &crate::storage::models_dir(root).join(&bundle.install_path).join("w.bin"),
+                &crate::storage::models_dir(root)
+                    .join(&bundle.install_path)
+                    .join("w.bin"),
                 bytes_each,
             );
         }
@@ -1258,7 +1277,9 @@ mod tests {
     fn install_qwen3(root: &Path, bytes_each: usize) {
         for bundle in speech_bundles(SpeechModelId::Qwen3Asr) {
             write_bytes(
-                &crate::storage::models_dir(root).join(&bundle.install_path).join("w.bin"),
+                &crate::storage::models_dir(root)
+                    .join(&bundle.install_path)
+                    .join("w.bin"),
                 bytes_each,
             );
         }
@@ -1280,7 +1301,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         install_qwen3(tmp.path(), 4);
         assert!(speech_is_ready(tmp.path(), SpeechModelId::Qwen3Asr));
-        std::fs::write(speech_marker_path(tmp.path(), SpeechModelId::Qwen3Asr).unwrap(), "stale").unwrap();
+        std::fs::write(
+            speech_marker_path(tmp.path(), SpeechModelId::Qwen3Asr).unwrap(),
+            "stale",
+        )
+        .unwrap();
         assert!(!speech_is_ready(tmp.path(), SpeechModelId::Qwen3Asr));
     }
 
@@ -1316,7 +1341,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         install_parakeet(tmp.path(), 10);
         install_qwen3(tmp.path(), 10);
-        assert_eq!(speech_model_size(tmp.path(), SpeechModelId::Parakeet), Some(20));
+        assert_eq!(
+            speech_model_size(tmp.path(), SpeechModelId::Parakeet),
+            Some(20)
+        );
         // Qwen3's own readiness marker lives inside its ASR bundle directory
         // (`speech_marker_path`), so its footprint includes the marker's bytes
         // on top of the three 10-byte bundle files.
