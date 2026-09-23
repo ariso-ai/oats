@@ -7,13 +7,30 @@ import MLXAudioSTT
 ///
 /// Chunking happens here, not inside `Qwen3ASRModel.generate`: its `maxTokens`
 /// is ONE budget shared by every internal chunk (later chunks are skipped once
-/// it is spent), and the aligner accepts at most ~5 minutes per call. 290 s
-/// targets plus the splitter's ±5 s silence search keep every chunk under 300 s.
+/// it is spent), and the aligner accepts at most ~5 minutes per call.
+///
+/// Greedy decoding can fall into a phrase loop on long chunks (a 290 s chunk
+/// repeated one sentence ~900 times and lost ~200 s of speech; the library's
+/// only loop guard catches ≤3 distinct tokens). Two layers stop that:
+/// short chunks (`chunkSeconds`) prevent it, and every chunk's result is
+/// checked (`isDegenerate`) — a degenerate chunk is re-split in halves down to
+/// `minSplitSeconds`, and at the floor any loop is collapsed to one occurrence
+/// with a stderr warning. Looped text is never emitted.
 enum Qwen3Transcriber {
     static let asrDir = "qwen3-asr-0.6b-4bit"
     static let alignerDir = "qwen3-forcedaligner-0.6b-4bit"
     static let sampleRate = 16000
-    static let chunkSeconds: Float = 290
+    /// Target ASR chunk length; the splitter's ±5 s silence search may stretch it.
+    /// Measured on a 348 s two-speaker Mandarin fixture: 290 s and 120 s chunks
+    /// each hit a decode loop; 60, 90 and 150 s did not. 60 s is the most
+    /// margin at no cost (wall time was the same, and so was accuracy).
+    static let chunkSeconds: Float = 60
+    /// Degenerate chunks are halved while each half stays at least this long.
+    static let minSplitSeconds: Float = 10
+    /// Token budget per second of audio. Dense Mandarin runs ~5–8 tokens/s;
+    /// 15/s plus a fixed allowance only runs out in a decode loop.
+    static let tokensPerSecond: Float = 15
+    static let baseTokens = 64
 
     struct Output {
         let words: [TimedWord]
@@ -36,6 +53,13 @@ enum Qwen3Transcriber {
         return try await run(samples: samples, modelsURL: modelsURL)
     }
 
+    /// One transcribed and aligned piece of audio, offsets relative to the recording.
+    struct Piece {
+        let text: String
+        let language: String
+        let words: [TimedWord]
+    }
+
     private static func run(samples: [Float], modelsURL: URL) async throws -> Output {
         // fromModelDirectory only — fromPretrained would download.
         let asr = try await Qwen3ASRModel.fromModelDirectory(modelsURL.appendingPathComponent(asrDir))
@@ -44,40 +68,152 @@ enum Qwen3Transcriber {
 
         let chunks = splitAudioIntoChunks(
             MLXArray(samples), sampleRate: sampleRate, chunkDuration: chunkSeconds)
+        var pieces: [Piece] = []
+        for (chunk, offset) in chunks {
+            pieces += transcribeChunk(
+                chunk, offset: offset, asr: asr, aligner: aligner, samples: samples)
+        }
+
         var words: [TimedWord] = []
         var texts: [String] = []
         var languages: [String] = []
-
-        for (chunk, offset) in chunks {
-            defer { Memory.clearCache() }
-            // chunkDuration above the chunk length: never re-split inside generate.
-            let out = asr.generate(audio: chunk, maxTokens: 8192, language: nil, chunkDuration: 600)
-            let text = out.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { continue }
-            let language = (out.language ?? "English")
-                .split(separator: ",").first.map(String.init) ?? "English"
-            texts.append(text)
-            if language.lowercased() != "none" { languages.append(language) }
-
-            let aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language))
-            warnIfTailUncovered(
-                lastWordEnd: aligned.items.last?.endTime ?? 0,
-                chunkSamples: chunk.dim(0), offset: offset, samples: samples)
-            var chunkWords = attachSeparators(items: aligned.items, text: text)
-            // Chunks are joined like words: a space unless either side is CJK.
-            if let first = chunkWords.first, let previous = words.last,
+        for piece in pieces {
+            texts.append(piece.text)
+            if piece.language.lowercased() != "none" { languages.append(piece.language) }
+            var pieceWords = piece.words
+            // Pieces are joined like words: a space unless either side is CJK.
+            if let first = pieceWords.first, let previous = words.last,
                needsSpace(between: previous.text, and: first.text) {
-                chunkWords[0] = TimedWord(text: " " + first.text, start: first.start, end: first.end)
+                pieceWords[0] = TimedWord(text: " " + first.text, start: first.start, end: first.end)
             }
-            for word in chunkWords {
-                words.append(TimedWord(
-                    text: word.text,
-                    start: word.start + Double(offset),
-                    end: word.end + Double(offset)))
+            words += pieceWords
+        }
+        return Output(words: words, text: joinWords(texts), language: isoCode(dominant(languages)))
+    }
+
+    /// Transcribe and align one chunk; if the result is degenerate, re-split it
+    /// in halves (recursively) until pieces would drop below `minSplitSeconds`.
+    private static func transcribeChunk(
+        _ chunk: MLXArray, offset: Float, asr: Qwen3ASRModel,
+        aligner: Qwen3ForcedAlignerModel, samples: [Float]
+    ) -> [Piece] {
+        defer { Memory.clearCache() }
+        let seconds = Float(chunk.dim(0)) / Float(sampleRate)
+        let budget = baseTokens + Int(seconds * tokensPerSecond)
+        // chunkDuration above the chunk length: never re-split inside generate.
+        let out = asr.generate(
+            audio: chunk, maxTokens: budget, language: nil, chunkDuration: max(600, seconds + 1))
+        var text = out.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return [] }
+        let language = (out.language ?? "English")
+            .split(separator: ",").first.map(String.init) ?? "English"
+
+        let looped = findLoop(in: text) != nil
+        let overBudget = out.generationTokens >= budget
+        var aligned: ForcedAlignResult?
+        if !looped && !overBudget {
+            aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language))
+        }
+        let unaligned = aligned.map { $0.items.isEmpty && !isSilent(
+            samples: samples, offset: offset, count: chunk.dim(0)) } ?? false
+
+        if looped || overBudget || unaligned {
+            let reason = looped ? "repetition loop" : overBudget ? "token budget exhausted" : "no aligned words"
+            if seconds / 2 >= minSplitSeconds {
+                stderrLine(String(
+                    format: "warning: qwen3 chunk %.1fs-%.1fs degenerate (%@); re-splitting",
+                    Double(offset), Double(offset + seconds), reason))
+                let halves = splitAudioIntoChunks(chunk, sampleRate: sampleRate, chunkDuration: seconds / 2)
+                return halves.flatMap { half, halfOffset in
+                    transcribeChunk(
+                        half, offset: offset + halfOffset, asr: asr, aligner: aligner, samples: samples)
+                }
+            }
+            // At the floor: keep what was said once, never the loop.
+            text = collapseLoops(text)
+            stderrLine(String(
+                format: "warning: qwen3 chunk %.1fs-%.1fs still degenerate (%@) at the %.0fs floor; loops collapsed",
+                Double(offset), Double(offset + seconds), reason, Double(minSplitSeconds)))
+            if aligned == nil {
+                aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language))
             }
         }
 
-        return Output(words: words, text: joinWords(texts), language: isoCode(dominant(languages)))
+        let items = aligned?.items ?? []
+        warnIfTailUncovered(
+            lastWordEnd: items.last?.endTime ?? 0,
+            chunkSamples: chunk.dim(0), offset: offset, samples: samples)
+        let words = attachSeparators(items: items, text: text).map {
+            TimedWord(text: $0.text, start: $0.start + Double(offset), end: $0.end + Double(offset))
+        }
+        return [Piece(text: text, language: language, words: words)]
+    }
+
+    /// A decode loop: some unit of `period` characters repeated at least
+    /// `minLoopRepeats` times back to back, spanning at least `minLoopChars`
+    /// characters. The span floor keeps short natural repeats ("哈哈哈",
+    /// "no no no") from counting. Returns the loop's start, period and repeat
+    /// count, earliest start first.
+    static let minLoopRepeats = 4
+    static let minLoopChars = 24
+    static let maxLoopPeriod = 200
+
+    static func findLoop(in text: String) -> (start: Int, period: Int, repeats: Int)? {
+        findLoop(Array(text))
+    }
+
+    static func findLoop(_ c: [Character]) -> (start: Int, period: Int, repeats: Int)? {
+        var best: (start: Int, period: Int, repeats: Int)?
+        for period in 1...max(1, min(maxLoopPeriod, c.count / minLoopRepeats)) {
+            // run = consecutive positions i with c[i] == c[i + period]; a run of
+            // length L starting at i means c[i ..< i + L + period] has this period.
+            var runStart = 0
+            var run = 0
+            var i = 0
+            while i + period <= c.count {
+                if i + period < c.count && c[i] == c[i + period] {
+                    if run == 0 { runStart = i }
+                    run += 1
+                } else {
+                    let span = run + period
+                    let repeats = span / period
+                    if run > 0 && repeats >= minLoopRepeats && span >= minLoopChars {
+                        if best == nil || runStart < best!.start {
+                            best = (runStart, period, repeats)
+                        }
+                        break
+                    }
+                    run = 0
+                }
+                i += 1
+            }
+        }
+        return best
+    }
+
+    /// Replace every decode loop with a single occurrence of its unit.
+    static func collapseLoops(_ text: String) -> String {
+        var c = Array(text)
+        while let loop = findLoop(c) {
+            let keepEnd = loop.start + loop.period
+            let resumeAt = loop.start + loop.repeats * loop.period
+            c.removeSubrange(keepEnd..<resumeAt)
+        }
+        return String(c)
+    }
+
+    /// True when the chunk's audio is below the silence threshold throughout.
+    static func isSilent(samples: [Float], offset: Float, count: Int) -> Bool {
+        let from = min(samples.count, Int(Double(offset) * Double(sampleRate)))
+        let to = min(samples.count, from + count)
+        return rms(samples, from, to) <= silenceRMS
+    }
+
+    static func rms(_ samples: [Float], _ from: Int, _ to: Int) -> Float {
+        guard to > from else { return 0 }
+        var sumSquares: Float = 0
+        for i in from..<to { sumSquares += samples[i] * samples[i] }
+        return (sumSquares / Float(to - from)).squareRoot()
     }
 
     /// Uncovered tail longer than this (seconds) that is not silent suggests
@@ -97,9 +233,7 @@ enum Qwen3Transcriber {
         let from = min(samples.count, chunkStart + Int(lastWordEnd * Double(sampleRate)))
         let to = min(samples.count, chunkStart + chunkSamples)
         guard to > from else { return }
-        var sumSquares: Float = 0
-        for i in from..<to { sumSquares += samples[i] * samples[i] }
-        let rms = (sumSquares / Float(to - from)).squareRoot()
+        let rms = rms(samples, from, to)
         guard rms > silenceRMS else { return }
         let start = Double(offset) + lastWordEnd
         let end = Double(offset) + chunkSeconds
