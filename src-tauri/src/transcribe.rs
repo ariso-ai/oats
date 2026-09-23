@@ -427,15 +427,17 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
         }
         Err(e) => {
             eprintln!("notes generation: {e}");
-            // Only an on-device model can be "not downloaded yet"; a remote
-            // provider's failure is a real error and is reported as-is.
-            let models_ready = !matches!(model, crate::notes_model::NotesModelId::Local { .. })
-                || crate::storage::ariso_root()
+            // Only an on-device run can be blocked on the LLM download. A
+            // remote model's failure (missing key, provider error) is a real
+            // failure no download resolves, so it keeps its own message and
+            // the Retry that comes with `NotesStatus::Failed`.
+            let pending_on_model = matches!(model, crate::notes_model::NotesModelId::Local { .. })
+                && !crate::storage::ariso_root()
                     .is_ok_and(|root| crate::model_manager::llm_is_ready(&root));
-            meta.notes_error = Some(if models_ready {
-                e
-            } else {
+            meta.notes_error = Some(if pending_on_model {
                 storage::MODELS_NOT_READY_NOTES_ERROR.to_string()
+            } else {
+                e
             });
             // No notes were written, so no model may claim them.
             meta.notes_model = None;
@@ -2079,6 +2081,48 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
+    /// A remote notes model can't be blocked on the on-device download, so its
+    /// failure must survive as a real (retryable) failure even when the local
+    /// LLM happens to be absent — otherwise the user sees "waiting for
+    /// on-device models…" with no Retry for something no download can fix.
+    #[tokio::test]
+    async fn process_notes_keeps_remote_failure_when_only_the_local_model_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::model_manager::mark_stt_ready_for_test(tmp.path());
+        // Deliberately no LLM marker: the on-device notes model is absent.
+        // The remote run then fails on its own terms — no key is stood in, so
+        // `generate_notes` errors before any network call.
+        crate::notes_model::set_selected(crate::notes_model::NotesModelId::Remote {
+            provider: crate::credentials::RemoteProvider::Gemini,
+            id: "gemini-3.7-flash".into(),
+        });
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        assert_ne!(
+            meta.notes_error.as_deref(),
+            Some(crate::storage::MODELS_NOT_READY_NOTES_ERROR),
+            "a remote model's failure is not pending on the on-device download"
+        );
+        assert_eq!(
+            crate::storage::derive_notes_status(false, meta.notes_error.as_deref(), false),
+            crate::storage::NotesStatus::Failed,
+            "the user must still be offered a Retry"
+        );
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
     #[tokio::test]
     async fn finalize_skips_notes_when_transcript_has_no_speech() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2228,6 +2272,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: true, preview: None,
+            notes_model: None,
         }
     }
 
