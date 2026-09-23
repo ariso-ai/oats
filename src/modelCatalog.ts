@@ -7,6 +7,10 @@ export type ModelType = 'Notes' | 'Speech';
 /** Where a model runs: on this machine, or behind a provider's API. */
 export type ModelRuntime = 'local' | 'remote';
 
+/** Every speech model this build can select. Mirrors the Rust speech-model
+ *  registry — a closed set, never a path. */
+export type SpeechModelId = 'parakeet-tdt-0.6b-v3' | 'qwen3-asr-0.6b-4bit';
+
 export interface CatalogModel {
   /** Stable row identity, and what a Speech selection persists. */
   key: string;
@@ -17,11 +21,13 @@ export interface CatalogModel {
   details: string;
   /** Present only on Notes rows — what a Notes selection persists. */
   notesModel?: NotesModelId;
+  /** Present only on Speech rows — what a Speech selection transcribes with. */
+  speechModel?: SpeechModelId;
 }
 
-/** Speech models, in display order. One entry today, but the user still picks
- *  an active one — the same way they pick a notes model — so a second entry
- *  needs no new selection machinery. */
+/** Speech models, in display order. The user picks one active model — the
+ *  same way they pick a notes model — and each row carries its own
+ *  install/size/remove state. */
 export const SPEECH_MODELS: CatalogModel[] = [
   {
     key: 'speech:parakeet-tdt-0.6b-v3',
@@ -30,6 +36,16 @@ export const SPEECH_MODELS: CatalogModel[] = [
     runtime: 'local',
     details:
       'Transcribes meeting audio to text. parakeet-tdt-0.6b-v3, running on this device.',
+    speechModel: 'parakeet-tdt-0.6b-v3',
+  },
+  {
+    key: 'speech:qwen3-asr-0.6b-4bit',
+    name: 'Qwen3-ASR 0.6B',
+    type: 'Speech',
+    runtime: 'local',
+    details:
+      'Transcribes meeting audio to text, including Mandarin and mixed Chinese-English. qwen3-asr-0.6b-4bit with a word-timing aligner, running on this device.',
+    speechModel: 'qwen3-asr-0.6b-4bit',
   },
 ];
 
@@ -40,6 +56,13 @@ export function parseSpeechModelKey(raw: unknown): string {
   return typeof raw === 'string' && SPEECH_MODELS.some((m) => m.key === raw)
     ? raw
     : DEFAULT_SPEECH_MODEL_KEY;
+}
+
+/** The model id behind a persisted catalog key; unknown keys map to the
+ *  default, same fallback as `parseSpeechModelKey`. */
+export function speechModelIdFromKey(key: string): SpeechModelId {
+  const row = SPEECH_MODELS.find((m) => m.key === parseSpeechModelKey(key));
+  return row?.speechModel ?? 'parakeet-tdt-0.6b-v3';
 }
 
 /** Every model Settings lists, notes models first. */

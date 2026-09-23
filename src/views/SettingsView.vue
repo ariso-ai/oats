@@ -167,7 +167,7 @@
           </thead>
           <tbody>
             <tr
-              v-for="row in catalog"
+              v-for="row in visibleCatalog"
               :key="row.key"
               class="model-row"
               :class="{
@@ -713,9 +713,9 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind, type SpeechModelId, type SttProgress } from '../tauri';
 import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
-import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
+import { modelCatalog, formatModelSize, speechModelIdFromKey, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
 import { thumbGeometry, scrollTopForDrag, type ScrollMetrics } from './modelListScrollbar';
 import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
@@ -810,11 +810,15 @@ const modelStatus = ref<ModelStatus>({ state: 'not_downloaded' });
 const modelPrompt = ref(false);
 const showDownloadConfirm = ref(false);
 
-// Per-model download UI state — the STT and LLM Install buttons are independent.
-const sttBusy = ref<Busy>('idle');
+// Per-model download UI state — every speech model's Install button, and the
+// LLM's, are independent of one another.
+const speechBusy = ref<Partial<Record<SpeechModelId, Busy>>>({});
+const speechProgress = ref<Partial<Record<SpeechModelId, number | null>>>({});
 const llmBusy = ref<Busy>('idle');
-const sttProgress = ref<number | null>(null);
 const llmProgress = ref<number | null>(null);
+/** The speech model currently selected to transcribe. */
+const selectedSpeechId = computed(() => speechModelIdFromKey(speechModelKey.value));
+const busyOf = (id: SpeechModelId): Busy => speechBusy.value[id] ?? 'idle';
 
 async function refreshModelStatus() {
   if (!platformCapabilities.value.localBackend.supported) {
@@ -871,6 +875,15 @@ async function onChangeVault() {
 // one that writes notes, and each local row carries its own install button.
 const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
 const catalog = modelCatalog();
+
+/** Hides a speech row this platform doesn't offer (e.g. Qwen3 on Windows).
+ *  Before `modelStatus.speech` has answered, nothing is hidden yet. */
+const visibleCatalog = computed(() => {
+  const offered = modelStatus.value.speech?.map((s) => s.id);
+  return offered
+    ? catalog.filter((row) => row.type !== 'Speech' || offered.includes(row.speechModel!))
+    : catalog;
+});
 
 /** How many rows the list shows before it scrolls. */
 const MODEL_ROWS_VISIBLE = 6;
@@ -1024,23 +1037,32 @@ function modelTypeLabel(row: CatalogModel): string {
   return row.runtime === 'remote' ? 'Remote language model' : 'Language model';
 }
 
-/** Speech rows read the STT download state; every other row is a notes model. */
+/** A speech model's own readiness. Before a backend that reports per-model
+ *  status answers, only the selected model's overall state is known. */
+function speechReady(id: SpeechModelId): boolean {
+  const entry = modelStatus.value.speech?.find((s) => s.id === id);
+  if (entry) return entry.ready;
+  return id === selectedSpeechId.value && modelStatus.value.state === 'ready';
+}
+
+/** Speech rows read their own model's download state; every other row is the
+ *  notes model. */
 function rowInstalled(row: CatalogModel): boolean {
-  return row.type === 'Speech' ? sttInstalled.value : llmInstalled.value;
+  return row.type === 'Speech' ? speechReady(row.speechModel!) : llmInstalled.value;
 }
 
 function rowBusy(row: CatalogModel): Busy {
-  return row.type === 'Speech' ? sttBusy.value : llmBusy.value;
+  return row.type === 'Speech' ? busyOf(row.speechModel!) : llmBusy.value;
 }
 
 /** Text beside the size: progress while downloading, and failures — but not
  *  "not downloaded", which the missing tick and the Install button already say. */
 function rowDetail(row: CatalogModel): string {
-  const progress = row.type === 'Speech' ? sttProgress.value : llmProgress.value;
+  const progress = row.type === 'Speech' ? speechProgress.value[row.speechModel!] ?? null : llmProgress.value;
   return rowDetailText(rowBusy(row), progress, rowInstalled(row), unsupported.value);
 }
 
-const modelSizes = ref<ModelSizes>({ notes: null, speech: null });
+const modelSizes = ref<ModelSizes>({ notes: null, speech: {} });
 const removeTarget = ref<CatalogModel | null>(null);
 const removeError = ref('');
 
@@ -1049,7 +1071,7 @@ async function loadModelSizes() {
     modelSizes.value = await local.modelSizes();
   } catch (e) {
     console.error('Failed to read model sizes', e);
-    modelSizes.value = { notes: null, speech: null };
+    modelSizes.value = { notes: null, speech: {} };
   }
 }
 
@@ -1058,7 +1080,10 @@ function rowKind(row: CatalogModel): LocalModelKind {
 }
 
 function rowSize(row: CatalogModel): string {
-  return formatModelSize(modelSizes.value[rowKind(row)]);
+  if (row.type === 'Speech') {
+    return formatModelSize(modelSizes.value.speech[row.speechModel!] ?? null);
+  }
+  return formatModelSize(modelSizes.value.notes);
 }
 
 function onRemoveRow(row: CatalogModel) {
@@ -1075,7 +1100,7 @@ async function confirmRemove() {
   removeTarget.value = null;
   if (!row) return;
   try {
-    await local.deleteModel(rowKind(row));
+    await local.deleteModel(rowKind(row), row.speechModel);
   } catch (e) {
     // The backend refuses mid-recording and mid-download; say which, rather
     // than leaving the row looking installed for no stated reason.
@@ -1087,7 +1112,7 @@ async function confirmRemove() {
 
 function onInstallRow(row: CatalogModel) {
   if (row.runtime !== 'local') return;
-  if (row.type === 'Speech') void onInstallStt();
+  if (row.type === 'Speech') void onInstallSpeech(row.speechModel!);
   else void onInstallLlm();
 }
 
@@ -1353,7 +1378,7 @@ async function confirmDownloadModels() {
     console.warn('Failed to persist localModelsPrompted', e),
   );
   // Per-target Rust guards allow STT and LLM to download in parallel.
-  void onInstallStt();
+  void onInstallSpeech();
   void onInstallLlm();
 }
 
@@ -1368,17 +1393,17 @@ async function cancelDownloadModels() {
   });
 }
 
-async function onInstallStt() {
-  sttBusy.value = 'downloading';
-  sttProgress.value = null;
+async function onInstallSpeech(id: SpeechModelId = selectedSpeechId.value) {
+  speechBusy.value = { ...speechBusy.value, [id]: 'downloading' };
+  speechProgress.value = { ...speechProgress.value, [id]: null };
   try {
-    await local.downloadStt();
+    await local.downloadStt(id);
     await refreshModelStatus();
     await loadModelSizes();
-    sttBusy.value = 'idle';
+    speechBusy.value = { ...speechBusy.value, [id]: 'idle' };
   } catch (e) {
-    console.error('STT model download failed', e);
-    sttBusy.value = 'error';
+    console.error('Speech model download failed', e);
+    speechBusy.value = { ...speechBusy.value, [id]: 'error' };
   }
 }
 
@@ -1401,8 +1426,8 @@ async function onInstallLlm() {
 // modelStatus, so callers refresh it first. The Rust per-target guards de-dupe,
 // so calling this while a download is already in progress is a safe no-op.
 function startMissingDownloads() {
-  const pending = pendingInstalls(modelStatus.value, sttBusy.value, llmBusy.value);
-  if (pending.stt) void onInstallStt();
+  const pending = pendingInstalls(modelStatus.value, busyOf(selectedSpeechId.value), llmBusy.value);
+  if (pending.stt) void onInstallSpeech();
   if (pending.llm) void onInstallLlm();
 }
 
@@ -1410,10 +1435,13 @@ const unsupported = computed(() => modelStatus.value.state === 'unsupported');
 // This value controls availability copy and interaction only; OS permission is
 // a separate concern handled when the user actually enables capture.
 const systemAudioSupported = computed(() => platformCapabilities.value.systemAudio.supported);
+// The selected speech model's readiness — `state` reflects it directly.
 const sttInstalled = computed(() => modelStatus.value.state === 'ready');
 const llmInstalled = computed(() => modelStatus.value.llmReady === true);
 const anyDownloading = computed(
-  () => sttBusy.value === 'downloading' || llmBusy.value === 'downloading',
+  () =>
+    Object.values(speechBusy.value).some((b) => b === 'downloading') ||
+    llmBusy.value === 'downloading',
 );
 
 // Hide the banner on unsupported platforms (neither model can install there) so
@@ -1720,9 +1748,10 @@ onMounted(async () => {
   await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited
-  // install calls (onInstallStt / onInstallLlm); these events only feed the bar.
-  const unSttProgress = await listen<number>('model://stt/progress', (e) => {
-    sttProgress.value = e.payload >= 0 ? e.payload : null;
+  // install calls (onInstallSpeech / onInstallLlm); these events only feed the bar.
+  const unSttProgress = await listen<SttProgress>('model://stt/progress', (e) => {
+    const { model, fraction } = e.payload;
+    speechProgress.value = { ...speechProgress.value, [model]: fraction >= 0 ? fraction : null };
   });
   const unLlmProgress = await listen<number>('model://llm/progress', (e) => {
     llmProgress.value = e.payload >= 0 ? e.payload : null;

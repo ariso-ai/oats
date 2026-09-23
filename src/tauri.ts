@@ -3,7 +3,9 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { parseNotesModel, type NotesModelId, type RemoteProvider } from './notesModels';
-import { parseSpeechModelKey } from './modelCatalog';
+import { parseSpeechModelKey, speechModelIdFromKey, type SpeechModelId } from './modelCatalog';
+
+export type { SpeechModelId };
 
 export type { NotesModelId, RemoteProvider };
 
@@ -407,14 +409,30 @@ export type LocalModelKind = 'notes' | 'speech';
 
 export interface ModelSizes {
   notes: number | null;
-  speech: number | null;
+  /** Per speech model available on this platform; absent = not offered here. */
+  speech: Partial<Record<SpeechModelId, number | null>>;
+}
+
+/** One speech model's own readiness, as reported by `local_model_status`. */
+export interface SpeechModelStatus {
+  id: SpeechModelId;
+  ready: boolean;
 }
 
 export interface ModelStatus {
+  /** Readiness of the *selected* speech model. */
   state: 'not_downloaded' | 'downloading' | 'ready' | 'error' | 'unsupported';
   version?: string;
   /** Whether the on-device notes LLM (gemma) has been downloaded. */
   llmReady?: boolean;
+  /** Every speech model this platform offers, with its own readiness. */
+  speech?: SpeechModelStatus[];
+}
+
+/** `model://stt/progress` payload: which speech model, and how far along. */
+export interface SttProgress {
+  model: SpeechModelId;
+  fraction: number;
 }
 
 /** One diarized voice in a local recording. `id` is stable across clip appends
@@ -554,8 +572,9 @@ export const local = {
   modelStatus(): Promise<ModelStatus> {
     return invoke<ModelStatus>('local_model_status');
   },
-  downloadStt(): Promise<void> {
-    return invoke('download_local_stt');
+  /** Download a speech model; omitted = the selected one. */
+  downloadStt(model?: SpeechModelId): Promise<void> {
+    return invoke('download_local_stt', { model: model ?? null });
   },
   downloadLlm(): Promise<void> {
     return invoke('download_local_llm');
@@ -565,8 +584,8 @@ export const local = {
     return invoke<ModelSizes>('local_model_sizes');
   },
   /** Delete a local model's files. Rejects while recording or mid-download. */
-  deleteModel(kind: LocalModelKind): Promise<void> {
-    return invoke('delete_local_model', { kind });
+  deleteModel(kind: LocalModelKind, speechModel?: SpeechModelId): Promise<void> {
+    return invoke('delete_local_model', { kind, speechModel: speechModel ?? null });
   },
   openLibraryWindow(): Promise<void> {
     return invoke('create_library_window');
@@ -676,9 +695,11 @@ export async function getSpeechModelSetting(): Promise<string> {
   return parseSpeechModelKey(await store.get<unknown>('speechModel'));
 }
 
+/** The backend owns this write (same reason as the notes model): transcription
+ *  runs detached and reads the selection from a process global, so it persists
+ *  `speech:<id>` to settings.json itself rather than racing a webview write. */
 export async function setSpeechModelSetting(key: string): Promise<void> {
-  const store = await load('settings.json', { autoSave: true });
-  await store.set('speechModel', key);
+  return invoke('set_speech_model', { model: speechModelIdFromKey(key) });
 }
 
 /** Whether the first-time "download local models?" dialog has been confirmed. */
