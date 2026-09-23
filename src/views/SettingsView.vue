@@ -2,14 +2,49 @@
   <div class="settings">
     <div v-if="showDownloadConfirm" class="download-confirm" role="dialog" aria-modal="true" aria-labelledby="download-confirm-title">
       <div class="download-confirm__card">
-        <h2 id="download-confirm-title" class="download-confirm__title">Download on-device models?</h2>
+        <h2 id="download-confirm-title" class="download-confirm__title">Download local models?</h2>
         <p class="download-confirm__body">
-          Local transcription needs the speech and language models (~750&nbsp;MB).
+          Local transcription needs the speech and notes models (~750&nbsp;MB).
           They download once and run entirely on your device.
         </p>
         <div class="download-confirm__actions">
           <button class="secondary-btn download-confirm__cancel" @click="cancelDownloadModels">Cancel</button>
           <button class="primary-btn download-confirm__confirm" @click="confirmDownloadModels">Download</button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="removeTarget"
+      class="download-confirm"
+      data-test="remove-confirm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="remove-confirm-title"
+    >
+      <div class="download-confirm__card">
+        <h2 id="remove-confirm-title" class="download-confirm__title">
+          Remove {{ removeTarget.name }}?
+        </h2>
+        <p class="download-confirm__body">
+          Its files are deleted from this device. Recording in Local mode needs
+          this model, so it has to be downloaded again before the next meeting.
+        </p>
+        <div class="download-confirm__actions">
+          <button
+            class="secondary-btn download-confirm__cancel"
+            data-test="remove-confirm-cancel"
+            @click="cancelRemove"
+          >
+            Cancel
+          </button>
+          <button
+            class="primary-btn download-confirm__confirm"
+            data-test="remove-confirm-ok"
+            @click="confirmRemove"
+          >
+            Remove
+          </button>
         </div>
       </div>
     </div>
@@ -100,44 +135,279 @@
       </div>
     </section>
 
-    <!-- On-device models card -->
-    <section v-if="backend === 'local'" class="section">
-      <h2 class="section-title">On-device models</h2>
+    <!-- AI models -->
+    <section v-if="backend === 'local'" class="section" data-test="models-section">
+      <h2 class="section-title">AI Models</h2>
       <div class="card">
         <div v-if="showModelBanner" class="signin-banner">
           Recording works right away. On-device models are finishing their
           download in the background — transcripts and notes for new
           recordings will be generated once they're ready.
         </div>
+        <!-- Sized in rows, not pixels: more models ship than belong on screen
+             at once, so the list scrolls inside the card instead of pushing
+             the sections below it out of reach. -->
+        <div
+          class="model-list"
+          @mouseenter="onModelListEnter"
+          @mouseleave="modelListHovered = false"
+        >
+        <div
+          ref="modelScrollEl"
+          class="model-table-scroll"
+          data-test="model-scroll"
+          :style="{ '--model-visible-rows': MODEL_ROWS_VISIBLE }"
+          @scroll="measureModelList"
+        >
+        <table class="model-table">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col" class="model-type-head">Type</th>
+              <th scope="col" class="model-runtime-head">Runtime</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in catalog"
+              :key="row.key"
+              class="model-row"
+              :class="{
+                'model-row--selectable': true,
+                'model-row--active': isActiveModel(row),
+              }"
+              data-test="model-row"
+              :aria-selected="isActiveModel(row)"
+              @click="onRowClick(row)"
+            >
+              <td class="model-name">
+                <button
+                  type="button"
+                  class="cell-flex"
+                  :aria-pressed="isActiveModel(row)"
+                  @click.stop="onRowClick(row)"
+                >
+                  {{ row.name }}
+                  <span
+                    v-if="isActiveModel(row)"
+                    class="model-tick model-tick--on"
+                    title="Currently in use"
+                    aria-label="Currently in use"
+                  >✓</span>
+                </button>
+              </td>
+              <td class="model-type">
+                <span class="help">
+                  <span
+                    class="model-type-icon"
+                    data-test="model-type-icon"
+                    role="img"
+                    tabindex="0"
+                    :aria-label="`${modelTypeLabel(row)}. ${row.details}`"
+                    @mouseenter="showModelDetails($event, row)"
+                    @mouseleave="modelDetails = null"
+                    @focus="showModelDetails($event, row)"
+                    @blur="modelDetails = null"
+                  >
+                    <!-- Speech: a microphone. Language: lines of text, or a
+                         cloud when the model is a provider's rather than ours. -->
+                    <svg v-if="row.type === 'Speech'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                      <line x1="12" y1="19" x2="12" y2="23" />
+                    </svg>
+                    <svg v-else-if="row.runtime === 'remote'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M17.5 19a4.5 4.5 0 0 0 .3-9 6.5 6.5 0 0 0-12.5 2A4 4 0 0 0 6 19z" />
+                      <line x1="8" y1="14" x2="14" y2="14" />
+                    </svg>
+                    <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="8" y1="13" x2="16" y2="13" />
+                      <line x1="8" y1="17" x2="13" y2="17" />
+                    </svg>
+                  </span>
+                </span>
+              </td>
+              <td class="model-runtime">
+                <span class="cell-flex cell-flex--end">
+                <template v-if="row.runtime === 'local'">
+                  <!-- Size or status, never both: the size is unknown while a model
+                       is downloading (it would only ever be the "—" placeholder) and
+                       beside the point when one failed or cannot run here. Ceding the
+                       space also keeps those longer messages readable in a column
+                       that no longer widens to fit them. -->
+                  <span
+                    v-if="!rowDetail(row)"
+                    class="model-size"
+                    data-test="model-size"
+                  >{{ rowSize(row) }}</span>
+                  <span v-if="rowDetail(row)" class="model-status">{{ rowDetail(row) }}</span>
+                  <button
+                    v-if="rowInstalled(row)"
+                    class="icon-btn"
+                    data-test="remove-model"
+                    title="Delete"
+                    aria-label="Delete"
+                    :disabled="recordingActive || anyDownloading"
+                    @click.stop="onRemoveRow(row)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                    </svg>
+                  </button>
+                  <button
+                    v-else-if="!unsupported"
+                    class="icon-btn icon-btn--install"
+                    data-test="install-model"
+                    :title="rowBusy(row) === 'downloading' ? 'Downloading' : 'Install'"
+                    :aria-label="rowBusy(row) === 'downloading' ? 'Downloading' : 'Install'"
+                    :disabled="anyDownloading"
+                    @click.stop="onInstallRow(row)"
+                  >
+                    <!-- Arrow into a tray: download. The label lives in the
+                         native tooltip, so the row stays icon-only. -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 3v12" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <path d="M4 19h16" />
+                    </svg>
+                  </button>
+                </template>
+                <template v-else>
+                  <!-- No "Remote" label: the cloud type icon already says it.
+                       Nor a "Connected" one: a connected provider is the row
+                       whose key icon has become a struck-through one. -->
+                  <button
+                    v-if="rowConnected(row)"
+                    class="icon-btn"
+                    data-test="remove-key"
+                    title="Disconnect"
+                    :aria-label="`Disconnect ${rowProviderLabel(row)}`"
+                    @click.stop="onRemoveKey(row)"
+                  >
+                    <!-- A link with a stroke through it: connected, click to
+                         break it. -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
+                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
+                      <line x1="9" y1="12" x2="15" y2="12" />
+                      <line x1="4" y1="20" x2="20" y2="4" />
+                    </svg>
+                  </button>
+                  <button
+                    v-else
+                    class="icon-btn"
+                    data-test="connect-key"
+                    title="Connect"
+                    :aria-label="`Connect ${rowProviderLabel(row)}`"
+                    @click.stop="onConnectRow(row)"
+                  >
+                    <!-- A link about to be made. Like Install and Delete, the
+                         word lives in the native tooltip. -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
+                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
+                      <line x1="9" y1="12" x2="15" y2="12" />
+                    </svg>
+                  </button>
+                </template>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <!-- Outside the scroll container on purpose: a bubble rendered inside
+             it is clipped by its bottom edge. Fixed-positioned to the icon it
+             describes. -->
+        <div
+          v-if="modelDetails"
+          role="tooltip"
+          class="help-tooltip help-tooltip--floating"
+          data-test="model-details"
+          :style="{ left: `${modelDetails.x}px`, top: `${modelDetails.y}px` }"
+        >{{ modelDetails.text }}</div>
+        <!-- Our own scrollbar: see modelListScrollbar.ts for why the native
+             one cannot fade in on hover in this webview. -->
+        <div
+          ref="modelTrackEl"
+          class="model-scrollbar"
+          :class="{ 'model-scrollbar--visible': (modelListHovered || draggingThumb) && !!modelThumb }"
+          data-test="model-scrollbar"
+          aria-hidden="true"
+        >
+          <div
+            v-if="modelThumb"
+            class="model-scrollbar__thumb"
+            data-test="model-scrollbar-thumb"
+            :style="{ height: `${modelThumb.height}px`, transform: `translateY(${modelThumb.offset}px)` }"
+            @pointerdown="onThumbPointerDown"
+            @pointermove="onThumbPointerMove"
+            @pointerup="onThumbPointerUp"
+            @pointercancel="onThumbPointerUp"
+          />
+        </div>
+        </div>
+        <!-- Asking for a key is a one-at-a-time affair, so the field lives
+             under the table rather than inside whichever row started it. -->
+        <div v-if="keyProvider" class="key-prompt" data-test="key-prompt">
+          <p class="setting-hint" data-test="remote-disclosure">
+            Notes for new recordings are sent to {{ keyProviderLabel }}. Recording,
+            transcription, and audio stay on this device.
+          </p>
+          <div class="key-prompt__row">
+            <input
+              v-model="keyInput"
+              class="key-input"
+              data-test="api-key-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              :placeholder="`${keyProviderLabel} API key`"
+              :aria-label="`${keyProviderLabel} API key`"
+              @keyup.enter="onSaveKey"
+            />
+            <button
+              class="primary-btn"
+              data-test="save-key"
+              :disabled="savingKey"
+              @click="onSaveKey"
+            >
+              Save
+            </button>
+            <button class="secondary-btn" @click="cancelKeyPrompt">Cancel</button>
+          </div>
+          <p class="setting-hint">
+            Stored in your {{ keychainName }}, never in oats' settings file.
+          </p>
+          <p
+            v-if="keyError"
+            class="setting-hint"
+            data-test="key-error"
+            style="color: var(--danger, #c0392b)"
+          >
+            {{ keyError }}
+          </p>
+        </div>
+        <p v-if="remoteModelInUse" class="setting-hint" data-test="remote-pending">
+          Notes are still written on this device — the selected remote model starts
+          writing them in a later update.
+        </p>
+        <p v-if="removeError" class="setting-hint" style="color: var(--danger, #c0392b)">
+          {{ removeError }}
+        </p>
+      </div>
+    </section>
+
+    <!-- Vault -->
+    <section v-if="backend === 'local'" class="section" data-test="vault-section">
+      <h2 class="section-title">Vault</h2>
+      <div class="card">
         <div class="setting-row">
-          <span class="setting-label">Speech voice model</span>
-          <div class="model-controls">
-            <span v-if="sttInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
-            <span v-else class="model-status">{{ sttStatusText }}</span>
-            <button
-              class="secondary-btn"
-              :disabled="unsupported || sttInstalled || anyDownloading"
-              @click="onInstallStt"
-            >
-              {{ sttInstalled ? 'Installed' : sttBusy === 'downloading' ? 'Downloading' : 'Install' }}
-            </button>
-          </div>
-        </div>
-        <div class="setting-row" style="margin-top: 16px">
-          <span class="setting-label">Language model</span>
-          <div class="model-controls">
-            <span v-if="llmInstalled" class="model-ready" title="Installed" aria-label="Installed">✓</span>
-            <span v-else class="model-status">{{ llmStatusText }}</span>
-            <button
-              class="secondary-btn"
-              :disabled="unsupported || llmInstalled || anyDownloading"
-              @click="onInstallLlm"
-            >
-              {{ llmInstalled ? 'Installed' : llmBusy === 'downloading' ? 'Downloading' : 'Install' }}
-            </button>
-          </div>
-        </div>
-        <div class="setting-row" style="margin-top: 16px">
           <span class="label-with-help">
             <span class="setting-label">Vault location</span>
             <span class="help">
@@ -445,8 +715,11 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, local, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus } from '../tauri';
-import { shouldPromptDownload, rowStatusText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
+import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
+import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
+import { thumbGeometry, scrollTopForDrag, type ScrollMetrics } from './modelListScrollbar';
+import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
 import { isDiagnosticsEnabled, setDiagnosticsEnabled } from '../composables/useDiagnostics';
@@ -595,6 +868,353 @@ async function onChangeVault() {
   }
 }
 
+// --- AI models table (Local backend only) ----------------------------------
+// The table is the single control: clicking a Notes row makes that model the
+// one that writes notes, and each local row carries its own install button.
+const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
+const catalog = modelCatalog();
+
+/** How many rows the list shows before it scrolls. */
+const MODEL_ROWS_VISIBLE = 6;
+
+/** Whether the pointer is over the list, which is what reveals its scrollbar. */
+const modelListHovered = ref(false);
+const modelScrollEl = ref<HTMLElement | null>(null);
+const modelTrackEl = ref<HTMLElement | null>(null);
+/** The bar's own height. It starts below the sticky header, so it is shorter
+ *  than the scroller's viewport and the thumb must be sized against it. */
+const modelTrackHeight = ref(0);
+const modelScrollMetrics = ref<ScrollMetrics>({
+  scrollTop: 0,
+  scrollHeight: 0,
+  clientHeight: 0,
+});
+
+/** Where the thumb sits, or null while everything fits on screen. */
+const modelThumb = computed(() =>
+  thumbGeometry(modelScrollMetrics.value, modelTrackHeight.value || undefined),
+);
+
+/** The hovered model's description, pinned to the icon it belongs to. */
+const modelDetails = ref<{ text: string; x: number; y: number } | null>(null);
+
+/** Pinned to the viewport, so anything that moves the icon leaves the bubble
+ *  behind: drop it instead. Capture phase catches the Settings page's own
+ *  scroller as well as the window's. */
+function dropModelDetails() {
+  modelDetails.value = null;
+}
+
+onMounted(() => window.addEventListener('scroll', dropModelDetails, true));
+onUnmounted(() => window.removeEventListener('scroll', dropModelDetails, true));
+
+function showModelDetails(event: Event, row: CatalogModel) {
+  const icon = event.currentTarget as HTMLElement | null;
+  if (!icon) return;
+  const rect = icon.getBoundingClientRect();
+  modelDetails.value = {
+    text: row.details,
+    x: rect.left + rect.width / 2,
+    y: rect.top,
+  };
+}
+
+function measureModelList() {
+  // The bubble is pinned to where the icon was; scrolling moves the icon out
+  // from under it.
+  modelDetails.value = null;
+  const el = modelScrollEl.value;
+  if (!el) return;
+  modelScrollMetrics.value = {
+    scrollTop: el.scrollTop,
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+  };
+  modelTrackHeight.value = modelTrackEl.value?.clientHeight ?? 0;
+}
+
+// Dragging the thumb scrolls the list, the way a real scrollbar does.
+const draggingThumb = ref(false);
+let dragStartY = 0;
+let dragStartScrollTop = 0;
+
+function onThumbPointerDown(event: PointerEvent) {
+  const el = modelScrollEl.value;
+  if (!el) return;
+  draggingThumb.value = true;
+  dragStartY = event.clientY;
+  dragStartScrollTop = el.scrollTop;
+  // Capture so the drag survives the pointer leaving the 6px-wide thumb, which
+  // it does almost immediately.
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  // Don't let the gesture start a text selection across the rows.
+  event.preventDefault();
+}
+
+function onThumbPointerMove(event: PointerEvent) {
+  const el = modelScrollEl.value;
+  const thumb = modelThumb.value;
+  if (!draggingThumb.value || !el || !thumb) return;
+  el.scrollTop = scrollTopForDrag({
+    startScrollTop: dragStartScrollTop,
+    deltaY: event.clientY - dragStartY,
+    metrics: modelScrollMetrics.value,
+    thumbHeight: thumb.height,
+    trackLength: modelTrackHeight.value || undefined,
+  });
+  measureModelList();
+}
+
+function onThumbPointerUp(event: PointerEvent) {
+  draggingThumb.value = false;
+  const target = event.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(event.pointerId)) {
+    target.releasePointerCapture(event.pointerId);
+  }
+}
+
+function onModelListEnter() {
+  modelListHovered.value = true;
+  // Rows arrive and depart (a download finishes, a key is removed), so measure
+  // when the pointer shows up rather than trusting a stale measurement.
+  measureModelList();
+}
+
+async function loadNotesModel() {
+  try {
+    notesModel.value = await getNotesModelSetting();
+  } catch (e) {
+    console.error('Failed to read notes model setting', e);
+  }
+}
+
+const speechModelKey = ref<string>(DEFAULT_SPEECH_MODEL_KEY);
+
+async function loadSpeechModel() {
+  try {
+    speechModelKey.value = await getSpeechModelSetting();
+  } catch (e) {
+    console.error('Failed to read speech model setting', e);
+  }
+}
+
+/** The tick marks the model of each type that is actually in use: one speech
+ *  model transcribes, one notes model writes the notes. Holding the selection
+ *  is not enough — a local model that is not on disk cannot run, so a deleted
+ *  model loses its tick even though it stays selected, and with no other model
+ *  of that type installed the column shows no tick at all. */
+/** Whether this model could run right now: downloaded, for an on-device one;
+ *  a key stored for its provider, for a remote one. Only a usable model can be
+ *  the one in use. */
+function rowUsable(row: CatalogModel): boolean {
+  return row.runtime === 'remote' ? rowConnected(row) : rowInstalled(row);
+}
+
+function isActiveModel(row: CatalogModel): boolean {
+  if (!rowUsable(row)) return false;
+  if (row.type === 'Speech') return row.key === speechModelKey.value;
+  return (
+    !!row.notesModel && notesModelKey(row.notesModel) === notesModelKey(notesModel.value)
+  );
+}
+
+/** What the type icon announces. A remote model is called out here rather than
+ *  with a word in the row — the cloud icon carries it visually, this carries it
+ *  for a screen reader and the hover tip. */
+function modelTypeLabel(row: CatalogModel): string {
+  if (row.type === 'Speech') return 'Speech model';
+  return row.runtime === 'remote' ? 'Remote language model' : 'Language model';
+}
+
+/** Speech rows read the STT download state; every other row is a notes model. */
+function rowInstalled(row: CatalogModel): boolean {
+  return row.type === 'Speech' ? sttInstalled.value : llmInstalled.value;
+}
+
+function rowBusy(row: CatalogModel): Busy {
+  return row.type === 'Speech' ? sttBusy.value : llmBusy.value;
+}
+
+/** Text beside the size: progress while downloading, and failures — but not
+ *  "not downloaded", which the missing tick and the Install button already say. */
+function rowDetail(row: CatalogModel): string {
+  const progress = row.type === 'Speech' ? sttProgress.value : llmProgress.value;
+  return rowDetailText(rowBusy(row), progress, rowInstalled(row), unsupported.value);
+}
+
+const modelSizes = ref<ModelSizes>({ notes: null, speech: null });
+const removeTarget = ref<CatalogModel | null>(null);
+const removeError = ref('');
+
+async function loadModelSizes() {
+  try {
+    modelSizes.value = await local.modelSizes();
+  } catch (e) {
+    console.error('Failed to read model sizes', e);
+    modelSizes.value = { notes: null, speech: null };
+  }
+}
+
+function rowKind(row: CatalogModel): LocalModelKind {
+  return row.type === 'Speech' ? 'speech' : 'notes';
+}
+
+function rowSize(row: CatalogModel): string {
+  return formatModelSize(modelSizes.value[rowKind(row)]);
+}
+
+function onRemoveRow(row: CatalogModel) {
+  removeError.value = '';
+  removeTarget.value = row;
+}
+
+function cancelRemove() {
+  removeTarget.value = null;
+}
+
+async function confirmRemove() {
+  const row = removeTarget.value;
+  removeTarget.value = null;
+  if (!row) return;
+  try {
+    await local.deleteModel(rowKind(row));
+  } catch (e) {
+    // The backend refuses mid-recording and mid-download; say which, rather
+    // than leaving the row looking installed for no stated reason.
+    removeError.value = e instanceof Error ? e.message : String(e);
+  }
+  await refreshModelStatus();
+  await loadModelSizes();
+}
+
+function onInstallRow(row: CatalogModel) {
+  if (row.runtime !== 'local') return;
+  if (row.type === 'Speech') void onInstallStt();
+  else void onInstallLlm();
+}
+
+// --- Remote provider API keys ----------------------------------------------
+// A key lives in the OS keychain, reachable only from Rust; the webview learns
+// which providers have one and nothing more.
+const connectedProviders = ref<RemoteProvider[]>([]);
+const keyProvider = ref<RemoteProvider | null>(null);
+const keyInput = ref('');
+const keyError = ref('');
+const savingKey = ref(false);
+
+const keyProviderLabel = computed(() =>
+  keyProvider.value ? remoteProviderLabel(keyProvider.value) : '',
+);
+/** The caveat belongs to the model actually in use, not to every stored key:
+ *  connecting a provider you haven't selected changes nothing about notes. */
+const remoteModelInUse = computed(() => notesModel.value.kind === 'remote');
+const keychainName = computed(() =>
+  platformCapabilities.value.os === 'windows' ? 'Windows Credential Manager' : 'macOS Keychain',
+);
+
+async function loadConnectedProviders() {
+  try {
+    connectedProviders.value = await llmKeys.providers();
+  } catch (e) {
+    console.error('Failed to read stored API keys', e);
+    connectedProviders.value = [];
+  }
+}
+
+function rowProvider(row: CatalogModel): RemoteProvider | null {
+  return row.notesModel?.kind === 'remote' ? row.notesModel.provider : null;
+}
+
+function rowProviderLabel(row: CatalogModel): string {
+  const provider = rowProvider(row);
+  return provider ? remoteProviderLabel(provider) : '';
+}
+
+/** One key per provider, so every model behind it reads as connected. */
+function rowConnected(row: CatalogModel): boolean {
+  const provider = rowProvider(row);
+  return !!provider && connectedProviders.value.includes(provider);
+}
+
+function onConnectRow(row: CatalogModel) {
+  const provider = rowProvider(row);
+  if (!provider) return;
+  keyProvider.value = provider;
+  keyInput.value = '';
+  keyError.value = '';
+}
+
+function cancelKeyPrompt() {
+  keyProvider.value = null;
+  keyInput.value = '';
+  keyError.value = '';
+}
+
+async function onSaveKey() {
+  const provider = keyProvider.value;
+  if (!provider || savingKey.value) return;
+  keyError.value = '';
+  savingKey.value = true;
+  try {
+    await llmKeys.set(provider, keyInput.value);
+    // The backend accepted the write, so the provider is connected; its value
+    // is never read back to confirm it.
+    if (!connectedProviders.value.includes(provider)) {
+      connectedProviders.value = [...connectedProviders.value, provider];
+    }
+    cancelKeyPrompt();
+  } catch (e) {
+    // Keep the field (and the unsaved key) in place so a rejected paste can be
+    // corrected rather than retyped.
+    keyError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    savingKey.value = false;
+  }
+}
+
+async function onRemoveKey(row: CatalogModel) {
+  const provider = rowProvider(row);
+  if (!provider) return;
+  keyError.value = '';
+  try {
+    await llmKeys.clear(provider);
+    connectedProviders.value = connectedProviders.value.filter((p) => p !== provider);
+  } catch (e) {
+    keyError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function onRowClick(row: CatalogModel) {
+  // A model can only be put into use once it can actually run: downloaded for
+  // an on-device one, a key stored for a remote one. A click on a row that
+  // isn't there yet asks for the missing half instead of selecting it.
+  if (!rowUsable(row)) {
+    if (row.runtime === 'remote') onConnectRow(row);
+    return;
+  }
+  if (row.type === 'Speech') {
+    const previousKey = speechModelKey.value;
+    if (row.key === previousKey) return;
+    speechModelKey.value = row.key;
+    try {
+      await setSpeechModelSetting(row.key);
+    } catch (e) {
+      console.error('Failed to persist speech model', e);
+      speechModelKey.value = previousKey;
+    }
+    return;
+  }
+  if (!row.notesModel) return;
+  const previous = notesModel.value;
+  notesModel.value = row.notesModel;
+  try {
+    await setNotesModelSetting(row.notesModel);
+  } catch (e) {
+    console.error('Failed to persist notes model', e);
+    notesModel.value = previous;
+  }
+}
+
 const backendOptions = [
   { value: 'ariso', label: 'ariso.ai' },
   { value: 'local', label: 'Local' },
@@ -691,6 +1311,8 @@ async function selectBackend(next: 'ariso' | 'local') {
 
 async function afterSwitchToLocal() {
   await refreshModelStatus();
+  await loadModelSizes();
+  await loadConnectedProviders();
   // First time only: ask before fetching the (large) on-device models.
   const prompted = await hasPromptedLocalModels().catch(() => true);
   if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
@@ -754,6 +1376,7 @@ async function onInstallStt() {
   try {
     await local.downloadStt();
     await refreshModelStatus();
+    await loadModelSizes();
     sttBusy.value = 'idle';
   } catch (e) {
     console.error('STT model download failed', e);
@@ -767,6 +1390,7 @@ async function onInstallLlm() {
   try {
     await local.downloadLlm();
     await refreshModelStatus();
+    await loadModelSizes();
     llmBusy.value = 'idle';
   } catch (e) {
     console.error('LLM model download failed', e);
@@ -805,12 +1429,6 @@ const showModelBanner = computed(() =>
   ),
 );
 
-const sttStatusText = computed(() =>
-  unsupported.value ? 'Unsupported on this platform' : rowStatusText(sttBusy.value, sttProgress.value),
-);
-const llmStatusText = computed(() =>
-  unsupported.value ? 'Unsupported on this platform' : rowStatusText(llmBusy.value, llmProgress.value),
-);
 
 const checking = ref(false);
 const autoCheck = ref(true);
@@ -1096,6 +1714,12 @@ onMounted(async () => {
     console.error('Failed to read backend setting; defaulting to Ariso', e);
   }
   if (backend.value === 'local') await refreshModelStatus();
+  await loadNotesModel();
+  await loadSpeechModel();
+  if (backend.value === 'local') await loadModelSizes();
+  // Ariso generates notes server-side, so it needs no provider keys — and must
+  // not touch the keychain to find that out.
+  if (backend.value === 'local') await loadConnectedProviders();
   await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited
@@ -1358,15 +1982,342 @@ async function refreshCalendarAccess() {
   color: #1c1c1c;
 }
 
+/* `table-layout: fixed` so the column widths below are binding. Under the
+   default `auto`, a width is only a suggestion — the column still grows to its
+   widest content, which is exactly the jumping this is meant to stop. */
+/* Row height (a 28px icon button, 10px of padding either side, and the 1px
+   rule) and the header's own height — both measured in the running app — so
+   the box is sized in whole rows and the sixth one is never clipped. */
+.model-table-scroll {
+  max-height: calc(var(--model-visible-rows, 6) * var(--model-row-height) + var(--model-head-height));
+  overflow-y: auto;
+  /* The sticky header needs a positioned scroll container of its own. */
+  position: relative;
+  /* The wrapper reaches the card's edge (see .model-list); the rows keep their
+     inset so the table's right edge lands where it always did. */
+  padding-right: 16px;
+  /* No `scrollbar-width` here, deliberately: setting it to any value (even
+     `thin`) puts this webview's scroller in legacy mode — a permanent 13-17px
+     bar that also ignores the ::-webkit-scrollbar width below. Measured in the
+     running app: plain scroller 17px, `thin` 13px, pseudo-element only 6px. */
+}
+
+/* An overlay-style bar of our own: this webview draws a persistent scrollbar
+   for inner scrollers whatever macOS's Show-scroll-bars setting says, so the
+   thumb is transparent until the pointer is over the list. The 6px gutter is
+   reserved either way, so revealing it never shifts the rows. */
+/* The native bar is hidden outright; `.model-scrollbar` below replaces it. */
+.model-table-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.model-list {
+  /* Shared by the scroller's max-height and the track's inset, so the bar can
+     never disagree with the rows about where the list starts. */
+  --model-row-height: 49px;
+  --model-head-height: 27px;
+  position: relative;
+  /* Past the card's 16px padding, so the list's right edge — and the scrollbar
+     pinned to it — is the section's own edge. */
+  margin-right: -16px;
+}
+
+/* Sits in the card's own right padding, so it overlays nothing and shifts no
+   rows when it appears. */
+.model-scrollbar {
+  position: absolute;
+  top: var(--model-head-height);
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  /* The track stays inert so it never steals a click meant for a row; the
+     thumb takes pointer events back so it can be dragged. */
+  pointer-events: none;
+}
+
+.model-scrollbar--visible {
+  opacity: 1;
+}
+
+.model-scrollbar__thumb {
+  width: 100%;
+  border-radius: 3px;
+  background: #c9c9c9;
+  pointer-events: auto;
+  cursor: default;
+  /* A drag that wanders off the thumb must not select the rows behind it. */
+  user-select: none;
+  touch-action: none;
+}
+
+.model-scrollbar__thumb:hover {
+  background: #b0b0b0;
+}
+
+.model-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.model-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: #6f6f6f;
+  padding: 0 8px 8px;
+  border-bottom: 1px solid #e5e6e3;
+  /* Stays put while the rows scroll under it. Opaque, or rows show through. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #ffffff;
+}
+
+.model-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid #f1f1ef;
+  color: #1c1c1c;
+  vertical-align: middle;
+}
+
+.model-table tr:last-child td {
+  border-bottom: none;
+}
+
+.model-row--selectable {
+  cursor: pointer;
+}
+
+.model-row--selectable:hover td {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.model-row--active td {
+  background: #f5f5f7;
+}
+
+/* The cells stay real table-cells — `display: flex` on a <td> drops it out of
+   table layout, so its height stops tracking the rest of the row. The flex row
+   lives on an inner span instead. */
+.cell-flex {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.cell-flex--end {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* The name cell's flex row is a real <button> for keyboard access — strip the
+   native button chrome so it still reads as plain row text. */
+button.cell-flex {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-name {
+  /* Flush with the card's own padding — no extra inset before the name. */
+  padding-left: 0;
+}
+
+/* The tick rides the right edge of the Name column rather than trailing the
+   text, so it lands in the same place on every row instead of wherever that
+   row's name happens to end. */
+.model-name button.cell-flex {
+  width: 100%;
+}
+
+.model-name .model-tick {
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+/* Qualified with the table + element selector so it outranks `.model-table th`
+   (which sets text-align: left and would otherwise win on specificity). */
+.model-table th.model-runtime-head {
+  text-align: center;
+}
+
+/* Wide enough for the "Type" header itself (~30px at 12px, plus the cell's
+   8px padding either side) — at the icon's own 32px the label was clipped.
+   Name carries no width and absorbs whatever these two leave. */
+.model-table th.model-type-head,
+.model-table td.model-type {
+  width: 52px;
+  white-space: nowrap;
+}
+
+/* Runtime is pinned instead of content-sized: its text changes while a model
+   downloads ("Starting…" → "9%" → "90%"), and a content-sized column would
+   resize on every tick, dragging the Type column sideways with it. 134px is
+   what is left once Name fits its longest entry ("Parakeet TDT 0.6B v3" plus
+   its in-use tick) in this fixed-width window — enough for size + status +
+   the icon button, with the long status strings wrapping instead. */
+.model-table th.model-runtime-head,
+.model-table td.model-runtime {
+  width: 134px;
+}
+
+.model-table th:first-child {
+  padding-left: 0;
+}
+
+/* Only renders when the model is actually in use. `margin-left: auto` pushes
+   it to the far end of the name cell rather than letting it sit against the
+   name, so the ticks line up down the column whatever the names are. */
+.model-tick {
+  display: inline-block;
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #2e8b4f;
+}
+
+.model-type {
+  color: #6f6f6f;
+}
+
+.model-type-icon {
+  display: inline-flex;
+  cursor: help;
+}
+
+.model-type-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.model-type-icon:focus-visible + .help-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* The Settings window is a fixed 450px and `.settings` clips on both axes
+   (it scrolls vertically), so a left-anchored 260px bubble would run off the
+   right edge from this middle column. Center it on the icon and narrow it:
+   at this width that keeps both edges inside the card. */
+/* Positioned against the viewport, so no ancestor's overflow can clip it, and
+   drawn above the icon it describes. */
+.help-tooltip.help-tooltip--floating {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 200px;
+  transform: translate(-50%, calc(-100% - 8px));
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Icon-only row actions (delete, install). The native title supplies the tip,
+   so neither button spells its verb out in the row. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Never let a long status beside it shrink the hit target: as a flex item it
+     would otherwise compress well below 28px. */
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #d6d6d6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #6f6f6f;
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.icon-btn:hover:not(:disabled),
+.icon-btn:focus-visible:not(:disabled) {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Install is not destructive, so it does not take the delete button's red. */
+.icon-btn--install:hover:not(:disabled),
+.icon-btn--install:focus-visible:not(:disabled) {
+  border-color: #1c1c1c;
+  color: #1c1c1c;
+}
+
+.model-runtime {
+  white-space: nowrap;
+}
+
+.model-size {
+  color: #6f6f6f;
+  font-variant-numeric: tabular-nums;
+}
+
 .model-controls {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
+/* The one thing in this column that changes on its own, so it gets a slot at
+   least as wide as its widest progress text ("Starting…"). Every percentage is
+   narrower, so the slot does not resize as the download advances — the text
+   stays pinned to the same right edge the size occupies when idle. The longer
+   one-shot states ("Download failed", "Unsupported on this platform") exceed
+   the slot and wrap instead of widening the column. */
 .model-status {
+  min-width: 54px;
+  text-align: right;
+  white-space: normal;
   font-size: 13px;
   color: #6f6f6f;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The key field sits under the table, so it gets the table's own gutter. */
+.key-prompt {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #ececec;
+}
+
+.key-prompt__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.key-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #d6d6d6;
+  border-radius: 6px;
+  background: #ffffff;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1c1c1c;
 }
 
 .model-ready {
@@ -1421,6 +2372,9 @@ async function refreshCalendarAccess() {
 
 /* Description is revealed only when the "?" is hovered or keyboard-focused. */
 .help-tooltip {
+  /* Always wrap inside the bubble: a tooltip can sit inside a nowrap cell
+     (the models table) and would otherwise inherit it and overflow. */
+  white-space: normal;
   position: absolute;
   top: calc(100% + 6px);
   left: 0;

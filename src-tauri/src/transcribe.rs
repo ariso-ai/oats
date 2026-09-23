@@ -173,20 +173,70 @@ pub async fn run_notes(transcript: &Path, models: &Path) -> Result<NotesOutput, 
         return Err(format!("ariso-stt notes failed: {}", stderr.trim()));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    // Tolerant parse: prefer the {title, notes} JSON contract; fall back to
-    // treating raw stdout as the notes body (non-JSON / older sidecar binary).
+    Ok(parse_notes_payload(&stdout))
+}
+
+/// Tolerant parse of whatever produced the notes: prefer the `{title, notes}`
+/// JSON contract; fall back to treating the text as the notes body. That
+/// covers an older sidecar binary and a remote model that answered in prose
+/// despite being asked for JSON — a titleless note beats a failed one.
+pub fn parse_notes_payload(raw: &str) -> NotesOutput {
+    let trimmed = strip_code_fence(raw.trim());
     match serde_json::from_str::<NotesJson>(trimmed) {
-        Ok(j) => Ok(NotesOutput {
+        Ok(j) => NotesOutput {
             title: normalize_title(&j.title),
             notes: j.notes.trim().to_string(),
-        }),
-        Err(_) => Ok(NotesOutput {
+        },
+        Err(_) => NotesOutput {
             title: None,
             notes: trimmed.to_string(),
-        }),
+        },
     }
 }
+
+/// Unwrap a ```json … ``` fence, which chat models add even when told not to.
+fn strip_code_fence(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("```") else {
+        return text;
+    };
+    let Some(body) = rest.split_once('\n').map(|(_lang, body)| body) else {
+        return text;
+    };
+    body.trim_end()
+        .strip_suffix("```")
+        .map(str::trim)
+        .unwrap_or(text)
+}
+
+/// Generate notes with whichever model the user selected: the on-device
+/// sidecar, or a provider's API with the user's own key.
+///
+/// The remote branch is the Local backend's only outbound call, and it exists
+/// only because the user chose a remote model and stored a key for it. A
+/// missing key fails here rather than sending an unauthenticated request.
+async fn generate_notes(
+    transcript_path: &Path,
+    models: &Path,
+    model: &crate::notes_model::NotesModelId,
+) -> Result<NotesOutput, String> {
+    match model {
+        // One on-device model ships, and the sidecar locates it from `models`;
+        // a second one would pass its id through here.
+        crate::notes_model::NotesModelId::Local { .. } => run_notes(transcript_path, models).await,
+        crate::notes_model::NotesModelId::Remote { provider, id } => {
+            let key = crate::credentials::get_api_key(*provider)?.ok_or_else(|| {
+                format!(
+                    "No API key stored for {} — add one in Settings.",
+                    provider.as_str()
+                )
+            })?;
+            let transcript = std::fs::read_to_string(transcript_path)
+                .map_err(|e| format!("read transcript: {e}"))?;
+            crate::remote_notes::run_remote_notes(&transcript, *provider, id, &key).await
+        }
+    }
+}
+
 
 /// Whether the transcript's on-disk bytes differ between two reads. Used to
 /// detect that a later append/regeneration superseded an in-flight notes run.
@@ -289,7 +339,10 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
         let _ = storage::write_meta(&dir, &meta);
         return;
     }
-    let outcome = run_notes(&transcript_path, &models).await;
+    // Which model writes these notes is fixed for the whole run: a setting
+    // change mid-flight applies to the next recording, not this one.
+    let model = crate::notes_model::selected();
+    let outcome = generate_notes(&transcript_path, &models, &model).await;
     if transcript_changed(&before, &std::fs::read(&transcript_path).ok()) {
         return;
     }
@@ -315,6 +368,7 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
         Ok(output) if output.notes.trim().is_empty() => {
             eprintln!("notes generation: empty output");
             meta.notes_error = Some("notes generation produced empty output".to_string());
+            meta.notes_model = None;
             let _ = storage::write_meta(&dir, &meta);
         }
         Ok(output) => {
@@ -324,10 +378,14 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
                 // its note stays alongside its audio.
                 None => {
                     match storage::write_notes(&dir, &output.notes) {
-                        Ok(()) => meta.notes_error = None,
+                        Ok(()) => {
+                            meta.notes_error = None;
+                            meta.notes_model = Some(crate::notes_model::tag(&model));
+                        }
                         Err(e) => {
                             eprintln!("write notes: {e}");
                             meta.notes_error = Some(e);
+                            meta.notes_model = None;
                         }
                     }
                     let _ = storage::write_meta(&dir, &meta);
@@ -335,9 +393,13 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
                 }
             };
             let basename = audio_file.strip_suffix(".mp3").unwrap_or(audio_file.as_str());
+            // Set before rendering: the note's own frontmatter names the model
+            // that wrote it, so a reader need not open meta.json.
+            meta.notes_model = Some(crate::notes_model::tag(&model));
             if let Err(e) = crate::vault::write_note(basename, &meta, &audio_file, &output.notes) {
                 eprintln!("write vault note: {e}");
                 meta.notes_error = Some(e);
+                meta.notes_model = None;
                 let _ = storage::write_meta(&dir, &meta);
                 return;
             }
@@ -357,6 +419,8 @@ async fn process_notes(dir: PathBuf, models: PathBuf, meta: RecordingMeta) {
             } else {
                 storage::MODELS_NOT_READY_NOTES_ERROR.to_string()
             });
+            // No notes were written, so no model may claim them.
+            meta.notes_model = None;
             let _ = storage::write_meta(&dir, &meta);
         }
     }
@@ -700,6 +764,7 @@ async fn fresh_recording_core(
         notes_in_progress: false,
         title_is_default,
         preview: None,
+    notes_model: None,
     };
     storage::write_meta(&dir, &meta)?;
 
@@ -822,6 +887,7 @@ fn save_failed_clip(
                 notes_in_progress: false,
                 title_is_default: false,
                 preview: None,
+            notes_model: None,
             };
             let _ = storage::write_meta(&dir, &meta);
         }
@@ -1626,6 +1692,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1686,6 +1753,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1733,6 +1801,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: true,
             preview: None,
+        notes_model: None,
         }).unwrap();
 
         let (res, notes_handle) = finalize_core(
@@ -1988,6 +2057,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2021,6 +2091,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2045,6 +2116,7 @@ mod tests {
             notes_error: Some("prior notes failure".into()),
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2072,6 +2144,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: true, preview: None,
+            notes_model: None,
         }
     }
 
@@ -2252,6 +2325,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2689,6 +2763,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2859,6 +2934,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2886,6 +2962,7 @@ mod tests {
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
             notes_in_progress: false, title_is_default: false, preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
 
@@ -2904,6 +2981,143 @@ mod tests {
 
         assert!(!dir.join("ari-note.md").exists(), "superseded notes must be discarded");
         assert!(storage::read_meta(&dir).unwrap().notes_error.is_none(), "no stale error written");
+    }
+
+    /// A recording directory with a transcript, ready for a notes run.
+    fn ready_for_notes(root: &std::path::Path, id: &str) -> (PathBuf, RecordingMeta) {
+        let dir = storage::create_recording_dir(root, id).unwrap();
+        std::fs::write(dir.join("transcript.md"), b"Alice: ship it.\nBob: agreed.").unwrap();
+        let meta = RecordingMeta {
+            id: id.into(),
+            title: "T".into(),
+            created_at: "2026-06-02T10:00:00Z".into(),
+            duration_seconds: 5,
+            status: RecordingStatus::Done,
+            language: None,
+            participants: vec![],
+            model_version: None,
+            error: None,
+            notes_error: None,
+            last_clip_end_at: None,
+            audio_file: None,
+            notes_written: None,
+            notes_in_progress: true,
+            title_is_default: false,
+            preview: None,
+            notes_model: None,
+        };
+        storage::write_meta(&dir, &meta).unwrap();
+        (dir, meta)
+    }
+
+    #[tokio::test]
+    async fn notes_from_the_on_device_model_are_tagged_as_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (dir, meta) = ready_for_notes(root, "2026-06-02T10-00-00Z");
+        let stub = write_stub(
+            root,
+            StubBehavior::notes_only(StubOutcome::success("# Notes")),
+        );
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub) };
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+
+        process_notes(dir.clone(), storage::models_dir(root), meta).await;
+        unsafe { std::env::remove_var("ARISO_STT_BIN") };
+
+        let written = storage::read_meta(&dir).unwrap();
+        assert_eq!(
+            written.notes_model.as_deref(),
+            Some("local:gemma-3-1b-it-qat-4bit")
+        );
+        assert!(written.notes_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_remote_model_writes_the_notes_and_signs_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (dir, meta) = ready_for_notes(root, "2026-06-02T10-00-00Z");
+        crate::remote_notes::testing::install_crypto_provider();
+        let (base, server) = crate::remote_notes::testing::stub_provider(
+            200,
+            r###"{"choices":[{"message":{"content":"{\"title\":\"T\",\"notes\":\"## Summary\"}"}}]}"###,
+        )
+        .await;
+        crate::remote_notes::testing::set_base_url(&base);
+        crate::credentials::testing::set_key(crate::credentials::RemoteProvider::OpenAi, "sk-test");
+        crate::notes_model::set_selected(crate::notes_model::NotesModelId::Remote {
+            provider: crate::credentials::RemoteProvider::OpenAi,
+            id: "gpt-5.1".into(),
+        });
+
+        process_notes(dir.clone(), storage::models_dir(root), meta).await;
+        let seen = server.await.unwrap();
+        crate::remote_notes::testing::clear_base_url();
+        crate::credentials::testing::clear_keys();
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+
+        // The transcript went to the provider, and the note records which model
+        // wrote it.
+        let sent = serde_json::to_string(&seen.body).unwrap();
+        assert!(sent.contains("Alice: ship it."), "transcript was not sent");
+        let written = storage::read_meta(&dir).unwrap();
+        assert_eq!(written.notes_model.as_deref(), Some("openai:gpt-5.1"));
+        assert!(written.notes_error.is_none(), "{:?}", written.notes_error);
+    }
+
+    #[tokio::test]
+    async fn a_remote_model_with_no_key_fails_before_any_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (dir, meta) = ready_for_notes(root, "2026-06-02T10-00-00Z");
+        crate::credentials::testing::clear_keys();
+        // Point the module at an address nothing is listening on: reaching the
+        // network at all would fail the test with a connection error instead.
+        crate::remote_notes::testing::set_base_url("http://127.0.0.1:1");
+        crate::notes_model::set_selected(crate::notes_model::NotesModelId::Remote {
+            provider: crate::credentials::RemoteProvider::Anthropic,
+            id: "claude-haiku-4-5".into(),
+        });
+
+        process_notes(dir.clone(), storage::models_dir(root), meta).await;
+        crate::remote_notes::testing::clear_base_url();
+        crate::credentials::testing::clear_keys();
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+
+        let written = storage::read_meta(&dir).unwrap();
+        let err = written.notes_error.expect("a missing key must be reported");
+        assert!(err.to_lowercase().contains("key"), "unhelpful error: {err}");
+        assert!(written.notes_model.is_none(), "no model wrote these notes");
+        assert!(!written.notes_in_progress);
+        // The transcript is the expensive artifact; it survives a notes failure.
+        assert!(dir.join("transcript.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_remote_run_leaves_no_model_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (dir, meta) = ready_for_notes(root, "2026-06-02T10-00-00Z");
+        crate::remote_notes::testing::install_crypto_provider();
+        let (base, server) =
+            crate::remote_notes::testing::stub_provider(500, r###"{"error":"boom"}"###).await;
+        crate::remote_notes::testing::set_base_url(&base);
+        crate::credentials::testing::set_key(crate::credentials::RemoteProvider::OpenAi, "sk-test");
+        crate::notes_model::set_selected(crate::notes_model::NotesModelId::Remote {
+            provider: crate::credentials::RemoteProvider::OpenAi,
+            id: "gpt-5.1".into(),
+        });
+
+        process_notes(dir.clone(), storage::models_dir(root), meta).await;
+        let _ = server.await;
+        crate::remote_notes::testing::clear_base_url();
+        crate::credentials::testing::clear_keys();
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+
+        let written = storage::read_meta(&dir).unwrap();
+        assert!(written.notes_error.is_some());
+        assert!(written.notes_model.is_none(), "a failed run wrote no notes");
     }
 
     #[tokio::test]
@@ -3001,6 +3215,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 User Title.mp3", Some("Generated".into()));
         assert_eq!(meta.title, "User Title");
@@ -3026,6 +3241,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: true,
             preview: None,
+        notes_model: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", None);
         assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
@@ -3051,6 +3267,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: true,
             preview: None,
+        notes_model: None,
         };
         maybe_apply_generated_title(&mut meta, "2026-06-02 default.mp3", Some("   ".to_string()));
         assert_eq!(meta.title, "Mon Jul 6 @ 959AM");
@@ -3159,6 +3376,7 @@ mod tests {
             title_is_default: true,
             notes_in_progress: false,
             preview: None,
+        notes_model: None,
         };
         storage::write_meta(&dir, &meta).unwrap();
         dir

@@ -929,6 +929,134 @@ async fn download_model_bundles(
     Ok(())
 }
 
+// --- Size on disk and removal ----------------------------------------------
+
+/// Which installed local model a size or delete request names. A closed enum,
+/// never a path or free-text id, so a webview cannot point these commands at a
+/// directory of its own choosing (`oats-security` surface #2).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalModelKind {
+    Notes,
+    Speech,
+}
+
+/// Bytes each local model occupies, or `None` for one that is not installed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSizes {
+    pub notes: Option<u64>,
+    pub speech: Option<u64>,
+}
+
+/// Install directories of this platform's speech bundles (ASR + diarization).
+fn speech_dirs(root: &Path) -> Vec<PathBuf> {
+    let models = crate::storage::models_dir(root);
+    let bundles = if cfg!(target_os = "windows") {
+        windows_stt_bundles()
+    } else {
+        macos_stt_bundles()
+    };
+    bundles
+        .iter()
+        .map(|bundle| models.join(&bundle.install_path))
+        .collect()
+}
+
+fn model_dirs(root: &Path, kind: LocalModelKind) -> Vec<PathBuf> {
+    match kind {
+        LocalModelKind::Notes => vec![llm_dir(root)],
+        LocalModelKind::Speech => speech_dirs(root),
+    }
+}
+
+/// Total bytes under `dir`. Symlinks are counted as neither file nor directory:
+/// following one could walk (or, for a caller that deletes, reach) somewhere
+/// outside the models tree entirely. Unreadable entries are skipped rather than
+/// failing the walk — a displayed size is advisory, not a correctness gate.
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        // `DirEntry::metadata` does not traverse symlinks.
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size(&entry.path()));
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+/// What this model occupies on disk, or `None` when none of its directories
+/// exist — which is how "not installed" is distinguished from "installed but
+/// empty", so the UI can show a dash rather than `0 MB`.
+pub fn model_size(root: &Path, kind: LocalModelKind) -> Option<u64> {
+    let dirs = model_dirs(root, kind);
+    if !dirs.iter().any(|dir| dir.exists()) {
+        return None;
+    }
+    Some(dirs.iter().map(|dir| dir_size(dir)).sum())
+}
+
+/// Remove a model's files, readiness marker included, so the next recording
+/// attempt re-downloads instead of failing on a half-present model. Idempotent:
+/// removing a model that is not installed succeeds and does nothing.
+pub fn delete_model(root: &Path, kind: LocalModelKind) -> Result<(), String> {
+    for dir in model_dirs(root, kind) {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| format!("remove {}: {e}", dir.display()))?;
+        }
+    }
+    // The notes marker lives inside `llm/<name>/`, so it went with the
+    // directory above; the speech manifest sits at the models root.
+    if kind == LocalModelKind::Speech {
+        let manifest = manifest_path(root);
+        if manifest.exists() {
+            std::fs::remove_file(&manifest).map_err(|e| format!("remove manifest: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Sizes for the Settings model list. Reads the filesystem only — never the
+/// network — so opening Settings in Local mode stays offline.
+#[tauri::command]
+pub fn local_model_sizes() -> Result<ModelSizes, String> {
+    let root = crate::storage::ariso_root()?;
+    Ok(ModelSizes {
+        notes: model_size(&root, LocalModelKind::Notes),
+        speech: model_size(&root, LocalModelKind::Speech),
+    })
+}
+
+/// Delete one local model's files. Refused mid-recording (that session still
+/// needs its models to transcribe and write notes) and while the same model is
+/// downloading — the download guard doubles as the mutual-exclusion lock, so a
+/// delete can never race a half-written install.
+#[tauri::command]
+pub fn delete_local_model(app: tauri::AppHandle, kind: LocalModelKind) -> Result<(), String> {
+    use tauri::Manager as _;
+    if app
+        .state::<crate::recording_state::RecordingState>()
+        .is_active()
+    {
+        return Err("Can't remove a model while a recording is in progress.".into());
+    }
+    let flag = match kind {
+        LocalModelKind::Notes => &LLM_DOWNLOAD_IN_PROGRESS,
+        LocalModelKind::Speech => &STT_DOWNLOAD_IN_PROGRESS,
+    };
+    let _guard = DownloadGuard::acquire(flag)
+        .ok_or_else(|| "That model is still downloading.".to_string())?;
+    let root = crate::storage::ariso_root()?;
+    delete_model(&root, kind)
+}
+
 /// Opaque download timestamp stored in `manifest.json`; a `unix:<secs>` string
 /// suffices and avoids pulling in a date crate.
 fn now_marker() -> String {
@@ -958,6 +1086,99 @@ pub(crate) fn mark_llm_ready_for_test(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write `bytes` worth of file at `path`, creating parents.
+    fn write_bytes(path: &std::path::Path, bytes: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![0u8; bytes]).unwrap();
+    }
+
+    fn install_notes(root: &Path, bytes: usize) {
+        write_bytes(&llm_dir(root).join("model.safetensors"), bytes);
+        std::fs::write(llm_marker_path(root), llm_model_version()).unwrap();
+    }
+
+    fn install_speech(root: &Path, bytes_each: usize) {
+        for dir in speech_dirs(root) {
+            write_bytes(&dir.join("weights.bin"), bytes_each);
+        }
+        write_manifest(root, "2026-09-20T00:00:00Z").unwrap();
+    }
+
+    #[test]
+    fn model_size_is_none_when_nothing_is_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(model_size(root, LocalModelKind::Notes), None);
+        assert_eq!(model_size(root, LocalModelKind::Speech), None);
+    }
+
+    #[test]
+    fn model_size_totals_files_recursively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_bytes(&llm_dir(root).join("model.safetensors"), 1000);
+        write_bytes(&llm_dir(root).join("nested").join("extra.bin"), 24);
+        assert_eq!(model_size(root, LocalModelKind::Notes), Some(1024));
+    }
+
+    #[test]
+    fn model_size_sums_every_speech_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dirs = speech_dirs(root);
+        assert!(dirs.len() >= 2, "expected asr + diarization bundles");
+        install_speech(root, 100);
+        let total = model_size(root, LocalModelKind::Speech).unwrap();
+        assert!(total >= (dirs.len() as u64) * 100);
+    }
+
+    #[test]
+    fn deleting_notes_clears_its_readiness_and_leaves_speech_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        install_notes(root, 10);
+        install_speech(root, 10);
+        assert!(llm_is_ready(root) && is_ready(root));
+
+        delete_model(root, LocalModelKind::Notes).unwrap();
+
+        assert!(!llm_is_ready(root));
+        assert_eq!(model_size(root, LocalModelKind::Notes), None);
+        assert!(is_ready(root), "speech must survive a notes delete");
+    }
+
+    #[test]
+    fn deleting_speech_clears_its_manifest_and_leaves_notes_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        install_notes(root, 10);
+        install_speech(root, 10);
+
+        delete_model(root, LocalModelKind::Speech).unwrap();
+
+        assert!(!is_ready(root));
+        assert_eq!(model_size(root, LocalModelKind::Speech), None);
+        assert!(llm_is_ready(root), "notes must survive a speech delete");
+    }
+
+    #[test]
+    fn deleting_a_model_that_is_not_installed_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        delete_model(root, LocalModelKind::Notes).unwrap();
+        delete_model(root, LocalModelKind::Speech).unwrap();
+    }
+
+    #[test]
+    fn deleting_notes_twice_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        install_notes(root, 10);
+        delete_model(root, LocalModelKind::Notes).unwrap();
+        delete_model(root, LocalModelKind::Notes).unwrap();
+        assert!(!llm_is_ready(root));
+    }
 
     #[test]
     fn not_downloaded_then_ready_after_manifest() {

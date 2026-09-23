@@ -2522,6 +2522,7 @@ pub fn write_recording_stub(
         notes_in_progress: false,
         title_is_default: true,
         preview: None,
+    notes_model: None,
     };
     crate::storage::write_meta(dir, &meta)
 }
@@ -3548,6 +3549,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         }
     }
 
@@ -4126,6 +4128,7 @@ mod tests {
             notes_in_progress: false,
             title_is_default: false,
             preview: None,
+        notes_model: None,
         };
         crate::storage::write_meta(&dir, &meta).unwrap();
         std::fs::write(dir.join("transcript.md"), b"t").unwrap();

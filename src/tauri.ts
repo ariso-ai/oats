@@ -2,6 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { parseNotesModel, type NotesModelId, type RemoteProvider } from './notesModels';
+import { parseSpeechModelKey } from './modelCatalog';
+
+export type { NotesModelId, RemoteProvider };
 
 // Broadcast by the backend to every window whenever the stored session changes:
 // sign-in or sign-out from any window, or a native path clearing a session the
@@ -399,6 +403,15 @@ export interface LocalCheckpointResult {
   stale: boolean;
 }
 
+/** Which downloadable local model a size/delete call names. Mirrors the Rust
+ *  `LocalModelKind` — a closed set, never a path. */
+export type LocalModelKind = 'notes' | 'speech';
+
+export interface ModelSizes {
+  notes: number | null;
+  speech: number | null;
+}
+
 export interface ModelStatus {
   state: 'not_downloaded' | 'downloading' | 'ready' | 'error' | 'unsupported';
   version?: string;
@@ -549,8 +562,35 @@ export const local = {
   downloadLlm(): Promise<void> {
     return invoke('download_local_llm');
   },
+  /** Bytes each local model occupies; `null` for one that isn't installed. */
+  modelSizes(): Promise<ModelSizes> {
+    return invoke<ModelSizes>('local_model_sizes');
+  },
+  /** Delete a local model's files. Rejects while recording or mid-download. */
+  deleteModel(kind: LocalModelKind): Promise<void> {
+    return invoke('delete_local_model', { kind });
+  },
   openLibraryWindow(): Promise<void> {
     return invoke('create_library_window');
+  },
+};
+
+/** The user's own API keys for the remote notes models, kept by the Rust
+ *  `credentials` module in the OS keychain.
+ *
+ *  There is deliberately no read: a key's value never comes back to a webview.
+ *  The UI only needs to know which providers have one. */
+export const llmKeys = {
+  /** Providers with a key stored — everything Settings needs to render
+   *  "Connected" without handling a secret. */
+  providers(): Promise<RemoteProvider[]> {
+    return invoke<RemoteProvider[]>('llm_api_key_providers');
+  },
+  set(provider: RemoteProvider, key: string): Promise<void> {
+    return invoke('set_llm_api_key', { provider, key });
+  },
+  clear(provider: RemoteProvider): Promise<void> {
+    return invoke('clear_llm_api_key', { provider });
   },
 };
 
@@ -613,6 +653,34 @@ export async function isOnboarded(): Promise<boolean> {
 export async function setOnboarded(value: boolean): Promise<void> {
   const store = await load('settings.json', { autoSave: true });
   await store.set('onboarded', value);
+}
+
+/** Which model generates notes on the Local backend. An unrecognized persisted
+ *  value (an older build's entry, hand-edited JSON) falls back to the default
+ *  rather than being trusted — the id reaches a model directory path. */
+export async function getNotesModelSetting(): Promise<NotesModelId> {
+  const store = await load('settings.json', { autoSave: true });
+  return parseNotesModel(await store.get<unknown>('notesModel'));
+}
+
+/** The backend owns this write. Notes generation runs detached from any window
+ *  and reads the selection from a process global that only this command
+ *  updates, so writing the store directly here would leave the two disagreeing
+ *  until the next launch. */
+export async function setNotesModelSetting(model: NotesModelId): Promise<void> {
+  return invoke('set_notes_model', { model });
+}
+
+/** Which speech model transcribes. Stored as the catalog key; an unrecognized
+ *  value falls back to the shipped default, same as the notes model. */
+export async function getSpeechModelSetting(): Promise<string> {
+  const store = await load('settings.json', { autoSave: true });
+  return parseSpeechModelKey(await store.get<unknown>('speechModel'));
+}
+
+export async function setSpeechModelSetting(key: string): Promise<void> {
+  const store = await load('settings.json', { autoSave: true });
+  await store.set('speechModel', key);
 }
 
 /** Whether the first-time "download local models?" dialog has been confirmed. */
