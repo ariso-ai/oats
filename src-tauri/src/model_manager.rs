@@ -1,3 +1,4 @@
+use crate::speech_model::SpeechModelId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -36,6 +37,8 @@ static WINDOWS_MODEL_LOCK: LazyLock<WindowsModelLock> = LazyLock::new(|| {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStatus {
+    /// Whether the *selected* speech model is ready. See `speech` below for
+    /// per-model readiness.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -44,6 +47,15 @@ pub struct ModelStatus {
     /// download status alongside the overall model status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_ready: Option<bool>,
+    /// Per speech model readiness, for every model available on this platform.
+    pub speech: Vec<SpeechModelStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechModelStatus {
+    pub id: SpeechModelId,
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,31 +168,42 @@ pub fn llm_is_ready(root: &Path) -> bool {
         .is_ok_and(|version| version.trim() == expected.as_str())
 }
 
-/// Both on-device models are downloaded and ready to record with: the STT
-/// (transcript) model AND the notes LLM. The Local backend gates recording on
-/// this — see `commands::ensure_recording_allowed`, the tray, and the
-/// mic-monitor auto-record path.
+/// Both on-device models are downloaded and ready to record with: the
+/// *selected* speech model AND the notes LLM. The Local backend gates
+/// recording on this — see `commands::ensure_recording_allowed`, the tray, and
+/// the mic-monitor auto-record path.
 pub fn local_models_ready(root: &Path) -> bool {
-    is_ready(root) && llm_is_ready(root)
+    speech_is_ready(root, crate::speech_model::selected()) && llm_is_ready(root)
 }
 
 pub fn status(root: &Path) -> ModelStatus {
     let llm_ready = Some(llm_is_ready(root));
-    if is_ready(root) {
+    let selected = crate::speech_model::selected();
+    let speech = crate::speech_model::available()
+        .into_iter()
+        .map(|id| SpeechModelStatus {
+            id,
+            ready: speech_is_ready(root, id),
+        })
+        .collect();
+    if speech_is_ready(root, selected) {
         ModelStatus {
             state: "ready".into(),
-            version: Some(
-                read_manifest(root)
+            version: Some(match selected {
+                SpeechModelId::Parakeet => read_manifest(root)
                     .map(|m| m.version)
                     .unwrap_or_else(stt_model_version),
-            ),
+                _ => speech_model_version(selected),
+            }),
             llm_ready,
+            speech,
         }
     } else {
         ModelStatus {
             state: "not_downloaded".into(),
             version: None,
             llm_ready,
+            speech,
         }
     }
 }
@@ -223,20 +246,39 @@ pub fn local_model_status() -> Result<ModelStatus, String> {
             state: "unsupported".into(),
             version: None,
             llm_ready: Some(false),
+            speech: vec![],
         });
     }
     let root = crate::storage::ariso_root()?;
     Ok(status(&root))
 }
 
-/// Download and verify the STT models from the R2 mirror, then write the
-/// readiness manifest. See `download_model_bundles` for the integrity model. A
-/// guard serializes against a concurrent STT download. Platform selection here
-/// chooses distribution metadata only; inference remains inside each sidecar.
+/// Progress payload for `model://stt/progress`: which speech model is
+/// downloading and how far along it is, so a download of a non-selected model
+/// (e.g. queued from the model picker) doesn't get misread as progress on the
+/// selected one.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SttProgress {
+    model: SpeechModelId,
+    fraction: f64,
+}
+
+/// Download and verify one speech model's bundles from the R2 mirror, then
+/// write its readiness marker. `model` defaults to the selected speech model.
+/// See `download_model_bundles` for the integrity model. Every speech download
+/// shares one guard: models can share on-disk directories (the diarizer), and
+/// two concurrent downloads would race on its `.part` files.
 #[tauri::command]
-pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn download_local_stt(app: tauri::AppHandle, model: Option<SpeechModelId>) -> Result<(), String> {
     if !(cfg!(target_os = "macos") || cfg!(target_os = "windows")) {
         let msg = "Local STT is not supported on this platform".to_string();
+        let _ = app.emit("model://stt/error", msg.clone());
+        return Err(msg);
+    }
+    let model = model.unwrap_or_else(crate::speech_model::selected);
+    if !model.is_available() {
+        let msg = "That speech model isn't available on this platform".to_string();
         let _ = app.emit("model://stt/error", msg.clone());
         return Err(msg);
     }
@@ -247,29 +289,27 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     let root = crate::storage::ariso_root()?;
     let models = crate::storage::models_dir(&root);
     // Clear any stale readiness marker before (re)downloading: an interrupted
-    // run must not leave `manifest.json` claiming the models are ready. It is
+    // run must not leave the marker claiming this model is ready. It is
     // rewritten only after every file downloads and verifies.
-    if let Err(error) = std::fs::remove_file(manifest_path(&root))
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
+    if let Err(error) = clear_speech_marker(&root, model) {
         return Err(format!("invalidate STT readiness marker: {error}"));
     }
 
     let app2 = app.clone();
-    let (cdn_base, bundles) = if cfg!(target_os = "windows") {
-        (WINDOWS_MODEL_LOCK.cdn_base.clone(), windows_stt_bundles())
+    let cdn_base = if cfg!(target_os = "windows") {
+        WINDOWS_MODEL_LOCK.cdn_base.clone()
     } else {
-        (MODELS_CDN_BASE.to_string(), macos_stt_bundles())
+        MODELS_CDN_BASE.to_string()
     };
-    let result = download_model_bundles(&cdn_base, &models, &bundles, &move |f| {
-        let _ = app2.emit("model://stt/progress", f);
+    let result = download_model_bundles(&cdn_base, &models, &speech_bundles(model), &move |fraction| {
+        let _ = app2.emit("model://stt/progress", SttProgress { model, fraction });
     })
     .await
-    .and_then(|()| write_manifest(&root, &now_marker()));
+    .and_then(|()| write_speech_marker(&root, model));
 
     match result {
         Ok(()) => {
-            let _ = app.emit("model://stt/done", ());
+            let _ = app.emit("model://stt/done", model);
             Ok(())
         }
         Err(e) => {
@@ -616,6 +656,19 @@ struct ModelBundle {
     files: Option<Vec<String>>,
 }
 
+/// The FluidAudio diarizer every macOS speech model shares — Parakeet and
+/// Qwen3-ASR both assign speakers with it, so it lives in its own function
+/// rather than being duplicated across bundle lists.
+fn macos_diarizer_bundle() -> ModelBundle {
+    ModelBundle {
+        folder: "speaker-diarization".into(),
+        prefix: "1ed7a662fdc7".into(),
+        install_path: "speaker-diarization".into(),
+        manifest_sha256: "bc9cf65e567d862fa30aea1e71831d7c1d2dddcf58c22e2f90aaac28dc8baa74".into(),
+        files: None,
+    }
+}
+
 /// Retains the existing CoreML/FluidAudio installation layout expected by the
 /// Swift sidecar. The generic downloader can therefore serve both platforms
 /// without forcing a shared on-disk model representation.
@@ -629,15 +682,43 @@ fn macos_stt_bundles() -> Vec<ModelBundle> {
                 .into(),
             files: None,
         },
+        macos_diarizer_bundle(),
+    ]
+}
+
+const QWEN3_ASR_DIR: &str = "qwen3-asr-0.6b-4bit";
+const QWEN3_ALIGNER_DIR: &str = "qwen3-forcedaligner-0.6b-4bit";
+
+/// Qwen3-ASR transcribes, the forced aligner times each word, and the shared
+/// FluidAudio diarizer assigns speakers — all three must be present.
+fn macos_qwen3_bundles() -> Vec<ModelBundle> {
+    vec![
         ModelBundle {
-            folder: "speaker-diarization".into(),
-            prefix: "1ed7a662fdc7".into(),
-            install_path: "speaker-diarization".into(),
-            manifest_sha256: "bc9cf65e567d862fa30aea1e71831d7c1d2dddcf58c22e2f90aaac28dc8baa74"
-                .into(),
+            folder: QWEN3_ASR_DIR.into(),
+            prefix: "313d85018176".into(),
+            install_path: QWEN3_ASR_DIR.into(),
+            manifest_sha256: "e67be63dffa605fe9332adebeb34a4e53096c0c9a6540ef24ae53a1cb7fef5a3".into(),
             files: None,
         },
+        ModelBundle {
+            folder: QWEN3_ALIGNER_DIR.into(),
+            prefix: "2f652af86ae0".into(),
+            install_path: QWEN3_ALIGNER_DIR.into(),
+            manifest_sha256: "930c0dbb18b0ac19bb2df027f03436062487d91ec9c1ea97125d9cb30db82cdf".into(),
+            files: None,
+        },
+        macos_diarizer_bundle(),
     ]
+}
+
+/// This speech model's install bundles on the current platform. Windows ships
+/// only Parakeet; Qwen3-ASR is macOS-only (see `SpeechModelId::is_available`).
+fn speech_bundles(model: SpeechModelId) -> Vec<ModelBundle> {
+    match model {
+        SpeechModelId::Parakeet if cfg!(target_os = "windows") => windows_stt_bundles(),
+        SpeechModelId::Parakeet => macos_stt_bundles(),
+        SpeechModelId::Qwen3Asr => macos_qwen3_bundles(),
+    }
 }
 
 /// Public CDN base for the STT model mirror (same R2 host as the LLM + updater).
@@ -932,32 +1013,118 @@ pub enum LocalModelKind {
 }
 
 /// Bytes each local model occupies, or `None` for one that is not installed.
+/// `speech` covers every speech model available on this platform, keyed by id.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSizes {
     pub notes: Option<u64>,
-    pub speech: Option<u64>,
+    pub speech: std::collections::BTreeMap<SpeechModelId, Option<u64>>,
 }
 
-/// Install directories of this platform's speech bundles (ASR + diarization).
-fn speech_dirs(root: &Path) -> Vec<PathBuf> {
+/// Install directories of one speech model's bundles on this platform.
+fn speech_dirs(root: &Path, model: SpeechModelId) -> Vec<PathBuf> {
     let models = crate::storage::models_dir(root);
-    let bundles = if cfg!(target_os = "windows") {
-        windows_stt_bundles()
-    } else {
-        macos_stt_bundles()
-    };
-    bundles
+    speech_bundles(model)
         .iter()
         .map(|bundle| models.join(&bundle.install_path))
         .collect()
 }
 
-fn model_dirs(root: &Path, kind: LocalModelKind) -> Vec<PathBuf> {
-    match kind {
-        LocalModelKind::Notes => vec![llm_dir(root)],
-        LocalModelKind::Speech => speech_dirs(root),
+/// Readiness marker of a speech model that doesn't use the legacy root
+/// `manifest.json`. Parakeet keeps `manifest.json` so existing installs stay
+/// ready; newer models write `<asr dir>/.complete` holding their bundle identity.
+fn speech_marker_path(root: &Path, model: SpeechModelId) -> Option<PathBuf> {
+    match model {
+        SpeechModelId::Parakeet => None,
+        SpeechModelId::Qwen3Asr => {
+            Some(crate::storage::models_dir(root).join(QWEN3_ASR_DIR).join(".complete"))
+        }
     }
+}
+
+/// The readiness identity for one speech model. Parakeet keeps its existing
+/// product-level version string (`stt_model_version`) so old installs stay
+/// ready; every other model's identity is its bundle set's folder@prefix join.
+pub fn speech_model_version(model: SpeechModelId) -> String {
+    match model {
+        SpeechModelId::Parakeet => stt_model_version(),
+        _ => bundle_version(&speech_bundles(model)),
+    }
+}
+
+/// Write this model's readiness marker after every one of its bundle files
+/// downloads and verifies.
+fn write_speech_marker(root: &Path, model: SpeechModelId) -> Result<(), String> {
+    match speech_marker_path(root, model) {
+        None => write_manifest(root, &now_marker()),
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            std::fs::write(&path, speech_model_version(model))
+                .map_err(|e| format!("write {}: {e}", path.display()))
+        }
+    }
+}
+
+/// Invalidate this model's readiness marker before a (re)download so an
+/// interrupted run never leaves it claiming to be ready.
+fn clear_speech_marker(root: &Path, model: SpeechModelId) -> Result<(), String> {
+    let path = speech_marker_path(root, model).unwrap_or_else(|| manifest_path(root));
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("remove {}: {e}", path.display())),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `model` is downloaded and ready to transcribe with: available on
+/// this platform, its readiness marker matches its current bundle identity,
+/// and every one of its install directories exists.
+pub fn speech_is_ready(root: &Path, model: SpeechModelId) -> bool {
+    if !model.is_available() {
+        return false;
+    }
+    match speech_marker_path(root, model) {
+        None => is_ready(root),
+        Some(marker) => {
+            std::fs::read_to_string(marker).is_ok_and(|v| v.trim() == speech_model_version(model))
+                && speech_dirs(root, model).iter().all(|d| d.exists())
+        }
+    }
+}
+
+/// What this speech model occupies on disk, or `None` when none of its
+/// directories exist — which is how "not installed" is distinguished from
+/// "installed but empty", so the UI can show a dash rather than `0 MB`. A
+/// directory shared with another installed speech model (the diarizer) is
+/// still counted here: each ready model's own footprint includes what it needs.
+pub fn speech_model_size(root: &Path, model: SpeechModelId) -> Option<u64> {
+    let dirs = speech_dirs(root, model);
+    if !dirs.iter().any(|d| d.exists()) {
+        return None;
+    }
+    Some(dirs.iter().map(|d| dir_size(d)).sum())
+}
+
+/// Remove one speech model's files and readiness marker, so the next
+/// recording attempt with it re-downloads instead of failing on a
+/// half-present model. A directory another *installed* speech model also uses
+/// (the shared diarizer) is kept rather than deleted out from under it.
+/// Idempotent: removing a model that is not installed succeeds and does
+/// nothing.
+pub fn delete_speech_model(root: &Path, model: SpeechModelId) -> Result<(), String> {
+    let keep: std::collections::HashSet<PathBuf> = SpeechModelId::ALL
+        .into_iter()
+        .filter(|other| *other != model && speech_is_ready(root, *other))
+        .flat_map(|other| speech_dirs(root, other))
+        .collect();
+    clear_speech_marker(root, model)?;
+    for dir in speech_dirs(root, model) {
+        if dir.exists() && !keep.contains(&dir) {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Total bytes under `dir`. Symlinks are counted as neither file nor directory:
@@ -981,34 +1148,25 @@ fn dir_size(dir: &Path) -> u64 {
     total
 }
 
-/// What this model occupies on disk, or `None` when none of its directories
+/// What the notes LLM occupies on disk, or `None` when its directory doesn't
 /// exist — which is how "not installed" is distinguished from "installed but
 /// empty", so the UI can show a dash rather than `0 MB`.
-pub fn model_size(root: &Path, kind: LocalModelKind) -> Option<u64> {
-    let dirs = model_dirs(root, kind);
-    if !dirs.iter().any(|dir| dir.exists()) {
+fn notes_size(root: &Path) -> Option<u64> {
+    let dir = llm_dir(root);
+    if !dir.exists() {
         return None;
     }
-    Some(dirs.iter().map(|dir| dir_size(dir)).sum())
+    Some(dir_size(&dir))
 }
 
-/// Remove a model's files, readiness marker included, so the next recording
-/// attempt re-downloads instead of failing on a half-present model. Idempotent:
-/// removing a model that is not installed succeeds and does nothing.
-pub fn delete_model(root: &Path, kind: LocalModelKind) -> Result<(), String> {
-    for dir in model_dirs(root, kind) {
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)
-                .map_err(|e| format!("remove {}: {e}", dir.display()))?;
-        }
-    }
-    // The notes marker lives inside `llm/<name>/`, so it went with the
-    // directory above; the speech manifest sits at the models root.
-    if kind == LocalModelKind::Speech {
-        let manifest = manifest_path(root);
-        if manifest.exists() {
-            std::fs::remove_file(&manifest).map_err(|e| format!("remove manifest: {e}"))?;
-        }
+/// Remove the notes LLM's files, readiness marker included, so the next
+/// recording attempt re-downloads instead of failing on a half-present model.
+/// Idempotent: removing a model that is not installed succeeds and does
+/// nothing.
+fn delete_notes(root: &Path) -> Result<(), String> {
+    let dir = llm_dir(root);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
     }
     Ok(())
 }
@@ -1019,17 +1177,25 @@ pub fn delete_model(root: &Path, kind: LocalModelKind) -> Result<(), String> {
 pub fn local_model_sizes() -> Result<ModelSizes, String> {
     let root = crate::storage::ariso_root()?;
     Ok(ModelSizes {
-        notes: model_size(&root, LocalModelKind::Notes),
-        speech: model_size(&root, LocalModelKind::Speech),
+        notes: notes_size(&root),
+        speech: crate::speech_model::available()
+            .into_iter()
+            .map(|m| (m, speech_model_size(&root, m)))
+            .collect(),
     })
 }
 
 /// Delete one local model's files. Refused mid-recording (that session still
 /// needs its models to transcribe and write notes) and while the same model is
 /// downloading — the download guard doubles as the mutual-exclusion lock, so a
-/// delete can never race a half-written install.
+/// delete can never race a half-written install. `speech_model` names which
+/// speech model to remove when `kind` is `Speech`; `None` means the selected one.
 #[tauri::command]
-pub fn delete_local_model(app: tauri::AppHandle, kind: LocalModelKind) -> Result<(), String> {
+pub fn delete_local_model(
+    app: tauri::AppHandle,
+    kind: LocalModelKind,
+    speech_model: Option<SpeechModelId>,
+) -> Result<(), String> {
     use tauri::Manager as _;
     if app
         .state::<crate::recording_state::RecordingState>()
@@ -1044,7 +1210,12 @@ pub fn delete_local_model(app: tauri::AppHandle, kind: LocalModelKind) -> Result
     let _guard = DownloadGuard::acquire(flag)
         .ok_or_else(|| "That model is still downloading.".to_string())?;
     let root = crate::storage::ariso_root()?;
-    delete_model(&root, kind)
+    match kind {
+        LocalModelKind::Notes => delete_notes(&root),
+        LocalModelKind::Speech => {
+            delete_speech_model(&root, speech_model.unwrap_or_else(crate::speech_model::selected))
+        }
+    }
 }
 
 /// Opaque download timestamp stored in `manifest.json`; a `unix:<secs>` string
@@ -1073,19 +1244,125 @@ mod tests {
         std::fs::write(llm_marker_path(root), llm_model_version()).unwrap();
     }
 
-    fn install_speech(root: &Path, bytes_each: usize) {
-        for dir in speech_dirs(root) {
-            write_bytes(&dir.join("weights.bin"), bytes_each);
+    fn install_parakeet(root: &Path, bytes_each: usize) {
+        for bundle in speech_bundles(SpeechModelId::Parakeet) {
+            write_bytes(
+                &crate::storage::models_dir(root).join(&bundle.install_path).join("w.bin"),
+                bytes_each,
+            );
         }
-        write_manifest(root, "2026-09-20T00:00:00Z").unwrap();
+        write_manifest(root, "unix:1").unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_qwen3(root: &Path, bytes_each: usize) {
+        for bundle in speech_bundles(SpeechModelId::Qwen3Asr) {
+            write_bytes(
+                &crate::storage::models_dir(root).join(&bundle.install_path).join("w.bin"),
+                bytes_each,
+            );
+        }
+        write_speech_marker(root, SpeechModelId::Qwen3Asr).unwrap();
+    }
+
+    #[test]
+    fn parakeet_manifest_install_stays_ready() {
+        // An install from before per-model readiness has only manifest.json.
+        let tmp = tempfile::tempdir().unwrap();
+        install_parakeet(tmp.path(), 4);
+        assert!(speech_is_ready(tmp.path(), SpeechModelId::Parakeet));
+        assert!(!speech_is_ready(tmp.path(), SpeechModelId::Qwen3Asr));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qwen3_ready_requires_its_current_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_qwen3(tmp.path(), 4);
+        assert!(speech_is_ready(tmp.path(), SpeechModelId::Qwen3Asr));
+        std::fs::write(speech_marker_path(tmp.path(), SpeechModelId::Qwen3Asr).unwrap(), "stale").unwrap();
+        assert!(!speech_is_ready(tmp.path(), SpeechModelId::Qwen3Asr));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn deleting_parakeet_keeps_the_diarizer_qwen3_needs() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_parakeet(tmp.path(), 4);
+        install_qwen3(tmp.path(), 4);
+        delete_speech_model(tmp.path(), SpeechModelId::Parakeet).unwrap();
+        let models = crate::storage::models_dir(tmp.path());
+        assert!(!models.join("parakeet-tdt-0.6b-v3").exists());
+        assert!(models.join("speaker-diarization").exists());
+        assert!(!speech_is_ready(tmp.path(), SpeechModelId::Parakeet));
+        assert!(speech_is_ready(tmp.path(), SpeechModelId::Qwen3Asr));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn deleting_the_last_speech_model_removes_the_diarizer() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_qwen3(tmp.path(), 4);
+        delete_speech_model(tmp.path(), SpeechModelId::Qwen3Asr).unwrap();
+        let models = crate::storage::models_dir(tmp.path());
+        assert!(!models.join("qwen3-asr-0.6b-4bit").exists());
+        assert!(!models.join("qwen3-forcedaligner-0.6b-4bit").exists());
+        assert!(!models.join("speaker-diarization").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_speech_model_counts_the_shared_diarizer() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_parakeet(tmp.path(), 10);
+        install_qwen3(tmp.path(), 10);
+        assert_eq!(speech_model_size(tmp.path(), SpeechModelId::Parakeet), Some(20));
+        // Qwen3's own readiness marker lives inside its ASR bundle directory
+        // (`speech_marker_path`), so its footprint includes the marker's bytes
+        // on top of the three 10-byte bundle files.
+        let marker_bytes = speech_model_version(SpeechModelId::Qwen3Asr).len() as u64;
+        assert_eq!(
+            speech_model_size(tmp.path(), SpeechModelId::Qwen3Asr),
+            Some(30 + marker_bytes)
+        );
+    }
+
+    #[test]
+    fn speech_size_is_none_when_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(speech_model_size(tmp.path(), SpeechModelId::Parakeet), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn local_models_ready_follows_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_parakeet(tmp.path(), 4);
+        install_notes(tmp.path(), 4); // existing helper: writes the LLM + its marker
+        let previous = crate::speech_model::selected();
+        crate::speech_model::set_selected(SpeechModelId::Parakeet);
+        assert!(local_models_ready(tmp.path()));
+        crate::speech_model::set_selected(SpeechModelId::Qwen3Asr);
+        assert!(!local_models_ready(tmp.path()));
+        assert_eq!(status(tmp.path()).state, "not_downloaded");
+        crate::speech_model::set_selected(previous);
+    }
+
+    #[test]
+    fn qwen3_pins_are_well_formed() {
+        for b in macos_qwen3_bundles() {
+            assert_eq!(b.prefix.len(), 12);
+            assert_eq!(b.manifest_sha256.len(), 64);
+            assert!(b.manifest_sha256.bytes().all(|c| c.is_ascii_hexdigit()));
+        }
     }
 
     #[test]
     fn model_size_is_none_when_nothing_is_installed() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        assert_eq!(model_size(root, LocalModelKind::Notes), None);
-        assert_eq!(model_size(root, LocalModelKind::Speech), None);
+        assert_eq!(notes_size(root), None);
+        assert_eq!(speech_model_size(root, SpeechModelId::Parakeet), None);
     }
 
     #[test]
@@ -1094,17 +1371,17 @@ mod tests {
         let root = tmp.path();
         write_bytes(&llm_dir(root).join("model.safetensors"), 1000);
         write_bytes(&llm_dir(root).join("nested").join("extra.bin"), 24);
-        assert_eq!(model_size(root, LocalModelKind::Notes), Some(1024));
+        assert_eq!(notes_size(root), Some(1024));
     }
 
     #[test]
     fn model_size_sums_every_speech_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let dirs = speech_dirs(root);
+        let dirs = speech_dirs(root, SpeechModelId::Parakeet);
         assert!(dirs.len() >= 2, "expected asr + diarization bundles");
-        install_speech(root, 100);
-        let total = model_size(root, LocalModelKind::Speech).unwrap();
+        install_parakeet(root, 100);
+        let total = speech_model_size(root, SpeechModelId::Parakeet).unwrap();
         assert!(total >= (dirs.len() as u64) * 100);
     }
 
@@ -1113,14 +1390,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         install_notes(root, 10);
-        install_speech(root, 10);
-        assert!(llm_is_ready(root) && is_ready(root));
+        install_parakeet(root, 10);
+        assert!(llm_is_ready(root) && speech_is_ready(root, SpeechModelId::Parakeet));
 
-        delete_model(root, LocalModelKind::Notes).unwrap();
+        delete_notes(root).unwrap();
 
         assert!(!llm_is_ready(root));
-        assert_eq!(model_size(root, LocalModelKind::Notes), None);
-        assert!(is_ready(root), "speech must survive a notes delete");
+        assert_eq!(notes_size(root), None);
+        assert!(
+            speech_is_ready(root, SpeechModelId::Parakeet),
+            "speech must survive a notes delete"
+        );
     }
 
     #[test]
@@ -1128,12 +1408,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         install_notes(root, 10);
-        install_speech(root, 10);
+        install_parakeet(root, 10);
 
-        delete_model(root, LocalModelKind::Speech).unwrap();
+        delete_speech_model(root, SpeechModelId::Parakeet).unwrap();
 
-        assert!(!is_ready(root));
-        assert_eq!(model_size(root, LocalModelKind::Speech), None);
+        assert!(!speech_is_ready(root, SpeechModelId::Parakeet));
+        assert_eq!(speech_model_size(root, SpeechModelId::Parakeet), None);
         assert!(llm_is_ready(root), "notes must survive a speech delete");
     }
 
@@ -1141,8 +1421,8 @@ mod tests {
     fn deleting_a_model_that_is_not_installed_is_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        delete_model(root, LocalModelKind::Notes).unwrap();
-        delete_model(root, LocalModelKind::Speech).unwrap();
+        delete_notes(root).unwrap();
+        delete_speech_model(root, SpeechModelId::Parakeet).unwrap();
     }
 
     #[test]
@@ -1150,8 +1430,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         install_notes(root, 10);
-        delete_model(root, LocalModelKind::Notes).unwrap();
-        delete_model(root, LocalModelKind::Notes).unwrap();
+        delete_notes(root).unwrap();
+        delete_notes(root).unwrap();
         assert!(!llm_is_ready(root));
     }
 
@@ -1474,6 +1754,25 @@ mod tests {
             .path()
             .join("parakeet-tdt-0.6b-v3/Encoder.mlmodelc/weights/weight.bin");
         assert!(std::fs::metadata(enc).unwrap().len() > 400_000_000);
+    }
+
+    // Hits the network (downloads the Qwen3-ASR models from R2). Excluded from
+    // the default run; invoke with `cargo test qwen3_r2_download_smoke -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: downloads the Qwen3-ASR models from the R2 CDN"]
+    async fn qwen3_r2_download_smoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundles = macos_qwen3_bundles();
+        download_model_bundles(MODELS_CDN_BASE, tmp.path(), &bundles, &|_| {})
+            .await
+            .unwrap();
+        for m in &bundles {
+            assert!(
+                tmp.path().join(&m.install_path).is_dir(),
+                "missing {}",
+                m.install_path
+            );
+        }
     }
 
     #[tokio::test]
