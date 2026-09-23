@@ -7,6 +7,8 @@ mod audio_capture;
 mod mic_capture;
 mod commands;
 mod credentials;
+mod notes_model;
+mod remote_notes;
 mod deep_link;
 mod meeting_notifications;
 mod mic_monitor;
@@ -250,6 +252,7 @@ fn main() {
             credentials::set_llm_api_key,
             credentials::llm_api_key_providers,
             credentials::clear_llm_api_key,
+            notes_model::set_notes_model,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
             meeting_notifications::take_pending_meeting_prep,
@@ -301,6 +304,9 @@ fn main() {
                     crate::vault::set_vault_override(std::path::PathBuf::from(dir));
                 }
             }
+            // Same reason as the vault override: notes generation runs detached
+            // from any window and cannot read the store itself.
+            crate::notes_model::load_selected(app.handle());
             // One-time upgrade migration MUST run before ensure_vault (which
             // creates `.oats/recordings`). Best-effort: log and continue.
             if let Err(e) = crate::vault::migrate_legacy_recordings() {

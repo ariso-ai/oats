@@ -333,6 +333,11 @@ pub fn render_note(meta: &RecordingMeta, audio_file: &str, notes_md: &str) -> St
     out.push_str(&format!("date: \"{}\"\n", esc(&meta.created_at)));
     out.push_str(&format!("duration: \"{}\"\n", format_hms(meta.duration_seconds as f64)));
     out.push_str(&format!("participants: [{participants}]\n"));
+    // Which model wrote these notes, for a reader who wants to know months
+    // later. Omitted rather than blank for notes that predate the field.
+    if let Some(model) = &meta.notes_model {
+        out.push_str(&format!("model: \"{}\"\n", esc(model)));
+    }
     out.push_str("---\n");
     out.push_str(&format!("![[Attachments/{audio_file}]]\n\n"));
     out.push_str(&render_action_items(notes_md, &note_date(&meta.created_at)));
@@ -988,7 +993,26 @@ mod tests {
             model_version: None, error: None, notes_error: None, last_clip_end_at: None,
             audio_file: None, notes_written: None, notes_in_progress: false,
             title_is_default: false, preview: None,
+        notes_model: None,
         }
+    }
+
+    #[test]
+    fn a_note_records_the_model_that_wrote_it() {
+        let mut meta = meta_for_note();
+        meta.notes_model = Some("openai:gpt-5.1".into());
+        let md = render_note(&meta, "2026-06-02 Team Standup.mp3", "# Notes");
+        assert!(
+            md.contains("model: \"openai:gpt-5.1\"\n"),
+            "frontmatter was: {md}"
+        );
+    }
+
+    #[test]
+    fn a_note_claims_no_model_when_none_is_recorded() {
+        // Notes written before the field existed must not sprout a blank line.
+        let md = render_note(&meta_for_note(), "a.mp3", "# Notes");
+        assert!(!md.contains("model:"), "frontmatter was: {md}");
     }
 
     #[test]

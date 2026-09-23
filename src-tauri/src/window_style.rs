@@ -22,7 +22,16 @@ where
     let builder = builder.title_bar_style(TitleBarStyle::Transparent);
     builder
         .background_color(SETTINGS_BACKGROUND)
-        .inner_size(450.0, 800.0)
+        // Taller, same width: the models list and the sections under it no
+        // longer have to share 800px. 880 is a preference, not a fit: a 13"
+        // laptop leaves ~850pt once the Dock is showing (956 minus menu bar
+        // minus Dock), and a 1440x900 display overflows on the menu bar alone.
+        // `prevent_overflow` clamps the initial size to the work area, which
+        // `resizable(false)` would otherwise leave the user no way to correct;
+        // `.settings` owns 100vh and scrolls internally, so the sections below
+        // the fold stay reachable on the clamped window.
+        .inner_size(450.0, 880.0)
+        .prevent_overflow()
         .resizable(false)
         .center()
         .skip_taskbar(true)

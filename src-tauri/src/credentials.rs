@@ -36,7 +36,9 @@ pub enum RemoteProvider {
 impl RemoteProvider {
     pub const ALL: [RemoteProvider; 3] = [Self::OpenAi, Self::Gemini, Self::Anthropic];
 
-    fn as_str(self) -> &'static str {
+    /// The provider's wire name — the frontend's value, the keychain account
+    /// suffix, and the prefix a note's model tag carries.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
             Self::Gemini => "gemini",
@@ -80,13 +82,27 @@ fn store_error(err: keyring::Error) -> String {
     }
 }
 
+/// The keychain service to file entries under. Tests use a service of their
+/// own: the round-trip test writes and deletes real entries, and must never be
+/// able to touch the ones the app stored for the person running the suite.
+fn keychain_service() -> &'static str {
+    #[cfg(test)]
+    {
+        "ai.ariso.desktop.tests"
+    }
+    #[cfg(not(test))]
+    {
+        KEYCHAIN_SERVICE
+    }
+}
+
 fn entry(provider: RemoteProvider) -> Result<Entry, String> {
     // `keyring` initializes the platform store on first use; surface a failure
     // here rather than reporting a key as saved when nothing persisted it.
     Entry::store_status()
         .as_ref()
         .map_err(|e| format!("This device has no usable credential store ({e})."))?;
-    Entry::new(KEYCHAIN_SERVICE, &provider.account()).map_err(store_error)
+    Entry::new(keychain_service(), &provider.account()).map_err(store_error)
 }
 
 fn set_api_key(provider: RemoteProvider, key: String) -> Result<(), String> {
@@ -97,6 +113,12 @@ fn set_api_key(provider: RemoteProvider, key: String) -> Result<(), String> {
 /// The stored key, or `None` when the user has not connected this provider.
 /// Crate-internal on purpose — no `#[tauri::command]` exposes a key's value.
 pub fn get_api_key(provider: RemoteProvider) -> Result<Option<String>, String> {
+    // Tests stand in for the keychain entirely rather than reading the
+    // developer's real login keychain. The ignored round-trip test opts out.
+    #[cfg(test)]
+    if testing::store_is_active() {
+        return Ok(testing::stored_key(provider));
+    }
     match entry(provider)?.get_password() {
         Ok(key) => Ok(Some(key)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -140,6 +162,68 @@ pub fn llm_api_key_providers() -> Result<Vec<RemoteProvider>, String> {
 #[tauri::command]
 pub fn clear_llm_api_key(provider: RemoteProvider) -> Result<(), String> {
     clear_api_key(provider)
+}
+
+/// Test-only stand-in for the OS keychain, so tests covering the code paths
+/// that *read* a key never touch the developer's real credential store. The
+/// keychain itself is exercised by the ignored round-trip test below.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::RemoteProvider;
+    use std::cell::Cell;
+
+    static KEYS: std::sync::RwLock<Vec<(RemoteProvider, String)>> =
+        std::sync::RwLock::new(Vec::new());
+
+    thread_local! {
+        // Off by default: the fake store is authoritative so a test that
+        // forgets to stand in a key reads "no key" instead of whatever the
+        // developer's real keychain happens to hold.
+        static USE_REAL_KEYCHAIN: Cell<bool> = Cell::new(false);
+    }
+
+    pub(crate) fn store_is_active() -> bool {
+        USE_REAL_KEYCHAIN.with(|mode| !mode.get())
+    }
+
+    pub(crate) struct RealKeychainGuard {
+        previous: bool,
+    }
+
+    /// Opt this thread out of the fake store for the guard's lifetime, for the
+    /// one test that means to hit the real OS keychain.
+    pub(crate) fn use_real_keychain() -> RealKeychainGuard {
+        USE_REAL_KEYCHAIN.with(|mode| RealKeychainGuard {
+            previous: mode.replace(true),
+        })
+    }
+
+    impl Drop for RealKeychainGuard {
+        fn drop(&mut self) {
+            USE_REAL_KEYCHAIN.with(|mode| mode.set(self.previous));
+        }
+    }
+
+    pub(crate) fn stored_key(provider: RemoteProvider) -> Option<String> {
+        KEYS.read()
+            .ok()?
+            .iter()
+            .find(|(p, _)| *p == provider)
+            .map(|(_, k)| k.clone())
+    }
+
+    pub(crate) fn set_key(provider: RemoteProvider, key: &str) {
+        if let Ok(mut keys) = KEYS.write() {
+            keys.retain(|(p, _)| *p != provider);
+            keys.push((provider, key.to_string()));
+        }
+    }
+
+    pub(crate) fn clear_keys() {
+        if let Ok(mut keys) = KEYS.write() {
+            keys.clear();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +304,7 @@ mod tests {
     #[test]
     #[ignore = "writes to the real OS keychain"]
     fn keychain_round_trip_sets_reads_and_clears_a_key() {
+        let _real_keychain = testing::use_real_keychain();
         let provider = RemoteProvider::OpenAi;
         let _ = clear_api_key(provider);
 

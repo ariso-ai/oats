@@ -146,9 +146,16 @@
              at once, so the list scrolls inside the card instead of pushing
              the sections below it out of reach. -->
         <div
+          class="model-list"
+          @mouseenter="onModelListEnter"
+          @mouseleave="modelListHovered = false"
+        >
+        <div
+          ref="modelScrollEl"
           class="model-table-scroll"
           data-test="model-scroll"
           :style="{ '--model-visible-rows': MODEL_ROWS_VISIBLE }"
+          @scroll="measureModelList"
         >
         <table class="model-table">
           <thead>
@@ -195,6 +202,10 @@
                     role="img"
                     tabindex="0"
                     :aria-label="`${modelTypeLabel(row)}. ${row.details}`"
+                    @mouseenter="showModelDetails($event, row)"
+                    @mouseleave="modelDetails = null"
+                    @focus="showModelDetails($event, row)"
+                    @blur="modelDetails = null"
                   >
                     <!-- Speech: a microphone. Language: lines of text, or a
                          cloud when the model is a provider's rather than ours. -->
@@ -214,7 +225,6 @@
                       <line x1="8" y1="17" x2="13" y2="17" />
                     </svg>
                   </span>
-                  <span role="tooltip" class="help-tooltip" data-test="model-details">{{ row.details }}</span>
                 </span>
               </td>
               <td class="model-runtime">
@@ -308,6 +318,37 @@
             </tr>
           </tbody>
         </table>
+        </div>
+        <!-- Outside the scroll container on purpose: a bubble rendered inside
+             it is clipped by its bottom edge. Fixed-positioned to the icon it
+             describes. -->
+        <div
+          v-if="modelDetails"
+          role="tooltip"
+          class="help-tooltip help-tooltip--floating"
+          data-test="model-details"
+          :style="{ left: `${modelDetails.x}px`, top: `${modelDetails.y}px` }"
+        >{{ modelDetails.text }}</div>
+        <!-- Our own scrollbar: see modelListScrollbar.ts for why the native
+             one cannot fade in on hover in this webview. -->
+        <div
+          ref="modelTrackEl"
+          class="model-scrollbar"
+          :class="{ 'model-scrollbar--visible': (modelListHovered || draggingThumb) && !!modelThumb }"
+          data-test="model-scrollbar"
+          aria-hidden="true"
+        >
+          <div
+            v-if="modelThumb"
+            class="model-scrollbar__thumb"
+            data-test="model-scrollbar-thumb"
+            :style="{ height: `${modelThumb.height}px`, transform: `translateY(${modelThumb.offset}px)` }"
+            @pointerdown="onThumbPointerDown"
+            @pointermove="onThumbPointerMove"
+            @pointerup="onThumbPointerUp"
+            @pointercancel="onThumbPointerUp"
+          />
+        </div>
         </div>
         <!-- Asking for a key is a one-at-a-time affair, so the field lives
              under the table rather than inside whichever row started it. -->
@@ -675,6 +716,7 @@ import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind } from '../tauri';
 import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
 import { modelCatalog, formatModelSize, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
+import { thumbGeometry, scrollTopForDrag, type ScrollMetrics } from './modelListScrollbar';
 import { shouldPromptDownload, rowDetailText, pendingInstalls, modelBannerVisible, type Busy } from './settingsDownload';
 import { defaultPlatformCapabilities, loadPlatformCapabilities } from '../composables/usePlatformCapabilities';
 import { applyToggle, type PermissionStatus } from './recordingSettings';
@@ -832,6 +874,109 @@ const catalog = modelCatalog();
 
 /** How many rows the list shows before it scrolls. */
 const MODEL_ROWS_VISIBLE = 6;
+
+/** Whether the pointer is over the list, which is what reveals its scrollbar. */
+const modelListHovered = ref(false);
+const modelScrollEl = ref<HTMLElement | null>(null);
+const modelTrackEl = ref<HTMLElement | null>(null);
+/** The bar's own height. It starts below the sticky header, so it is shorter
+ *  than the scroller's viewport and the thumb must be sized against it. */
+const modelTrackHeight = ref(0);
+const modelScrollMetrics = ref<ScrollMetrics>({
+  scrollTop: 0,
+  scrollHeight: 0,
+  clientHeight: 0,
+});
+
+/** Where the thumb sits, or null while everything fits on screen. */
+const modelThumb = computed(() =>
+  thumbGeometry(modelScrollMetrics.value, modelTrackHeight.value || undefined),
+);
+
+/** The hovered model's description, pinned to the icon it belongs to. */
+const modelDetails = ref<{ text: string; x: number; y: number } | null>(null);
+
+/** Pinned to the viewport, so anything that moves the icon leaves the bubble
+ *  behind: drop it instead. Capture phase catches the Settings page's own
+ *  scroller as well as the window's. */
+function dropModelDetails() {
+  modelDetails.value = null;
+}
+
+onMounted(() => window.addEventListener('scroll', dropModelDetails, true));
+onUnmounted(() => window.removeEventListener('scroll', dropModelDetails, true));
+
+function showModelDetails(event: Event, row: CatalogModel) {
+  const icon = event.currentTarget as HTMLElement | null;
+  if (!icon) return;
+  const rect = icon.getBoundingClientRect();
+  modelDetails.value = {
+    text: row.details,
+    x: rect.left + rect.width / 2,
+    y: rect.top,
+  };
+}
+
+function measureModelList() {
+  // The bubble is pinned to where the icon was; scrolling moves the icon out
+  // from under it.
+  modelDetails.value = null;
+  const el = modelScrollEl.value;
+  if (!el) return;
+  modelScrollMetrics.value = {
+    scrollTop: el.scrollTop,
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+  };
+  modelTrackHeight.value = modelTrackEl.value?.clientHeight ?? 0;
+}
+
+// Dragging the thumb scrolls the list, the way a real scrollbar does.
+const draggingThumb = ref(false);
+let dragStartY = 0;
+let dragStartScrollTop = 0;
+
+function onThumbPointerDown(event: PointerEvent) {
+  const el = modelScrollEl.value;
+  if (!el) return;
+  draggingThumb.value = true;
+  dragStartY = event.clientY;
+  dragStartScrollTop = el.scrollTop;
+  // Capture so the drag survives the pointer leaving the 6px-wide thumb, which
+  // it does almost immediately.
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  // Don't let the gesture start a text selection across the rows.
+  event.preventDefault();
+}
+
+function onThumbPointerMove(event: PointerEvent) {
+  const el = modelScrollEl.value;
+  const thumb = modelThumb.value;
+  if (!draggingThumb.value || !el || !thumb) return;
+  el.scrollTop = scrollTopForDrag({
+    startScrollTop: dragStartScrollTop,
+    deltaY: event.clientY - dragStartY,
+    metrics: modelScrollMetrics.value,
+    thumbHeight: thumb.height,
+    trackLength: modelTrackHeight.value || undefined,
+  });
+  measureModelList();
+}
+
+function onThumbPointerUp(event: PointerEvent) {
+  draggingThumb.value = false;
+  const target = event.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(event.pointerId)) {
+    target.releasePointerCapture(event.pointerId);
+  }
+}
+
+function onModelListEnter() {
+  modelListHovered.value = true;
+  // Rows arrive and depart (a download finishes, a key is removed), so measure
+  // when the pointer shows up rather than trusting a stale measurement.
+  measureModelList();
+}
 
 async function loadNotesModel() {
   try {
@@ -1840,17 +1985,13 @@ async function refreshCalendarAccess() {
    rule) and the header's own height — both measured in the running app — so
    the box is sized in whole rows and the sixth one is never clipped. */
 .model-table-scroll {
-  --model-row-height: 49px;
-  --model-head-height: 27px;
   max-height: calc(var(--model-visible-rows, 6) * var(--model-row-height) + var(--model-head-height));
   overflow-y: auto;
   /* The sticky header needs a positioned scroll container of its own. */
   position: relative;
-  /* Reach past the card's 16px padding so the bar rides the section's right
-     edge, then give the rows that padding back minus the bar's own 6px, so
-     the table's right edge lands exactly where it did before. */
-  margin-right: -16px;
-  padding-right: 10px;
+  /* The wrapper reaches the card's edge (see .model-list); the rows keep their
+     inset so the table's right edge lands where it always did. */
+  padding-right: 16px;
   /* No `scrollbar-width` here, deliberately: setting it to any value (even
      `thin`) puts this webview's scroller in legacy mode — a permanent 13-17px
      bar that also ignores the ::-webkit-scrollbar width below. Measured in the
@@ -1861,21 +2002,55 @@ async function refreshCalendarAccess() {
    for inner scrollers whatever macOS's Show-scroll-bars setting says, so the
    thumb is transparent until the pointer is over the list. The 6px gutter is
    reserved either way, so revealing it never shifts the rows. */
+/* The native bar is hidden outright; `.model-scrollbar` below replaces it. */
 .model-table-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.model-list {
+  /* Shared by the scroller's max-height and the track's inset, so the bar can
+     never disagree with the rows about where the list starts. */
+  --model-row-height: 49px;
+  --model-head-height: 27px;
+  position: relative;
+  /* Past the card's 16px padding, so the list's right edge — and the scrollbar
+     pinned to it — is the section's own edge. */
+  margin-right: -16px;
+}
+
+/* Sits in the card's own right padding, so it overlays nothing and shifts no
+   rows when it appears. */
+.model-scrollbar {
+  position: absolute;
+  top: var(--model-head-height);
+  right: 0;
+  bottom: 0;
   width: 6px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  /* The track stays inert so it never steals a click meant for a row; the
+     thumb takes pointer events back so it can be dragged. */
+  pointer-events: none;
 }
 
-.model-table-scroll::-webkit-scrollbar-track {
-  background: transparent;
+.model-scrollbar--visible {
+  opacity: 1;
 }
 
-.model-table-scroll::-webkit-scrollbar-thumb {
-  background: transparent;
+.model-scrollbar__thumb {
+  width: 100%;
   border-radius: 3px;
+  background: #c9c9c9;
+  pointer-events: auto;
+  cursor: default;
+  /* A drag that wanders off the thumb must not select the rows behind it. */
+  user-select: none;
+  touch-action: none;
 }
 
-.model-table-scroll:hover::-webkit-scrollbar-thumb {
-  background: #c9c9c9;
+.model-scrollbar__thumb:hover {
+  background: #b0b0b0;
 }
 
 .model-table {
@@ -1955,17 +2130,30 @@ button.cell-flex {
   padding-left: 0;
 }
 
+/* The tick rides the right edge of the Name column rather than trailing the
+   text, so it lands in the same place on every row instead of wherever that
+   row's name happens to end. */
+.model-name button.cell-flex {
+  width: 100%;
+}
+
+.model-name .model-tick {
+  margin-left: auto;
+  padding-left: 8px;
+}
+
 /* Qualified with the table + element selector so it outranks `.model-table th`
    (which sets text-align: left and would otherwise win on specificity). */
 .model-table th.model-runtime-head {
   text-align: center;
 }
 
-/* Type holds a single 16px icon; the rest is the cell's own padding. Name
-   carries no width and absorbs whatever these two leave. */
+/* Wide enough for the "Type" header itself (~30px at 12px, plus the cell's
+   8px padding either side) — at the icon's own 32px the label was clipped.
+   Name carries no width and absorbs whatever these two leave. */
 .model-table th.model-type-head,
 .model-table td.model-type {
-  width: 32px;
+  width: 52px;
   white-space: nowrap;
 }
 
@@ -2017,11 +2205,16 @@ button.cell-flex {
    (it scrolls vertically), so a left-anchored 260px bubble would run off the
    right edge from this middle column. Center it on the icon and narrow it:
    at this width that keeps both edges inside the card. */
-.model-type .help-tooltip {
-  left: 50%;
-  right: auto;
-  transform: translateX(-50%);
+/* Positioned against the viewport, so no ancestor's overflow can clip it, and
+   drawn above the icon it describes. */
+.help-tooltip.help-tooltip--floating {
+  position: fixed;
+  top: 0;
+  left: 0;
   width: 200px;
+  transform: translate(-50%, calc(-100% - 8px));
+  opacity: 1;
+  visibility: visible;
 }
 
 /* Icon-only row actions (delete, install). The native title supplies the tip,
