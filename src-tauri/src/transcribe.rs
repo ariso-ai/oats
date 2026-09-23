@@ -85,17 +85,26 @@ pub fn sidecar_path() -> Result<PathBuf, String> {
     }))
 }
 
+/// Sidecar argv for one transcription. Parakeet passes no `--asr-model`, so its
+/// command line — and the Windows sidecar, which only ships Parakeet — is
+/// exactly what it was before model selection existed.
+fn transcribe_args(audio: &Path, models: &Path, model: crate::speech_model::SpeechModelId) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--audio".into(), audio.into(), "--models".into(), models.into(), "--format".into(), "json".into(),
+    ];
+    if model != crate::speech_model::SpeechModelId::Parakeet {
+        args.push("--asr-model".into());
+        args.push(model.id().into());
+    }
+    args
+}
+
 /// Run the sidecar in transcribe mode and parse its JSON stdout.
 pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptResult, String> {
     let bin = sidecar_path()?;
     let mut command = Command::new(&bin);
     command
-        .arg("--audio")
-        .arg(audio)
-        .arg("--models")
-        .arg(models)
-        .arg("--format")
-        .arg("json")
+        .args(transcribe_args(audio, models, crate::speech_model::selected()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_background_process(&mut command);
@@ -768,7 +777,7 @@ async fn fresh_recording_core(
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
-            meta.model_version = Some(crate::model_manager::stt_model_version());
+            meta.model_version = Some(crate::model_manager::speech_model_version(crate::speech_model::selected()));
             storage::write_segments(&dir, &storage::SegmentsFile {
                 language: Some(result.language.clone()),
                 participants: result.participants.clone(),
@@ -1198,6 +1207,20 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn parakeet_argv_is_unchanged() {
+        let args = transcribe_args(Path::new("/a.mp3"), Path::new("/m"), crate::speech_model::SpeechModelId::Parakeet);
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--audio", "/a.mp3", "--models", "/m", "--format", "json"]);
+    }
+
+    #[test]
+    fn qwen3_argv_names_the_model() {
+        let args = transcribe_args(Path::new("/a.mp3"), Path::new("/m"), crate::speech_model::SpeechModelId::Qwen3Asr);
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--audio", "/a.mp3", "--models", "/m", "--format", "json", "--asr-model", "qwen3-asr-0.6b-4bit"]);
+    }
 
     #[cfg(windows)]
     const CONSOLE_PROBE_ENV: &str = "OATS_TEST_CONSOLE_PROBE_CHILD";
