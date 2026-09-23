@@ -49,6 +49,7 @@ enum Qwen3Transcriber {
         var languages: [String] = []
 
         for (chunk, offset) in chunks {
+            defer { Memory.clearCache() }
             // chunkDuration above the chunk length: never re-split inside generate.
             let out = asr.generate(audio: chunk, maxTokens: 8192, language: nil, chunkDuration: 600)
             let text = out.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -59,6 +60,9 @@ enum Qwen3Transcriber {
             if language.lowercased() != "none" { languages.append(language) }
 
             let aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language))
+            warnIfTailUncovered(
+                lastWordEnd: aligned.items.last?.endTime ?? 0,
+                chunkSamples: chunk.dim(0), offset: offset, samples: samples)
             var chunkWords = attachSeparators(items: aligned.items, text: text)
             // Chunks are joined like words: a space unless either side is CJK.
             if let first = chunkWords.first, let previous = words.last,
@@ -71,10 +75,37 @@ enum Qwen3Transcriber {
                     start: word.start + Double(offset),
                     end: word.end + Double(offset)))
             }
-            Memory.clearCache()
         }
 
         return Output(words: words, text: joinWords(texts), language: isoCode(dominant(languages)))
+    }
+
+    /// Uncovered tail longer than this (seconds) that is not silent suggests
+    /// the ASR stopped early (e.g. hit its token budget) and dropped speech.
+    static let uncoveredTailWarnSeconds = 30.0
+    /// RMS above this (about -40 dBFS) counts as "not silent".
+    static let silenceRMS: Float = 0.01
+
+    /// Warn on stderr when the chunk's audio after its last aligned word is
+    /// long and not silent — a sign of silently truncated transcription.
+    static func warnIfTailUncovered(
+        lastWordEnd: Double, chunkSamples: Int, offset: Float, samples: [Float]
+    ) {
+        let chunkSeconds = Double(chunkSamples) / Double(sampleRate)
+        guard chunkSeconds - lastWordEnd > uncoveredTailWarnSeconds else { return }
+        let chunkStart = Int(Double(offset) * Double(sampleRate))
+        let from = min(samples.count, chunkStart + Int(lastWordEnd * Double(sampleRate)))
+        let to = min(samples.count, chunkStart + chunkSamples)
+        guard to > from else { return }
+        var sumSquares: Float = 0
+        for i in from..<to { sumSquares += samples[i] * samples[i] }
+        let rms = (sumSquares / Float(to - from)).squareRoot()
+        guard rms > silenceRMS else { return }
+        let start = Double(offset) + lastWordEnd
+        let end = Double(offset) + chunkSeconds
+        stderrLine(String(
+            format: "warning: qwen3 chunk at %.1fs: %.1fs-%.1fs has audio (rms %.3f) but no aligned words",
+            Double(offset), start, end, rms))
     }
 
     /// The aligner returns bare words: its tokenizer drops every character that

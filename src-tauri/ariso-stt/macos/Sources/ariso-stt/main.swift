@@ -80,9 +80,17 @@ func renderParakeet(_ words: [TimedWord]) -> String {
 /// Merge timed words with diarization turns into speaker-attributed,
 /// time-ordered segments. Speaker ids are remapped to contiguous 0-based
 /// indices in order of first appearance; labels are "Speaker N".
+///
+/// A word belongs to every turn containing its midpoint. With
+/// `assignGapWordsToNearestTurn` false (Parakeet), a word whose midpoint is in
+/// no turn is dropped. With it true (Qwen3, whose aligner yields one timed unit
+/// per Chinese character, so many sit at turn edges), such a word joins the
+/// turn nearest its midpoint (ties go to the earlier turn), so no word is lost.
+/// Segment start/end always come from the turn itself.
 func mergeTimedWords(
     words: [TimedWord], fullText: String, duration: Double, language: String,
-    render: ([TimedWord]) -> String, diarization: [TimedSpeakerSegment]
+    render: ([TimedWord]) -> String, diarization: [TimedSpeakerSegment],
+    assignGapWordsToNearestTurn: Bool = false
 ) -> OutResult {
     var speakerIndex: [String: Int] = [:]
     var order: [String] = []
@@ -102,13 +110,37 @@ func mergeTimedWords(
             OutSegment(speaker: 0, text: fullText, start: 0, end: duration))
     } else {
         let ordered = diarization.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
-        for turn in ordered {
+        func contains(_ turn: TimedSpeakerSegment, _ mid: Double) -> Bool {
+            mid >= Double(turn.startTimeSeconds) && mid < Double(turn.endTimeSeconds)
+        }
+        // Word index -> nearest turn index, for words whose midpoint is in no turn.
+        var gapTurn: [Int: Int] = [:]
+        if assignGapWordsToNearestTurn {
+            for (w, word) in words.enumerated() {
+                let mid = (word.start + word.end) / 2.0
+                if ordered.contains(where: { contains($0, mid) }) { continue }
+                var best = 0
+                var bestDistance = Double.infinity
+                for (t, turn) in ordered.enumerated() {
+                    let start = Double(turn.startTimeSeconds)
+                    let end = Double(turn.endTimeSeconds)
+                    let distance = mid < start ? start - mid : mid - end
+                    if distance < bestDistance {
+                        best = t
+                        bestDistance = distance
+                    }
+                }
+                gapTurn[w] = best
+            }
+        }
+        for (t, turn) in ordered.enumerated() {
             let start = Double(turn.startTimeSeconds)
             let end = Double(turn.endTimeSeconds)
-            let inTurn = words.filter {
-                let mid = ($0.start + $0.end) / 2.0
-                return mid >= start && mid < end
-            }
+            // Filtering `words` in order keeps each turn's text in time order.
+            let inTurn = words.indices.filter { w in
+                let mid = (words[w].start + words[w].end) / 2.0
+                return (mid >= start && mid < end) || gapTurn[w] == t
+            }.map { words[$0] }
             if inTurn.isEmpty { continue }
             segments.append(
                 OutSegment(
@@ -422,7 +454,8 @@ runToCompletion {
             result = mergeTimedWords(
                 words: qwen.words, fullText: qwen.text,
                 duration: Double(samples.count) / 16000.0, language: qwen.language,
-                render: renderQwen3, diarization: diarization.segments)
+                render: renderQwen3, diarization: diarization.segments,
+                assignGapWordsToNearestTurn: true)
         } else {
             // ASR: load models and transcribe (resampling handled internally).
             let asrModels = try await AsrModels.load(from: asrDir, version: .v3)

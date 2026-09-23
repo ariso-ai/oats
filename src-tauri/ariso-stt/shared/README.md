@@ -23,7 +23,10 @@ downloads belong to the Tauri host, so sidecar inference remains offline.
 `<models>/qwen3-asr-0.6b-4bit` and `<models>/qwen3-forcedaligner-0.6b-4bit`;
 language auto-detected and reported as an ISO code such as `zh` or `en`). Any
 other value exits non-zero. The Windows sidecar ships Parakeet only and the
-host never passes the flag there.
+host never passes the flag there. On first load the macOS sidecar writes a
+`tokenizer.json` into each Qwen3 model directory (generated locally from
+`vocab.json`/`merges.txt`, atomic write, no network), so those directories must
+be writable and host integrity/size checks must tolerate the extra file.
 
 `windows-models.json` is Windows distribution metadata, shared by the Tauri
 host, native sidecar, publisher, and installer build. It pins model data and the
