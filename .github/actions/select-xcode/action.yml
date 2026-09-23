@@ -1,0 +1,30 @@
+name: Select Xcode 26+
+description: >
+  Point DEVELOPER_DIR at the newest installed Xcode 26 or later. The ariso-stt
+  sidecar depends on mlx-audio-swift, whose Package.swift declares
+  swift-tools-version 6.2, which Xcode 16.x (Swift 6.1) refuses to resolve.
+  GitHub's macos-15 image ships Xcode 26.x but defaults to 16.4. DEVELOPER_DIR
+  is used instead of `sudo xcode-select`, so it also works on self-hosted Macs
+  without sudo, and only affects the job that runs this step.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        best=""
+        best_version=""
+        for app in /Applications/Xcode*.app; do
+          [ -d "$app" ] || continue
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null) || continue
+          [ "${version%%.*}" -ge 26 ] 2>/dev/null || continue
+          if [ -z "$best" ] || [ "$(printf '%s\n%s\n' "$best_version" "$version" | sort -V | tail -1)" = "$version" ]; then
+            best="$app"
+            best_version="$version"
+          fi
+        done
+        if [ -z "$best" ]; then
+          echo "::error::Xcode 26 or later is required to build the ariso-stt sidecar (mlx-audio-swift needs Swift 6.2). Installed: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')"
+          exit 1
+        fi
+        echo "Using Xcode $best_version at $best"
+        echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"
