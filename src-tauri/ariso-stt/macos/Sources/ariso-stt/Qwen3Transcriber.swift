@@ -13,9 +13,9 @@ import MLXAudioSTT
 /// repeated one sentence ~900 times and lost ~200 s of speech; the library's
 /// only loop guard catches ≤3 distinct tokens). Two layers stop that:
 /// short chunks (`chunkSeconds`) prevent it, and every chunk's result is
-/// checked (`isDegenerate`) — a degenerate chunk is re-split in halves down to
-/// `minSplitSeconds`, and at the floor any loop is collapsed to one occurrence
-/// with a stderr warning. Looped text is never emitted.
+/// checked in `transcribeChunk` — a degenerate chunk is re-split in halves
+/// down to `minSplitSeconds`, and at the floor any loop is collapsed to one
+/// occurrence with a stderr warning. Looped text is never emitted.
 enum Qwen3Transcriber {
     static let asrDir = "qwen3-asr-0.6b-4bit"
     static let alignerDir = "qwen3-forcedaligner-0.6b-4bit"
@@ -91,20 +91,46 @@ enum Qwen3Transcriber {
         return Output(words: words, text: joinWords(texts), language: isoCode(dominant(languages)))
     }
 
-    /// Transcribe and align one chunk; if the result is degenerate, re-split it
-    /// in halves (recursively) until pieces would drop below `minSplitSeconds`.
+    /// Transcribe and align one chunk. A degenerate result — a decode loop, an
+    /// exhausted token budget, or audible audio left without text, without
+    /// aligned words, or after the last aligned word — is re-split in halves
+    /// (recursively) while each half stays at least `minSplitSeconds`. Text
+    /// that survives always reaches the piece as timed words, so the merge can
+    /// place it in a segment.
     private static func transcribeChunk(
         _ chunk: MLXArray, offset: Float, asr: Qwen3ASRModel,
         aligner: Qwen3ForcedAlignerModel, samples: [Float]
     ) -> [Piece] {
         defer { Memory.clearCache() }
         let seconds = Float(chunk.dim(0)) / Float(sampleRate)
+        let span = (Double(offset), Double(offset + seconds))
+
+        func resplit(_ reason: String) -> [Piece]? {
+            guard seconds / 2 >= minSplitSeconds else { return nil }
+            stderrLine(String(
+                format: "warning: qwen3 chunk %.1fs-%.1fs degenerate (%@); re-splitting",
+                span.0, span.1, reason))
+            let halves = splitAudioIntoChunks(chunk, sampleRate: sampleRate, chunkDuration: seconds / 2)
+            return halves.flatMap { half, halfOffset in
+                transcribeChunk(
+                    half, offset: offset + halfOffset, asr: asr, aligner: aligner, samples: samples)
+            }
+        }
+
         let budget = baseTokens + Int(seconds * tokensPerSecond)
         // chunkDuration above the chunk length: never re-split inside generate.
         let out = asr.generate(
             audio: chunk, maxTokens: budget, language: nil, chunkDuration: max(600, seconds + 1))
         var text = out.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return [] }
+        let silent = isSilent(samples: samples, offset: offset, count: chunk.dim(0))
+        if text.isEmpty {
+            if silent { return [] }
+            if let pieces = resplit("no text") { return pieces }
+            stderrLine(String(
+                format: "warning: qwen3 chunk %.1fs-%.1fs has audio but no text at the %.0fs floor",
+                span.0, span.1, Double(minSplitSeconds)))
+            return []
+        }
         let language = (out.language ?? "English")
             .split(separator: ",").first.map(String.init) ?? "English"
 
@@ -112,39 +138,50 @@ enum Qwen3Transcriber {
         let overBudget = out.generationTokens >= budget
         var aligned: ForcedAlignResult?
         if !looped && !overBudget {
-            aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language))
+            aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language, text: text))
         }
-        let unaligned = aligned.map { $0.items.isEmpty && !isSilent(
-            samples: samples, offset: offset, count: chunk.dim(0)) } ?? false
+        let unaligned = aligned.map { $0.items.isEmpty && !silent } ?? false
+        // The library can stop decoding early without exhausting the budget.
+        let tail = aligned?.items.last.flatMap {
+            uncoveredTail(
+                lastWordEnd: $0.endTime, chunkSamples: chunk.dim(0), offset: offset, samples: samples)
+        }
 
-        if looped || overBudget || unaligned {
-            let reason = looped ? "repetition loop" : overBudget ? "token budget exhausted" : "no aligned words"
-            if seconds / 2 >= minSplitSeconds {
+        if looped || overBudget || unaligned || tail != nil {
+            let reason = looped ? "repetition loop"
+                : overBudget ? "token budget exhausted"
+                : unaligned ? "no aligned words" : "audio after the last aligned word"
+            if let pieces = resplit(reason) { return pieces }
+            if looped || overBudget || unaligned {
+                // At the floor: keep what was said once, never the loop.
+                text = collapseLoops(text)
                 stderrLine(String(
-                    format: "warning: qwen3 chunk %.1fs-%.1fs degenerate (%@); re-splitting",
-                    Double(offset), Double(offset + seconds), reason))
-                let halves = splitAudioIntoChunks(chunk, sampleRate: sampleRate, chunkDuration: seconds / 2)
-                return halves.flatMap { half, halfOffset in
-                    transcribeChunk(
-                        half, offset: offset + halfOffset, asr: asr, aligner: aligner, samples: samples)
+                    format: "warning: qwen3 chunk %.1fs-%.1fs still degenerate (%@) at the %.0fs floor; loops collapsed",
+                    span.0, span.1, reason, Double(minSplitSeconds)))
+                if aligned == nil {
+                    aligned = aligner.generate(
+                        audio: chunk, text: text, language: alignerLanguage(language, text: text))
                 }
-            }
-            // At the floor: keep what was said once, never the loop.
-            text = collapseLoops(text)
-            stderrLine(String(
-                format: "warning: qwen3 chunk %.1fs-%.1fs still degenerate (%@) at the %.0fs floor; loops collapsed",
-                Double(offset), Double(offset + seconds), reason, Double(minSplitSeconds)))
-            if aligned == nil {
-                aligned = aligner.generate(audio: chunk, text: text, language: alignerLanguage(language))
             }
         }
 
         let items = aligned?.items ?? []
-        warnIfTailUncovered(
-            lastWordEnd: items.last?.endTime ?? 0,
-            chunkSamples: chunk.dim(0), offset: offset, samples: samples)
-        let words = attachSeparators(items: items, text: text).map {
+        if let last = items.last, let tail = uncoveredTail(
+            lastWordEnd: last.endTime, chunkSamples: chunk.dim(0), offset: offset, samples: samples) {
+            stderrLine(String(
+                format: "warning: qwen3 chunk at %.1fs: %.1fs-%.1fs has audio (rms %.3f) but no aligned words",
+                span.0, tail.start, tail.end, tail.rms))
+        }
+        var words = attachSeparators(items: items, text: text).map {
             TimedWord(text: $0.text, start: $0.start + Double(offset), end: $0.end + Double(offset))
+        }
+        if words.isEmpty {
+            // Text with no timings (a quiet speaker below the silence threshold,
+            // or the floor): one word spanning the chunk still lands in a turn.
+            stderrLine(String(
+                format: "warning: qwen3 chunk %.1fs-%.1fs has no aligned words; its text is kept untimed",
+                span.0, span.1))
+            words = [TimedWord(text: text, start: span.0, end: span.1)]
         }
         return [Piece(text: text, language: language, words: words)]
     }
@@ -216,30 +253,27 @@ enum Qwen3Transcriber {
         return (sumSquares / Float(to - from)).squareRoot()
     }
 
-    /// Uncovered tail longer than this (seconds) that is not silent suggests
-    /// the ASR stopped early (e.g. hit its token budget) and dropped speech.
-    static let uncoveredTailWarnSeconds = 30.0
+    /// A non-silent stretch longer than this (seconds) after the last aligned
+    /// word means the ASR stopped early and dropped speech, so the chunk is
+    /// re-split (60 → 30 → 15 s); at the floor it is only warned about.
+    static let uncoveredTailSeconds = 10.0
     /// RMS above this (about -40 dBFS) counts as "not silent".
     static let silenceRMS: Float = 0.01
 
-    /// Warn on stderr when the chunk's audio after its last aligned word is
-    /// long and not silent — a sign of silently truncated transcription.
-    static func warnIfTailUncovered(
+    /// The chunk's audio after its last aligned word, in recording seconds,
+    /// when it is longer than `uncoveredTailSeconds` and not silent.
+    static func uncoveredTail(
         lastWordEnd: Double, chunkSamples: Int, offset: Float, samples: [Float]
-    ) {
+    ) -> (start: Double, end: Double, rms: Float)? {
         let chunkSeconds = Double(chunkSamples) / Double(sampleRate)
-        guard chunkSeconds - lastWordEnd > uncoveredTailWarnSeconds else { return }
+        guard chunkSeconds - lastWordEnd > uncoveredTailSeconds else { return nil }
         let chunkStart = Int(Double(offset) * Double(sampleRate))
         let from = min(samples.count, chunkStart + Int(lastWordEnd * Double(sampleRate)))
         let to = min(samples.count, chunkStart + chunkSamples)
-        guard to > from else { return }
+        guard to > from else { return nil }
         let rms = rms(samples, from, to)
-        guard rms > silenceRMS else { return }
-        let start = Double(offset) + lastWordEnd
-        let end = Double(offset) + chunkSeconds
-        stderrLine(String(
-            format: "warning: qwen3 chunk at %.1fs: %.1fs-%.1fs has audio (rms %.3f) but no aligned words",
-            Double(offset), start, end, rms))
+        guard rms > silenceRMS else { return nil }
+        return (Double(offset) + lastWordEnd, Double(offset) + chunkSeconds, rms)
     }
 
     /// The aligner returns bare words: its tokenizer drops every character that
@@ -298,8 +332,12 @@ enum Qwen3Transcriber {
     }
 
     /// The aligner splits "Chinese" into characters (keeping embedded Latin
-    /// words whole) and everything else on spaces.
-    static func alignerLanguage(_ language: String) -> String {
+    /// words whole) and everything else on spaces. Text with any CJK ideograph
+    /// aligns as Chinese whatever language was detected: a mixed chunk detected
+    /// as English would otherwise lose unspaced CJK runs to space splitting.
+    static func alignerLanguage(_ language: String, text: String) -> String {
+        let isIdeograph = ForceAlignProcessor().isCJKChar
+        if text.contains(where: isIdeograph) { return "Chinese" }
         switch language {
         case "Chinese", "Cantonese": return "Chinese"
         default: return language
