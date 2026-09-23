@@ -10,13 +10,20 @@ Both source packages produce the same runtime executable name and accept the
 same argv-based commands:
 
 ```text
-ariso-stt --audio <path> --models <dir> --format json
+ariso-stt --audio <path> --models <dir> --format json [--asr-model <id>]
 ariso-stt notes --transcript <path> --models <dir>
 ```
 
 Transcription writes one JSON object matching `transcript.schema.json` to
 stdout. Notes writes Markdown to stdout. Diagnostics go to stderr. Model
 downloads belong to the Tauri host, so sidecar inference remains offline.
+
+`--asr-model` defaults to `parakeet-tdt-0.6b-v3`. The macOS sidecar also accepts
+`qwen3-asr-0.6b-4bit` (Qwen3-ASR + Qwen3-ForcedAligner, loaded from
+`<models>/qwen3-asr-0.6b-4bit` and `<models>/qwen3-forcedaligner-0.6b-4bit`;
+language auto-detected and reported as an ISO code such as `zh` or `en`). Any
+other value exits non-zero. The Windows sidecar ships Parakeet only and the
+host never passes the flag there.
 
 `windows-models.json` is Windows distribution metadata, shared by the Tauri
 host, native sidecar, publisher, and installer build. It pins model data and the
