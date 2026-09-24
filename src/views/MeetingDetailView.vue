@@ -816,7 +816,10 @@ const showStatusChip = computed(
   () =>
     cloudProcessing.value ||
     (!!detail.value?.isLocal &&
-      ['transcribing', 'notes-pending', 'transcript-failed', 'notes-failed', 'notes-empty-transcript'].includes(progress.stage.value))
+      [
+        'transcribing', 'pending-models', 'notes-pending', 'notes-pending-model',
+        'transcript-failed', 'notes-failed', 'notes-empty-transcript',
+      ].includes(progress.stage.value))
 );
 // Cloud has no post-upload failure signal, so its chip is always the spinner
 // variant — there is nothing to offer a Retry for.
@@ -824,7 +827,9 @@ const statusGenerating = computed(
   () =>
     cloudProcessing.value ||
     progress.stage.value === 'transcribing' ||
-    progress.stage.value === 'notes-pending'
+    progress.stage.value === 'pending-models' ||
+    progress.stage.value === 'notes-pending' ||
+    progress.stage.value === 'notes-pending-model'
 );
 const statusLabel = computed(() => {
   // One combined stage server-side: no transcript/notes split like local's.
@@ -832,8 +837,12 @@ const statusLabel = computed(() => {
   switch (progress.stage.value) {
     case 'transcribing':
       return 'Generating Transcript';
+    case 'pending-models':
+      return 'Waiting for on-device models to finish downloading…';
     case 'notes-pending':
       return 'Generating AI Notes';
+    case 'notes-pending-model':
+      return 'Waiting for the notes model to finish downloading…';
     case 'transcript-failed':
       return 'Transcript failed';
     case 'notes-failed':

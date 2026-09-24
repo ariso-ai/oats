@@ -399,19 +399,15 @@ async fn run_loop(app: AppHandle) {
                         {
                             return;
                         }
-                        // Local backend: don't auto-record until both on-device
-                        // models are downloaded. Surface Settings (which auto-
-                        // starts the downloads) and skip this meeting — checked
-                        // before the record prompt so the user isn't asked to
-                        // record and then bailed on. Ariso path is unaffected.
+                        // Local backend: recording is never blocked on model
+                        // state. Nudge any missing download in the background
+                        // and fall through to the normal record prompt exactly
+                        // as when models are already ready. Ariso path is
+                        // unaffected.
                         if crate::commands::active_backend(&app2) == "local"
                             && !crate::commands::local_models_ready()
                         {
-                            let app_main = app2.clone();
-                            let _ = app2.run_on_main_thread(move || {
-                                crate::commands::surface_model_download(&app_main);
-                            });
-                            return;
+                            crate::commands::request_local_model_downloads(&app2);
                         }
                         let record =
                             crate::meeting_notifications::prompt_auto_record(&app2, default_record)

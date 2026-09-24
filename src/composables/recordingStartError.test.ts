@@ -29,6 +29,12 @@ describe('recordingStartErrorMessage', () => {
       'C:\\secret',
     );
   });
+
+  it('explains a blocked Ariso session without mentioning local models', () => {
+    const msg = recordingStartErrorMessage('sign-in required');
+    expect(msg).toContain('Sign in');
+    expect(msg).not.toContain('local models');
+  });
 });
 
 describe('recordingBlockedPayload', () => {

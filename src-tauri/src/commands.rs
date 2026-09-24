@@ -143,11 +143,13 @@ pub(crate) fn local_models_ready() -> bool {
     }
 }
 
-/// Surface the (pre-created) Settings window and emit `tray://show-model-prompt`
-/// so its on-device-models section auto-starts the missing downloads. Shared by
-/// every recording entry point that gates on Local model readiness.
-pub(crate) fn surface_model_download(app: &tauri::AppHandle) {
-    let _ = open_settings_window(app);
+/// Emit `tray://show-model-prompt` so the (pre-created, always-mounted) Settings
+/// window auto-starts any missing on-device model download in the background.
+/// Safe to call on every local recording attempt while a model is missing: the
+/// per-target download guards in `model_manager.rs` de-dupe a download already
+/// in flight. Deliberately does not open/focus Settings — recording itself is
+/// never blocked on model state.
+pub(crate) fn request_local_model_downloads(app: &tauri::AppHandle) {
     let _ = app.emit("tray://show-model-prompt", ());
 }
 
@@ -1617,22 +1619,20 @@ pub(crate) fn open_waveform_window(
 }
 
 /// Gate recording on a valid session for the Ariso backend. The Local backend
-/// needs no auth but is gated on both on-device models being downloaded;
-/// otherwise the Settings window is surfaced and the attempt aborts. When the
-/// Ariso user is signed out, surface the (pre-created) Settings window and emit
-/// `tray://show-sign-in-prompt` so its sign-in banner appears, then report
-/// `false` so the caller aborts. Mirrors the tray's session gate so every
-/// recording entry point behaves identically.
+/// needs no auth and is never gated on model state: recording starts
+/// immediately and any missing on-device model download is nudged in the
+/// background. When the Ariso user is signed out, surface the (pre-created)
+/// Settings window and emit `tray://show-sign-in-prompt` so its sign-in banner
+/// appears, then report `false` so the caller aborts. Mirrors the tray's
+/// session gate so every recording entry point behaves identically.
 async fn ensure_recording_allowed(app: &tauri::AppHandle) -> bool {
     if active_backend(app) == "local" {
-        // Local needs no auth, but both on-device models must be ready. When
-        // they aren't, surface Settings (which auto-starts the downloads) and
-        // abort this recording attempt.
-        if local_models_ready() {
-            return true;
+        // Local recording is never blocked on model state — start it
+        // immediately, nudging any missing download in the background.
+        if !local_models_ready() {
+            request_local_model_downloads(app);
         }
-        surface_model_download(app);
-        return false;
+        return true;
     }
     if is_session_valid(app).await {
         return true;
@@ -3904,6 +3904,42 @@ mod tests {
         // A failed transcription never reaches notes generation, so the
         // (has_note=false, notes_error=None) combination here must not be
         // misread as notes-pending.
+        delete_local_recording(id.to_string()).unwrap();
+        assert!(!dir.exists(), "recording dir should be gone");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_allows_pending_models_with_no_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.status = crate::storage::RecordingStatus::PendingModels;
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        delete_local_recording(id.to_string()).unwrap();
+        assert!(!dir.exists(), "recording dir should be gone");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn delete_local_recording_allows_notes_pending_on_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-06-02T14-30-05Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.status = crate::storage::RecordingStatus::Done;
+        meta.notes_error = Some(crate::storage::MODELS_NOT_READY_NOTES_ERROR.to_string());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        // Waiting on the notes model is not "still being processed" — nothing is
+        // mid-write, so delete must succeed, unlike the genuine NotesStatus::Pending
+        // case covered by `delete_local_recording_refuses_while_notes_are_pending`.
         delete_local_recording(id.to_string()).unwrap();
         assert!(!dir.exists(), "recording dir should be gone");
         unsafe { std::env::remove_var("ARISO_ROOT"); }

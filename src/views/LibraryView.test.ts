@@ -800,6 +800,25 @@ describe('LibraryView', () => {
       expect(wrapper.get('.meeting-item').find('.mi-sub--processing').exists()).toBe(true);
     });
 
+    it('shows "Waiting for on-device models…" for a pending-models recording', async () => {
+      const wrapper = await mountWithRows([item({ id: 'a', status: 'pending-models' })]);
+      const row = wrapper.get('.meeting-item');
+      expect(row.find('.mi-sub--processing').text()).toBe('Waiting for on-device models…');
+    });
+
+    it('shows "Waiting for on-device models…" when only notes are pending on a model, even long after the recording ended', async () => {
+      const wrapper = await mountWithRows([
+        item({
+          id: 'a',
+          timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+          status: 'done',
+          files: { hasAudio: true, hasTranscript: true, hasNote: false, notesStatus: 'pending-model' },
+        }),
+      ]);
+      const row = wrapper.get('.meeting-item');
+      expect(row.find('.mi-sub--processing').text()).toBe('Waiting for on-device models…');
+    });
+
     it('shows the normal sub-line once a local recording has its notes', async () => {
       const wrapper = await mountWithRows([
         item({ id: 'a', status: 'done', files: { hasAudio: true, hasTranscript: true, hasNote: true } }),

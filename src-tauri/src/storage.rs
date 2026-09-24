@@ -14,6 +14,12 @@ pub enum RecordingStatus {
     Transcribing,
     Done,
     Failed,
+    /// Capture finished and audio is saved, but the on-device STT model isn't
+    /// downloaded yet, so transcription hasn't started. Resolved automatically
+    /// once the model finishes downloading (`transcribe::retry_recordings_pending_stt`)
+    /// — never a manual Retry target.
+    #[serde(rename = "pending-models")]
+    PendingModels,
 }
 
 /// AI-notes generation state, derived from on-disk artifacts. Notes run as a
@@ -31,6 +37,11 @@ pub enum NotesStatus {
     /// empty transcript instead of blaming notes generation.
     #[serde(rename = "empty-transcript")]
     EmptyTranscript,
+    /// The transcript exists, but the on-device notes model isn't downloaded
+    /// yet. Resolved automatically once it finishes
+    /// (`transcribe::retry_recordings_pending_llm`).
+    #[serde(rename = "pending-model")]
+    PendingModel,
 }
 
 /// Reason stored in `meta.notes_error` when a recording carries no speech.
@@ -38,6 +49,12 @@ pub enum NotesStatus {
 /// linking the skip (in `transcribe`) to the status the UI renders.
 pub const NO_SPEECH_NOTES_ERROR: &str =
     "no speech detected in this recording — notes generation skipped";
+
+/// Reason stored in `meta.notes_error` when notes generation was attempted but
+/// the on-device notes model isn't downloaded yet. `derive_notes_status`
+/// recognizes it and reports `NotesStatus::PendingModel` instead of `Failed`.
+pub const MODELS_NOT_READY_NOTES_ERROR: &str =
+    "on-device notes model not downloaded yet — notes generation pending";
 
 /// Classify AI-notes generation from the note file's presence, any recorded
 /// `notes_error`, and whether a run is currently in flight. An in-flight run
@@ -54,6 +71,8 @@ pub fn derive_notes_status(
         NotesStatus::Ready
     } else if notes_error == Some(NO_SPEECH_NOTES_ERROR) {
         NotesStatus::EmptyTranscript
+    } else if notes_error == Some(MODELS_NOT_READY_NOTES_ERROR) {
+        NotesStatus::PendingModel
     } else if notes_error.is_some() {
         NotesStatus::Failed
     } else {
@@ -1394,6 +1413,36 @@ mod tests {
             serde_json::to_string(&NotesStatus::EmptyTranscript).unwrap(),
             r#""empty-transcript""#
         );
+    }
+
+    #[test]
+    fn derive_notes_status_reports_pending_model_before_generic_failed() {
+        assert_eq!(
+            derive_notes_status(false, Some(MODELS_NOT_READY_NOTES_ERROR), false),
+            NotesStatus::PendingModel
+        );
+    }
+
+    #[test]
+    fn reconcile_leaves_pending_models_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = "2026-06-05T10-00-00Z";
+        let dir = create_recording_dir(root, id).unwrap();
+        let mut meta = RecordingMeta {
+            id: id.into(), title: "T".into(), created_at: "2026-06-05T10:00:00Z".into(),
+            duration_seconds: 5, status: RecordingStatus::PendingModels, language: None,
+            participants: vec![], model_version: None, error: None, notes_error: None,
+            last_clip_end_at: None, audio_file: None, notes_written: None,
+            notes_in_progress: false, title_is_default: true, preview: None,
+            notes_model: None,
+        };
+        write_meta(&dir, &meta).unwrap();
+
+        assert_eq!(reconcile_interrupted_recordings(root).unwrap(), 0);
+
+        meta = read_meta(&dir).unwrap();
+        assert_eq!(meta.status, RecordingStatus::PendingModels, "not treated as interrupted");
     }
 
     #[test]

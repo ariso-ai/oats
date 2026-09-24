@@ -140,7 +140,9 @@
       <h2 class="section-title">AI Models</h2>
       <div class="card">
         <div v-if="showModelBanner" class="signin-banner">
-          Both local models must finish downloading before you can record.
+          Recording works right away. On-device models are finishing their
+          download in the background — transcripts and notes for new
+          recordings will be generated once they're ready.
         </div>
         <!-- Sized in rows, not pixels: more models ship than belong on screen
              at once, so the list scrolls inside the card instead of pushing
@@ -1397,7 +1399,8 @@ async function onInstallLlm() {
 }
 
 // Kick off downloads for whichever on-device models are still missing. Shared
-// by the backend switch and the recording-gate prompt. Reads the current
+// by the backend switch and the background download-nudge fired whenever a
+// local recording starts while a model is missing. Reads the current
 // modelStatus, so callers refresh it first. The Rust per-target guards de-dupe,
 // so calling this while a download is already in progress is a safe no-op.
 function startMissingDownloads() {
@@ -1732,8 +1735,9 @@ onMounted(async () => {
   });
   const unModelPrompt = await listen('tray://show-model-prompt', async () => {
     modelPrompt.value = true;
-    // The recording gate fired because a model isn't ready — auto-start the
-    // missing download(s).
+    // A local recording just started (or auto-record fired) while a model
+    // isn't ready — auto-start the missing download(s) in the background.
+    // Recording itself was never blocked on this.
     await refreshModelStatus();
     startMissingDownloads();
   });

@@ -77,6 +77,15 @@ describe('deriveStage', () => {
       }),
     ).toBe('notes-pending');
   });
+
+  it('maps pending-models status to its own stage', () => {
+    expect(deriveStage(view({ status: 'pending-models' }))).toBe('pending-models');
+  });
+  it('maps done+notes pending-model to notes-pending-model', () => {
+    expect(
+      deriveStage(view({ status: 'done', hasTranscript: true, notesStatus: 'pending-model' }))
+    ).toBe('notes-pending-model');
+  });
 });
 
 describe('useLocalRecordingProgress polling', () => {
@@ -154,6 +163,22 @@ describe('useLocalRecordingProgress polling', () => {
     const calls = recordingStatus.mock.calls.length;
     await vi.advanceTimersByTimeAsync(4000);
     expect(recordingStatus.mock.calls.length).toBe(calls);
+  });
+
+  it('keeps polling at pending-models until it resolves', async () => {
+    recordingStatus
+      .mockResolvedValueOnce(view({ status: 'pending-models' }))
+      .mockResolvedValueOnce(view({ status: 'pending-models' }))
+      .mockResolvedValueOnce(view({ status: 'transcribing' }));
+    const p = useLocalRecordingProgress(() => 'rec-1');
+    p.begin();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(p.stage.value).toBe('pending-models');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.stage.value).toBe('pending-models');
+    expect(recordingStatus).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.stage.value).toBe('transcribing');
   });
 
   it('retryTranscription optimistically shows transcribing, calls the binding, and resumes polling', async () => {

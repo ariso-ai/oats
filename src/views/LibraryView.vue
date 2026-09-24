@@ -457,6 +457,7 @@ const searchPaletteOpen = ref(false);
 // the list row instead, so they never enter this set.
 const processingMeetings = useMeetingProcessing();
 const PROCESSING_LABEL = 'Processing…';
+const PENDING_MODELS_LABEL = 'Waiting for on-device models…';
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
   openPrepTab?: () => void;
@@ -903,11 +904,23 @@ function subFor(m: MeetingListItem): string {
 // Returns the label to show, or null when the row's normal sub-line applies.
 function rowProcessingLabel(m: MeetingListItem): string | null {
   if (activeBackend.value?.id === 'local') {
+    // Blocked on a model download — unlike a generic stuck "pending" (below),
+    // this is an expected, potentially long wait (slow wifi, a big download),
+    // so it is never age-bounded.
+    if (m.status === 'pending-models') return PENDING_MODELS_LABEL;
     // `recording`/`transcribing` are authoritative live states from disk.
     // `failed` is deliberately excluded — the failure is reported by the detail
     // panel's chip with a Retry, and a row that kept spinning forever would be
     // a lie.
     if (m.status === 'recording' || m.status === 'transcribing') return PROCESSING_LABEL;
+    if (
+      m.status === 'done' &&
+      m.files?.hasTranscript &&
+      !m.files.hasNote &&
+      m.files.notesStatus === 'pending-model'
+    ) {
+      return PENDING_MODELS_LABEL;
+    }
     // "Has a transcript but no note" is an *inference* that notes are still
     // generating. It holds only while the notes are still pending: a recording
     // that settled without a note (nothing was said, or generation failed) is

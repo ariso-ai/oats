@@ -330,6 +330,28 @@ fn main() {
                 Err(e) => eprintln!("reconcile interrupted recordings: {e}"),
             }
 
+            // Best-effort: resume any recording left pending on a model that
+            // happens to already be ready by this launch (e.g. it finished
+            // downloading in a session oats wasn't running to observe).
+            // Readiness lives under the models root (`~/.ariso`); recordings
+            // live under the (possibly overridden) vault's meta root — these
+            // are genuinely different paths, so both must be resolved here.
+            if let (Ok(models_root), Ok(meta_root)) =
+                (crate::storage::ariso_root(), crate::vault::meta_root())
+            {
+                if crate::model_manager::is_ready(&models_root) {
+                    let r = meta_root.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::transcribe::retry_recordings_pending_stt(&r).await;
+                    });
+                }
+                if crate::model_manager::llm_is_ready(&models_root) {
+                    tauri::async_runtime::spawn(async move {
+                        crate::transcribe::retry_recordings_pending_llm(&meta_root).await;
+                    });
+                }
+            }
+
             // Managed state must exist before the tray is created: tray menu
             // rebuilds and the title refresher read RecordingState and
             // FeaturedMeetingState.

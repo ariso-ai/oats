@@ -270,6 +270,11 @@ pub async fn download_local_stt(app: tauri::AppHandle) -> Result<(), String> {
     match result {
         Ok(()) => {
             let _ = app.emit("model://stt/done", ());
+            tauri::async_runtime::spawn(async move {
+                if let Ok(meta_root) = crate::vault::meta_root() {
+                    crate::transcribe::retry_recordings_pending_stt(&meta_root).await;
+                }
+            });
             Ok(())
         }
         Err(e) => {
@@ -458,6 +463,11 @@ pub async fn download_local_llm(app: tauri::AppHandle) -> Result<(), String> {
     match result {
         Ok(()) => {
             let _ = app.emit("model://llm/done", ());
+            tauri::async_runtime::spawn(async move {
+                if let Ok(meta_root) = crate::vault::meta_root() {
+                    crate::transcribe::retry_recordings_pending_llm(&meta_root).await;
+                }
+            });
             Ok(())
         }
         Err(e) => {
@@ -1056,6 +1066,21 @@ fn now_marker() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("unix:{secs}")
+}
+
+/// Test-only: write the STT readiness manifest directly, bypassing the network
+/// download path. `transcribe.rs`'s tests use this instead of duplicating
+/// `manifest_path`/`stt_model_version` (both private to this module).
+#[cfg(test)]
+pub(crate) fn mark_stt_ready_for_test(root: &Path) {
+    write_manifest(root, "2026-01-01T00:00:00Z").expect("write STT manifest for test");
+}
+
+/// Test-only: write the LLM `.complete` readiness marker directly.
+#[cfg(test)]
+pub(crate) fn mark_llm_ready_for_test(root: &Path) {
+    std::fs::create_dir_all(llm_dir(root)).expect("create llm dir for test");
+    std::fs::write(llm_marker_path(root), llm_model_version()).expect("write llm marker for test");
 }
 
 #[cfg(test)]
