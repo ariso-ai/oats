@@ -1118,17 +1118,20 @@ pub fn speech_is_ready(root: &Path, model: SpeechModelId) -> bool {
     }
 }
 
-/// What this speech model occupies on disk, or `None` when none of its
-/// directories exist — which is how "not installed" is distinguished from
-/// "installed but empty", so the UI can show a dash rather than `0 MB`. A
-/// directory shared with another installed speech model (the diarizer) is
-/// still counted here: each ready model's own footprint includes what it needs.
+/// What this speech model occupies on disk, or `None` when it isn't ready —
+/// which is how "not installed" is distinguished from "installed but empty",
+/// so the UI can show a dash rather than `0 MB`. Requiring readiness (rather
+/// than just checking a directory exists) matters because the diarizer
+/// directory is shared across speech models: without it, installing only one
+/// model would report a size for every other model that merely shares that
+/// directory. A directory shared with another ready speech model (the
+/// diarizer) is still counted here: each ready model's own footprint includes
+/// what it needs.
 pub fn speech_model_size(root: &Path, model: SpeechModelId) -> Option<u64> {
-    let dirs = speech_dirs(root, model);
-    if !dirs.iter().any(|d| d.exists()) {
+    if !speech_is_ready(root, model) {
         return None;
     }
-    Some(dirs.iter().map(|d| dir_size(d)).sum())
+    Some(speech_dirs(root, model).iter().map(|d| dir_size(d)).sum())
 }
 
 /// Remove one speech model's files and readiness marker, so the next
@@ -1378,6 +1381,15 @@ mod tests {
             speech_model_size(tmp.path(), SpeechModelId::Qwen3Asr),
             Some(30 + marker_bytes)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn uninstalled_model_size_ignores_the_shared_diarizer() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_qwen3(tmp.path(), 10);
+        assert!(!speech_is_ready(tmp.path(), SpeechModelId::Parakeet));
+        assert_eq!(speech_model_size(tmp.path(), SpeechModelId::Parakeet), None);
     }
 
     #[test]
