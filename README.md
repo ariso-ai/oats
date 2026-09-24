@@ -114,7 +114,8 @@ Everything is stored locally under `~/.ariso/recordings/`:
 | **Transcription** | Ariso backend (no model training) | Apple Neural Engine on macOS; native CPU sidecar on Windows |
 | **Summary notes** | Ariso backend (no model training) | On-device LLM |
 | **Works offline** | No | **Yes** |
-| **Best for** | Convenience and sharing | Confidential meetings, air-gapped use |
+| **Multi-language** | **Yes** | No |
+| **Best for** | Collaboration and sharing | Confidential meetings, air-gapped use |
 
 ## 🤝 Contributing
 
