@@ -287,12 +287,13 @@
                     :aria-label="`Disconnect ${rowProviderLabel(row)}`"
                     @click.stop="onRemoveKey(row)"
                   >
-                    <!-- A link with a stroke through it: connected, click to
-                         break it. -->
+                    <!-- A plug with a stroke through it: connected, click to
+                         unplug it. -->
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
-                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
-                      <line x1="9" y1="12" x2="15" y2="12" />
+                      <path d="M9 2v6" />
+                      <path d="M15 2v6" />
+                      <path d="M7 8h10v4a5 5 0 0 1-10 0z" />
+                      <path d="M12 17v5" />
                       <line x1="4" y1="20" x2="20" y2="4" />
                     </svg>
                   </button>
@@ -304,12 +305,13 @@
                     :aria-label="`Connect ${rowProviderLabel(row)}`"
                     @click.stop="onConnectRow(row)"
                   >
-                    <!-- A link about to be made. Like Install and Delete, the
-                         word lives in the native tooltip. -->
+                    <!-- A plug about to be inserted. Like Install and Delete,
+                         the word lives in the native tooltip. -->
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
-                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
-                      <line x1="9" y1="12" x2="15" y2="12" />
+                      <path d="M9 2v6" />
+                      <path d="M15 2v6" />
+                      <path d="M7 8h10v4a5 5 0 0 1-10 0z" />
+                      <path d="M12 17v5" />
                     </svg>
                   </button>
                 </template>
