@@ -170,6 +170,35 @@ placed near them for discoverability.
   "Connected" with no re-entry required, and Keychain Access shows one oats
   item instead of three.
 
+## Windows (Credential Manager)
+
+Nothing above is macOS-only. `keyring`'s `v1` interface picks Windows
+Credential Manager on Windows, so the same code keeps one generic
+credential there (target `llm-api-keys.ai.ariso.desktop`), and the same
+startup migration folds in the legacy `llm-api-key:<provider>.ai.ariso.desktop`
+credentials.
+
+One Windows-only constraint matters once keys share an item: Credential
+Manager caps a secret at `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560 bytes), and
+`keyring` writes a password as UTF-16, so the **whole serialized key map** is
+limited to 1280 UTF-16 units (`WINDOWS_MAX_SECRET_UTF16`), while one key alone
+may be up to `MAX_KEY_LEN` (4096). Real keys (Anthropic ~108, OpenAI ~164,
+Gemini ~39 chars) fit easily; only a runaway paste reaches the cap.
+
+- `save_keys` checks the serialized map against `store_capacity()` (Windows:
+  1280; elsewhere: none) **before** touching the store, and fails with an
+  actionable message naming Windows Credential Manager instead of
+  `keyring`'s opaque `TooLong`. The stored keys are left exactly as they were.
+- Migration gets the same check through `save_keys`: if the legacy keys don't
+  fit together, it returns that error (logged at startup) and — as with any
+  failed save — deletes no legacy credential, so nothing is lost.
+- `store_error` names Windows Credential Manager on Windows rather than "the
+  system keychain" (matching Settings' existing `keychainName`).
+
+The budget logic is platform-neutral (`ensure_fits`) and unit-tested on every
+platform; a `#[cfg(windows)]` test on the windows-latest CI job proves an
+over-budget `set_api_key` fails before reaching the real store.
+
 ## Decisions
 
 Non-interactive run (`autofix:approved`, no trusted maintainer comments on

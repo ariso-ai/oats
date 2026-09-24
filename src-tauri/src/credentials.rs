@@ -26,6 +26,13 @@ const KEYS_ACCOUNT: &str = "llm-api-keys";
 /// runaway paste can't be pushed into the keychain.
 const MAX_KEY_LEN: usize = 4096;
 
+/// Windows Credential Manager caps a credential's secret at
+/// `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560 bytes), and `keyring` writes a
+/// password as UTF-16 — so the whole serialized key map, every provider's key
+/// together, gets this many UTF-16 units. Real keys (well under 200 chars
+/// each) fit comfortably; only a runaway paste can reach it.
+const WINDOWS_MAX_SECRET_UTF16: usize = 2560 / 2;
+
 /// Provider wire name -> key. The only shape stored in the consolidated
 /// keychain item.
 type KeyMap = BTreeMap<String, String>;
@@ -90,14 +97,44 @@ fn serialize_keys(keys: &KeyMap) -> String {
     serde_json::to_string(keys).unwrap_or_default()
 }
 
+/// The platform store's cap on the consolidated item's value, in UTF-16
+/// units, or `None` where the cap is far beyond anything we'd store (the
+/// macOS Keychain).
+fn store_capacity() -> Option<usize> {
+    cfg!(windows).then_some(WINDOWS_MAX_SECRET_UTF16)
+}
+
+/// Reject a serialized key map the store can't hold with a message the user
+/// can act on, instead of `keyring`'s opaque `TooLong`. Never quotes `raw`.
+fn ensure_fits(raw: &str, max_utf16_units: usize) -> Result<(), String> {
+    if raw.encode_utf16().count() > max_utf16_units {
+        return Err(
+            "Together, your API keys are longer than Windows Credential Manager \
+                    can store. Remove a key you no longer use and try again."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The user-facing name of this platform's credential store.
+const STORE_NAME: &str = if cfg!(windows) {
+    "Windows Credential Manager"
+} else {
+    "The system keychain"
+};
+
 /// Turn a credential-store failure into something a user can act on, without
 /// echoing whatever was being stored.
 fn store_error(err: keyring::Error) -> String {
     match err {
+        keyring::Error::NoStorageAccess(_) if cfg!(windows) => {
+            "Windows Credential Manager denied access. Try again.".to_string()
+        }
         keyring::Error::NoStorageAccess(_) => {
             "The system keychain is locked. Unlock it and try again.".to_string()
         }
-        other => format!("The system keychain refused the request ({other})."),
+        other => format!("{STORE_NAME} refused the request ({other})."),
     }
 }
 
@@ -143,8 +180,14 @@ fn load_keys() -> Result<KeyMap, String> {
 }
 
 fn save_keys(keys: &KeyMap) -> Result<(), String> {
+    let raw = serialize_keys(keys);
+    // Checked before the store is touched, so an over-budget save leaves the
+    // stored keys exactly as they were.
+    if let Some(max) = store_capacity() {
+        ensure_fits(&raw, max)?;
+    }
     consolidated_entry()?
-        .set_password(&serialize_keys(keys))
+        .set_password(&raw)
         .map_err(store_error)
 }
 
@@ -399,6 +442,68 @@ mod tests {
         assert_eq!(parse_keys(""), KeyMap::new());
         assert_eq!(parse_keys("not json"), KeyMap::new());
         assert_eq!(parse_keys("[\"openai\"]"), KeyMap::new());
+    }
+
+    #[test]
+    fn windows_budget_is_credential_managers_blob_cap_in_utf16_units() {
+        // CRED_MAX_CREDENTIAL_BLOB_SIZE is 2560 bytes and `keyring` writes a
+        // password as UTF-16, two bytes per unit.
+        assert_eq!(WINDOWS_MAX_SECRET_UTF16 * 2, 2560);
+    }
+
+    #[test]
+    fn only_windows_caps_the_stored_key_map() {
+        #[cfg(windows)]
+        assert_eq!(store_capacity(), Some(WINDOWS_MAX_SECRET_UTF16));
+        #[cfg(not(windows))]
+        assert_eq!(store_capacity(), None);
+    }
+
+    #[test]
+    fn a_key_map_at_the_budget_fits_and_one_unit_over_does_not() {
+        assert!(ensure_fits(&"k".repeat(10), 10).is_ok());
+        assert!(ensure_fits(&"k".repeat(11), 10).is_err());
+    }
+
+    #[test]
+    fn the_budget_counts_utf16_units_not_chars() {
+        // An astral-plane character is one char but two UTF-16 units, which is
+        // what Credential Manager's byte cap actually measures.
+        assert!(ensure_fits("😀", 1).is_err());
+        assert!(ensure_fits("😀", 2).is_ok());
+    }
+
+    #[test]
+    fn an_over_budget_error_never_quotes_a_key() {
+        let raw = serialize_keys(&KeyMap::from([(
+            "openai".to_string(),
+            format!("sk-live-do-not-leak{}", "k".repeat(2000)),
+        )]));
+        let err = ensure_fits(&raw, WINDOWS_MAX_SECRET_UTF16).unwrap_err();
+        assert!(!err.contains("sk-live"), "error leaked the key: {err}");
+        assert!(err.contains("Windows Credential Manager"), "{err}");
+    }
+
+    /// Runs on the windows-latest CI job: the budget is enforced before the
+    /// store is ever reached, so this never writes a real credential.
+    #[cfg(windows)]
+    #[test]
+    fn saving_keys_over_the_windows_budget_fails_before_touching_the_store() {
+        testing::clear_keys();
+        let err = set_api_key(RemoteProvider::OpenAi, "k".repeat(2000)).unwrap_err();
+        assert!(err.contains("Windows Credential Manager"), "{err}");
+    }
+
+    #[test]
+    fn a_store_error_names_this_platforms_credential_store() {
+        let err = store_error(keyring::Error::PlatformFailure("boom".into()));
+        #[cfg(windows)]
+        assert!(
+            err.contains("Windows Credential Manager") && !err.contains("keychain"),
+            "{err}"
+        );
+        #[cfg(not(windows))]
+        assert!(err.contains("keychain"), "{err}");
     }
 
     #[test]
