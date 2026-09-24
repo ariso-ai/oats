@@ -187,6 +187,37 @@ fn connected_providers() -> Result<Vec<RemoteProvider>, String> {
         .collect())
 }
 
+/// One-time upgrade: move each pre-consolidation per-provider keychain item
+/// into the single combined item, then remove the old item. Idempotent (a
+/// present consolidated item short-circuits immediately) and best-effort per
+/// provider, so it's safe to call on every startup.
+pub fn migrate_legacy_keys() -> Result<(), String> {
+    let consolidated = consolidated_entry()?;
+    match consolidated.get_password() {
+        Ok(_) => return Ok(()),
+        Err(keyring::Error::NoEntry) => {}
+        Err(e) => return Err(store_error(e)),
+    }
+
+    let mut keys = KeyMap::new();
+    for provider in RemoteProvider::ALL {
+        let legacy = legacy_entry(provider)?;
+        if let Ok(value) = legacy.get_password() {
+            if let Ok(valid) = validate_key(&value) {
+                keys.insert(provider.as_str().to_string(), valid.to_string());
+            }
+            // Best-effort cleanup either way: a value that failed validation
+            // is not worth keeping around as a stale item, and one that
+            // migrated successfully has no reason to still exist here.
+            let _ = legacy.delete_credential();
+        }
+    }
+    if !keys.is_empty() {
+        save_keys(&keys)?;
+    }
+    Ok(())
+}
+
 /// Store a provider's API key. The value is never returned to a webview again.
 #[tauri::command]
 pub fn set_llm_api_key(provider: RemoteProvider, key: String) -> Result<(), String> {
@@ -413,6 +444,84 @@ mod tests {
         clear_api_key(RemoteProvider::Anthropic).unwrap();
         assert!(matches!(
             consolidated_entry().unwrap().get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+    }
+
+    #[test]
+    #[ignore = "writes to the real OS keychain"]
+    fn legacy_per_provider_entries_are_migrated_into_one_item_and_removed() {
+        let _real_keychain = testing::use_real_keychain();
+        let _ = consolidated_entry().unwrap().delete_credential();
+        for provider in RemoteProvider::ALL {
+            let _ = legacy_entry(provider).unwrap().delete_credential();
+        }
+
+        legacy_entry(RemoteProvider::OpenAi)
+            .unwrap()
+            .set_password("sk-legacy-openai")
+            .unwrap();
+        legacy_entry(RemoteProvider::Gemini)
+            .unwrap()
+            .set_password("sk-legacy-gemini")
+            .unwrap();
+
+        migrate_legacy_keys().unwrap();
+
+        assert_eq!(
+            get_api_key(RemoteProvider::OpenAi).unwrap().as_deref(),
+            Some("sk-legacy-openai")
+        );
+        assert_eq!(
+            get_api_key(RemoteProvider::Gemini).unwrap().as_deref(),
+            Some("sk-legacy-gemini")
+        );
+        assert_eq!(get_api_key(RemoteProvider::Anthropic).unwrap(), None);
+
+        // The legacy items are gone; one consolidated item now holds both keys.
+        assert!(matches!(
+            legacy_entry(RemoteProvider::OpenAi).unwrap().get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+        assert!(matches!(
+            legacy_entry(RemoteProvider::Gemini).unwrap().get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+        let raw = consolidated_entry().unwrap().get_password().unwrap();
+        assert_eq!(parse_keys(&raw).len(), 2);
+
+        // Safe to run again on every launch: already migrated, so a no-op.
+        migrate_legacy_keys().unwrap();
+        assert_eq!(
+            get_api_key(RemoteProvider::OpenAi).unwrap().as_deref(),
+            Some("sk-legacy-openai")
+        );
+
+        clear_api_key(RemoteProvider::OpenAi).unwrap();
+        clear_api_key(RemoteProvider::Gemini).unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes to the real OS keychain"]
+    fn an_invalid_legacy_value_is_dropped_but_its_stale_item_still_removed() {
+        let _real_keychain = testing::use_real_keychain();
+        let _ = consolidated_entry().unwrap().delete_credential();
+        for provider in RemoteProvider::ALL {
+            let _ = legacy_entry(provider).unwrap().delete_credential();
+        }
+
+        // A CR/LF makes this fail `validate_key`, simulating corrupt legacy
+        // data — migration must drop it, not propagate an error.
+        legacy_entry(RemoteProvider::OpenAi)
+            .unwrap()
+            .set_password("sk-bad\r\nX-Evil: 1")
+            .unwrap();
+
+        migrate_legacy_keys().unwrap();
+
+        assert_eq!(get_api_key(RemoteProvider::OpenAi).unwrap(), None);
+        assert!(matches!(
+            legacy_entry(RemoteProvider::OpenAi).unwrap().get_password(),
             Err(keyring::Error::NoEntry)
         ));
     }
