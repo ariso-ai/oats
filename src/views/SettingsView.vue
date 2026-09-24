@@ -140,7 +140,7 @@
       <h2 class="section-title">AI Models</h2>
       <div class="card">
         <div v-if="showModelBanner" class="signin-banner">
-          Recording works right away. Local models are finishing their
+          Recording works right away. On-device models are finishing their
           download in the background — transcripts and notes for new
           recordings will be generated once they're ready.
         </div>
