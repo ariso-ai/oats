@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.26.0](https://github.com/ariso-ai/oats/compare/v0.25.0...v0.26.0) (2026-09-24)
+
+
+### Features
+
+* **ariso-stt:** Qwen3-ASR transcription with forced-aligned word timings ([39f91c4](https://github.com/ariso-ai/oats/commit/39f91c4e1a3e8248ad6b1581e5292e6869fa765c))
+* auto-resume pending recordings once their model finishes downloading ([565d985](https://github.com/ariso-ai/oats/commit/565d9856b9be4e52422729583d71a720bc5682b7))
+* auto-resume pending recordings once their model finishes downloading ([fa46b72](https://github.com/ariso-ai/oats/commit/fa46b7251560bad4eb9b1c5a90de1d47e2dcfd15))
+* **credentials:** add JSON key-map helpers for the consolidated keychain item ([adb618e](https://github.com/ariso-ai/oats/commit/adb618e621a66ef1966384f3479a902aa328d65c))
+* **credentials:** consolidate per-provider keychain items into one ([2f624e2](https://github.com/ariso-ai/oats/commit/2f624e20418aab9e53a64dd8e66da0960d2452bd))
+* **credentials:** migrate legacy per-provider keychain items on startup ([1945dc6](https://github.com/ariso-ai/oats/commit/1945dc64324ecf1f212f7c6a12134c47dbfb52f4))
+* **credentials:** store all remote-model API keys in one macOS Keychain item ([e4fb8ef](https://github.com/ariso-ai/oats/commit/e4fb8efcf72383a491503fc41b23654cbb6d7870))
+* **LibraryView:** show a distinct, unbounded row label while pending on a model ([73bd26b](https://github.com/ariso-ai/oats/commit/73bd26b047a342eab406f5b0976c747070cd1a9b))
+* **LibraryView:** show a distinct, unbounded row label while pending on a model ([e5c5974](https://github.com/ariso-ai/oats/commit/e5c59747c131c9c92fce844ef3fa7047a7a8477e))
+* **MeetingDetailView:** show a pending-on-model chip, no Retry ([46985a4](https://github.com/ariso-ai/oats/commit/46985a4c5c201aa43833269507a4e6720dd653f8))
+* **MeetingDetailView:** show a pending-on-model chip, no Retry ([28e2433](https://github.com/ariso-ai/oats/commit/28e2433b675cd60fcdd90e0a40dd68771d821896))
+* **notes:** generate notes with a remote model, and record which wrote them ([6081faa](https://github.com/ariso-ai/oats/commit/6081faa06015aa0ef11163e3f8c85d048bc7d671))
+* **notes:** generate notes with a remote model, and record which wrote them ([a2cd6b1](https://github.com/ariso-ai/oats/commit/a2cd6b1bc321fc613e492904a2112141f18e17ff))
+* **settings:** let the model list's scrollbar be dragged ([efcc47a](https://github.com/ariso-ai/oats/commit/efcc47a232bfc12d388d4c07c2003f43c715385f))
+* **settings:** Qwen3-ASR speech row with per-model install and remove ([ef706a7](https://github.com/ariso-ai/oats/commit/ef706a79a603204e5f02de8af632b48eec8ceb98))
+* **settings:** redesign models configuration for model selection ([10b732e](https://github.com/ariso-ai/oats/commit/10b732ec6e0b547c77d3ed608aa88347a0f79ae9))
+* **settings:** redesign models configuration for model selection ([cd2d01c](https://github.com/ariso-ai/oats/commit/cd2d01c997fc465875975fa5b5dd33e906960fe5))
+* **settings:** store remote model API keys in the OS keychain ([011889e](https://github.com/ariso-ai/oats/commit/011889e47999cf117b4a09950bc448645e1342eb))
+* **settings:** store remote model API keys in the OS keychain ([7be0d90](https://github.com/ariso-ai/oats/commit/7be0d9061e7024935416ca7b4b02a6a99abd8f44))
+* **settings:** tweak models section ([017d082](https://github.com/ariso-ai/oats/commit/017d082ff6e4e946349e6b6c2c4cca1c439c3d63))
+* start local recording instantly instead of blocking on model downloads ([7dd66be](https://github.com/ariso-ai/oats/commit/7dd66be35bafcd21dba0de5b316766e463265593))
+* stop blocking local recording on missing on-device models ([9129acf](https://github.com/ariso-ai/oats/commit/9129acf40b95dee9d5a5e739293049be3d7f81be))
+* stop blocking local recording on missing on-device models ([8f6501c](https://github.com/ariso-ai/oats/commit/8f6501c917de1bc5c3feb6f68365726f19884ff3))
+* **storage:** add PendingModels/PendingModel status variants ([edca4f6](https://github.com/ariso-ai/oats/commit/edca4f601ed7eb43dc2618b8962ad737dfa53a90))
+* **storage:** add PendingModels/PendingModel status variants ([780ab38](https://github.com/ariso-ai/oats/commit/780ab38735bcf6c80218e58f98d6d63382e892ea))
+* **stt:** closed speech-model registry with persisted selection ([0ae6901](https://github.com/ariso-ai/oats/commit/0ae6901bc69c2fb1b6de4c7617270a142e915b61))
+* **stt:** pass the selected speech model to the sidecar ([9d9add5](https://github.com/ariso-ai/oats/commit/9d9add5b55715ba094bf846937b24b4c5da7fc01))
+* **stt:** per-model speech install, readiness, size and delete ([ca6cb5a](https://github.com/ariso-ai/oats/commit/ca6cb5a9ad57e913c208e6f331deb3fb87ca7e0b))
+* **stt:** Qwen3-ASR as a selectable on-device speech model ([5a7203b](https://github.com/ariso-ai/oats/commit/5a7203bfc5a2210fa27a88ce44eebf2f84bd807d))
+* **tauri.ts:** add pending-models/pending-model to the local status types ([4081140](https://github.com/ariso-ai/oats/commit/40811408882631e28d284cad1a90ed82f7bdefc3))
+* **tauri.ts:** add pending-models/pending-model to the local status types ([d142b8d](https://github.com/ariso-ai/oats/commit/d142b8d1a32e52023179374c3d99603dbc29de5a))
+* **transcribe:** reclassify missing-model failures as pending, not failed ([6aaedd5](https://github.com/ariso-ai/oats/commit/6aaedd576f4b88f4daa456d7f4429c59282148fa))
+* **transcribe:** reclassify missing-model failures as pending, not failed ([83353a3](https://github.com/ariso-ai/oats/commit/83353a3f242a624bc989965bc29ebdb68fa140b7))
+* **useLocalRecordingProgress:** add pending-models/notes-pending-model stages ([afd36a7](https://github.com/ariso-ai/oats/commit/afd36a704566599f9729c2889938807131f0fd87))
+* **useLocalRecordingProgress:** add pending-models/notes-pending-model stages ([8b4bc9c](https://github.com/ariso-ai/oats/commit/8b4bc9c950c3a9abaffebe4dfee3785bd3962a03))
+
+
+### Bug Fixes
+
+* **ariso-stt:** keep Qwen3 words that fall between diarization turns ([83b87d7](https://github.com/ariso-ai/oats/commit/83b87d7cee0b6cc53296d6032d3d20c4420b9bea))
+* **ariso-stt:** never drop Qwen3 text or audible audio silently ([8fb7251](https://github.com/ariso-ai/oats/commit/8fb725191aebea4ec03e58a94381cc4fe79bdc8e))
+* **ariso-stt:** stop Qwen3 decode loops from silently dropping speech ([2db6ba6](https://github.com/ariso-ai/oats/commit/2db6ba64f1920e33187708ab07376db8ae522c17))
+* close speaker-rename revert race with an in-flight clip append ([30ab18c](https://github.com/ariso-ai/oats/commit/30ab18cc28577ea3b62989bb81355e014a4d8c53))
+* close speaker-rename revert race with an in-flight clip append ([41a35d3](https://github.com/ariso-ai/oats/commit/41a35d3b5d6cb9a51098574c87274a381236f29f)), closes [#420](https://github.com/ariso-ai/oats/issues/420)
+* **credentials:** defer legacy keychain item deletion until migration write succeeds ([7e1964e](https://github.com/ariso-ai/oats/commit/7e1964e1a40340454d760a15cac7db19bc092522))
+* **credentials:** enforce Windows Credential Manager's size cap on the combined API-key item ([926ac1f](https://github.com/ariso-ai/oats/commit/926ac1fd998e1d896143f129d9e071361c9bc2ae))
+* **credentials:** enforce Windows Credential Manager's size cap on the combined key item ([ec23aa8](https://github.com/ariso-ai/oats/commit/ec23aa8734f7f47b9be3fd71c33efeaf83294cdb))
+* **notes:** give the remote prompt the note format the vault renders ([868aef8](https://github.com/ariso-ai/oats/commit/868aef8bac805113b7955b31e86a11b8b3b367db))
+* **notes:** only treat a missing LLM as pending for on-device notes ([d61fb9c](https://github.com/ariso-ai/oats/commit/d61fb9cbb4451e3335478e04577bedcdfca091b7))
+* **notes:** only treat a missing LLM as pending for on-device notes ([170081f](https://github.com/ariso-ai/oats/commit/170081fc9622cbe456e3cb96c7c55d8e1ee13ab0))
+* resolve the recordings root, not the models root, for auto-resume scans ([5dfd78b](https://github.com/ariso-ai/oats/commit/5dfd78bb66d3da19d2a77bb7efbd57a01c5af88a))
+* resolve the recordings root, not the models root, for auto-resume scans ([6c8797a](https://github.com/ariso-ai/oats/commit/6c8797a07452bfc52bca56353c28ec467b596b19))
+* **settings:** Add/Remove API key buttons with plus/minus icons and a removal confirmation ([d3caf5d](https://github.com/ariso-ai/oats/commit/d3caf5d6644454e426d7a4391bcd2f2f7b879fbf))
+* **settings:** correct the size of settings window ([d7646fa](https://github.com/ariso-ai/oats/commit/d7646fa960f3eaeacd20659523b5fdd0050a05e1))
+* **settings:** fall back to the other installed speech model on remove ([7fa0299](https://github.com/ariso-ai/oats/commit/7fa02996a225afd1874970965259ea97b0b75d57))
+* **settings:** keep the model list's thumb inside its track ([bdd2b72](https://github.com/ariso-ai/oats/commit/bdd2b723eceb7cde30ebf03f2c85b2e1121ef62e))
+* **settings:** pin the model list's scrollbar to the list's right edge ([c3908d6](https://github.com/ariso-ai/oats/commit/c3908d630ae4d7e8ce8b154ebbb2400118084ec8))
+* **settings:** plus/minus API key buttons with a removal confirmation ([acb1c60](https://github.com/ariso-ai/oats/commit/acb1c608724eae46aeeb522191be3e400b31789b)), closes [#440](https://github.com/ariso-ai/oats/issues/440)
+* **settings:** stop the list's bottom edge clipping the model tooltip ([eabaa93](https://github.com/ariso-ai/oats/commit/eabaa936a54e13ba8fdea6e5a2962259929d5045))
+* **settings:** use plug icons for provider connect/disconnect ([816ebf5](https://github.com/ariso-ai/oats/commit/816ebf5bb081933d7361b4ee3ae1314a666321d8))
+* **stt:** pin one speech model per transcription and recording ([168c4c6](https://github.com/ariso-ai/oats/commit/168c4c603aa03f30a85ea2931afd0728bcc320ac))
+
 ## [0.25.0](https://github.com/ariso-ai/oats/compare/v0.24.0...v0.25.0) (2026-09-19)
 
 
