@@ -315,8 +315,9 @@ fn main() {
             if let Err(e) = crate::vault::migrate_legacy_recordings() {
                 eprintln!("migrate legacy recordings: {e}");
             }
-            // One-time upgrade: move per-provider API-key Keychain items into
-            // the single combined item. Best-effort: log and continue.
+            // One-time upgrade: move per-provider API-key credentials (macOS
+            // Keychain / Windows Credential Manager) into the single combined
+            // item. Best-effort: log and continue.
             if let Err(e) = crate::credentials::migrate_legacy_keys() {
                 eprintln!("migrate legacy api keys: {e}");
             }
