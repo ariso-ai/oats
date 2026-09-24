@@ -971,7 +971,8 @@ async fn append_recording_core(
     // `meta` is mutated any further below.
     let time_offset = meta.duration_seconds as f64;
 
-    let models = storage::models_dir(&storage::ariso_root()?);
+    let ariso_root = storage::ariso_root()?;
+    let models = storage::models_dir(&ariso_root);
     // Transcribe from a temp file so the target's audio is never touched on failure.
     let clip_path = dir.join("append-clip.mp3");
     if let Err(e) = std::fs::write(&clip_path, &audio) {
@@ -991,6 +992,18 @@ async fn append_recording_core(
         Ok(r) => r,
         Err(e) => {
             let _ = std::fs::remove_file(&clip_path);
+            // A model the user removed mid-use can't transcribe this clip and
+            // never will on its own. Route it through the fresh path instead
+            // of `save_failed_clip` so it becomes `PendingModels` and
+            // auto-resumes once `download_local_stt` finishes (mirrors
+            // `fresh_recording_core`'s STT-failure branch), rather than a
+            // `Failed` recording that needs a manual Retry. The fresh path
+            // takes its own (non-reentrant) lock on the id it derives, so
+            // release this one first.
+            if !crate::model_manager::is_ready(&ariso_root) {
+                drop(append_guard);
+                return fresh_recording_core(root, audio, title, created_at, duration_seconds).await;
+            }
             // Save this clip as its own Failed recording (no re-transcribe: it
             // would deterministically fail again); leave the target intact.
             save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &e);
@@ -2924,6 +2937,10 @@ mod tests {
             tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
         ).await.unwrap();
         h1.await.unwrap();
+        // Models are ready: this failure is a genuine STT error, not a missing
+        // model, so it must still land as its own Failed recording (not fall
+        // back to the PendingModels path exercised separately below).
+        crate::model_manager::mark_stt_ready_for_test(tmp.path());
 
         // Second: failing stub → append must fall back to a separate Failed recording.
         let fail_stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
@@ -2947,6 +2964,58 @@ mod tests {
         assert_eq!(crate::vault::read_audio(meta2.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
         assert_eq!(meta2.status, RecordingStatus::Failed);
         assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// Issue #446: deleting the on-device model(s) and then recording again
+    /// within the append window must behave like a first-time recording —
+    /// auto-resuming once the model downloads — not end up as an unrecoverable
+    /// `Failed` recording.
+    #[tokio::test]
+    async fn append_with_missing_model_falls_back_to_pending_fresh_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        // First: success stub builds a Done target to append into.
+        let ok_stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &ok_stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let (r1, h1) = finalize_core(
+            tmp.path(), b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+        // Deliberately no `mark_stt_ready_for_test`: the model is "missing".
+
+        // Second: failing stub simulates the sidecar rejecting the deleted
+        // model. The append must fall back to the fresh path instead of
+        // saving a Failed clip.
+        let fail_stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("model not found"));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
+        let (r2, h2) = finalize_core(
+            tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
+        ).await.unwrap();
+        h2.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        // The clip becomes its own PendingModels recording, not an append and
+        // not a Failed recording.
+        assert_ne!(r2.id, r1.id);
+        assert_eq!(r2.status, RecordingStatus::PendingModels);
+        let dir2 = crate::storage::recordings_dir(tmp.path()).join(&r2.id);
+        let meta2 = crate::storage::read_meta(&dir2).unwrap();
+        assert_eq!(meta2.status, RecordingStatus::PendingModels);
+        assert_eq!(crate::vault::read_audio(meta2.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
+
+        // The target recording is untouched: still one segment, 30s.
+        let dir1 = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
+        assert_eq!(crate::storage::read_segments(&dir1).unwrap().unwrap().segments.len(), 1);
+        assert_eq!(crate::storage::read_meta(&dir1).unwrap().duration_seconds, 30);
+
+        // No separate Failed recording exists anywhere.
+        for entry in std::fs::read_dir(crate::storage::recordings_dir(tmp.path())).unwrap() {
+            let dir = entry.unwrap().path();
+            if let Ok(meta) = crate::storage::read_meta(&dir) {
+                assert_ne!(meta.status, RecordingStatus::Failed, "no Failed recording: {dir:?}");
+            }
+        }
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
