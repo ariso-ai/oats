@@ -315,6 +315,11 @@ fn main() {
             if let Err(e) = crate::vault::migrate_legacy_recordings() {
                 eprintln!("migrate legacy recordings: {e}");
             }
+            // One-time upgrade: move per-provider API-key Keychain items into
+            // the single combined item. Best-effort: log and continue.
+            if let Err(e) = crate::credentials::migrate_legacy_keys() {
+                eprintln!("migrate legacy api keys: {e}");
+            }
             // Best-effort: create the vault (+ Attachments/, .oats/, .obsidian)
             // up front so it can be opened in Obsidian before the first
             // recording. Write paths also call ensure_vault lazily.
