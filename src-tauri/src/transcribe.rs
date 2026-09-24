@@ -953,7 +953,16 @@ async fn append_recording_core(
         save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &format!("write clip: {e}"));
         return Err(format!("write clip: {e}"));
     }
-    let result = match run_transcribe(&clip_path, &models, crate::speech_model::selected()).await {
+    // Transcribe the clip with the model that produced the target recording,
+    // not whatever is currently selected: an append must not mix models (and
+    // languages/segmentation styles) into one recording's model_version.
+    let clip_model = crate::speech_model::SpeechModelId::ALL
+        .into_iter()
+        .find(|m| {
+            meta.model_version.as_deref() == Some(crate::model_manager::speech_model_version(*m).as_str())
+        })
+        .unwrap_or_else(crate::speech_model::selected);
+    let result = match run_transcribe(&clip_path, &models, clip_model).await {
         Ok(r) => r,
         Err(e) => {
             let _ = std::fs::remove_file(&clip_path);
