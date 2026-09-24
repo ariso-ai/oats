@@ -1416,8 +1416,8 @@ describe('SettingsView remote model API keys', () => {
     const connectBtn = row.get('[data-test="connect-key"]');
     expect(connectBtn.text()).toBe('');
     expect(connectBtn.find('svg').exists()).toBe(true);
-    expect(connectBtn.attributes('title')).toBe('Connect');
-    expect(connectBtn.attributes('aria-label')).toBe('Connect Anthropic');
+    expect(connectBtn.attributes('title')).toBe('Add API key');
+    expect(connectBtn.attributes('aria-label')).toBe('Add Anthropic API key');
     expect(row.find('[data-test="remove-key"]').exists()).toBe(false);
   });
 
@@ -1457,7 +1457,8 @@ describe('SettingsView remote model API keys', () => {
     // The swapped icon is the whole signal — no "Connected" word in the row.
     expect(row.find('[data-test="connect-key"]').exists()).toBe(false);
     const disconnect = row.get('[data-test="remove-key"]');
-    expect(disconnect.attributes('title')).toBe('Disconnect');
+    expect(disconnect.attributes('title')).toBe('Remove API key');
+    expect(disconnect.attributes('aria-label')).toBe('Remove Anthropic API key');
     expect(disconnect.text()).toBe('');
     expect(row.text()).not.toContain('Connected');
     expect(wrapper.find('[data-test="api-key-input"]').exists()).toBe(false);
@@ -1485,14 +1486,44 @@ describe('SettingsView remote model API keys', () => {
     );
   });
 
-  it('forgets a key when the provider is disconnected', async () => {
+  it('asks before removing a key, the same way it asks before removing a model', async () => {
     llmApiKeyProviders.mockResolvedValue(['anthropic']);
     const wrapper = await mountLocal();
 
     await rowNamed(wrapper, 'Claude Haiku 4.5').get('[data-test="remove-key"]').trigger('click');
     await flushPromises();
 
+    const dialog = wrapper.get('[data-test="remove-confirm"]');
+    expect(dialog.text()).toContain('Remove Anthropic API key?');
+    expect(clearLlmApiKey).not.toHaveBeenCalled();
+  });
+
+  it('keeps the key when removal is cancelled', async () => {
+    llmApiKeyProviders.mockResolvedValue(['anthropic']);
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').get('[data-test="remove-key"]').trigger('click');
+    await wrapper.get('[data-test="remove-confirm-cancel"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="remove-confirm"]').exists()).toBe(false);
+    expect(clearLlmApiKey).not.toHaveBeenCalled();
+    expect(rowNamed(wrapper, 'Claude Haiku 4.5').find('[data-test="remove-key"]').exists()).toBe(
+      true,
+    );
+  });
+
+  it('forgets a key once its removal is confirmed', async () => {
+    llmApiKeyProviders.mockResolvedValue(['anthropic']);
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, 'Claude Haiku 4.5').get('[data-test="remove-key"]').trigger('click');
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="remove-confirm"]').exists()).toBe(false);
     expect(clearLlmApiKey).toHaveBeenCalledWith('anthropic');
+    expect(deleteModel).not.toHaveBeenCalled();
     expect(rowNamed(wrapper, 'Claude Haiku 4.5').find('[data-test="connect-key"]').exists()).toBe(
       true,
     );

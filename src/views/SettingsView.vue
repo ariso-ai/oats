@@ -14,8 +14,10 @@
       </div>
     </div>
 
+    <!-- One confirmation for both kinds of removal: a local model's files, or
+         a provider's stored API key. -->
     <div
-      v-if="removeTarget"
+      v-if="removeTarget || removeKeyProvider"
       class="download-confirm"
       data-test="remove-confirm"
       role="dialog"
@@ -24,11 +26,16 @@
     >
       <div class="download-confirm__card">
         <h2 id="remove-confirm-title" class="download-confirm__title">
-          Remove {{ removeTarget.name }}?
+          <template v-if="removeTarget">Remove {{ removeTarget.name }}?</template>
+          <template v-else>Remove {{ removeKeyProviderLabel }} API key?</template>
         </h2>
-        <p class="download-confirm__body">
+        <p v-if="removeTarget" class="download-confirm__body">
           Its files are deleted from this device. Recording in Local mode needs
           this model, so it has to be downloaded again before the next meeting.
+        </p>
+        <p v-else class="download-confirm__body">
+          The key is deleted from {{ keychainName }}. {{ removeKeyProviderLabel }}
+          models can't write notes until you add a key again.
         </p>
         <div class="download-confirm__actions">
           <button
@@ -279,39 +286,33 @@
                 </template>
                 <template v-else>
                   <!-- No "Remote" label: the cloud type icon already says it.
-                       Nor a "Connected" one: a connected provider is the row
-                       whose key icon has become a struck-through one. -->
+                       Nor a "Connected" one: a provider with a key stored is the
+                       row whose plus has become a minus. -->
                   <button
                     v-if="rowConnected(row)"
                     class="icon-btn"
                     data-test="remove-key"
-                    title="Disconnect"
-                    :aria-label="`Disconnect ${rowProviderLabel(row)}`"
+                    title="Remove API key"
+                    :aria-label="`Remove ${rowProviderLabel(row)} API key`"
                     @click.stop="onRemoveKey(row)"
                   >
-                    <!-- A link with a stroke through it: connected, click to
-                         break it. -->
+                    <!-- A minus: a key is stored, click to remove it. -->
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
-                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
-                      <line x1="9" y1="12" x2="15" y2="12" />
-                      <line x1="4" y1="20" x2="20" y2="4" />
+                      <path d="M5 12h14" />
                     </svg>
                   </button>
                   <button
                     v-else
                     class="icon-btn"
                     data-test="connect-key"
-                    title="Connect"
-                    :aria-label="`Connect ${rowProviderLabel(row)}`"
+                    title="Add API key"
+                    :aria-label="`Add ${rowProviderLabel(row)} API key`"
                     @click.stop="onConnectRow(row)"
                   >
-                    <!-- A link about to be made. Like Install and Delete, the
-                         word lives in the native tooltip. -->
+                    <!-- A plus: add a key. Like Install and Delete, the words
+                         live in the native tooltip. -->
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M8.5 7H7a5 5 0 0 0 0 10h1.5" />
-                      <path d="M15.5 7H17a5 5 0 0 1 0 10h-1.5" />
-                      <line x1="9" y1="12" x2="15" y2="12" />
+                      <path d="M12 5v14M5 12h14" />
                     </svg>
                   </button>
                 </template>
@@ -1095,9 +1096,14 @@ function onRemoveRow(row: CatalogModel) {
 
 function cancelRemove() {
   removeTarget.value = null;
+  removeKeyProvider.value = null;
 }
 
 async function confirmRemove() {
+  if (removeKeyProvider.value) {
+    await confirmRemoveKey();
+    return;
+  }
   const row = removeTarget.value;
   removeTarget.value = null;
   if (!row) return;
@@ -1221,10 +1227,24 @@ async function onSaveKey() {
   }
 }
 
-async function onRemoveKey(row: CatalogModel) {
+/** The provider whose key the removal dialog is asking about. */
+const removeKeyProvider = ref<RemoteProvider | null>(null);
+const removeKeyProviderLabel = computed(() =>
+  removeKeyProvider.value ? remoteProviderLabel(removeKeyProvider.value) : '',
+);
+
+/** Removing a key is asked about first, the same way removing a model is. */
+function onRemoveKey(row: CatalogModel) {
   const provider = rowProvider(row);
   if (!provider) return;
   keyError.value = '';
+  removeKeyProvider.value = provider;
+}
+
+async function confirmRemoveKey() {
+  const provider = removeKeyProvider.value;
+  removeKeyProvider.value = null;
+  if (!provider) return;
   try {
     await llmKeys.clear(provider);
     connectedProviders.value = connectedProviders.value.filter((p) => p !== provider);
