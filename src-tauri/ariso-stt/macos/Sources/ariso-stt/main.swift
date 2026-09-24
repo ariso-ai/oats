@@ -61,22 +61,37 @@ func runToCompletion(_ body: @escaping @Sendable () async -> Void) -> Never {
     dispatchMain()
 }
 
-// MARK: - Token -> text reconstruction
+// MARK: - Timed words -> speaker segments
+
+/// One timed unit of recognized text: a Parakeet token or an aligned Qwen3 word.
+struct TimedWord {
+    let text: String
+    let start: Double
+    let end: Double
+}
 
 /// Parakeet/SentencePiece tokens use U+2581 ("▁") to mark a leading space.
-func reconstructText(_ tokens: [TokenTiming]) -> String {
-    let joined = tokens.map { $0.token }.joined()
-    return joined
+func renderParakeet(_ words: [TimedWord]) -> String {
+    words.map { $0.text }.joined()
         .replacingOccurrences(of: "\u{2581}", with: " ")
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-/// Merge ASR token timings with diarization turns into speaker-attributed,
+/// Merge timed words with diarization turns into speaker-attributed,
 /// time-ordered segments. Speaker ids are remapped to contiguous 0-based
 /// indices in order of first appearance; labels are "Speaker N".
-func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutResult {
-    let timings = asr.tokenTimings ?? []
-
+///
+/// A word belongs to every turn containing its midpoint. With
+/// `assignGapWordsToNearestTurn` false (Parakeet), a word whose midpoint is in
+/// no turn is dropped. With it true (Qwen3, whose aligner yields one timed unit
+/// per Chinese character, so many sit at turn edges), such a word joins the
+/// turn nearest its midpoint (ties go to the earlier turn), so no word is lost.
+/// Segment start/end always come from the turn itself.
+func mergeTimedWords(
+    words: [TimedWord], fullText: String, duration: Double, language: String,
+    render: ([TimedWord]) -> String, diarization: [TimedSpeakerSegment],
+    assignGapWordsToNearestTurn: Bool = false
+) -> OutResult {
     var speakerIndex: [String: Int] = [:]
     var order: [String] = []
     func indexFor(_ speakerId: String) -> Int {
@@ -89,24 +104,48 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
 
     var segments: [OutSegment] = []
 
-    if diarization.isEmpty || timings.isEmpty {
-        // No diarization (or no token timings): a single segment for the whole transcript.
+    if diarization.isEmpty || words.isEmpty {
+        // No diarization (or no word timings): a single segment for the whole transcript.
         segments.append(
-            OutSegment(speaker: 0, text: asr.text, start: 0, end: asr.duration))
+            OutSegment(speaker: 0, text: fullText, start: 0, end: duration))
     } else {
         let ordered = diarization.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
-        for turn in ordered {
+        func contains(_ turn: TimedSpeakerSegment, _ mid: Double) -> Bool {
+            mid >= Double(turn.startTimeSeconds) && mid < Double(turn.endTimeSeconds)
+        }
+        // Word index -> nearest turn index, for words whose midpoint is in no turn.
+        var gapTurn: [Int: Int] = [:]
+        if assignGapWordsToNearestTurn {
+            for (w, word) in words.enumerated() {
+                let mid = (word.start + word.end) / 2.0
+                if ordered.contains(where: { contains($0, mid) }) { continue }
+                var best = 0
+                var bestDistance = Double.infinity
+                for (t, turn) in ordered.enumerated() {
+                    let start = Double(turn.startTimeSeconds)
+                    let end = Double(turn.endTimeSeconds)
+                    let distance = mid < start ? start - mid : mid - end
+                    if distance < bestDistance {
+                        best = t
+                        bestDistance = distance
+                    }
+                }
+                gapTurn[w] = best
+            }
+        }
+        for (t, turn) in ordered.enumerated() {
             let start = Double(turn.startTimeSeconds)
             let end = Double(turn.endTimeSeconds)
-            let inTurn = timings.filter {
-                let mid = ($0.startTime + $0.endTime) / 2.0
-                return mid >= start && mid < end
-            }
+            // Filtering `words` in order keeps each turn's text in time order.
+            let inTurn = words.indices.filter { w in
+                let mid = (words[w].start + words[w].end) / 2.0
+                return (mid >= start && mid < end) || gapTurn[w] == t
+            }.map { words[$0] }
             if inTurn.isEmpty { continue }
             segments.append(
                 OutSegment(
                     speaker: indexFor(turn.speakerId),
-                    text: reconstructText(inTurn),
+                    text: render(inTurn),
                     start: start,
                     end: end))
         }
@@ -115,9 +154,9 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
             segments.append(
                 OutSegment(
                     speaker: indexFor(ordered[0].speakerId),
-                    text: asr.text,
+                    text: fullText,
                     start: 0,
-                    end: asr.duration))
+                    end: duration))
         }
     }
 
@@ -127,10 +166,19 @@ func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutRes
         : order.indices.map { OutParticipant(id: $0, label: "Speaker \($0 + 1)") }
 
     return OutResult(
-        language: "en",
-        durationSeconds: asr.duration,
+        language: language,
+        durationSeconds: duration,
         participants: participants,
         segments: segments)
+}
+
+func mergeSegments(asr: ASRResult, diarization: [TimedSpeakerSegment]) -> OutResult {
+    let words = (asr.tokenTimings ?? []).map {
+        TimedWord(text: $0.token, start: $0.startTime, end: $0.endTime)
+    }
+    return mergeTimedWords(
+        words: words, fullText: asr.text, duration: asr.duration, language: "en",
+        render: renderParakeet, diarization: diarization)
 }
 
 // MARK: - Notes (LLM meeting-notes generation)
@@ -349,6 +397,8 @@ let modelsURL = URL(fileURLWithPath: modelsPath)
 // The STT models (ASR + diarizer) are downloaded and integrity-verified by the
 // Rust app from the project CDN (see download_local_stt) and laid out where
 // FluidAudio expects them, so this sidecar only LOADS them — it never downloads.
+// Parakeet loads from `parakeet-tdt-0.6b-v3`; Qwen3 loads from
+// `qwen3-asr-0.6b-4bit` + `qwen3-forcedaligner-0.6b-4bit` (see Qwen3Transcriber).
 let asrDir = modelsURL.appendingPathComponent("parakeet-tdt-0.6b-v3")
 let diarizerDir = modelsURL.appendingPathComponent("speaker-diarization")
 
@@ -373,6 +423,11 @@ if isNotes {
     }
 }
 
+let asrModel = argValue("--asr-model") ?? "parakeet-tdt-0.6b-v3"
+guard ["parakeet-tdt-0.6b-v3", "qwen3-asr-0.6b-4bit"].contains(asrModel) else {
+    fail("unknown --asr-model: \(asrModel)")
+}
+
 guard let audioPath = argValue("--audio") else { fail("missing --audio") }
 let audioURL = URL(fileURLWithPath: audioPath)
 
@@ -385,22 +440,40 @@ runToCompletion {
             }
         }
 
-        // ASR: load models and transcribe (resampling handled internally).
-        let asrModels = try await AsrModels.load(from: asrDir, version: .v3)
-        let asrManager = AsrManager()
-        try await asrManager.loadModels(asrModels)
-        var decoderState = try TdtDecoderState()
-        let asrResult = try await asrManager.transcribe(
-            audioForTranscription, decoderState: &decoderState)
+        let result: OutResult
+        if asrModel == "qwen3-asr-0.6b-4bit" {
+            // 16 kHz mono Float samples, shared by Qwen3 and the diarizer.
+            let samples = try AudioConverter().resampleAudioFile(audioForTranscription)
+            let qwen = try await Qwen3Transcriber.transcribe(samples: samples, modelsURL: modelsURL)
 
-        // Diarization: needs 16 kHz mono Float samples.
-        let samples = try AudioConverter().resampleAudioFile(audioForTranscription)
-        let diarizerModels = try await DiarizerModels.downloadIfNeeded(to: diarizerDir)
-        let diarizer = DiarizerManager()
-        diarizer.initialize(models: diarizerModels)
-        let diarization = try diarizer.performCompleteDiarization(samples, sampleRate: 16000)
+            let diarizerModels = try await DiarizerModels.downloadIfNeeded(to: diarizerDir)
+            let diarizer = DiarizerManager()
+            diarizer.initialize(models: diarizerModels)
+            let diarization = try diarizer.performCompleteDiarization(samples, sampleRate: 16000)
 
-        let result = mergeSegments(asr: asrResult, diarization: diarization.segments)
+            result = mergeTimedWords(
+                words: qwen.words, fullText: qwen.text,
+                duration: Double(samples.count) / 16000.0, language: qwen.language,
+                render: renderQwen3, diarization: diarization.segments,
+                assignGapWordsToNearestTurn: true)
+        } else {
+            // ASR: load models and transcribe (resampling handled internally).
+            let asrModels = try await AsrModels.load(from: asrDir, version: .v3)
+            let asrManager = AsrManager()
+            try await asrManager.loadModels(asrModels)
+            var decoderState = try TdtDecoderState()
+            let asrResult = try await asrManager.transcribe(
+                audioForTranscription, decoderState: &decoderState)
+
+            // Diarization: needs 16 kHz mono Float samples.
+            let samples = try AudioConverter().resampleAudioFile(audioForTranscription)
+            let diarizerModels = try await DiarizerModels.downloadIfNeeded(to: diarizerDir)
+            let diarizer = DiarizerManager()
+            diarizer.initialize(models: diarizerModels)
+            let diarization = try diarizer.performCompleteDiarization(samples, sampleRate: 16000)
+
+            result = mergeSegments(asr: asrResult, diarization: diarization.segments)
+        }
         let data = try JSONEncoder().encode(result)
         FileHandle.standardOutput.write(data)
     } catch {

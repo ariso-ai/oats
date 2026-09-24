@@ -161,6 +161,12 @@ jobs:
       - name: Build frontend
         run: npm run vite:build
 
+      # mlx-audio-swift (Qwen3-ASR) needs Swift 6.2 / Xcode 26+. Select it
+      # before the fingerprint so the sidecar cache key names the Xcode used.
+      - name: Select Xcode 26+
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/select-xcode
+
       # The sidecar artifacts (Metal/MLX) are toolchain-specific, and this cache
       # is shared with release.yaml's signed build. Key it on the Xcode toolchain
       # so a sidecar built by one runner's Xcode is never restored into another's

@@ -10,19 +10,24 @@ const getBackendSetting = vi.fn(
 const setBackendSetting = vi.fn((_b: unknown) => Promise.resolve());
 const hasPromptedLocalModels = vi.fn(() => Promise.resolve(false));
 const setPromptedLocalModels = vi.fn((_v: unknown) => Promise.resolve());
-type ModelStatusShape = { state: string; version?: string; llmReady?: boolean };
+type ModelStatusShape = {
+  state: string;
+  version?: string;
+  llmReady?: boolean;
+  speech?: { id: string; ready: boolean }[];
+};
 const modelStatus = vi.fn(
   (): Promise<ModelStatusShape> => Promise.resolve({ state: 'not_downloaded' })
 );
 const modelSizes = vi.fn(
-  (): Promise<{ notes: number | null; speech: number | null }> =>
-    Promise.resolve({ notes: null, speech: null })
+  (): Promise<{ notes: number | null; speech: Record<string, number | null> }> =>
+    Promise.resolve({ notes: null, speech: {} })
 );
-const deleteModel = vi.fn((_k: unknown) => Promise.resolve());
+const deleteModel = vi.fn((_k: unknown, _speechModel?: unknown) => Promise.resolve());
 const llmApiKeyProviders = vi.fn((): Promise<string[]> => Promise.resolve([]));
 const setLlmApiKey = vi.fn((_p: unknown, _k: unknown) => Promise.resolve());
 const clearLlmApiKey = vi.fn((_p: unknown) => Promise.resolve());
-const downloadStt = vi.fn(() => Promise.resolve());
+const downloadStt = vi.fn((_model?: unknown) => Promise.resolve());
 const downloadLlm = vi.fn(() => Promise.resolve());
 const getNotesModelSetting = vi.fn(() =>
   Promise.resolve({ kind: 'local', id: 'gemma-3-1b-it-qat-4bit' } as const)
@@ -106,10 +111,10 @@ vi.mock('../tauri', () => ({
   pickVaultFolder: (current?: string) => pickVaultFolder(current),
   local: {
     modelStatus: () => modelStatus(),
-    downloadStt: () => downloadStt(),
+    downloadStt: (model?: unknown) => downloadStt(model),
     downloadLlm: () => downloadLlm(),
     modelSizes: () => modelSizes(),
-    deleteModel: (k: unknown) => deleteModel(k),
+    deleteModel: (k: unknown, speechModel?: unknown) => deleteModel(k, speechModel),
   },
   llmKeys: {
     providers: () => llmApiKeyProviders(),
@@ -193,7 +198,7 @@ beforeEach(() => {
   getBackendSetting.mockResolvedValue('ariso');
   getNotesModelSetting.mockResolvedValue({ kind: 'local', id: 'gemma-3-1b-it-qat-4bit' });
   modelStatus.mockResolvedValue({ state: 'not_downloaded' });
-  modelSizes.mockResolvedValue({ notes: null, speech: null });
+  modelSizes.mockResolvedValue({ notes: null, speech: {} });
   getSpeechModelSetting.mockResolvedValue('speech:parakeet-tdt-0.6b-v3');
   deleteModel.mockResolvedValue(undefined);
   llmApiKeyProviders.mockResolvedValue([]);
@@ -1601,8 +1606,18 @@ describe('SettingsView model size and removal', () => {
 
   async function mountInstalled() {
     getBackendSetting.mockResolvedValue('local');
-    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
-    modelSizes.mockResolvedValue({ notes: 750 * MB, speech: 900 * MB });
+    // Only Parakeet offered here, matching a platform (or pre-Qwen build) that
+    // ships a single speech model — keeps this describe's rows exactly Gemma
+    // + Parakeet, as its assertions assume.
+    modelStatus.mockResolvedValue({
+      state: 'ready',
+      llmReady: true,
+      speech: [{ id: 'parakeet-tdt-0.6b-v3', ready: true }],
+    });
+    modelSizes.mockResolvedValue({
+      notes: 750 * MB,
+      speech: { 'parakeet-tdt-0.6b-v3': 900 * MB },
+    });
     const wrapper = mount(SettingsView);
     await flushPromises();
     return wrapper;
@@ -1666,7 +1681,10 @@ describe('SettingsView model size and removal', () => {
   it('yields the size to a failure message rather than showing both', async () => {
     getBackendSetting.mockResolvedValue('local');
     modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: false });
-    modelSizes.mockResolvedValue({ notes: 750 * MB, speech: 900 * MB });
+    modelSizes.mockResolvedValue({
+      notes: 750 * MB,
+      speech: { 'parakeet-tdt-0.6b-v3': 900 * MB },
+    });
     downloadStt.mockRejectedValue(new Error('network'));
     const wrapper = mount(SettingsView);
     await flushPromises();
@@ -1711,17 +1729,17 @@ describe('SettingsView model size and removal', () => {
     await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
     await flushPromises();
 
-    expect(deleteModel).toHaveBeenCalledWith('notes');
+    expect(deleteModel).toHaveBeenCalledWith('notes', undefined);
   });
 
-  it('names the speech model kind when removing that row', async () => {
+  it('names the speech model kind and id when removing that row', async () => {
     const wrapper = await mountInstalled();
     await rowNamed(wrapper, PARAKEET).get('[data-test="remove-model"]').trigger('click');
     await flushPromises();
     await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
     await flushPromises();
 
-    expect(deleteModel).toHaveBeenCalledWith('speech');
+    expect(deleteModel).toHaveBeenCalledWith('speech', 'parakeet-tdt-0.6b-v3');
   });
 
   it('keeps the model when the confirm is dismissed', async () => {
@@ -1760,5 +1778,223 @@ describe('SettingsView model size and removal', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('Can\'t remove a model while a recording is in progress.');
+  });
+});
+
+describe('SettingsView Qwen3-ASR speech row', () => {
+  const ROW = '[data-test="model-row"]';
+  const MB = 1024 * 1024;
+  const PARAKEET = 'Parakeet TDT 0.6B v3';
+  const QWEN = 'Qwen3-ASR 0.6B';
+
+  function rows(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll(ROW);
+  }
+
+  function rowNamed(wrapper: ReturnType<typeof mount>, name: string) {
+    const row = rows(wrapper).find((r) => r.text().includes(name));
+    if (!row) throw new Error(`no model row named ${name}`);
+    return row;
+  }
+
+  function fireSttProgress(model: string, fraction: number) {
+    const cb = listeners.get('model://stt/progress');
+    expect(cb).toBeDefined();
+    cb!({ payload: { model, fraction } });
+  }
+
+  async function mountLocal() {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('gives Qwen3 its own install button, independent of Parakeet', async () => {
+    modelStatus.mockResolvedValue({
+      state: 'ready',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: true },
+        { id: 'qwen3-asr-0.6b-4bit', ready: false },
+      ],
+    });
+    const wrapper = await mountLocal();
+
+    expect(rowNamed(wrapper, QWEN).find('[data-test="install-model"]').exists()).toBe(true);
+    expect(rowNamed(wrapper, PARAKEET).find('[data-test="install-model"]').exists()).toBe(false);
+  });
+
+  it('installs Qwen3 by its own id', async () => {
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, QWEN).get('[data-test="install-model"]').trigger('click');
+    await flushPromises();
+
+    expect(downloadStt).toHaveBeenCalledWith('qwen3-asr-0.6b-4bit');
+  });
+
+  it('removes Qwen3 by its own id once installed', async () => {
+    modelStatus.mockResolvedValue({
+      state: 'ready',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: true },
+        { id: 'qwen3-asr-0.6b-4bit', ready: true },
+      ],
+    });
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, QWEN).get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(deleteModel).toHaveBeenCalledWith('speech', 'qwen3-asr-0.6b-4bit');
+  });
+
+  function bothSpeechModels(qwenReady: boolean) {
+    return {
+      state: 'ready',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: true },
+        { id: 'qwen3-asr-0.6b-4bit', ready: qwenReady },
+      ],
+    };
+  }
+
+  async function removeRow(wrapper: ReturnType<typeof mount>, name: string) {
+    await rowNamed(wrapper, name).get('[data-test="remove-model"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+  }
+
+  it('moves the selection to the other installed speech model when the selected one is removed', async () => {
+    getSpeechModelSetting.mockResolvedValue('speech:qwen3-asr-0.6b-4bit');
+    modelStatus.mockResolvedValue(bothSpeechModels(true));
+    // The backend reports Qwen3 gone once its files are deleted.
+    deleteModel.mockImplementation(() => {
+      modelStatus.mockResolvedValue(bothSpeechModels(false));
+      return Promise.resolve();
+    });
+    const wrapper = await mountLocal();
+    const statusReadsBefore = modelStatus.mock.calls.length;
+
+    await removeRow(wrapper, QWEN);
+
+    expect(setSpeechModelSetting).toHaveBeenCalledWith('speech:parakeet-tdt-0.6b-v3');
+    // Readiness follows the selection, so status is read again after the switch.
+    expect(modelStatus.mock.calls.length).toBeGreaterThanOrEqual(statusReadsBefore + 2);
+    expect(rowNamed(wrapper, PARAKEET).find('.model-tick--on').exists()).toBe(true);
+  });
+
+  it('keeps the selection when the removed speech model was not the selected one', async () => {
+    modelStatus.mockResolvedValue(bothSpeechModels(true));
+    deleteModel.mockImplementation(() => {
+      modelStatus.mockResolvedValue(bothSpeechModels(false));
+      return Promise.resolve();
+    });
+    const wrapper = await mountLocal();
+
+    await removeRow(wrapper, QWEN);
+
+    expect(setSpeechModelSetting).not.toHaveBeenCalled();
+  });
+
+  it('keeps the selection when no other speech model is installed', async () => {
+    getSpeechModelSetting.mockResolvedValue('speech:qwen3-asr-0.6b-4bit');
+    const onlyQwen = (qwenReady: boolean) => ({
+      state: qwenReady ? 'ready' : 'not_downloaded',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: false },
+        { id: 'qwen3-asr-0.6b-4bit', ready: qwenReady },
+      ],
+    });
+    modelStatus.mockResolvedValue(onlyQwen(true));
+    deleteModel.mockImplementation(() => {
+      modelStatus.mockResolvedValue(onlyQwen(false));
+      return Promise.resolve();
+    });
+    const wrapper = await mountLocal();
+
+    await removeRow(wrapper, QWEN);
+
+    expect(setSpeechModelSetting).not.toHaveBeenCalled();
+  });
+
+  it("keeps each speech model's size on its own row", async () => {
+    modelSizes.mockResolvedValue({
+      notes: null,
+      speech: { 'parakeet-tdt-0.6b-v3': 900 * MB, 'qwen3-asr-0.6b-4bit': null },
+    });
+    const wrapper = await mountLocal();
+
+    expect(rowNamed(wrapper, PARAKEET).get('[data-test="model-size"]').text()).toBe('900 MB');
+    expect(rowNamed(wrapper, QWEN).get('[data-test="model-size"]').text()).toBe('—');
+  });
+
+  it('hides Qwen3 on a platform that only offers Parakeet', async () => {
+    modelStatus.mockResolvedValue({
+      state: 'ready',
+      llmReady: true,
+      speech: [{ id: 'parakeet-tdt-0.6b-v3', ready: true }],
+    });
+    const wrapper = await mountLocal();
+
+    expect(rows(wrapper).some((r) => r.text().includes(QWEN))).toBe(false);
+  });
+
+  it('tracks download progress per speech model', async () => {
+    // Never settles, so the row stays mid-download for the assertions below.
+    downloadStt.mockReturnValue(new Promise(() => {}));
+    const wrapper = await mountLocal();
+
+    // Starting Qwen's download disables every other row's install button (only
+    // one on-device download runs at a time), so Parakeet never leaves 'idle'.
+    await rowNamed(wrapper, QWEN).get('[data-test="install-model"]').trigger('click');
+    await flushPromises();
+
+    fireSttProgress('qwen3-asr-0.6b-4bit', 0.5);
+    // A progress event naming a model that is not mid-download (Parakeet is
+    // idle here) is recorded but must not surface on that model's row.
+    fireSttProgress('parakeet-tdt-0.6b-v3', 0.9);
+    await flushPromises();
+
+    expect(rowNamed(wrapper, QWEN).text()).toContain('50%');
+    expect(rowNamed(wrapper, PARAKEET).text()).not.toContain('90%');
+    expect(rowNamed(wrapper, PARAKEET).text()).not.toContain('50%');
+  });
+
+  it('selects Qwen3 as the active speech model when its installed row is clicked', async () => {
+    modelStatus.mockResolvedValue({
+      state: 'ready',
+      llmReady: true,
+      speech: [
+        { id: 'parakeet-tdt-0.6b-v3', ready: true },
+        { id: 'qwen3-asr-0.6b-4bit', ready: true },
+      ],
+    });
+    const wrapper = await mountLocal();
+
+    await rowNamed(wrapper, QWEN).trigger('click');
+    await flushPromises();
+
+    expect(setSpeechModelSetting).toHaveBeenCalledWith('speech:qwen3-asr-0.6b-4bit');
+  });
+
+  it('auto-starts the selected model\'s download when Qwen3 is selected but missing', async () => {
+    getSpeechModelSetting.mockResolvedValue('speech:qwen3-asr-0.6b-4bit');
+    modelStatus.mockResolvedValue({ state: 'not_downloaded', llmReady: true });
+    const wrapper = await mountLocal();
+
+    const cb = listeners.get('tray://show-model-prompt');
+    expect(cb).toBeDefined();
+    await cb!({ payload: null });
+    await flushPromises();
+
+    expect(downloadStt).toHaveBeenCalledWith('qwen3-asr-0.6b-4bit');
   });
 });

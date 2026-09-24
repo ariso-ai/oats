@@ -83,6 +83,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
+      # mlx-audio-swift (Qwen3-ASR) needs Swift 6.2 / Xcode 26+. Select it
+      # before the fingerprint so the sidecar cache key names the Xcode used.
+      - name: Select Xcode 26+
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/select-xcode
+
       # The ariso-stt sidecar is a gitignored build artifact that tauri's
       # `externalBin` requires to exist before any cargo build, `tauri dev`
       # included. The smoke test never executes it (no transcription), but the

@@ -85,17 +85,32 @@ pub fn sidecar_path() -> Result<PathBuf, String> {
     }))
 }
 
+/// Sidecar argv for one transcription. Parakeet passes no `--asr-model`, so its
+/// command line — and the Windows sidecar, which only ships Parakeet — is
+/// exactly what it was before model selection existed.
+fn transcribe_args(audio: &Path, models: &Path, model: crate::speech_model::SpeechModelId) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--audio".into(), audio.into(), "--models".into(), models.into(), "--format".into(), "json".into(),
+    ];
+    if model != crate::speech_model::SpeechModelId::Parakeet {
+        args.push("--asr-model".into());
+        args.push(model.id().into());
+    }
+    args
+}
+
 /// Run the sidecar in transcribe mode and parse its JSON stdout.
-pub async fn run_transcribe(audio: &Path, models: &Path) -> Result<TranscriptResult, String> {
+/// `model` is read once by the caller, which stamps that same value on the
+/// recording, so a selection change mid-run can't mislabel the transcript.
+pub async fn run_transcribe(
+    audio: &Path,
+    models: &Path,
+    model: crate::speech_model::SpeechModelId,
+) -> Result<TranscriptResult, String> {
     let bin = sidecar_path()?;
     let mut command = Command::new(&bin);
     command
-        .arg("--audio")
-        .arg(audio)
-        .arg("--models")
-        .arg(models)
-        .arg("--format")
-        .arg("json")
+        .args(transcribe_args(audio, models, model))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_background_process(&mut command);
@@ -584,7 +599,7 @@ async fn checkpoint_locked(
             stale: false,
         });
     }
-    let transcribed = run_transcribe(&clip_path, &models).await;
+    let transcribed = run_transcribe(&clip_path, &models, crate::speech_model::selected()).await;
     let _ = std::fs::remove_file(&clip_path);
 
     let result = match transcribed {
@@ -776,11 +791,12 @@ async fn fresh_recording_core(
     let root = storage::ariso_root()?;
     let models = storage::models_dir(&root);
     let audio_path = crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file);
-    match run_transcribe(&audio_path, &models).await {
+    let speech_model = crate::speech_model::selected();
+    match run_transcribe(&audio_path, &models, speech_model).await {
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
-            meta.model_version = Some(crate::model_manager::stt_model_version());
+            meta.model_version = Some(crate::model_manager::speech_model_version(speech_model));
             storage::write_segments(&dir, &storage::SegmentsFile {
                 language: Some(result.language.clone()),
                 participants: result.participants.clone(),
@@ -811,7 +827,7 @@ async fn fresh_recording_core(
             ))
         }
         Err(e) => {
-            if !crate::model_manager::is_ready(&root) {
+            if !crate::model_manager::speech_is_ready(&root, speech_model) {
                 meta.status = RecordingStatus::PendingModels;
                 let _ = storage::write_meta(&dir, &meta);
                 return Ok((
@@ -962,7 +978,16 @@ async fn append_recording_core(
         save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &format!("write clip: {e}"));
         return Err(format!("write clip: {e}"));
     }
-    let result = match run_transcribe(&clip_path, &models).await {
+    // Transcribe the clip with the model that produced the target recording,
+    // not whatever is currently selected: an append must not mix models (and
+    // languages/segmentation styles) into one recording's model_version.
+    let clip_model = crate::speech_model::SpeechModelId::ALL
+        .into_iter()
+        .find(|m| {
+            meta.model_version.as_deref() == Some(crate::model_manager::speech_model_version(*m).as_str())
+        })
+        .unwrap_or_else(crate::speech_model::selected);
+    let result = match run_transcribe(&clip_path, &models, clip_model).await {
         Ok(r) => r,
         Err(e) => {
             let _ = std::fs::remove_file(&clip_path);
@@ -1258,6 +1283,20 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn parakeet_argv_is_unchanged() {
+        let args = transcribe_args(Path::new("/a.mp3"), Path::new("/m"), crate::speech_model::SpeechModelId::Parakeet);
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--audio", "/a.mp3", "--models", "/m", "--format", "json"]);
+    }
+
+    #[test]
+    fn qwen3_argv_names_the_model() {
+        let args = transcribe_args(Path::new("/a.mp3"), Path::new("/m"), crate::speech_model::SpeechModelId::Qwen3Asr);
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--audio", "/a.mp3", "--models", "/m", "--format", "json", "--asr-model", "qwen3-asr-0.6b-4bit"]);
+    }
+
     #[cfg(windows)]
     const CONSOLE_PROBE_ENV: &str = "OATS_TEST_CONSOLE_PROBE_CHILD";
 
@@ -1541,7 +1580,7 @@ mod tests {
 
         let audio = tmp.path().join("a.mp3");
         std::fs::write(&audio, b"x").unwrap();
-        let res = run_transcribe(&audio, tmp.path()).await.unwrap();
+        let res = run_transcribe(&audio, tmp.path(), crate::speech_model::SpeechModelId::Parakeet).await.unwrap();
 
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         assert_eq!(res.language, "en");
@@ -1556,12 +1595,54 @@ mod tests {
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         let audio = tmp.path().join("a.mp3");
         std::fs::write(&audio, b"x").unwrap();
-        let err = run_transcribe(&audio, tmp.path()).await.unwrap_err();
+        let err = run_transcribe(&audio, tmp.path(), crate::speech_model::SpeechModelId::Parakeet).await.unwrap_err();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         assert!(err.contains("boom"), "got: {err}");
     }
 
     use crate::storage::{read_meta, RecordingStatus};
+
+    /// The model is read once per transcription: switching the selection
+    /// while the sidecar runs must not stamp the recording with a model that
+    /// never touched its audio.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_stamped_model_is_the_one_that_transcribed() {
+        use crate::speech_model::{selected, set_selected, SpeechModelId};
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let gate = tmp.path().join("gate");
+        std::fs::create_dir_all(&gate).unwrap();
+        let gate_guard = SttGateGuard::new(&gate);
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(&gate, StubBehavior::transcribe_success(json).gating_transcribe());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let previous = selected();
+        set_selected(SpeechModelId::Qwen3Asr);
+        let root = tmp.path().to_path_buf();
+        let finalize = tokio::spawn(async move {
+            finalize_core(&root, b"audio".to_vec(), "T".into(), "2026-06-02T14:30:05.000Z".into(), 1).await
+        });
+        wait_for_stt_start(&gate).await;
+        set_selected(SpeechModelId::Parakeet);
+        gate_guard.release();
+
+        let result = tokio::time::timeout(Duration::from_secs(10), finalize)
+            .await
+            .expect("finalize did not complete")
+            .expect("finalize task panicked");
+        set_selected(previous);
+        let (res, notes) = result.unwrap();
+        notes.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        assert_eq!(
+            meta.model_version,
+            Some(crate::model_manager::speech_model_version(SpeechModelId::Qwen3Asr))
+        );
+    }
 
     #[tokio::test]
     async fn finalize_writes_transcript_and_marks_done() {

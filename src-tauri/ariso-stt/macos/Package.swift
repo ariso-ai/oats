@@ -10,7 +10,8 @@ let package = Package(
         // mlx-swift-lm 3.x is provider-agnostic: the HuggingFace downloader and
         // tokenizer live in these packages, wired in via the MLXHuggingFace macros.
         .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
-        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0")
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+        .package(url: "https://github.com/Blaizzy/mlx-audio-swift", exact: "0.1.3")
     ],
     targets: [
         .executableTarget(
@@ -21,7 +22,9 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "HuggingFace", package: "swift-huggingface"),
-                .product(name: "Tokenizers", package: "swift-transformers")
+                .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "MLXAudioSTT", package: "mlx-audio-swift"),
+                .product(name: "MLXAudioCore", package: "mlx-audio-swift")
             ]
         )
     ]

@@ -1434,8 +1434,7 @@ mod tests {
             duration_seconds: 5, status: RecordingStatus::PendingModels, language: None,
             participants: vec![], model_version: None, error: None, notes_error: None,
             last_clip_end_at: None, audio_file: None, notes_written: None,
-            notes_in_progress: false, title_is_default: true, preview: None,
-            notes_model: None,
+            notes_in_progress: false, title_is_default: true, preview: None, notes_model: None,
         };
         write_meta(&dir, &meta).unwrap();
 

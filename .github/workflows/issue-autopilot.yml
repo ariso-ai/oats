@@ -283,6 +283,11 @@ jobs:
           name: issue-context
           path: ${{ runner.temp }}/issue-context
 
+      # mlx-audio-swift (Qwen3-ASR) needs Swift 6.2 / Xcode 26+. Select it
+      # before the fingerprint so the sidecar cache key names the Xcode used.
+      - name: Select Xcode 26+
+        uses: ./.github/actions/select-xcode
+
       # The sidecar is a gitignored build artifact that tauri's `externalBin`
       # requires before `cargo build` will link. RESTORE-ONLY — see SECURITY
       # item 4. A miss costs one local xcodebuild, never a cache write.

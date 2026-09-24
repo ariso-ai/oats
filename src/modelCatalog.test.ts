@@ -3,6 +3,7 @@ import {
   modelCatalog,
   formatModelSize,
   parseSpeechModelKey,
+  speechModelIdFromKey,
   DEFAULT_SPEECH_MODEL_KEY,
 } from './modelCatalog';
 import { DEFAULT_NOTES_MODEL, notesModelKey } from './notesModels';
@@ -73,5 +74,24 @@ describe('parseSpeechModelKey', () => {
     for (const raw of [undefined, null, 42, {}, 'speech:not-shipped']) {
       expect(parseSpeechModelKey(raw)).toBe(DEFAULT_SPEECH_MODEL_KEY);
     }
+  });
+});
+
+describe('Qwen3-ASR speech model', () => {
+  it('lists Qwen3-ASR as a second local speech model', () => {
+    const speech = modelCatalog().filter((m) => m.type === 'Speech');
+    expect(speech.map((m) => m.name)).toEqual(['Parakeet TDT 0.6B v3', 'Qwen3-ASR 0.6B']);
+    const qwen = speech[1];
+    expect(qwen.key).toBe('speech:qwen3-asr-0.6b-4bit');
+    expect(qwen.speechModel).toBe('qwen3-asr-0.6b-4bit');
+    expect(qwen.runtime).toBe('local');
+    expect(qwen.details).toContain('Mandarin');
+  });
+
+  it('keeps an installed selection of Qwen3 and rejects unknown speech keys', () => {
+    expect(parseSpeechModelKey('speech:qwen3-asr-0.6b-4bit')).toBe('speech:qwen3-asr-0.6b-4bit');
+    expect(parseSpeechModelKey('speech:whisper-large-v3')).toBe(DEFAULT_SPEECH_MODEL_KEY);
+    expect(speechModelIdFromKey('speech:qwen3-asr-0.6b-4bit')).toBe('qwen3-asr-0.6b-4bit');
+    expect(speechModelIdFromKey('garbage')).toBe('parakeet-tdt-0.6b-v3');
   });
 });
