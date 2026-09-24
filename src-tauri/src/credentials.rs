@@ -13,6 +13,7 @@
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The app's bundle identifier, so keychain entries are attributed to oats and
 /// are visible as one group in Keychain Access.
@@ -21,6 +22,10 @@ const KEYCHAIN_SERVICE: &str = "ai.ariso.desktop";
 /// Far longer than any provider key in circulation, and short enough that a
 /// runaway paste can't be pushed into the keychain.
 const MAX_KEY_LEN: usize = 4096;
+
+/// Provider wire name -> key. The only shape stored in the consolidated
+/// keychain item.
+type KeyMap = BTreeMap<String, String>;
 
 /// A provider whose API can generate notes. A closed set: the value names a
 /// keychain account (and, later, a request URL), so free text must never
@@ -69,6 +74,17 @@ fn validate_key(raw: &str) -> Result<&str, String> {
         return Err("That API key contains characters a key can't hold.".to_string());
     }
     Ok(key)
+}
+
+/// Parse the consolidated item's stored value. Missing, empty, or invalid
+/// JSON all mean "no keys stored" rather than an error — a corrupted
+/// credential must not break Settings or notes generation.
+fn parse_keys(raw: &str) -> KeyMap {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn serialize_keys(keys: &KeyMap) -> String {
+    serde_json::to_string(keys).unwrap_or_default()
 }
 
 /// Turn a credential-store failure into something a user can act on, without
@@ -297,6 +313,22 @@ mod tests {
         let secret = "sk-live-do-not-leak\nX-Evil: 1";
         let err = validate_key(secret).unwrap_err();
         assert!(!err.contains("sk-live"), "error leaked the key: {err}");
+    }
+
+    #[test]
+    fn keys_round_trip_through_json() {
+        let mut keys = KeyMap::new();
+        keys.insert("openai".to_string(), "sk-abc".to_string());
+        keys.insert("anthropic".to_string(), "sk-def".to_string());
+        let raw = serialize_keys(&keys);
+        assert_eq!(parse_keys(&raw), keys);
+    }
+
+    #[test]
+    fn missing_or_corrupted_stored_json_reads_as_no_keys() {
+        assert_eq!(parse_keys(""), KeyMap::new());
+        assert_eq!(parse_keys("not json"), KeyMap::new());
+        assert_eq!(parse_keys("[\"openai\"]"), KeyMap::new());
     }
 
     /// Hits the real OS credential store, so it stays out of the default run;
