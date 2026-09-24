@@ -200,20 +200,26 @@ pub fn migrate_legacy_keys() -> Result<(), String> {
     }
 
     let mut keys = KeyMap::new();
+    let mut to_delete = Vec::new();
     for provider in RemoteProvider::ALL {
         let legacy = legacy_entry(provider)?;
         if let Ok(value) = legacy.get_password() {
             if let Ok(valid) = validate_key(&value) {
                 keys.insert(provider.as_str().to_string(), valid.to_string());
             }
-            // Best-effort cleanup either way: a value that failed validation
-            // is not worth keeping around as a stale item, and one that
-            // migrated successfully has no reason to still exist here.
-            let _ = legacy.delete_credential();
+            to_delete.push(legacy);
         }
     }
     if !keys.is_empty() {
         save_keys(&keys)?;
+    }
+    // Only remove the old items once the combined item safely holds their
+    // values (or held nothing worth keeping) — never delete a legacy item
+    // before its value is durably migrated. If `save_keys` above failed,
+    // this line is never reached and every legacy item survives untouched
+    // for the next launch to retry.
+    for legacy in to_delete {
+        let _ = legacy.delete_credential();
     }
     Ok(())
 }
