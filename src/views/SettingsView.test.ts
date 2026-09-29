@@ -1675,8 +1675,19 @@ describe('SettingsView custom endpoint row', () => {
     expect(rowNamed(wrapper, 'Qwen2.5-72B')).toBeTruthy();
   });
 
+  // Not `rowNamed`: once configured, the row's name is the model id rather
+  // than the literal "Custom endpoint" (see modelCatalog). Its action buttons
+  // are unique to it in every state, configured or not.
   function customRow(wrapper: ReturnType<typeof mount>) {
-    return rowNamed(wrapper, 'Custom endpoint');
+    const row = wrapper
+      .findAll(ROW)
+      .find(
+        (r) =>
+          r.find('[data-test="custom-connect"]').exists() ||
+          r.find('[data-test="custom-edit"]').exists(),
+      );
+    if (!row) throw new Error('no custom endpoint row');
+    return row;
   }
 
   it('opens a three-field form when the row has no endpoint yet', async () => {
@@ -1787,6 +1798,120 @@ describe('SettingsView custom endpoint row', () => {
 
     expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(false);
     expect(setCustomEndpointFn).not.toHaveBeenCalled();
+  });
+
+  it('pre-fills the base URL and model id on edit, leaving the key field blank', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+
+    expect((wrapper.get('[data-test="custom-base-url"]').element as HTMLInputElement).value).toBe(
+      'http://10.0.1.20:8000/',
+    );
+    expect((wrapper.get('[data-test="custom-model-id"]').element as HTMLInputElement).value).toBe(
+      'Qwen2.5-72B',
+    );
+    expect((wrapper.get('[data-test="custom-key-input"]').element as HTMLInputElement).value).toBe('');
+  });
+
+  it('leaves a stored key untouched when the edit form is saved with the key field blank', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-v2');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000/', 'Qwen2.5-72B-v2');
+    expect(setCustomLlmKey).not.toHaveBeenCalled();
+    expect(clearCustomLlmKey).not.toHaveBeenCalled();
+  });
+
+  it('offers "Use no API key" only when editing an endpoint with a key stored', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(false);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.find('[data-test="custom-clear-key"]').exists()).toBe(false);
+  });
+
+  it('clears the stored key when "Use no API key" is clicked and saved', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    await wrapper.get('[data-test="custom-clear-key"]').trigger('click');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(clearCustomLlmKey).toHaveBeenCalled();
+    expect(setCustomLlmKey).not.toHaveBeenCalled();
+  });
+
+  it('asks before removing the endpoint, clearing both it and its key', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-remove"]').trigger('click');
+    await flushPromises();
+    expect(clearCustomEndpointFn).not.toHaveBeenCalled();
+    const dialog = wrapper.get('[data-test="remove-confirm"]');
+    expect(dialog.text().toLowerCase()).toContain('remove');
+
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(clearCustomEndpointFn).toHaveBeenCalled();
+    expect(clearCustomLlmKey).toHaveBeenCalled();
+  });
+
+  it('discloses the destination once configured, and warns for a plaintext URL', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'm' });
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    const disclosure = wrapper.get('[data-test="custom-disclosure"]').text();
+    expect(disclosure).toContain('10.0.1.20:8000');
+    expect(wrapper.get('[data-test="custom-plaintext-warning"]').text().toLowerCase()).toContain(
+      'not encrypted',
+    );
+  });
+
+  it('shows no plaintext warning for an https endpoint', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'https://dgx.local:8443/', modelId: 'm' });
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.find('[data-test="custom-plaintext-warning"]').exists()).toBe(false);
+  });
+
+  it('becomes selectable once configured with no key, since a key is optional', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(false);
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).toHaveBeenCalledWith({ kind: 'custom' });
+  });
+
+  it('is not selectable while the endpoint is unconfigured', async () => {
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(true);
   });
 });
 

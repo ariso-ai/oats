@@ -14,10 +14,10 @@
       </div>
     </div>
 
-    <!-- One confirmation for both kinds of removal: a local model's files, or
-         a provider's stored API key. -->
+    <!-- One confirmation for all three kinds of removal: a local model's
+         files, a provider's stored API key, or the custom endpoint. -->
     <div
-      v-if="removeTarget || removeKeyProvider"
+      v-if="removeTarget || removeKeyProvider || removeCustomEndpoint"
       class="download-confirm"
       data-test="remove-confirm"
       role="dialog"
@@ -27,11 +27,16 @@
       <div class="download-confirm__card">
         <h2 id="remove-confirm-title" class="download-confirm__title">
           <template v-if="removeTarget">Remove {{ removeTarget.name }}?</template>
+          <template v-else-if="removeCustomEndpoint">Remove the custom endpoint?</template>
           <template v-else>Remove {{ removeKeyProviderLabel }} API key?</template>
         </h2>
         <p v-if="removeTarget" class="download-confirm__body">
           Its files are deleted from this device. Recording in Local mode needs
           this model, so it has to be downloaded again before the next meeting.
+        </p>
+        <p v-else-if="removeCustomEndpoint" class="download-confirm__body">
+          Its base URL, model identifier, and any stored API key are deleted.
+          Notes stop using it until you set it up again.
         </p>
         <p v-else class="download-confirm__body">
           The key is deleted from {{ keychainName }}. {{ removeKeyProviderLabel }}
@@ -310,6 +315,17 @@
                         <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
                       </svg>
                     </button>
+                    <button
+                      class="icon-btn"
+                      data-test="custom-remove"
+                      title="Remove"
+                      aria-label="Remove custom endpoint"
+                      @click.stop="onRemoveCustomEndpoint"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14" />
+                      </svg>
+                    </button>
                   </template>
                 </template>
                 <template v-else>
@@ -459,6 +475,22 @@
               aria-label="Custom endpoint API key"
             />
           </div>
+          <div v-if="customEndpointValue && hasCustomKey && !customClearKeyRequested" class="key-prompt__row">
+            <button type="button" class="secondary-btn" data-test="custom-clear-key" @click="requestClearCustomKey">
+              Use no API key
+            </button>
+          </div>
+          <p v-if="customEndpointValue" class="setting-hint" data-test="custom-disclosure">
+            Notes for new recordings will be sent to {{ customEndpointValue.baseUrl }}.
+          </p>
+          <p
+            v-if="customEndpointValue && customEndpointValue.baseUrl.startsWith('http://')"
+            class="setting-hint"
+            data-test="custom-plaintext-warning"
+            style="color: var(--danger, #c0392b)"
+          >
+            This connection is not encrypted — the transcript and API key travel in plain text on your network.
+          </p>
           <div class="key-prompt__row">
             <button
               class="secondary-btn"
@@ -1141,6 +1173,7 @@ async function loadSpeechModel() {
  *  a key stored for its provider, for a remote one. Only a usable model can be
  *  the one in use. */
 function rowUsable(row: CatalogModel): boolean {
+  if (row.notesModel?.kind === 'custom') return !!customEndpointValue.value;
   return row.runtime === 'remote' ? rowConnected(row) : rowInstalled(row);
 }
 
@@ -1217,11 +1250,24 @@ function onRemoveRow(row: CatalogModel) {
 function cancelRemove() {
   removeTarget.value = null;
   removeKeyProvider.value = null;
+  removeCustomEndpoint.value = false;
 }
 
 async function confirmRemove() {
   if (removeKeyProvider.value) {
     await confirmRemoveKey();
+    return;
+  }
+  if (removeCustomEndpoint.value) {
+    removeCustomEndpoint.value = false;
+    try {
+      await customEndpoint.clear();
+      await customLlmKey.clear();
+      await loadCustomEndpoint();
+      await loadHasCustomKey();
+    } catch (e) {
+      removeError.value = e instanceof Error ? e.message : String(e);
+    }
     return;
   }
   const row = removeTarget.value;
@@ -1282,7 +1328,9 @@ const keyProviderLabel = computed(() =>
 );
 /** The caveat belongs to the model actually in use, not to every stored key:
  *  connecting a provider you haven't selected changes nothing about notes. */
-const remoteModelInUse = computed(() => notesModel.value.kind === 'remote');
+const remoteModelInUse = computed(
+  () => notesModel.value.kind === 'remote' || notesModel.value.kind === 'custom',
+);
 const keychainName = computed(() =>
   platformCapabilities.value.os === 'windows' ? 'Windows Credential Manager' : 'macOS Keychain',
 );
@@ -1356,14 +1404,21 @@ const customSaving = ref(false);
 const customError = ref('');
 const customTesting = ref(false);
 const customTestResult = ref('');
+const customClearKeyRequested = ref(false);
 
 function openCustomForm() {
   customFormOpen.value = true;
   customBaseUrlInput.value = customEndpointValue.value?.baseUrl ?? '';
   customModelIdInput.value = customEndpointValue.value?.modelId ?? '';
   customKeyInput.value = '';
+  customClearKeyRequested.value = false;
   customError.value = '';
   customTestResult.value = '';
+}
+
+function requestClearCustomKey() {
+  customClearKeyRequested.value = true;
+  customKeyInput.value = '';
 }
 
 function closeCustomForm() {
@@ -1371,6 +1426,7 @@ function closeCustomForm() {
   customBaseUrlInput.value = '';
   customModelIdInput.value = '';
   customKeyInput.value = '';
+  customClearKeyRequested.value = false;
   customError.value = '';
   customTestResult.value = '';
 }
@@ -1401,6 +1457,8 @@ async function onSaveCustomEndpoint() {
     await customEndpoint.set(customBaseUrlInput.value, customModelIdInput.value);
     if (customKeyInput.value) {
       await customLlmKey.set(customKeyInput.value);
+    } else if (customClearKeyRequested.value) {
+      await customLlmKey.clear();
     }
     await loadCustomEndpoint();
     await loadHasCustomKey();
@@ -1410,6 +1468,15 @@ async function onSaveCustomEndpoint() {
   } finally {
     customSaving.value = false;
   }
+}
+
+/** Whether the removal dialog is asking about the custom endpoint, rather
+ *  than a local model's files or a provider's key. */
+const removeCustomEndpoint = ref(false);
+
+function onRemoveCustomEndpoint() {
+  removeError.value = '';
+  removeCustomEndpoint.value = true;
 }
 
 /** The provider whose key the removal dialog is asking about. */
@@ -1443,7 +1510,8 @@ async function onRowClick(row: CatalogModel) {
   // an on-device one, a key stored for a remote one. A click on a row that
   // isn't there yet asks for the missing half instead of selecting it.
   if (!rowUsable(row)) {
-    if (row.runtime === 'remote') onConnectRow(row);
+    if (row.notesModel?.kind === 'custom') openCustomForm();
+    else if (row.runtime === 'remote') onConnectRow(row);
     return;
   }
   if (row.type === 'Speech') {
