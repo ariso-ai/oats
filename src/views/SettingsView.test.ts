@@ -228,6 +228,16 @@ beforeEach(() => {
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
+  // clearAllMocks leaves a test's mockResolvedValue/mockRejectedValue in
+  // place for every test after it, so restore the defaults here the same
+  // way the mocks above do.
+  getCustomEndpoint.mockResolvedValue(null);
+  setCustomEndpointFn.mockResolvedValue(undefined);
+  clearCustomEndpointFn.mockResolvedValue(undefined);
+  hasCustomLlmKey.mockResolvedValue(false);
+  setCustomLlmKey.mockResolvedValue(undefined);
+  clearCustomLlmKey.mockResolvedValue(undefined);
+  testCustomNotesEndpointFn.mockResolvedValue(undefined);
   // Sign-in stores a session and sign-out clears it, as the backend does, so
   // the account refresh that follows each one reads the new state.
   googleSignIn.mockImplementation(storeSession);
@@ -1663,6 +1673,120 @@ describe('SettingsView custom endpoint row', () => {
     getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
     const wrapper = await mountLocal();
     expect(rowNamed(wrapper, 'Qwen2.5-72B')).toBeTruthy();
+  });
+
+  function customRow(wrapper: ReturnType<typeof mount>) {
+    return rowNamed(wrapper, 'Custom endpoint');
+  }
+
+  it('opens a three-field form when the row has no endpoint yet', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+
+    const form = wrapper.get('[data-test="custom-form"]');
+    expect(form.find('[data-test="custom-base-url"]').exists()).toBe(true);
+    expect(form.find('[data-test="custom-model-id"]').exists()).toBe(true);
+    expect(form.find('[data-test="custom-key-input"]').exists()).toBe(true);
+  });
+
+  it('marks the API key field optional', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+
+    const key = wrapper.get('[data-test="custom-key-input"]');
+    expect(key.attributes('placeholder')?.toLowerCase()).toContain('optional');
+  });
+
+  it('saves the endpoint with no key when the key field is left blank', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-Instruct');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'Qwen2.5-72B-Instruct');
+    expect(setCustomLlmKey).not.toHaveBeenCalled();
+  });
+
+  it('saves a key alongside the endpoint when one is entered', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-Instruct');
+    await wrapper.get('[data-test="custom-key-input"]').setValue('sk-custom');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomLlmKey).toHaveBeenCalledWith('sk-custom');
+  });
+
+  it('closes the form and refreshes the row after a successful save', async () => {
+    // mountLocal() already triggers the initial load (the default null from
+    // beforeEach); this queues only the reload that follows the save below.
+    const wrapper = await mountLocal();
+    getCustomEndpoint.mockResolvedValueOnce({
+      baseUrl: 'http://10.0.1.20:8000/',
+      modelId: 'Qwen2.5-72B-Instruct',
+    });
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-Instruct');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(false);
+    expect(rowNamed(wrapper, 'Qwen2.5-72B-Instruct')).toBeTruthy();
+  });
+
+  it('shows a validation error from the backend and keeps the form open', async () => {
+    setCustomEndpointFn.mockRejectedValue(new Error('Enter a valid http:// or https:// URL.'));
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('not a url');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('m');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="custom-error"]').text()).toContain('http://');
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(true);
+  });
+
+  it('tests the connection with the current form values, without saving', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('m');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+
+    expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'm', null);
+    expect(setCustomEndpointFn).not.toHaveBeenCalled();
+    expect(wrapper.get('[data-test="custom-test-result"]').text().toLowerCase()).toContain('connected');
+  });
+
+  it('tests with the typed key, and reports a failure distinctly', async () => {
+    testCustomNotesEndpointFn.mockRejectedValue(new Error('the custom endpoint rejected the request — check the API key in Settings.'));
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('m');
+    await wrapper.get('[data-test="custom-key-input"]').setValue('sk-bad');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+
+    expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'm', 'sk-bad');
+    expect(wrapper.get('[data-test="custom-test-result"]').text()).toContain('rejected the request');
+  });
+
+  it('closes the form on Cancel without saving', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-cancel"]').trigger('click');
+
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(false);
+    expect(setCustomEndpointFn).not.toHaveBeenCalled();
   });
 });
 

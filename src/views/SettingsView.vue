@@ -284,6 +284,34 @@
                     </svg>
                   </button>
                 </template>
+                <template v-else-if="row.key === 'custom'">
+                  <button
+                    v-if="!customEndpointValue"
+                    class="icon-btn"
+                    data-test="custom-connect"
+                    title="Add custom endpoint"
+                    aria-label="Add custom endpoint"
+                    @click.stop="openCustomForm"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                  <template v-else>
+                    <button
+                      class="icon-btn"
+                      data-test="custom-edit"
+                      title="Edit"
+                      aria-label="Edit custom endpoint"
+                      @click.stop="openCustomForm"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                      </svg>
+                    </button>
+                  </template>
+                </template>
                 <template v-else>
                   <!-- No "Remote" label: the cloud type icon already says it.
                        Nor a "Connected" one: a provider with a key stored is the
@@ -392,6 +420,76 @@
             style="color: var(--danger, #c0392b)"
           >
             {{ keyError }}
+          </p>
+        </div>
+        <div v-if="customFormOpen" class="key-prompt" data-test="custom-form">
+          <div class="key-prompt__row">
+            <input
+              v-model="customBaseUrlInput"
+              class="key-input"
+              data-test="custom-base-url"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Base URL (e.g. http://10.0.1.20:8000)"
+              aria-label="Custom endpoint base URL"
+            />
+          </div>
+          <div class="key-prompt__row">
+            <input
+              v-model="customModelIdInput"
+              class="key-input"
+              data-test="custom-model-id"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Model identifier"
+              aria-label="Custom endpoint model identifier"
+            />
+          </div>
+          <div class="key-prompt__row">
+            <input
+              v-model="customKeyInput"
+              class="key-input"
+              data-test="custom-key-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="API key (optional — leave blank if the endpoint doesn't require one)"
+              aria-label="Custom endpoint API key"
+            />
+          </div>
+          <div class="key-prompt__row">
+            <button
+              class="secondary-btn"
+              data-test="custom-test-connection"
+              :disabled="customTesting"
+              @click="onTestCustomConnection"
+            >
+              {{ customTesting ? 'Testing…' : 'Test connection' }}
+            </button>
+            <button
+              class="primary-btn"
+              data-test="custom-save"
+              :disabled="customSaving"
+              @click="onSaveCustomEndpoint"
+            >
+              Save
+            </button>
+            <button class="secondary-btn" data-test="custom-cancel" @click="closeCustomForm">
+              Cancel
+            </button>
+          </div>
+          <p v-if="customTestResult" class="setting-hint" data-test="custom-test-result">
+            {{ customTestResult }}
+          </p>
+          <p
+            v-if="customError"
+            class="setting-hint"
+            data-test="custom-error"
+            style="color: var(--danger, #c0392b)"
+          >
+            {{ customError }}
           </p>
         </div>
         <p v-if="remoteModelInUse" class="setting-hint" data-test="remote-pending">
@@ -1246,6 +1344,71 @@ async function onSaveKey() {
     keyError.value = e instanceof Error ? e.message : String(e);
   } finally {
     savingKey.value = false;
+  }
+}
+
+// --- Custom endpoint form ---------------------------------------------------
+const customFormOpen = ref(false);
+const customBaseUrlInput = ref('');
+const customModelIdInput = ref('');
+const customKeyInput = ref('');
+const customSaving = ref(false);
+const customError = ref('');
+const customTesting = ref(false);
+const customTestResult = ref('');
+
+function openCustomForm() {
+  customFormOpen.value = true;
+  customBaseUrlInput.value = customEndpointValue.value?.baseUrl ?? '';
+  customModelIdInput.value = customEndpointValue.value?.modelId ?? '';
+  customKeyInput.value = '';
+  customError.value = '';
+  customTestResult.value = '';
+}
+
+function closeCustomForm() {
+  customFormOpen.value = false;
+  customBaseUrlInput.value = '';
+  customModelIdInput.value = '';
+  customKeyInput.value = '';
+  customError.value = '';
+  customTestResult.value = '';
+}
+
+async function onTestCustomConnection() {
+  if (customTesting.value) return;
+  customTesting.value = true;
+  customTestResult.value = '';
+  try {
+    await testCustomNotesEndpoint(
+      customBaseUrlInput.value,
+      customModelIdInput.value,
+      customKeyInput.value || null,
+    );
+    customTestResult.value = 'Connected.';
+  } catch (e) {
+    customTestResult.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    customTesting.value = false;
+  }
+}
+
+async function onSaveCustomEndpoint() {
+  if (customSaving.value) return;
+  customError.value = '';
+  customSaving.value = true;
+  try {
+    await customEndpoint.set(customBaseUrlInput.value, customModelIdInput.value);
+    if (customKeyInput.value) {
+      await customLlmKey.set(customKeyInput.value);
+    }
+    await loadCustomEndpoint();
+    await loadHasCustomKey();
+    closeCustomForm();
+  } catch (e) {
+    customError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    customSaving.value = false;
   }
 }
 
