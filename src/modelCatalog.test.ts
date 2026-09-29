@@ -10,18 +10,18 @@ import { DEFAULT_NOTES_MODEL, notesModelKey } from './notesModels';
 
 describe('modelCatalog', () => {
   it('lists the speech model alongside the notes models', () => {
-    const types = modelCatalog().map((m) => m.type);
+    const types = modelCatalog(null, false).map((m) => m.type);
     expect(types).toContain('Notes');
     expect(types).toContain('Speech');
   });
 
   it('names the speech model rather than describing its role', () => {
-    const speech = modelCatalog().find((m) => m.type === 'Speech');
+    const speech = modelCatalog(null, false).find((m) => m.type === 'Speech');
     expect(speech?.name).toBe('Parakeet TDT 0.6B v3');
   });
 
   it("derives a notes row's runtime from the model itself", () => {
-    const gemma = modelCatalog().find(
+    const gemma = modelCatalog(null, false).find(
       (m) => m.key === notesModelKey(DEFAULT_NOTES_MODEL),
     );
     expect(gemma?.runtime).toBe('local');
@@ -29,20 +29,20 @@ describe('modelCatalog', () => {
   });
 
   it('carries a notes model only on notes rows', () => {
-    for (const row of modelCatalog()) {
+    for (const row of modelCatalog(null, false)) {
       expect(Boolean(row.notesModel)).toBe(row.type === 'Notes');
     }
   });
 
   it('gives every row hover details naming the underlying model id', () => {
-    const gemma = modelCatalog().find((m) => m.type === 'Notes');
+    const gemma = modelCatalog(null, false).find((m) => m.type === 'Notes');
     expect(gemma?.details).toContain('gemma-3-1b-it-qat-4bit');
-    const speech = modelCatalog().find((m) => m.type === 'Speech');
+    const speech = modelCatalog(null, false).find((m) => m.type === 'Speech');
     expect(speech?.details).toContain('parakeet-tdt-0.6b-v3');
   });
 
   it('gives every row a distinct key', () => {
-    const keys = modelCatalog().map((m) => m.key);
+    const keys = modelCatalog(null, false).map((m) => m.key);
     expect(new Set(keys).size).toBe(keys.length);
   });
 });
@@ -79,7 +79,7 @@ describe('parseSpeechModelKey', () => {
 
 describe('Qwen3-ASR speech model', () => {
   it('lists Qwen3-ASR as a second local speech model', () => {
-    const speech = modelCatalog().filter((m) => m.type === 'Speech');
+    const speech = modelCatalog(null, false).filter((m) => m.type === 'Speech');
     expect(speech.map((m) => m.name)).toEqual(['Parakeet TDT 0.6B v3', 'Qwen3-ASR 0.6B']);
     const qwen = speech[1];
     expect(qwen.key).toBe('speech:qwen3-asr-0.6b-4bit');
@@ -93,5 +93,39 @@ describe('Qwen3-ASR speech model', () => {
     expect(parseSpeechModelKey('speech:whisper-large-v3')).toBe(DEFAULT_SPEECH_MODEL_KEY);
     expect(speechModelIdFromKey('speech:qwen3-asr-0.6b-4bit')).toBe('qwen3-asr-0.6b-4bit');
     expect(speechModelIdFromKey('garbage')).toBe('parakeet-tdt-0.6b-v3');
+  });
+});
+
+describe('the custom endpoint row', () => {
+  it('appears after the three fixed remote providers', () => {
+    const catalog = modelCatalog(null, false);
+    const notesRows = catalog.filter((r) => r.type === 'Notes');
+    expect(notesRows[notesRows.length - 1].notesModel).toEqual({ kind: 'custom' });
+  });
+
+  it('reads "Not configured" with no saved endpoint', () => {
+    const catalog = modelCatalog(null, false);
+    const row = catalog.find((r) => r.notesModel?.kind === 'custom')!;
+    expect(row.details).toContain('Not configured');
+  });
+
+  it('names the configured model id once an endpoint is saved', () => {
+    const catalog = modelCatalog({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' }, false);
+    const row = catalog.find((r) => r.notesModel?.kind === 'custom')!;
+    expect(row.details).toContain('Qwen2.5-72B');
+    expect(row.name).toContain('Qwen2.5-72B');
+  });
+
+  it('is a remote-runtime row like the three fixed providers', () => {
+    const catalog = modelCatalog(null, false);
+    const row = catalog.find((r) => r.notesModel?.kind === 'custom')!;
+    expect(row.runtime).toBe('remote');
+  });
+
+  it('carries whether a key is stored, for the edit form to read', () => {
+    const withKey = modelCatalog({ baseUrl: 'http://h', modelId: 'm' }, true);
+    const withoutKey = modelCatalog({ baseUrl: 'http://h', modelId: 'm' }, false);
+    expect(withKey.find((r) => r.notesModel?.kind === 'custom')!.hasCustomKey).toBe(true);
+    expect(withoutKey.find((r) => r.notesModel?.kind === 'custom')!.hasCustomKey).toBe(false);
   });
 });

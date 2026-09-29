@@ -877,7 +877,7 @@ async function onChangeVault() {
 // The table is the single control: clicking a Notes row makes that model the
 // one that writes notes, and each local row carries its own install button.
 const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
-const catalog = modelCatalog();
+const catalog = modelCatalog(null, false);
 
 /** Hides a speech row this platform doesn't offer (e.g. Qwen3 on Windows).
  *  Before `modelStatus.speech` has answered, nothing is hidden yet. */
