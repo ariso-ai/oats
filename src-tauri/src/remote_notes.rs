@@ -152,6 +152,87 @@ pub async fn run_remote_notes(
     Ok(output)
 }
 
+/// A minimal chat-completion request against a base URL that is a runtime
+/// value, not a hardcoded one — shared by `run_custom_notes` (the real notes
+/// prompt) and `test_custom_notes_endpoint` (a short fixed test prompt).
+async fn chat_completion(
+    base_url: &str,
+    model_id: &str,
+    api_key: Option<&str>,
+    transcript: &str,
+    system_prompt: &str,
+) -> Result<NotesOutput, String> {
+    let client = client()?;
+    let url = format!("{}v1/chat/completions", ensure_trailing_slash(base_url));
+    let mut request = client.post(url).json(&json!({
+        "model": model_id,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": transcript },
+        ],
+        "response_format": { "type": "json_object" },
+    }));
+    // No header at all when there is no key — never an empty bearer token,
+    // which some servers would reject differently than "no auth attempted".
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let name = "the custom endpoint";
+    let response = tokio::time::timeout(REMOTE_NOTES_TIMEOUT, request.send())
+        .await
+        .map_err(|_| format!("{name} did not answer within {}s", REMOTE_NOTES_TIMEOUT.as_secs()))?
+        .map_err(|e| format!("could not reach {name} ({})", transport_reason(&e)))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 | 403 => format!("{name} rejected the request — check the API key in Settings."),
+            429 => format!("{name} is rate-limiting this key; try again shortly."),
+            code => format!("{name} returned HTTP {code}."),
+        });
+    }
+
+    let body: Value = tokio::time::timeout(REMOTE_NOTES_TIMEOUT, response.json())
+        .await
+        .map_err(|_| format!("{name} stopped mid-answer"))?
+        .map_err(|_| format!("{name} responded, but not in the expected format"))?;
+
+    let text = body["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| format!("{name} responded, but not in the expected format"))?;
+    let output = parse_notes_payload(text);
+    if output.notes.trim().is_empty() {
+        return Err(format!("{name} returned empty notes"));
+    }
+    Ok(output)
+}
+
+/// A base URL with exactly one trailing slash, so appending `v1/chat/...`
+/// never produces a double slash regardless of whether the saved value ends
+/// in one (`notes_model::validate_base_url` already normalizes this at save
+/// time, but this stays defensive for a base URL passed in directly, e.g.
+/// from a test or a future caller).
+fn ensure_trailing_slash(base_url: &str) -> String {
+    if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    }
+}
+
+/// Generate notes for `transcript` against a user-configured OpenAI-compatible
+/// endpoint. `api_key` is `None` when the user configured no key — many
+/// self-hosted servers (`vllm serve`, bare `ollama`) run with no auth at all.
+pub async fn run_custom_notes(
+    transcript: &str,
+    base_url: &str,
+    model_id: &str,
+    api_key: Option<&str>,
+) -> Result<NotesOutput, String> {
+    chat_completion(base_url, model_id, api_key, transcript, SYSTEM_PROMPT).await
+}
+
 fn provider_name(provider: RemoteProvider) -> &'static str {
     match provider {
         RemoteProvider::OpenAi => "OpenAI",
@@ -519,5 +600,74 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoint_with_a_key_sends_a_bearer_header() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(
+            200,
+            r###"{"choices":[{"message":{"content":"{\"title\":\"T\",\"notes\":\"## Summary\"}"}}]}"###,
+        )
+        .await;
+
+        let result = run_custom_notes(
+            "Alice: ship it.",
+            &base,
+            "Qwen2.5-72B-Instruct",
+            Some("sk-custom"),
+        )
+        .await;
+        let seen = server.await.unwrap();
+
+        assert_eq!(seen.target, "/v1/chat/completions");
+        assert_eq!(seen.header("authorization"), Some("Bearer sk-custom"));
+        assert_eq!(seen.body["model"], "Qwen2.5-72B-Instruct");
+        assert_eq!(result.unwrap().notes, "## Summary");
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoint_with_no_key_sends_no_authorization_header() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(
+            200,
+            r###"{"choices":[{"message":{"content":"{\"title\":\"T\",\"notes\":\"## Summary\"}"}}]}"###,
+        )
+        .await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "Qwen2.5-72B-Instruct", None).await;
+        let seen = server.await.unwrap();
+
+        // No header at all — never an empty bearer token, which some servers
+        // would reject differently than "no auth attempted".
+        assert_eq!(seen.header("authorization"), None);
+        assert!(result.unwrap().notes.contains("Summary"));
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoint_rejecting_the_key_says_so_without_quoting_it() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(401, r###"{"error":"nope: sk-custom"}"###).await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "m", Some("sk-custom")).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(!err.contains("sk-custom"), "error leaked the key: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoints_malformed_response_gets_its_own_message() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(200, r###"{"unexpected": "shape"}"###).await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "m", None).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("expected format") || err.to_lowercase().contains("no notes"),
+            "{err}"
+        );
     }
 }
