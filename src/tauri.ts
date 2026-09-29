@@ -2,12 +2,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { load } from '@tauri-apps/plugin-store';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { parseNotesModel, type NotesModelId, type RemoteProvider } from './notesModels';
+import { parseNotesModel, type NotesModelId, type RemoteProvider, type CustomEndpoint } from './notesModels';
 import { parseSpeechModelKey, speechModelIdFromKey, type SpeechModelId } from './modelCatalog';
 
 export type { SpeechModelId };
 
-export type { NotesModelId, RemoteProvider };
+export type { NotesModelId, RemoteProvider, CustomEndpoint };
 
 // Broadcast by the backend to every window whenever the stored session changes:
 // sign-in or sign-out from any window, or a native path clearing a session the
@@ -612,6 +612,53 @@ export const llmKeys = {
     return invoke('clear_llm_api_key', { provider });
   },
 };
+
+/** The one configurable custom OpenAI-compatible endpoint's non-secret half
+ *  (base URL + model id). The API key lives separately in `customLlmKey`. */
+export const customEndpoint = {
+  /** `null` when the user hasn't configured one. */
+  get(): Promise<CustomEndpoint | null> {
+    return invoke<CustomEndpoint | null>('get_custom_endpoint');
+  },
+  /** Validates before persisting; rejects with an actionable message rather
+   *  than silently coercing a bad URL or model id. */
+  set(baseUrl: string, modelId: string): Promise<void> {
+    return invoke('set_custom_endpoint', { baseUrl, modelId });
+  },
+  /** Removes the endpoint. Does not touch the stored key — callers that mean
+   *  to remove both call `customLlmKey.clear()` too. */
+  clear(): Promise<void> {
+    return invoke('clear_custom_endpoint');
+  },
+};
+
+/** The custom endpoint's own API key, optional and stored separately from its
+ *  base URL/model id — the same separation `llmKeys` already has from a
+ *  `Remote` selection. There is no read: a key's value never comes back to a
+ *  webview. */
+export const customLlmKey = {
+  /** Whether a key is currently stored — everything Settings needs to word
+   *  its disclosure and offer "Use no API key" without seeing the key. */
+  has(): Promise<boolean> {
+    return invoke<boolean>('has_custom_llm_key');
+  },
+  set(key: string): Promise<void> {
+    return invoke('set_custom_llm_key', { key });
+  },
+  clear(): Promise<void> {
+    return invoke('clear_custom_llm_key');
+  },
+};
+
+/** Confirm a not-yet-saved custom endpoint actually works, without persisting
+ *  anything. `key` is `null` to test with no `Authorization` header at all. */
+export function testCustomNotesEndpoint(
+  baseUrl: string,
+  modelId: string,
+  key: string | null,
+): Promise<void> {
+  return invoke('test_custom_notes_endpoint', { baseUrl, modelId, key });
+}
 
 /** Metadata persisted next to a buffered Ariso upload, mirrors the Rust
  *  `PendingUploadMeta`. Lets the Library resume a failed upload after restart. */
