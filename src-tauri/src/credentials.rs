@@ -574,8 +574,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "writes to the real OS keychain"]
     fn the_reserved_custom_key_coexists_with_provider_keys() {
-        testing::clear_keys();
+        // set_api_key/set_custom_key always write through to the real
+        // (test-service) keychain — the fake store in `testing` only
+        // stands in for *reads* — so exercising them together with
+        // get_api_key/get_custom_api_key needs the real-keychain guard,
+        // same as the other keychain-backed tests below.
+        let _real_keychain = testing::use_real_keychain();
+        let _ = consolidated_entry().unwrap().delete_credential();
         set_api_key(RemoteProvider::OpenAi, "sk-openai".to_string()).unwrap();
         set_custom_key("sk-custom".to_string()).unwrap();
 
@@ -584,6 +591,9 @@ mod tests {
             Some("sk-openai")
         );
         assert_eq!(get_custom_api_key().unwrap().as_deref(), Some("sk-custom"));
+
+        clear_api_key(RemoteProvider::OpenAi).unwrap();
+        clear_custom_key().unwrap();
     }
 
     #[test]
@@ -593,8 +603,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "writes to the real OS keychain"]
     fn clearing_the_custom_key_leaves_provider_keys_untouched() {
-        testing::clear_keys();
+        // Same real-keychain requirement as
+        // `the_reserved_custom_key_coexists_with_provider_keys` above.
+        let _real_keychain = testing::use_real_keychain();
+        let _ = consolidated_entry().unwrap().delete_credential();
         set_api_key(RemoteProvider::Anthropic, "sk-anthropic".to_string()).unwrap();
         set_custom_key("sk-custom".to_string()).unwrap();
 
@@ -605,6 +619,8 @@ mod tests {
             get_api_key(RemoteProvider::Anthropic).unwrap().as_deref(),
             Some("sk-anthropic")
         );
+
+        clear_api_key(RemoteProvider::Anthropic).unwrap();
     }
 
     #[test]
