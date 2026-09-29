@@ -27,7 +27,16 @@ export function remoteProviderLabel(provider: RemoteProvider): string {
 
 export type NotesModelId =
   | { kind: 'local'; id: string }
-  | { kind: 'remote'; provider: RemoteProvider; id: string };
+  | { kind: 'remote'; provider: RemoteProvider; id: string }
+  | { kind: 'custom' };
+
+/** The non-secret half of the one configurable custom endpoint. The API key,
+ *  when present, lives in the OS keychain and is never sent to this webview —
+ *  Settings only ever learns whether one is stored (`hasCustomLlmKey`). */
+export interface CustomEndpoint {
+  baseUrl: string;
+  modelId: string;
+}
 
 export interface NotesModelOption {
   value: NotesModelId;
@@ -69,11 +78,14 @@ export const NOTES_MODEL_OPTIONS: NotesModelOption[] = [
 
 /** A stable identity for a selection — safe as a `v-for` key and for equality. */
 export function notesModelKey(model: NotesModelId): string {
-  return model.kind === 'local' ? `local:${model.id}` : `remote:${model.provider}:${model.id}`;
+  if (model.kind === 'local') return `local:${model.id}`;
+  if (model.kind === 'remote') return `remote:${model.provider}:${model.id}`;
+  return 'custom';
 }
 
 /** The registry's display name, falling back to the bare id if unregistered. */
 export function notesModelLabel(model: NotesModelId): string {
+  if (model.kind === 'custom') return 'Custom endpoint';
   const key = notesModelKey(model);
   const option = NOTES_MODEL_OPTIONS.find((o) => notesModelKey(o.value) === key);
   return option ? option.label : model.id;
@@ -86,7 +98,8 @@ export function notesModelLabel(model: NotesModelId): string {
  */
 export function parseNotesModel(raw: unknown): NotesModelId {
   if (typeof raw !== 'object' || raw === null) return DEFAULT_NOTES_MODEL;
-  const candidate = raw as Partial<NotesModelId> & { provider?: unknown };
+  const candidate = raw as { kind?: unknown; id?: unknown; provider?: unknown };
+  if (candidate.kind === 'custom') return { kind: 'custom' };
   if (typeof candidate.kind !== 'string' || typeof candidate.id !== 'string') {
     return DEFAULT_NOTES_MODEL;
   }

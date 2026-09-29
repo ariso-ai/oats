@@ -115,3 +115,22 @@ describe('parseNotesModel', () => {
     }
   });
 });
+
+describe('the custom endpoint kind', () => {
+  it('keys apart from every local and remote model', () => {
+    const custom: NotesModelId = { kind: 'custom' };
+    const keys = [...NOTES_MODEL_OPTIONS.map((o) => notesModelKey(o.value)), notesModelKey(custom)];
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('parses back to itself, unlike an unregistered local/remote id', () => {
+    // Custom names no id or provider to check against a closed registry —
+    // whether it can actually run is checked elsewhere (the endpoint + key),
+    // the same way Rust's parse() treats it as always a valid *kind*.
+    expect(parseNotesModel({ kind: 'custom' })).toEqual({ kind: 'custom' });
+  });
+
+  it('labels itself distinctly from the bare-id fallback other kinds use', () => {
+    expect(notesModelLabel({ kind: 'custom' })).not.toBe('custom');
+  });
+});
