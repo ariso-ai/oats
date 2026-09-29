@@ -254,6 +254,13 @@ fn main() {
             credentials::llm_api_key_providers,
             credentials::clear_llm_api_key,
             notes_model::set_notes_model,
+            notes_model::set_custom_endpoint,
+            notes_model::get_custom_endpoint,
+            notes_model::clear_custom_endpoint,
+            credentials::set_custom_llm_key,
+            credentials::has_custom_llm_key,
+            credentials::clear_custom_llm_key,
+            remote_notes::test_custom_notes_endpoint,
             speech_model::set_speech_model,
             meeting_notifications::sync_meeting_notifications,
             meeting_notifications::stop_meeting_notifications,
@@ -309,6 +316,7 @@ fn main() {
             // Same reason as the vault override: notes generation runs detached
             // from any window and cannot read the store itself.
             crate::notes_model::load_selected(app.handle());
+            crate::notes_model::load_custom_endpoint(app.handle());
             crate::speech_model::load_selected(app.handle());
             // One-time upgrade migration MUST run before ensure_vault (which
             // creates `.oats/recordings`). Best-effort: log and continue.

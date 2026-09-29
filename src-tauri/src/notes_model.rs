@@ -207,6 +207,15 @@ fn set_custom_endpoint_global(endpoint: Option<CustomEndpoint>) {
     }
 }
 
+/// Test seam: set the custom endpoint directly, bypassing settings.json, for
+/// tests in other modules (`transcribe.rs`) that need `generate_notes`'s
+/// `Custom` arm to see a specific endpoint.
+pub(crate) fn testing_set_custom_endpoint(endpoint: Option<CustomEndpoint>) {
+    if let Ok(mut guard) = CUSTOM_ENDPOINT.write() {
+        *guard = endpoint;
+    }
+}
+
 /// The configured custom endpoint, or `None` if the user hasn't set one up.
 /// Readable from anywhere, including the detached notes-generation task,
 /// which has no `AppHandle` and so cannot reach `settings.json` directly.

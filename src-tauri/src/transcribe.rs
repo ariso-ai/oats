@@ -249,6 +249,23 @@ async fn generate_notes(
                 .map_err(|e| format!("read transcript: {e}"))?;
             crate::remote_notes::run_remote_notes(&transcript, *provider, id, &key).await
         }
+        crate::notes_model::NotesModelId::Custom => {
+            let endpoint = crate::notes_model::get_custom_endpoint()
+                .ok_or_else(|| "No custom endpoint configured — set one up in Settings.".to_string())?;
+            // A missing key is a valid configuration (many self-hosted
+            // endpoints run with no auth), so this is not a failure the way a
+            // missing key is for the fixed providers above.
+            let key = crate::credentials::get_custom_api_key()?;
+            let transcript = std::fs::read_to_string(transcript_path)
+                .map_err(|e| format!("read transcript: {e}"))?;
+            crate::remote_notes::run_custom_notes(
+                &transcript,
+                &endpoint.base_url,
+                &endpoint.model_id,
+                key.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -2121,6 +2138,75 @@ mod tests {
             "the user must still be offered a Retry"
         );
         unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[tokio::test]
+    async fn generate_notes_fails_fast_when_no_custom_endpoint_is_configured() {
+        // STT must actually succeed for notes generation to run at all, so
+        // (unlike a literal `/bin/false`) this uses the same working stub +
+        // ARISO_ROOT + mark_stt_ready_for_test combination the Remote-arm
+        // test above uses, isolating this test from whatever STT models (if
+        // any) happen to be installed on the machine running the suite.
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::model_manager::mark_stt_ready_for_test(tmp.path());
+        crate::notes_model::set_selected(crate::notes_model::NotesModelId::Custom);
+        // Make sure no endpoint leaks in from another test in this binary.
+        // (transcribe.rs tests already run with --test-threads=1 per the
+        // documented macOS workaround, so this is safe without extra locking.)
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        assert!(
+            meta.notes_error.as_deref().unwrap_or("").contains("No custom endpoint configured"),
+            "{:?}", meta.notes_error
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_notes_custom_arm_runs_with_no_key_stored() {
+        // With an endpoint configured but pointed at nothing listening, the
+        // Custom arm must reach run_custom_notes (not fail fast on a missing
+        // key) and surface a connection-failure error, proving a missing key
+        // alone is never treated as "not configured". As above, STT must
+        // actually succeed for notes generation to run.
+        let tmp = tempfile::tempdir().unwrap();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json));
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        crate::model_manager::mark_stt_ready_for_test(tmp.path());
+        crate::notes_model::set_selected(crate::notes_model::NotesModelId::Custom);
+        crate::notes_model::testing_set_custom_endpoint(Some(crate::notes_model::CustomEndpoint {
+            base_url: "http://127.0.0.1:1/".to_string(),
+            model_id: "m".to_string(),
+        }));
+
+        let (res, notes_handle) = finalize_core(
+            tmp.path(), b"audio".to_vec(),
+            "T".into(), "2026-06-02T14:30:05.000Z".into(), 12,
+        ).await.unwrap();
+        notes_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+        crate::notes_model::set_selected(crate::notes_model::default_model());
+        crate::notes_model::testing_set_custom_endpoint(None);
+
+        let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
+        let err = meta.notes_error.unwrap_or_default();
+        assert!(err.to_lowercase().contains("could not reach"), "{err}");
+        assert!(!err.to_lowercase().contains("no api key"), "{err}");
     }
 
     #[tokio::test]
