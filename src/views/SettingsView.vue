@@ -481,7 +481,7 @@
             </button>
           </div>
           <p v-if="customEndpointValue" class="setting-hint" data-test="custom-disclosure">
-            Notes for new recordings will be sent to {{ customEndpointValue.baseUrl }}.
+            Notes for new recordings will be sent to {{ customEndpointValue.baseUrl }}{{ hasCustomKey ? '' : ', with no API key' }}.
           </p>
           <p
             v-if="customEndpointValue && customEndpointValue.baseUrl.startsWith('http://')"
@@ -1328,9 +1328,7 @@ const keyProviderLabel = computed(() =>
 );
 /** The caveat belongs to the model actually in use, not to every stored key:
  *  connecting a provider you haven't selected changes nothing about notes. */
-const remoteModelInUse = computed(
-  () => notesModel.value.kind === 'remote' || notesModel.value.kind === 'custom',
-);
+const remoteModelInUse = computed(() => notesModel.value.kind === 'remote');
 const keychainName = computed(() =>
   platformCapabilities.value.os === 'windows' ? 'Windows Credential Manager' : 'macOS Keychain',
 );

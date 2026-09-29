@@ -167,7 +167,7 @@ pub fn validate_base_url(raw: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Enter a valid http:// or https:// URL.".to_string());
     }
-    let url = reqwest::Url::parse(trimmed)
+    let mut url = reqwest::Url::parse(trimmed)
         .map_err(|_| "Enter a valid http:// or https:// URL.".to_string())?;
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err("Enter a valid http:// or https:// URL.".to_string());
@@ -175,8 +175,13 @@ pub fn validate_base_url(raw: &str) -> Result<String, String> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err("Enter a valid http:// or https:// URL.".to_string());
     }
-    // Normalize: a trailing slash on the base URL must not become a double
-    // slash once `/v1/chat/completions` is appended in remote_notes.rs.
+    // Normalize: a base URL is a host, not an endpoint path. Drop any path,
+    // query, or fragment a user pastes along with it (e.g. `/v1`) so
+    // `remote_notes.rs` appending `v1/chat/completions` can't double up into
+    // `/v1/v1/chat/completions`.
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
     Ok(url.to_string())
 }
 
@@ -210,6 +215,7 @@ fn set_custom_endpoint_global(endpoint: Option<CustomEndpoint>) {
 /// Test seam: set the custom endpoint directly, bypassing settings.json, for
 /// tests in other modules (`transcribe.rs`) that need `generate_notes`'s
 /// `Custom` arm to see a specific endpoint.
+#[cfg(test)]
 pub(crate) fn testing_set_custom_endpoint(endpoint: Option<CustomEndpoint>) {
     if let Ok(mut guard) = CUSTOM_ENDPOINT.write() {
         *guard = endpoint;
@@ -434,6 +440,26 @@ mod tests {
     fn a_trailing_slash_on_the_base_url_does_not_double_up() {
         assert_eq!(
             validate_base_url("http://10.0.1.20:8000/").unwrap(),
+            "http://10.0.1.20:8000/"
+        );
+    }
+
+    #[test]
+    fn a_path_on_the_base_url_is_dropped_so_it_cannot_double_up_with_v1() {
+        assert_eq!(
+            validate_base_url("http://10.0.1.20:8000/v1").unwrap(),
+            "http://10.0.1.20:8000/"
+        );
+    }
+
+    #[test]
+    fn a_query_string_or_fragment_on_the_base_url_is_also_dropped() {
+        assert_eq!(
+            validate_base_url("http://10.0.1.20:8000/v1?foo=bar").unwrap(),
+            "http://10.0.1.20:8000/"
+        );
+        assert_eq!(
+            validate_base_url("http://10.0.1.20:8000/v1#frag").unwrap(),
             "http://10.0.1.20:8000/"
         );
     }

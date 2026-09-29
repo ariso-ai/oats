@@ -1663,6 +1663,14 @@ describe('SettingsView custom endpoint row', () => {
     return wrapper;
   }
 
+  it('does not show the on-device caveat when the custom endpoint is selected, since it is live', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    getNotesModelSetting.mockResolvedValue({ kind: 'custom' } as never);
+    const wrapper = await mountLocal();
+
+    expect(wrapper.find('[data-test="remote-pending"]').exists()).toBe(false);
+  });
+
   it('reads "Custom endpoint" with nothing configured', async () => {
     const wrapper = await mountLocal();
     expect(getCustomEndpoint).toHaveBeenCalled();
@@ -1890,6 +1898,24 @@ describe('SettingsView custom endpoint row', () => {
 
     await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
     expect(wrapper.find('[data-test="custom-plaintext-warning"]').exists()).toBe(false);
+  });
+
+  it('notes that no API key is set when the disclosure is shown without one', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(false);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.get('[data-test="custom-disclosure"]').text()).toContain('with no API key');
+  });
+
+  it('omits the no-API-key note when a key is stored', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.get('[data-test="custom-disclosure"]').text()).not.toContain('with no API key');
   });
 
   it('becomes selectable once configured with no key, since a key is optional', async () => {
