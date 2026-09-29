@@ -716,7 +716,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind, type SpeechModelId, type SttProgress } from '../tauri';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, customEndpoint, customLlmKey, testCustomNotesEndpoint, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind, type SpeechModelId, type SttProgress, type CustomEndpoint } from '../tauri';
 import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
 import { modelCatalog, formatModelSize, speechModelIdFromKey, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
 import { thumbGeometry, scrollTopForDrag, type ScrollMetrics } from './modelListScrollbar';
@@ -877,15 +877,37 @@ async function onChangeVault() {
 // The table is the single control: clicking a Notes row makes that model the
 // one that writes notes, and each local row carries its own install button.
 const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
-const catalog = modelCatalog(null, false);
+// --- Custom OpenAI-compatible endpoint (Local backend only) ----------------
+const customEndpointValue = ref<CustomEndpoint | null>(null);
+const hasCustomKey = ref(false);
+
+async function loadCustomEndpoint() {
+  try {
+    customEndpointValue.value = await customEndpoint.get();
+  } catch (e) {
+    console.error('Failed to read custom endpoint', e);
+    customEndpointValue.value = null;
+  }
+}
+
+async function loadHasCustomKey() {
+  try {
+    hasCustomKey.value = await customLlmKey.has();
+  } catch (e) {
+    console.error('Failed to read custom endpoint key status', e);
+    hasCustomKey.value = false;
+  }
+}
+
+const catalog = computed(() => modelCatalog(customEndpointValue.value, hasCustomKey.value));
 
 /** Hides a speech row this platform doesn't offer (e.g. Qwen3 on Windows).
  *  Before `modelStatus.speech` has answered, nothing is hidden yet. */
 const visibleCatalog = computed(() => {
   const offered = modelStatus.value.speech?.map((s) => s.id);
   return offered
-    ? catalog.filter((row) => row.type !== 'Speech' || offered.includes(row.speechModel!))
-    : catalog;
+    ? catalog.value.filter((row) => row.type !== 'Speech' || offered.includes(row.speechModel!))
+    : catalog.value;
 });
 
 /** How many rows the list shows before it scrolls. */
@@ -1382,6 +1404,8 @@ async function afterSwitchToLocal() {
   await refreshModelStatus();
   await loadModelSizes();
   await loadConnectedProviders();
+  await loadCustomEndpoint();
+  await loadHasCustomKey();
   // First time only: ask before fetching the (large) on-device models.
   const prompted = await hasPromptedLocalModels().catch(() => true);
   if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
@@ -1792,6 +1816,8 @@ onMounted(async () => {
   // Ariso generates notes server-side, so it needs no provider keys — and must
   // not touch the keychain to find that out.
   if (backend.value === 'local') await loadConnectedProviders();
+  if (backend.value === 'local') await loadCustomEndpoint();
+  if (backend.value === 'local') await loadHasCustomKey();
   await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited

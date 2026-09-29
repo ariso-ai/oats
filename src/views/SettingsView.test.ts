@@ -58,6 +58,15 @@ const ensureCalendarAccess = vi.fn(
 );
 const signOut = vi.fn(() => Promise.resolve());
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
+const getCustomEndpoint = vi.fn((): Promise<{ baseUrl: string; modelId: string } | null> =>
+  Promise.resolve(null),
+);
+const setCustomEndpointFn = vi.fn((_b: unknown, _m: unknown) => Promise.resolve());
+const clearCustomEndpointFn = vi.fn(() => Promise.resolve());
+const hasCustomLlmKey = vi.fn((): Promise<boolean> => Promise.resolve(false));
+const setCustomLlmKey = vi.fn((_k: unknown) => Promise.resolve());
+const clearCustomLlmKey = vi.fn(() => Promise.resolve());
+const testCustomNotesEndpointFn = vi.fn((_b: unknown, _m: unknown, _k: unknown) => Promise.resolve());
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -121,6 +130,17 @@ vi.mock('../tauri', () => ({
     set: (p: unknown, k: unknown) => setLlmApiKey(p, k),
     clear: (p: unknown) => clearLlmApiKey(p),
   },
+  customEndpoint: {
+    get: () => getCustomEndpoint(),
+    set: (b: unknown, m: unknown) => setCustomEndpointFn(b, m),
+    clear: () => clearCustomEndpointFn(),
+  },
+  customLlmKey: {
+    has: () => hasCustomLlmKey(),
+    set: (k: unknown) => setCustomLlmKey(k),
+    clear: () => clearCustomLlmKey(),
+  },
+  testCustomNotesEndpoint: (b: unknown, m: unknown, k: unknown) => testCustomNotesEndpointFn(b, m, k),
 }));
 const loadRecordingEnabled = vi.fn(() => Promise.resolve({ mic: false, systemAudio: false }));
 const ensureMicPermission = vi.fn(() => Promise.resolve(true));
@@ -1616,6 +1636,33 @@ describe('SettingsView remote model API keys', () => {
 
     expect(wrapper.find('[data-test="connect-key"]').exists()).toBe(false);
     expect(llmApiKeyProviders).not.toHaveBeenCalled();
+  });
+});
+
+describe('SettingsView custom endpoint row', () => {
+  const ROW = '[data-test="model-row"]';
+  function rowNamed(wrapper: ReturnType<typeof mount>, name: string) {
+    const row = wrapper.findAll(ROW).find((r) => r.text().includes(name));
+    if (!row) throw new Error(`no model row named ${name}`);
+    return row;
+  }
+  async function mountLocal() {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('reads "Custom endpoint" with nothing configured', async () => {
+    const wrapper = await mountLocal();
+    expect(getCustomEndpoint).toHaveBeenCalled();
+    expect(rowNamed(wrapper, 'Custom endpoint')).toBeTruthy();
+  });
+
+  it('shows the configured model id once an endpoint is loaded', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
+    const wrapper = await mountLocal();
+    expect(rowNamed(wrapper, 'Qwen2.5-72B')).toBeTruthy();
   });
 });
 
