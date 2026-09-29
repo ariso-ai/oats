@@ -233,6 +233,31 @@ pub async fn run_custom_notes(
     chat_completion(base_url, model_id, api_key, transcript, SYSTEM_PROMPT).await
 }
 
+/// A short fixed prompt for "Test connection" — cheap, and never the real
+/// notes system prompt, so a test run never depends on transcript content.
+const TEST_PROMPT: &str = "Reply with the single word: ok.";
+
+/// Confirm a not-yet-saved custom endpoint actually works, without persisting
+/// anything — Save is a separate, explicit step. Reuses the exact request
+/// path `run_custom_notes` uses, so a passing test genuinely predicts a
+/// passing real call.
+#[tauri::command]
+pub async fn test_custom_notes_endpoint(
+    base_url: String,
+    model_id: String,
+    key: Option<String>,
+) -> Result<(), String> {
+    chat_completion(
+        &base_url,
+        &model_id,
+        key.as_deref(),
+        "test connection",
+        TEST_PROMPT,
+    )
+    .await
+    .map(|_| ())
+}
+
 fn provider_name(provider: RemoteProvider) -> &'static str {
     match provider {
         RemoteProvider::OpenAi => "OpenAI",
@@ -669,5 +694,43 @@ mod tests {
             err.to_lowercase().contains("expected format") || err.to_lowercase().contains("no notes"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_connection_succeeds_against_a_200_stub() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(
+            200,
+            r###"{"choices":[{"message":{"content":"ok"}}]}"###,
+        )
+        .await;
+
+        let result = test_custom_notes_endpoint(base, "m".to_string(), None).await;
+        let _ = server.await.unwrap();
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_reports_a_rejected_key() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(401, r###"{"error":"no"}"###).await;
+
+        let result = test_custom_notes_endpoint(base, "m".to_string(), Some("sk-bad".to_string())).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.to_lowercase().contains("rejected"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_names_a_connection_failure() {
+        install_crypto_provider();
+        // Nothing listening on this port: a real connection failure, not a stub.
+        let result =
+            test_custom_notes_endpoint("http://127.0.0.1:1".to_string(), "m".to_string(), None).await;
+
+        let err = result.unwrap_err();
+        assert!(err.to_lowercase().contains("could not reach"), "{err}");
     }
 }
