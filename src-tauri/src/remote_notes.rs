@@ -189,7 +189,13 @@ async fn chat_completion(
         return Err(match status.as_u16() {
             401 | 403 => format!("{name} rejected the request — check the API key in Settings."),
             429 => format!("{name} is rate-limiting this key; try again shortly."),
-            code => format!("{name} returned HTTP {code}."),
+            code => match error_message(response, api_key).await {
+                // Unlike the fixed providers, a self-hosted server's 4xx is
+                // usually a fixable typo (Ollama: "invalid model name"), so
+                // its own explanation is worth showing.
+                Some(message) => format!("{name} returned HTTP {code}: {message}"),
+                None => format!("{name} returned HTTP {code}."),
+            },
         });
     }
 
@@ -206,6 +212,49 @@ async fn chat_completion(
         return Err(format!("{name} returned empty notes"));
     }
     Ok(output)
+}
+
+/// Longest error message surfaced from a custom endpoint, in characters.
+const MAX_ERROR_MESSAGE_CHARS: usize = 200;
+/// Most of an error body read looking for that message.
+const MAX_ERROR_BODY_BYTES: usize = 16 * 1024;
+
+/// The server's own explanation from an OpenAI-shaped error body
+/// (`{"error":{"message":...}}`, or `{"error":"..."}`), which Ollama,
+/// llama.cpp, vLLM and mlx_lm all use. Only that parsed field is ever
+/// returned — never a raw body, which could echo the transcript — and it is
+/// stripped of control characters, has the key redacted, and is bounded.
+async fn error_message(mut response: reqwest::Response, api_key: Option<&str>) -> Option<String> {
+    let mut body = Vec::new();
+    while body.len() < MAX_ERROR_BODY_BYTES {
+        match tokio::time::timeout(REMOTE_NOTES_TIMEOUT, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    let json: Value = serde_json::from_slice(&body).ok()?;
+    let raw = json["error"]["message"].as_str().or(json["error"].as_str())?;
+    sanitize_error_message(raw, api_key)
+}
+
+fn sanitize_error_message(raw: &str, api_key: Option<&str>) -> Option<String> {
+    let mut text = raw.to_string();
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        text = text.replace(key, "[redacted]");
+    }
+    let text = text
+        .split(|c: char| c.is_control() || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    if text.chars().count() <= MAX_ERROR_MESSAGE_CHARS {
+        return Some(text);
+    }
+    let cut: String = text.chars().take(MAX_ERROR_MESSAGE_CHARS).collect();
+    Some(format!("{cut}…"))
 }
 
 /// A base URL with exactly one trailing slash, so appending `v1/chat/...`
@@ -247,6 +296,11 @@ pub async fn test_custom_notes_endpoint(
     model_id: String,
     key: Option<String>,
 ) -> Result<(), String> {
+    // Same normalization Save applies, so a test and a save of the same
+    // typed values reach the same server with the same request.
+    let base_url = crate::notes_model::validate_base_url(&base_url)?;
+    let model_id = crate::notes_model::validate_model_id(&model_id)?;
+    let key = normalize_optional_key(key)?;
     chat_completion(
         &base_url,
         &model_id,
@@ -256,6 +310,15 @@ pub async fn test_custom_notes_endpoint(
     )
     .await
     .map(|_| ())
+}
+
+/// A blank key means "no key" (the field is optional); anything else gets
+/// the same shape check a saved key does.
+fn normalize_optional_key(key: Option<String>) -> Result<Option<String>, String> {
+    match key.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(k) => crate::credentials::validate_key(k).map(|k| Some(k.to_string())),
+    }
 }
 
 fn provider_name(provider: RemoteProvider) -> &'static str {
@@ -721,6 +784,106 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(err.to_lowercase().contains("rejected"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoints_error_message_is_surfaced() {
+        install_crypto_provider();
+        // Ollama's actual answer to a model id with a space in it.
+        let (base, server) = stub_provider(
+            400,
+            r###"{"error":{"message":"invalid model name","type":"invalid_request_error","param":null,"code":null}}"###,
+        )
+        .await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "qwen 3.5", None).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("HTTP 400"), "{err}");
+        assert!(err.contains("invalid model name"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_surfaced_error_message_never_quotes_the_key_and_is_bounded() {
+        install_crypto_provider();
+        let body = json!({
+            "error": { "message": format!("bad key sk-custom\n{}", "x".repeat(2000)) }
+        })
+        .to_string();
+        let (base, server) = stub_provider(400, &body).await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "m", Some("sk-custom")).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(!err.contains("sk-custom"), "error leaked the key: {err}");
+        assert!(!err.contains('\n'), "error kept a control character: {err}");
+        assert!(err.chars().count() < 400, "error was not bounded: {} chars", err.chars().count());
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoints_unstructured_error_body_is_not_quoted() {
+        install_crypto_provider();
+        // Only a parsed `error.message` is surfaced — never a raw body, which
+        // could echo the transcript back.
+        let (base, server) = stub_provider(500, "Alice: ship it. <html>boom</html>").await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "m", None).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("HTTP 500"), "{err}");
+        assert!(!err.contains("Alice"), "error quoted the body: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_normalizes_its_inputs_the_way_save_does() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(
+            200,
+            r###"{"choices":[{"message":{"content":"ok"}}]}"###,
+        )
+        .await;
+
+        // Whitespace and a pasted `/v1` path, as a user might type them.
+        let result = test_custom_notes_endpoint(
+            format!("  {base}/v1  "),
+            " qwen3.5:9b ".to_string(),
+            Some("  sk-custom  ".to_string()),
+        )
+        .await;
+        let seen = server.await.unwrap();
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(seen.target, "/v1/chat/completions");
+        assert_eq!(seen.body["model"], "qwen3.5:9b");
+        assert_eq!(seen.header("authorization"), Some("Bearer sk-custom"));
+    }
+
+    #[tokio::test]
+    async fn test_connection_rejects_a_blank_model_id_before_sending_anything() {
+        // No stub: validation must fail before any request is made.
+        let result =
+            test_custom_notes_endpoint("http://127.0.0.1:1".to_string(), "   ".to_string(), None).await;
+
+        assert_eq!(result.unwrap_err(), "Enter a model identifier.");
+    }
+
+    #[tokio::test]
+    async fn test_connection_treats_a_blank_key_as_no_key() {
+        install_crypto_provider();
+        let (base, server) = stub_provider(
+            200,
+            r###"{"choices":[{"message":{"content":"ok"}}]}"###,
+        )
+        .await;
+
+        let result = test_custom_notes_endpoint(base, "m".to_string(), Some("  ".to_string())).await;
+        let seen = server.await.unwrap();
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(seen.header("authorization"), None);
     }
 
     #[tokio::test]

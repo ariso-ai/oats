@@ -76,7 +76,7 @@ impl RemoteProvider {
 
 /// Bound and sanitize a pasted key. Errors describe the problem without ever
 /// quoting the key itself.
-fn validate_key(raw: &str) -> Result<&str, String> {
+pub(crate) fn validate_key(raw: &str) -> Result<&str, String> {
     let key = raw.trim();
     if key.is_empty() {
         return Err("Enter an API key.".to_string());
