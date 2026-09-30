@@ -94,7 +94,7 @@ windows = { version = "=0.62.2", features = [
 windows-numerics = "=0.3.1"
 # Desktop shortcuts should focus the running app instead of creating another
 # hidden tray process. Register this before every other Tauri plugin in main.
-tauri-plugin-single-instance = "=2.4.4"
+tauri-plugin-single-instance = "=2.4.5"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
