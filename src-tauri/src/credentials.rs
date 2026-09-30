@@ -22,6 +22,12 @@ const KEYCHAIN_SERVICE: &str = "ai.ariso.desktop";
 /// The single account every provider's key lives under.
 const KEYS_ACCOUNT: &str = "llm-api-keys";
 
+/// The reserved map key the custom endpoint's API key lives under. Not a
+/// `RemoteProvider` variant — it names no fixed host, so it doesn't belong in
+/// that closed enum — but shares every other mechanism `KeyMap` gives the
+/// three providers.
+const CUSTOM_KEY_NAME: &str = "custom";
+
 /// Far longer than any provider key in circulation, and short enough that a
 /// runaway paste can't be pushed into the keychain.
 const MAX_KEY_LEN: usize = 4096;
@@ -70,7 +76,7 @@ impl RemoteProvider {
 
 /// Bound and sanitize a pasted key. Errors describe the problem without ever
 /// quoting the key itself.
-fn validate_key(raw: &str) -> Result<&str, String> {
+pub(crate) fn validate_key(raw: &str) -> Result<&str, String> {
     let key = raw.trim();
     if key.is_empty() {
         return Err("Enter an API key.".to_string());
@@ -222,6 +228,36 @@ fn clear_api_key(provider: RemoteProvider) -> Result<(), String> {
     }
 }
 
+fn set_custom_key(key: String) -> Result<(), String> {
+    let key = validate_key(&key)?.to_string();
+    let mut keys = load_keys()?;
+    keys.insert(CUSTOM_KEY_NAME.to_string(), key);
+    save_keys(&keys)
+}
+
+/// The stored custom-endpoint key, or `None` when none is set — a normal,
+/// expected state, not a failure: the custom endpoint's key is optional.
+/// Crate-internal on purpose, same as `get_api_key`.
+pub(crate) fn get_custom_api_key() -> Result<Option<String>, String> {
+    Ok(load_keys()?.get(CUSTOM_KEY_NAME).cloned())
+}
+
+/// Idempotent, same as `clear_api_key`.
+fn clear_custom_key() -> Result<(), String> {
+    let mut keys = load_keys()?;
+    if keys.remove(CUSTOM_KEY_NAME).is_none() {
+        return Ok(());
+    }
+    if keys.is_empty() {
+        match consolidated_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(store_error(e)),
+        }
+    } else {
+        save_keys(&keys)
+    }
+}
+
 fn connected_providers() -> Result<Vec<RemoteProvider>, String> {
     let keys = load_keys()?;
     Ok(RemoteProvider::ALL
@@ -284,6 +320,28 @@ pub fn llm_api_key_providers() -> Result<Vec<RemoteProvider>, String> {
 #[tauri::command]
 pub fn clear_llm_api_key(provider: RemoteProvider) -> Result<(), String> {
     clear_api_key(provider)
+}
+
+/// Store the custom endpoint's API key. Optional — Settings only calls this
+/// when the user actually entered one.
+#[tauri::command]
+pub fn set_custom_llm_key(key: String) -> Result<(), String> {
+    set_custom_key(key)
+}
+
+/// Whether a key is stored for the custom endpoint — Settings needs this to
+/// decide whether to offer "Use no API key" and how to word its disclosure,
+/// without ever seeing the key itself.
+#[tauri::command]
+pub fn has_custom_llm_key() -> Result<bool, String> {
+    Ok(get_custom_api_key()?.is_some())
+}
+
+/// Forget the custom endpoint's API key, independent of the endpoint's base
+/// URL/model id.
+#[tauri::command]
+pub fn clear_custom_llm_key() -> Result<(), String> {
+    clear_custom_key()
 }
 
 /// Test-only stand-in for the OS keychain, so tests covering the code paths
@@ -513,6 +571,69 @@ mod tests {
         // before ever reaching the keychain, not attempt to delete an item
         // that was never created.
         assert!(clear_api_key(RemoteProvider::OpenAi).is_ok());
+    }
+
+    #[test]
+    #[ignore = "writes to the real OS keychain"]
+    fn the_reserved_custom_key_coexists_with_provider_keys() {
+        // set_api_key/set_custom_key always write through to the real
+        // (test-service) keychain — the fake store in `testing` only
+        // stands in for *reads* — so exercising them together with
+        // get_api_key/get_custom_api_key needs the real-keychain guard,
+        // same as the other keychain-backed tests below.
+        let _real_keychain = testing::use_real_keychain();
+        let _ = consolidated_entry().unwrap().delete_credential();
+        set_api_key(RemoteProvider::OpenAi, "sk-openai".to_string()).unwrap();
+        set_custom_key("sk-custom".to_string()).unwrap();
+
+        assert_eq!(
+            get_api_key(RemoteProvider::OpenAi).unwrap().as_deref(),
+            Some("sk-openai")
+        );
+        assert_eq!(get_custom_api_key().unwrap().as_deref(), Some("sk-custom"));
+
+        clear_api_key(RemoteProvider::OpenAi).unwrap();
+        clear_custom_key().unwrap();
+    }
+
+    #[test]
+    fn no_custom_key_reads_as_none_not_an_error() {
+        testing::clear_keys();
+        assert_eq!(get_custom_api_key().unwrap(), None);
+    }
+
+    #[test]
+    #[ignore = "writes to the real OS keychain"]
+    fn clearing_the_custom_key_leaves_provider_keys_untouched() {
+        // Same real-keychain requirement as
+        // `the_reserved_custom_key_coexists_with_provider_keys` above.
+        let _real_keychain = testing::use_real_keychain();
+        let _ = consolidated_entry().unwrap().delete_credential();
+        set_api_key(RemoteProvider::Anthropic, "sk-anthropic".to_string()).unwrap();
+        set_custom_key("sk-custom".to_string()).unwrap();
+
+        clear_custom_key().unwrap();
+
+        assert_eq!(get_custom_api_key().unwrap(), None);
+        assert_eq!(
+            get_api_key(RemoteProvider::Anthropic).unwrap().as_deref(),
+            Some("sk-anthropic")
+        );
+
+        clear_api_key(RemoteProvider::Anthropic).unwrap();
+    }
+
+    #[test]
+    fn clearing_an_unset_custom_key_never_touches_the_keychain() {
+        testing::clear_keys();
+        assert!(clear_custom_key().is_ok());
+    }
+
+    #[test]
+    fn an_empty_custom_key_is_rejected_the_same_as_a_provider_key() {
+        testing::clear_keys();
+        assert!(set_custom_key("".to_string()).is_err());
+        assert!(set_custom_key("   \n".to_string()).is_err());
     }
 
     #[test]

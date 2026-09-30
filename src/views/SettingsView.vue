@@ -14,10 +14,10 @@
       </div>
     </div>
 
-    <!-- One confirmation for both kinds of removal: a local model's files, or
-         a provider's stored API key. -->
+    <!-- One confirmation for all three kinds of removal: a local model's
+         files, a provider's stored API key, or the custom endpoint. -->
     <div
-      v-if="removeTarget || removeKeyProvider"
+      v-if="removeTarget || removeKeyProvider || removeCustomEndpoint"
       class="download-confirm"
       data-test="remove-confirm"
       role="dialog"
@@ -27,11 +27,16 @@
       <div class="download-confirm__card">
         <h2 id="remove-confirm-title" class="download-confirm__title">
           <template v-if="removeTarget">Remove {{ removeTarget.name }}?</template>
+          <template v-else-if="removeCustomEndpoint">Remove the custom endpoint?</template>
           <template v-else>Remove {{ removeKeyProviderLabel }} API key?</template>
         </h2>
         <p v-if="removeTarget" class="download-confirm__body">
           Its files are deleted from this device. Recording in Local mode needs
           this model, so it has to be downloaded again before the next meeting.
+        </p>
+        <p v-else-if="removeCustomEndpoint" class="download-confirm__body">
+          Its base URL, model identifier, and any stored API key are deleted.
+          Notes stop using it until you set it up again.
         </p>
         <p v-else class="download-confirm__body">
           The key is deleted from {{ keychainName }}. {{ removeKeyProviderLabel }}
@@ -284,6 +289,45 @@
                     </svg>
                   </button>
                 </template>
+                <template v-else-if="row.key === 'custom'">
+                  <button
+                    v-if="!customEndpointValue"
+                    class="icon-btn"
+                    data-test="custom-connect"
+                    title="Add custom endpoint"
+                    aria-label="Add custom endpoint"
+                    @click.stop="openCustomForm"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                  <template v-else>
+                    <button
+                      class="icon-btn"
+                      data-test="custom-edit"
+                      title="Edit"
+                      aria-label="Edit custom endpoint"
+                      @click.stop="openCustomForm"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                      </svg>
+                    </button>
+                    <button
+                      class="icon-btn"
+                      data-test="custom-remove"
+                      title="Remove"
+                      aria-label="Remove custom endpoint"
+                      @click.stop="onRemoveCustomEndpoint"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14" />
+                      </svg>
+                    </button>
+                  </template>
+                </template>
                 <template v-else>
                   <!-- No "Remote" label: the cloud type icon already says it.
                        Nor a "Connected" one: a provider with a key stored is the
@@ -392,6 +436,96 @@
             style="color: var(--danger, #c0392b)"
           >
             {{ keyError }}
+          </p>
+        </div>
+        <div v-if="customFormOpen" class="key-prompt" data-test="custom-form">
+          <div class="key-prompt__row">
+            <input
+              v-model="customBaseUrlInput"
+              class="key-input"
+              data-test="custom-base-url"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Base URL (e.g. http://10.0.1.20:8000)"
+              aria-label="Custom endpoint base URL"
+            />
+          </div>
+          <div class="key-prompt__row">
+            <input
+              v-model="customModelIdInput"
+              class="key-input"
+              data-test="custom-model-id"
+              type="text"
+              list="custom-model-options"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Model (leave blank to detect it with Test connection)"
+              aria-label="Custom endpoint model identifier"
+            />
+            <datalist id="custom-model-options" data-test="custom-model-options">
+              <option v-for="model in customAvailableModels" :key="model" :value="model" />
+            </datalist>
+          </div>
+          <div class="key-prompt__row">
+            <input
+              v-model="customKeyInput"
+              class="key-input"
+              data-test="custom-key-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="API key (optional — leave blank if the endpoint doesn't require one)"
+              aria-label="Custom endpoint API key"
+            />
+          </div>
+          <div v-if="customEndpointValue && hasCustomKey && !customClearKeyRequested" class="key-prompt__row">
+            <button type="button" class="secondary-btn" data-test="custom-clear-key" @click="requestClearCustomKey">
+              Use no API key
+            </button>
+          </div>
+          <p v-if="customEndpointValue" class="setting-hint" data-test="custom-disclosure">
+            Notes for new recordings will be sent to {{ customEndpointValue.baseUrl }}{{ hasCustomKey ? '' : ', with no API key' }}.
+          </p>
+          <p
+            v-if="customEndpointValue && customEndpointValue.baseUrl.startsWith('http://')"
+            class="setting-hint"
+            data-test="custom-plaintext-warning"
+            style="color: var(--danger, #c0392b)"
+          >
+            This connection is not encrypted — the transcript and API key travel in plain text on your network.
+          </p>
+          <div class="key-prompt__row">
+            <button
+              class="secondary-btn"
+              data-test="custom-test-connection"
+              :disabled="customTesting"
+              @click="onTestCustomConnection"
+            >
+              {{ customTesting ? 'Testing…' : 'Test connection' }}
+            </button>
+            <button
+              class="primary-btn"
+              data-test="custom-save"
+              :disabled="customSaving"
+              @click="onSaveCustomEndpoint"
+            >
+              Save
+            </button>
+            <button class="secondary-btn" data-test="custom-cancel" @click="closeCustomForm">
+              Cancel
+            </button>
+          </div>
+          <p v-if="customTestResult" class="setting-hint" data-test="custom-test-result">
+            {{ customTestResult }}
+          </p>
+          <p
+            v-if="customError"
+            class="setting-hint"
+            data-test="custom-error"
+            style="color: var(--danger, #c0392b)"
+          >
+            {{ customError }}
           </p>
         </div>
         <p v-if="remoteModelInUse" class="setting-hint" data-test="remote-pending">
@@ -716,7 +850,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { BACKEND_CHANGED_EVENT } from '../composables/useBackend';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
-import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind, type SpeechModelId, type SttProgress } from '../tauri';
+import { AUTH_CHANGED_EVENT, auth, updater, getBackendSetting, setBackendSetting, hasPromptedLocalModels, setPromptedLocalModels, getNotesModelSetting, setNotesModelSetting, getSpeechModelSetting, setSpeechModelSetting, local, llmKeys, customEndpoint, customLlmKey, testCustomNotesEndpoint, getVaultDir, setVaultDir, pickVaultFolder, type ModelStatus, type ModelSizes, type LocalModelKind, type SpeechModelId, type SttProgress, type CustomEndpoint } from '../tauri';
 import { DEFAULT_NOTES_MODEL, notesModelKey, remoteProviderLabel, type NotesModelId, type RemoteProvider } from '../notesModels';
 import { modelCatalog, formatModelSize, speechModelIdFromKey, DEFAULT_SPEECH_MODEL_KEY, type CatalogModel } from '../modelCatalog';
 import { thumbGeometry, scrollTopForDrag, type ScrollMetrics } from './modelListScrollbar';
@@ -877,15 +1011,37 @@ async function onChangeVault() {
 // The table is the single control: clicking a Notes row makes that model the
 // one that writes notes, and each local row carries its own install button.
 const notesModel = ref<NotesModelId>(DEFAULT_NOTES_MODEL);
-const catalog = modelCatalog();
+// --- Custom OpenAI-compatible endpoint (Local backend only) ----------------
+const customEndpointValue = ref<CustomEndpoint | null>(null);
+const hasCustomKey = ref(false);
+
+async function loadCustomEndpoint() {
+  try {
+    customEndpointValue.value = await customEndpoint.get();
+  } catch (e) {
+    console.error('Failed to read custom endpoint', e);
+    customEndpointValue.value = null;
+  }
+}
+
+async function loadHasCustomKey() {
+  try {
+    hasCustomKey.value = await customLlmKey.has();
+  } catch (e) {
+    console.error('Failed to read custom endpoint key status', e);
+    hasCustomKey.value = false;
+  }
+}
+
+const catalog = computed(() => modelCatalog(customEndpointValue.value, hasCustomKey.value));
 
 /** Hides a speech row this platform doesn't offer (e.g. Qwen3 on Windows).
  *  Before `modelStatus.speech` has answered, nothing is hidden yet. */
 const visibleCatalog = computed(() => {
   const offered = modelStatus.value.speech?.map((s) => s.id);
   return offered
-    ? catalog.filter((row) => row.type !== 'Speech' || offered.includes(row.speechModel!))
-    : catalog;
+    ? catalog.value.filter((row) => row.type !== 'Speech' || offered.includes(row.speechModel!))
+    : catalog.value;
 });
 
 /** How many rows the list shows before it scrolls. */
@@ -1021,6 +1177,7 @@ async function loadSpeechModel() {
  *  a key stored for its provider, for a remote one. Only a usable model can be
  *  the one in use. */
 function rowUsable(row: CatalogModel): boolean {
+  if (row.notesModel?.kind === 'custom') return !!customEndpointValue.value;
   return row.runtime === 'remote' ? rowConnected(row) : rowInstalled(row);
 }
 
@@ -1097,11 +1254,24 @@ function onRemoveRow(row: CatalogModel) {
 function cancelRemove() {
   removeTarget.value = null;
   removeKeyProvider.value = null;
+  removeCustomEndpoint.value = false;
 }
 
 async function confirmRemove() {
   if (removeKeyProvider.value) {
     await confirmRemoveKey();
+    return;
+  }
+  if (removeCustomEndpoint.value) {
+    removeCustomEndpoint.value = false;
+    try {
+      await customEndpoint.clear();
+      await customLlmKey.clear();
+      await loadCustomEndpoint();
+      await loadHasCustomKey();
+    } catch (e) {
+      removeError.value = e instanceof Error ? e.message : String(e);
+    }
     return;
   }
   const row = removeTarget.value;
@@ -1227,6 +1397,102 @@ async function onSaveKey() {
   }
 }
 
+// --- Custom endpoint form ---------------------------------------------------
+const customFormOpen = ref(false);
+const customBaseUrlInput = ref('');
+const customModelIdInput = ref('');
+const customKeyInput = ref('');
+const customSaving = ref(false);
+const customError = ref('');
+const customTesting = ref(false);
+const customTestResult = ref('');
+// Models the server listed on the last Test connection, offered as choices.
+const customAvailableModels = ref<string[]>([]);
+const customClearKeyRequested = ref(false);
+
+function openCustomForm() {
+  customFormOpen.value = true;
+  customBaseUrlInput.value = customEndpointValue.value?.baseUrl ?? '';
+  customModelIdInput.value = customEndpointValue.value?.modelId ?? '';
+  customKeyInput.value = '';
+  customClearKeyRequested.value = false;
+  customError.value = '';
+  customTestResult.value = '';
+  customAvailableModels.value = [];
+}
+
+function requestClearCustomKey() {
+  customClearKeyRequested.value = true;
+  customKeyInput.value = '';
+}
+
+function closeCustomForm() {
+  customFormOpen.value = false;
+  customBaseUrlInput.value = '';
+  customModelIdInput.value = '';
+  customKeyInput.value = '';
+  customClearKeyRequested.value = false;
+  customError.value = '';
+  customTestResult.value = '';
+  customAvailableModels.value = [];
+}
+
+async function onTestCustomConnection() {
+  if (customTesting.value) return;
+  customTesting.value = true;
+  customTestResult.value = '';
+  try {
+    const result = await testCustomNotesEndpoint(
+      customBaseUrlInput.value,
+      customModelIdInput.value,
+      customKeyInput.value || null,
+    );
+    // A blank model resolves to one the server lists; fill it in so Save
+    // persists exactly what was tested.
+    customModelIdInput.value = result.modelId;
+    customAvailableModels.value = result.availableModels;
+    const others = result.availableModels.length - 1;
+    customTestResult.value =
+      others > 0
+        ? `Connected — using ${result.modelId}. ${others} other model${others === 1 ? '' : 's'} available in the model field.`
+        : `Connected — using ${result.modelId}.`;
+  } catch (e) {
+    customTestResult.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    customTesting.value = false;
+  }
+}
+
+async function onSaveCustomEndpoint() {
+  if (customSaving.value) return;
+  customError.value = '';
+  customSaving.value = true;
+  try {
+    await customEndpoint.set(customBaseUrlInput.value, customModelIdInput.value);
+    if (customKeyInput.value) {
+      await customLlmKey.set(customKeyInput.value);
+    } else if (customClearKeyRequested.value) {
+      await customLlmKey.clear();
+    }
+    await loadCustomEndpoint();
+    await loadHasCustomKey();
+    closeCustomForm();
+  } catch (e) {
+    customError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    customSaving.value = false;
+  }
+}
+
+/** Whether the removal dialog is asking about the custom endpoint, rather
+ *  than a local model's files or a provider's key. */
+const removeCustomEndpoint = ref(false);
+
+function onRemoveCustomEndpoint() {
+  removeError.value = '';
+  removeCustomEndpoint.value = true;
+}
+
 /** The provider whose key the removal dialog is asking about. */
 const removeKeyProvider = ref<RemoteProvider | null>(null);
 const removeKeyProviderLabel = computed(() =>
@@ -1258,7 +1524,8 @@ async function onRowClick(row: CatalogModel) {
   // an on-device one, a key stored for a remote one. A click on a row that
   // isn't there yet asks for the missing half instead of selecting it.
   if (!rowUsable(row)) {
-    if (row.runtime === 'remote') onConnectRow(row);
+    if (row.notesModel?.kind === 'custom') openCustomForm();
+    else if (row.runtime === 'remote') onConnectRow(row);
     return;
   }
   if (row.type === 'Speech') {
@@ -1382,6 +1649,8 @@ async function afterSwitchToLocal() {
   await refreshModelStatus();
   await loadModelSizes();
   await loadConnectedProviders();
+  await loadCustomEndpoint();
+  await loadHasCustomKey();
   // First time only: ask before fetching the (large) on-device models.
   const prompted = await hasPromptedLocalModels().catch(() => true);
   if (shouldPromptDownload('local', prompted, modelStatus.value.state)) {
@@ -1792,6 +2061,8 @@ onMounted(async () => {
   // Ariso generates notes server-side, so it needs no provider keys — and must
   // not touch the keychain to find that out.
   if (backend.value === 'local') await loadConnectedProviders();
+  if (backend.value === 'local') await loadCustomEndpoint();
+  if (backend.value === 'local') await loadHasCustomKey();
   await loadVaultDir();
 
   // Per-model download progress. Completion/failure is handled by the awaited

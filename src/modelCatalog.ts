@@ -1,4 +1,4 @@
-import { NOTES_MODEL_OPTIONS, notesModelKey, type NotesModelId } from './notesModels';
+import { NOTES_MODEL_OPTIONS, notesModelKey, type NotesModelId, type CustomEndpoint } from './notesModels';
 
 /** What a model is for. Drives the Type column, and which install/download
  *  state in Settings a row reads from. */
@@ -23,6 +23,10 @@ export interface CatalogModel {
   notesModel?: NotesModelId;
   /** Present only on Speech rows — what a Speech selection transcribes with. */
   speechModel?: SpeechModelId;
+  /** Present only on the Custom endpoint row — whether a key is stored for
+   *  it, so the edit form can offer "Use no API key" without a second
+   *  round-trip through the backend. */
+  hasCustomKey?: boolean;
 }
 
 /** Speech models, in display order. The user picks one active model — the
@@ -65,8 +69,12 @@ export function speechModelIdFromKey(key: string): SpeechModelId {
   return row?.speechModel ?? 'parakeet-tdt-0.6b-v3';
 }
 
-/** Every model Settings lists, notes models first. */
-export function modelCatalog(): CatalogModel[] {
+/** Every model Settings lists, notes models first, the custom endpoint last
+ *  among them. */
+export function modelCatalog(
+  customEndpoint: CustomEndpoint | null,
+  hasCustomKey: boolean,
+): CatalogModel[] {
   const notes: CatalogModel[] = NOTES_MODEL_OPTIONS.map((option) => ({
     key: notesModelKey(option.value),
     name: option.label,
@@ -77,7 +85,18 @@ export function modelCatalog(): CatalogModel[] {
     }.`,
     notesModel: option.value,
   }));
-  return [...notes, ...SPEECH_MODELS];
+  const custom: CatalogModel = {
+    key: 'custom',
+    name: customEndpoint ? customEndpoint.modelId : 'Custom endpoint',
+    type: 'Notes',
+    runtime: 'remote',
+    details: customEndpoint
+      ? `Writes meeting notes and titles. ${customEndpoint.modelId} at ${customEndpoint.baseUrl}, called over the network.`
+      : 'Writes meeting notes and titles. Not configured — add a base URL and model identifier in Settings.',
+    notesModel: { kind: 'custom' },
+    hasCustomKey,
+  };
+  return [...notes, custom, ...SPEECH_MODELS];
 }
 
 const MB = 1024 * 1024;

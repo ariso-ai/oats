@@ -58,6 +58,18 @@ const ensureCalendarAccess = vi.fn(
 );
 const signOut = vi.fn(() => Promise.resolve());
 const emitNotificationsSync = vi.fn(() => Promise.resolve());
+const getCustomEndpoint = vi.fn((): Promise<{ baseUrl: string; modelId: string } | null> =>
+  Promise.resolve(null),
+);
+const setCustomEndpointFn = vi.fn((_b: unknown, _m: unknown) => Promise.resolve());
+const clearCustomEndpointFn = vi.fn(() => Promise.resolve());
+const hasCustomLlmKey = vi.fn((): Promise<boolean> => Promise.resolve(false));
+const setCustomLlmKey = vi.fn((_k: unknown) => Promise.resolve());
+const clearCustomLlmKey = vi.fn(() => Promise.resolve());
+const testCustomNotesEndpointFn = vi.fn(
+  (_b: unknown, m: unknown, _k: unknown): Promise<{ modelId: string; availableModels: string[] }> =>
+    Promise.resolve({ modelId: String(m), availableModels: [] }),
+);
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -121,6 +133,17 @@ vi.mock('../tauri', () => ({
     set: (p: unknown, k: unknown) => setLlmApiKey(p, k),
     clear: (p: unknown) => clearLlmApiKey(p),
   },
+  customEndpoint: {
+    get: () => getCustomEndpoint(),
+    set: (b: unknown, m: unknown) => setCustomEndpointFn(b, m),
+    clear: () => clearCustomEndpointFn(),
+  },
+  customLlmKey: {
+    has: () => hasCustomLlmKey(),
+    set: (k: unknown) => setCustomLlmKey(k),
+    clear: () => clearCustomLlmKey(),
+  },
+  testCustomNotesEndpoint: (b: unknown, m: unknown, k: unknown) => testCustomNotesEndpointFn(b, m, k),
 }));
 const loadRecordingEnabled = vi.fn(() => Promise.resolve({ mic: false, systemAudio: false }));
 const ensureMicPermission = vi.fn(() => Promise.resolve(true));
@@ -208,6 +231,18 @@ beforeEach(() => {
   getVaultDir.mockResolvedValue('/Users/x/.ariso/vault');
   setVaultDir.mockResolvedValue(undefined);
   pickVaultFolder.mockResolvedValue(null);
+  // clearAllMocks leaves a test's mockResolvedValue/mockRejectedValue in
+  // place for every test after it, so restore the defaults here the same
+  // way the mocks above do.
+  getCustomEndpoint.mockResolvedValue(null);
+  setCustomEndpointFn.mockResolvedValue(undefined);
+  clearCustomEndpointFn.mockResolvedValue(undefined);
+  hasCustomLlmKey.mockResolvedValue(false);
+  setCustomLlmKey.mockResolvedValue(undefined);
+  clearCustomLlmKey.mockResolvedValue(undefined);
+  testCustomNotesEndpointFn.mockImplementation((_b, m) =>
+    Promise.resolve({ modelId: String(m), availableModels: [] }),
+  );
   // Sign-in stores a session and sign-out clears it, as the backend does, so
   // the account refresh that follows each one reads the new state.
   googleSignIn.mockImplementation(storeSession);
@@ -1616,6 +1651,330 @@ describe('SettingsView remote model API keys', () => {
 
     expect(wrapper.find('[data-test="connect-key"]').exists()).toBe(false);
     expect(llmApiKeyProviders).not.toHaveBeenCalled();
+  });
+});
+
+describe('SettingsView custom endpoint row', () => {
+  const ROW = '[data-test="model-row"]';
+  function rowNamed(wrapper: ReturnType<typeof mount>, name: string) {
+    const row = wrapper.findAll(ROW).find((r) => r.text().includes(name));
+    if (!row) throw new Error(`no model row named ${name}`);
+    return row;
+  }
+  async function mountLocal() {
+    getBackendSetting.mockResolvedValue('local');
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('does not show the on-device caveat when the custom endpoint is selected, since it is live', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    getNotesModelSetting.mockResolvedValue({ kind: 'custom' } as never);
+    const wrapper = await mountLocal();
+
+    expect(wrapper.find('[data-test="remote-pending"]').exists()).toBe(false);
+  });
+
+  it('reads "Custom endpoint" with nothing configured', async () => {
+    const wrapper = await mountLocal();
+    expect(getCustomEndpoint).toHaveBeenCalled();
+    expect(rowNamed(wrapper, 'Custom endpoint')).toBeTruthy();
+  });
+
+  it('shows the configured model id once an endpoint is loaded', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
+    const wrapper = await mountLocal();
+    expect(rowNamed(wrapper, 'Qwen2.5-72B')).toBeTruthy();
+  });
+
+  // Not `rowNamed`: once configured, the row's name is the model id rather
+  // than the literal "Custom endpoint" (see modelCatalog). Its action buttons
+  // are unique to it in every state, configured or not.
+  function customRow(wrapper: ReturnType<typeof mount>) {
+    const row = wrapper
+      .findAll(ROW)
+      .find(
+        (r) =>
+          r.find('[data-test="custom-connect"]').exists() ||
+          r.find('[data-test="custom-edit"]').exists(),
+      );
+    if (!row) throw new Error('no custom endpoint row');
+    return row;
+  }
+
+  it('opens a three-field form when the row has no endpoint yet', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+
+    const form = wrapper.get('[data-test="custom-form"]');
+    expect(form.find('[data-test="custom-base-url"]').exists()).toBe(true);
+    expect(form.find('[data-test="custom-model-id"]').exists()).toBe(true);
+    expect(form.find('[data-test="custom-key-input"]').exists()).toBe(true);
+  });
+
+  it('marks the API key field optional', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+
+    const key = wrapper.get('[data-test="custom-key-input"]');
+    expect(key.attributes('placeholder')?.toLowerCase()).toContain('optional');
+  });
+
+  it('saves the endpoint with no key when the key field is left blank', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-Instruct');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'Qwen2.5-72B-Instruct');
+    expect(setCustomLlmKey).not.toHaveBeenCalled();
+  });
+
+  it('saves a key alongside the endpoint when one is entered', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-Instruct');
+    await wrapper.get('[data-test="custom-key-input"]').setValue('sk-custom');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomLlmKey).toHaveBeenCalledWith('sk-custom');
+  });
+
+  it('closes the form and refreshes the row after a successful save', async () => {
+    // mountLocal() already triggers the initial load (the default null from
+    // beforeEach); this queues only the reload that follows the save below.
+    const wrapper = await mountLocal();
+    getCustomEndpoint.mockResolvedValueOnce({
+      baseUrl: 'http://10.0.1.20:8000/',
+      modelId: 'Qwen2.5-72B-Instruct',
+    });
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-Instruct');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(false);
+    expect(rowNamed(wrapper, 'Qwen2.5-72B-Instruct')).toBeTruthy();
+  });
+
+  it('shows a validation error from the backend and keeps the form open', async () => {
+    setCustomEndpointFn.mockRejectedValue(new Error('Enter a valid http:// or https:// URL.'));
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('not a url');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('m');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="custom-error"]').text()).toContain('http://');
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(true);
+  });
+
+  it('tests the connection with the current form values, without saving', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('m');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+
+    expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'm', null);
+    expect(setCustomEndpointFn).not.toHaveBeenCalled();
+    expect(wrapper.get('[data-test="custom-test-result"]').text().toLowerCase()).toContain('connected');
+  });
+
+  it('tests with the typed key, and reports a failure distinctly', async () => {
+    testCustomNotesEndpointFn.mockRejectedValue(new Error('the custom endpoint rejected the request — check the API key in Settings.'));
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('m');
+    await wrapper.get('[data-test="custom-key-input"]').setValue('sk-bad');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+
+    expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'm', 'sk-bad');
+    expect(wrapper.get('[data-test="custom-test-result"]').text()).toContain('rejected the request');
+  });
+
+  it('fills a blank model with the one the server resolved, and offers the rest', async () => {
+    testCustomNotesEndpointFn.mockResolvedValue({
+      modelId: 'qwen3.5:9b',
+      availableModels: ['qwen3.5:9b', 'gemma4:26b'],
+    });
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://localhost:11434');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+
+    expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://localhost:11434', '', null);
+    const modelInput = wrapper.get('[data-test="custom-model-id"]').element as HTMLInputElement;
+    expect(modelInput.value).toBe('qwen3.5:9b');
+    expect(wrapper.get('[data-test="custom-test-result"]').text()).toContain('qwen3.5:9b');
+    const options = wrapper.findAll('[data-test="custom-model-options"] option').map((o) => o.attributes('value'));
+    expect(options).toEqual(['qwen3.5:9b', 'gemma4:26b']);
+  });
+
+  it('saves the model the test resolved', async () => {
+    testCustomNotesEndpointFn.mockResolvedValue({ modelId: 'qwen3.5:9b', availableModels: ['qwen3.5:9b'] });
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://localhost:11434');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomEndpointFn).toHaveBeenCalledWith('http://localhost:11434', 'qwen3.5:9b');
+  });
+
+  it('closes the form on Cancel without saving', async () => {
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://10.0.1.20:8000');
+    await wrapper.get('[data-test="custom-cancel"]').trigger('click');
+
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(false);
+    expect(setCustomEndpointFn).not.toHaveBeenCalled();
+  });
+
+  it('pre-fills the base URL and model id on edit, leaving the key field blank', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+
+    expect((wrapper.get('[data-test="custom-base-url"]').element as HTMLInputElement).value).toBe(
+      'http://10.0.1.20:8000/',
+    );
+    expect((wrapper.get('[data-test="custom-model-id"]').element as HTMLInputElement).value).toBe(
+      'Qwen2.5-72B',
+    );
+    expect((wrapper.get('[data-test="custom-key-input"]').element as HTMLInputElement).value).toBe('');
+  });
+
+  it('leaves a stored key untouched when the edit form is saved with the key field blank', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'Qwen2.5-72B' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    await wrapper.get('[data-test="custom-model-id"]').setValue('Qwen2.5-72B-v2');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000/', 'Qwen2.5-72B-v2');
+    expect(setCustomLlmKey).not.toHaveBeenCalled();
+    expect(clearCustomLlmKey).not.toHaveBeenCalled();
+  });
+
+  it('offers "Use no API key" only when editing an endpoint with a key stored', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(false);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.find('[data-test="custom-clear-key"]').exists()).toBe(false);
+  });
+
+  it('clears the stored key when "Use no API key" is clicked and saved', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    await wrapper.get('[data-test="custom-clear-key"]').trigger('click');
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(clearCustomLlmKey).toHaveBeenCalled();
+    expect(setCustomLlmKey).not.toHaveBeenCalled();
+  });
+
+  it('asks before removing the endpoint, clearing both it and its key', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-remove"]').trigger('click');
+    await flushPromises();
+    expect(clearCustomEndpointFn).not.toHaveBeenCalled();
+    const dialog = wrapper.get('[data-test="remove-confirm"]');
+    expect(dialog.text().toLowerCase()).toContain('remove');
+
+    await wrapper.get('[data-test="remove-confirm-ok"]').trigger('click');
+    await flushPromises();
+
+    expect(clearCustomEndpointFn).toHaveBeenCalled();
+    expect(clearCustomLlmKey).toHaveBeenCalled();
+  });
+
+  it('discloses the destination once configured, and warns for a plaintext URL', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'm' });
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    const disclosure = wrapper.get('[data-test="custom-disclosure"]').text();
+    expect(disclosure).toContain('10.0.1.20:8000');
+    expect(wrapper.get('[data-test="custom-plaintext-warning"]').text().toLowerCase()).toContain(
+      'not encrypted',
+    );
+  });
+
+  it('shows no plaintext warning for an https endpoint', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'https://dgx.local:8443/', modelId: 'm' });
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.find('[data-test="custom-plaintext-warning"]').exists()).toBe(false);
+  });
+
+  it('notes that no API key is set when the disclosure is shown without one', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(false);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.get('[data-test="custom-disclosure"]').text()).toContain('with no API key');
+  });
+
+  it('omits the no-API-key note when a key is stored', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://10.0.1.20:8000/', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(true);
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).get('[data-test="custom-edit"]').trigger('click');
+    expect(wrapper.get('[data-test="custom-disclosure"]').text()).not.toContain('with no API key');
+  });
+
+  it('becomes selectable once configured with no key, since a key is optional', async () => {
+    getCustomEndpoint.mockResolvedValue({ baseUrl: 'http://h', modelId: 'm' });
+    hasCustomLlmKey.mockResolvedValue(false);
+    modelStatus.mockResolvedValue({ state: 'ready', llmReady: true });
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).toHaveBeenCalledWith({ kind: 'custom' });
+  });
+
+  it('is not selectable while the endpoint is unconfigured', async () => {
+    const wrapper = await mountLocal();
+
+    await customRow(wrapper).trigger('click');
+    await flushPromises();
+
+    expect(setNotesModelSetting).not.toHaveBeenCalled();
+    expect(wrapper.find('[data-test="custom-form"]').exists()).toBe(true);
   });
 });
 
