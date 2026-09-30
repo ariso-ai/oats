@@ -650,13 +650,22 @@ export const customLlmKey = {
   },
 };
 
+/** What Test connection found, mirrors the Rust `EndpointTest`. */
+export interface EndpointTest {
+  /** The model tested with: the typed one, or the server's first listed. */
+  modelId: string;
+  /** Every model the server lists via `GET /v1/models`; empty if it doesn't. */
+  availableModels: string[];
+}
+
 /** Confirm a not-yet-saved custom endpoint actually works, without persisting
- *  anything. `key` is `null` to test with no `Authorization` header at all. */
+ *  anything. A blank `modelId` resolves to the first model the server lists.
+ *  `key` is `null` to test with no `Authorization` header at all. */
 export function testCustomNotesEndpoint(
   baseUrl: string,
   modelId: string,
   key: string | null,
-): Promise<void> {
+): Promise<EndpointTest> {
   return invoke('test_custom_notes_endpoint', { baseUrl, modelId, key });
 }
 

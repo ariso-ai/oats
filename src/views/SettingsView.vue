@@ -457,11 +457,15 @@
               class="key-input"
               data-test="custom-model-id"
               type="text"
+              list="custom-model-options"
               autocomplete="off"
               spellcheck="false"
-              placeholder="Model identifier"
+              placeholder="Model (leave blank to detect it with Test connection)"
               aria-label="Custom endpoint model identifier"
             />
+            <datalist id="custom-model-options" data-test="custom-model-options">
+              <option v-for="model in customAvailableModels" :key="model" :value="model" />
+            </datalist>
           </div>
           <div class="key-prompt__row">
             <input
@@ -1402,6 +1406,8 @@ const customSaving = ref(false);
 const customError = ref('');
 const customTesting = ref(false);
 const customTestResult = ref('');
+// Models the server listed on the last Test connection, offered as choices.
+const customAvailableModels = ref<string[]>([]);
 const customClearKeyRequested = ref(false);
 
 function openCustomForm() {
@@ -1412,6 +1418,7 @@ function openCustomForm() {
   customClearKeyRequested.value = false;
   customError.value = '';
   customTestResult.value = '';
+  customAvailableModels.value = [];
 }
 
 function requestClearCustomKey() {
@@ -1427,6 +1434,7 @@ function closeCustomForm() {
   customClearKeyRequested.value = false;
   customError.value = '';
   customTestResult.value = '';
+  customAvailableModels.value = [];
 }
 
 async function onTestCustomConnection() {
@@ -1434,12 +1442,20 @@ async function onTestCustomConnection() {
   customTesting.value = true;
   customTestResult.value = '';
   try {
-    await testCustomNotesEndpoint(
+    const result = await testCustomNotesEndpoint(
       customBaseUrlInput.value,
       customModelIdInput.value,
       customKeyInput.value || null,
     );
-    customTestResult.value = 'Connected.';
+    // A blank model resolves to one the server lists; fill it in so Save
+    // persists exactly what was tested.
+    customModelIdInput.value = result.modelId;
+    customAvailableModels.value = result.availableModels;
+    const others = result.availableModels.length - 1;
+    customTestResult.value =
+      others > 0
+        ? `Connected — using ${result.modelId}. ${others} other model${others === 1 ? '' : 's'} available in the model field.`
+        : `Connected — using ${result.modelId}.`;
   } catch (e) {
     customTestResult.value = e instanceof Error ? e.message : String(e);
   } finally {

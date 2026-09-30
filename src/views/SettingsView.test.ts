@@ -66,7 +66,10 @@ const clearCustomEndpointFn = vi.fn(() => Promise.resolve());
 const hasCustomLlmKey = vi.fn((): Promise<boolean> => Promise.resolve(false));
 const setCustomLlmKey = vi.fn((_k: unknown) => Promise.resolve());
 const clearCustomLlmKey = vi.fn(() => Promise.resolve());
-const testCustomNotesEndpointFn = vi.fn((_b: unknown, _m: unknown, _k: unknown) => Promise.resolve());
+const testCustomNotesEndpointFn = vi.fn(
+  (_b: unknown, m: unknown, _k: unknown): Promise<{ modelId: string; availableModels: string[] }> =>
+    Promise.resolve({ modelId: String(m), availableModels: [] }),
+);
 
 // Capture event listeners by name so tests can fire them.
 const listeners = new Map<string, (e: { payload: unknown }) => void>();
@@ -237,7 +240,9 @@ beforeEach(() => {
   hasCustomLlmKey.mockResolvedValue(false);
   setCustomLlmKey.mockResolvedValue(undefined);
   clearCustomLlmKey.mockResolvedValue(undefined);
-  testCustomNotesEndpointFn.mockResolvedValue(undefined);
+  testCustomNotesEndpointFn.mockImplementation((_b, m) =>
+    Promise.resolve({ modelId: String(m), availableModels: [] }),
+  );
   // Sign-in stores a session and sign-out clears it, as the backend does, so
   // the account refresh that follows each one reads the new state.
   googleSignIn.mockImplementation(storeSession);
@@ -1796,6 +1801,38 @@ describe('SettingsView custom endpoint row', () => {
 
     expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://10.0.1.20:8000', 'm', 'sk-bad');
     expect(wrapper.get('[data-test="custom-test-result"]').text()).toContain('rejected the request');
+  });
+
+  it('fills a blank model with the one the server resolved, and offers the rest', async () => {
+    testCustomNotesEndpointFn.mockResolvedValue({
+      modelId: 'qwen3.5:9b',
+      availableModels: ['qwen3.5:9b', 'gemma4:26b'],
+    });
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://localhost:11434');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+
+    expect(testCustomNotesEndpointFn).toHaveBeenCalledWith('http://localhost:11434', '', null);
+    const modelInput = wrapper.get('[data-test="custom-model-id"]').element as HTMLInputElement;
+    expect(modelInput.value).toBe('qwen3.5:9b');
+    expect(wrapper.get('[data-test="custom-test-result"]').text()).toContain('qwen3.5:9b');
+    const options = wrapper.findAll('[data-test="custom-model-options"] option').map((o) => o.attributes('value'));
+    expect(options).toEqual(['qwen3.5:9b', 'gemma4:26b']);
+  });
+
+  it('saves the model the test resolved', async () => {
+    testCustomNotesEndpointFn.mockResolvedValue({ modelId: 'qwen3.5:9b', availableModels: ['qwen3.5:9b'] });
+    const wrapper = await mountLocal();
+    await customRow(wrapper).get('[data-test="custom-connect"]').trigger('click');
+    await wrapper.get('[data-test="custom-base-url"]').setValue('http://localhost:11434');
+    await wrapper.get('[data-test="custom-test-connection"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-test="custom-save"]').trigger('click');
+    await flushPromises();
+
+    expect(setCustomEndpointFn).toHaveBeenCalledWith('http://localhost:11434', 'qwen3.5:9b');
   });
 
   it('closes the form on Cancel without saving', async () => {

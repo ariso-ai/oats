@@ -286,21 +286,88 @@ pub async fn run_custom_notes(
 /// notes system prompt, so a test run never depends on transcript content.
 const TEST_PROMPT: &str = "Reply with the single word: ok.";
 
+/// What "Test connection" found: the model it tested with (the typed one, or
+/// the server's first listed model when none was typed) and every model the
+/// server listed, for Settings to offer as choices.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointTest {
+    pub model_id: String,
+    pub available_models: Vec<String>,
+}
+
+/// Listing is a quick metadata call, unlike a chat completion that may wait
+/// on a model loading into memory.
+const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bounds a hostile or runaway listing.
+const MAX_LISTED_MODELS: usize = 500;
+
+/// The model ids a server offers via the OpenAI-compatible `GET /v1/models`,
+/// which Ollama, llama.cpp's `llama-server`, `mlx_lm.server` and vLLM all
+/// implement — so no server needs its own code path. `Ok(vec![])` means the
+/// server answered but doesn't list models; an unreachable server or a
+/// rejected key is an `Err`, since the chat call would fail the same way.
+async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
+    let client = client()?;
+    let url = format!("{}v1/models", ensure_trailing_slash(base_url));
+    let mut request = client.get(url);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let name = "the custom endpoint";
+    let response = tokio::time::timeout(LIST_MODELS_TIMEOUT, request.send())
+        .await
+        .map_err(|_| format!("{name} did not answer within {}s", LIST_MODELS_TIMEOUT.as_secs()))?
+        .map_err(|e| format!("could not reach {name} ({})", transport_reason(&e)))?;
+    match response.status().as_u16() {
+        401 | 403 => {
+            return Err(format!("{name} rejected the request — check the API key in Settings."));
+        }
+        _ if !response.status().is_success() => return Ok(Vec::new()),
+        _ => {}
+    }
+    let body: Value = match tokio::time::timeout(LIST_MODELS_TIMEOUT, response.json()).await {
+        Ok(Ok(body)) => body,
+        _ => return Ok(Vec::new()),
+    };
+    Ok(body["data"]
+        .as_array()
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m["id"].as_str())
+                .filter_map(|id| crate::notes_model::validate_model_id(id).ok())
+                .take(MAX_LISTED_MODELS)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Confirm a not-yet-saved custom endpoint actually works, without persisting
-/// anything — Save is a separate, explicit step. Reuses the exact request
-/// path `run_custom_notes` uses, so a passing test genuinely predicts a
-/// passing real call.
+/// anything — Save is a separate, explicit step. Asks the server which models
+/// it has first, so a blank model id resolves to one it actually serves, then
+/// reuses the exact request path `run_custom_notes` uses, so a passing test
+/// genuinely predicts a passing real call.
 #[tauri::command]
 pub async fn test_custom_notes_endpoint(
     base_url: String,
     model_id: String,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<EndpointTest, String> {
     // Same normalization Save applies, so a test and a save of the same
     // typed values reach the same server with the same request.
     let base_url = crate::notes_model::validate_base_url(&base_url)?;
-    let model_id = crate::notes_model::validate_model_id(&model_id)?;
     let key = normalize_optional_key(key)?;
+    let available_models = list_models(&base_url, key.as_deref()).await?;
+    let model_id = if model_id.trim().is_empty() {
+        available_models.first().cloned().ok_or_else(|| {
+            "Enter a model identifier — this server didn't list any models.".to_string()
+        })?
+    } else {
+        crate::notes_model::validate_model_id(&model_id)?
+    };
+
     chat_completion(
         &base_url,
         &model_id,
@@ -309,7 +376,17 @@ pub async fn test_custom_notes_endpoint(
         TEST_PROMPT,
     )
     .await
-    .map(|_| ())
+    .map_err(|e| {
+        if available_models.is_empty() || available_models.contains(&model_id) {
+            e
+        } else {
+            format!("{e} (available models: {})", available_models.join(", "))
+        }
+    })?;
+    Ok(EndpointTest {
+        model_id,
+        available_models,
+    })
 }
 
 /// A blank key means "no key" (the field is optional); anything else gets
@@ -420,67 +497,88 @@ pub(crate) mod testing {
         status: u16,
         response_body: &str,
     ) -> (String, tokio::task::JoinHandle<SeenRequest>) {
+        let (base, handle) = stub_sequence(&[(status, response_body)]).await;
+        (base, tokio::spawn(async move { handle.await.unwrap().remove(0) }))
+    }
+
+    /// Like `stub_provider`, but answers one request per `(status, body)`
+    /// pair, in order — for flows that list models before chatting.
+    pub(crate) async fn stub_sequence(
+        responses: &[(u16, &str)],
+    ) -> (String, tokio::task::JoinHandle<Vec<SeenRequest>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let canned = response_body.to_string();
+        let responses: Vec<(u16, String)> =
+            responses.iter().map(|(s, b)| (*s, b.to_string())).collect();
         let handle = tokio::spawn(async move {
-            // Bounded: a test whose code never sends a request should fail, not hang.
-            let (mut socket, _) =
-                tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
-                    .await
-                    .expect("no request reached the provider stub")
-                    .unwrap();
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            let (head_end, len) = loop {
-                let n = socket.read(&mut buf).await.unwrap();
-                raw.extend_from_slice(&buf[..n]);
-                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&raw[..pos]).to_string();
-                    let len = head
-                        .lines()
-                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
-                        .and_then(|l| l.split(':').nth(1)?.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    break (pos + 4, len);
-                }
-                assert!(n > 0, "client closed before sending a request");
-            };
-            while raw.len() < head_end + len {
-                let n = socket.read(&mut buf).await.unwrap();
-                assert!(n > 0, "client closed mid-body");
-                raw.extend_from_slice(&buf[..n]);
+            let mut seen = Vec::new();
+            for (status, canned) in responses {
+                seen.push(serve_one(&listener, status, &canned).await);
             }
-            let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
-            let mut lines = head.lines();
-            let target = lines
-                .next()
-                .and_then(|l| l.split_whitespace().nth(1))
-                .unwrap_or_default()
-                .to_string();
-            let headers = lines
-                .filter_map(|l| {
-                    let (k, v) = l.split_once(':')?;
-                    Some((k.trim().to_string(), v.trim().to_string()))
-                })
-                .collect();
-            let body: serde_json::Value =
-                serde_json::from_slice(&raw[head_end..head_end + len]).unwrap();
-
-            let resp = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n{canned}",
-                len = canned.len(),
-                canned = canned
-            );
-            socket.write_all(resp.as_bytes()).await.unwrap();
-            socket.flush().await.unwrap();
-            SeenRequest {
-                target,
-                headers,
-                body,
-            }
+            seen
         });
         (base, handle)
+    }
+
+    async fn serve_one(listener: &TcpListener, status: u16, canned: &str) -> SeenRequest {
+        let (mut socket, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+                .await
+                .expect("no request reached the provider stub")
+                .unwrap();
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        let (head_end, len) = loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..pos]).to_string();
+                let len = head
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split(':').nth(1)?.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                break (pos + 4, len);
+            }
+            assert!(n > 0, "client closed before sending a request");
+        };
+        while raw.len() < head_end + len {
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0, "client closed mid-body");
+            raw.extend_from_slice(&buf[..n]);
+        }
+        let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+        let mut lines = head.lines();
+        let target = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
+        let headers = lines
+            .filter_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                Some((k.trim().to_string(), v.trim().to_string()))
+            })
+            .collect();
+        // A GET (e.g. `/v1/models`) has no body.
+        let body: serde_json::Value = if len == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&raw[head_end..head_end + len]).unwrap()
+        };
+
+        let resp = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n{canned}",
+            len = canned.len(),
+            canned = canned
+        );
+        socket.write_all(resp.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        SeenRequest {
+            target,
+            headers,
+            body,
+        }
     }
 }
 
@@ -488,6 +586,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{
         SeenRequest, clear_base_url, install_crypto_provider, set_base_url, stub_provider,
+        stub_sequence,
     };
     use super::*;
     use std::sync::OnceLock;
@@ -760,33 +859,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connection_succeeds_against_a_200_stub() {
-        install_crypto_provider();
-        let (base, server) = stub_provider(
-            200,
-            r###"{"choices":[{"message":{"content":"ok"}}]}"###,
-        )
-        .await;
-
-        let result = test_custom_notes_endpoint(base, "m".to_string(), None).await;
-        let _ = server.await.unwrap();
-
-        assert!(result.is_ok(), "{result:?}");
-    }
-
-    #[tokio::test]
-    async fn test_connection_reports_a_rejected_key() {
-        install_crypto_provider();
-        let (base, server) = stub_provider(401, r###"{"error":"no"}"###).await;
-
-        let result = test_custom_notes_endpoint(base, "m".to_string(), Some("sk-bad".to_string())).await;
-        let _ = server.await.unwrap();
-
-        let err = result.unwrap_err();
-        assert!(err.to_lowercase().contains("rejected"), "{err}");
-    }
-
-    #[tokio::test]
     async fn a_custom_endpoints_error_message_is_surfaced() {
         install_crypto_provider();
         // Ollama's actual answer to a model id with a space in it.
@@ -837,14 +909,87 @@ mod tests {
         assert!(!err.contains("Alice"), "error quoted the body: {err}");
     }
 
+    const MODELS: &str = r###"{"object":"list","data":[{"id":"qwen3.5:9b","object":"model"},{"id":"gemma4:26b","object":"model"}]}"###;
+    const CHAT_OK: &str = r###"{"choices":[{"message":{"content":"ok"}}]}"###;
+
+    #[tokio::test]
+    async fn test_connection_with_a_blank_model_uses_the_first_model_the_server_lists() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[(200, MODELS), (200, CHAT_OK)]).await;
+
+        let result = test_custom_notes_endpoint(base, "  ".to_string(), None).await;
+        let seen = server.await.unwrap();
+
+        let result = result.unwrap();
+        assert_eq!(result.model_id, "qwen3.5:9b");
+        assert_eq!(result.available_models, vec!["qwen3.5:9b", "gemma4:26b"]);
+        assert_eq!(seen[0].target, "/v1/models");
+        assert_eq!(seen[1].target, "/v1/chat/completions");
+        assert_eq!(seen[1].body["model"], "qwen3.5:9b");
+    }
+
+    #[tokio::test]
+    async fn test_connection_keeps_a_typed_model_and_still_reports_the_list() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[(200, MODELS), (200, CHAT_OK)]).await;
+
+        let result = test_custom_notes_endpoint(base, "gemma4:26b".to_string(), None).await;
+        let seen = server.await.unwrap();
+
+        let result = result.unwrap();
+        assert_eq!(result.model_id, "gemma4:26b");
+        assert_eq!(result.available_models.len(), 2);
+        assert_eq!(seen[1].body["model"], "gemma4:26b");
+    }
+
+    #[tokio::test]
+    async fn test_connection_names_the_available_models_when_a_typed_one_fails() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[
+            (200, MODELS),
+            (400, r###"{"error":{"message":"invalid model name"}}"###),
+        ])
+        .await;
+
+        let result = test_custom_notes_endpoint(base, "qwen 3.5".to_string(), None).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("invalid model name"), "{err}");
+        assert!(err.contains("qwen3.5:9b, gemma4:26b"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_falls_back_to_a_typed_model_when_the_server_cannot_list() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[(404, "404 page not found"), (200, CHAT_OK)]).await;
+
+        let result = test_custom_notes_endpoint(base, "m".to_string(), None).await;
+        let seen = server.await.unwrap();
+
+        let result = result.unwrap();
+        assert_eq!(result.model_id, "m");
+        assert!(result.available_models.is_empty());
+        assert_eq!(seen[1].body["model"], "m");
+    }
+
+    #[tokio::test]
+    async fn test_connection_asks_for_a_model_when_it_is_blank_and_none_are_listed() {
+        install_crypto_provider();
+        // Only the listing is served: no chat request may follow.
+        let (base, server) = stub_sequence(&[(404, "404 page not found")]).await;
+
+        let result = test_custom_notes_endpoint(base, "".to_string(), None).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("Enter a model identifier"), "{err}");
+    }
+
     #[tokio::test]
     async fn test_connection_normalizes_its_inputs_the_way_save_does() {
         install_crypto_provider();
-        let (base, server) = stub_provider(
-            200,
-            r###"{"choices":[{"message":{"content":"ok"}}]}"###,
-        )
-        .await;
+        let (base, server) = stub_sequence(&[(200, MODELS), (200, CHAT_OK)]).await;
 
         // Whitespace and a pasted `/v1` path, as a user might type them.
         let result = test_custom_notes_endpoint(
@@ -856,34 +1001,36 @@ mod tests {
         let seen = server.await.unwrap();
 
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(seen.target, "/v1/chat/completions");
-        assert_eq!(seen.body["model"], "qwen3.5:9b");
-        assert_eq!(seen.header("authorization"), Some("Bearer sk-custom"));
-    }
-
-    #[tokio::test]
-    async fn test_connection_rejects_a_blank_model_id_before_sending_anything() {
-        // No stub: validation must fail before any request is made.
-        let result =
-            test_custom_notes_endpoint("http://127.0.0.1:1".to_string(), "   ".to_string(), None).await;
-
-        assert_eq!(result.unwrap_err(), "Enter a model identifier.");
+        assert_eq!(seen[0].target, "/v1/models");
+        assert_eq!(seen[0].header("authorization"), Some("Bearer sk-custom"));
+        assert_eq!(seen[1].target, "/v1/chat/completions");
+        assert_eq!(seen[1].body["model"], "qwen3.5:9b");
+        assert_eq!(seen[1].header("authorization"), Some("Bearer sk-custom"));
     }
 
     #[tokio::test]
     async fn test_connection_treats_a_blank_key_as_no_key() {
         install_crypto_provider();
-        let (base, server) = stub_provider(
-            200,
-            r###"{"choices":[{"message":{"content":"ok"}}]}"###,
-        )
-        .await;
+        let (base, server) = stub_sequence(&[(200, MODELS), (200, CHAT_OK)]).await;
 
         let result = test_custom_notes_endpoint(base, "m".to_string(), Some("  ".to_string())).await;
         let seen = server.await.unwrap();
 
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(seen.header("authorization"), None);
+        assert_eq!(seen[0].header("authorization"), None);
+        assert_eq!(seen[1].header("authorization"), None);
+    }
+
+    #[tokio::test]
+    async fn test_connection_reports_a_rejected_key() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[(401, r###"{"error":"no"}"###)]).await;
+
+        let result = test_custom_notes_endpoint(base, "m".to_string(), Some("sk-bad".to_string())).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.to_lowercase().contains("rejected"), "{err}");
     }
 
     #[tokio::test]
