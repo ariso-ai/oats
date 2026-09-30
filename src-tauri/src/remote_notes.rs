@@ -164,25 +164,49 @@ async fn chat_completion(
 ) -> Result<NotesOutput, String> {
     let client = client()?;
     let url = format!("{}v1/chat/completions", ensure_trailing_slash(base_url));
-    let mut request = client.post(url).json(&json!({
-        "model": model_id,
-        "messages": [
-            { "role": "system", "content": system_prompt },
-            { "role": "user", "content": transcript },
-        ],
-        "response_format": { "type": "json_object" },
-    }));
-    // No header at all when there is no key — never an empty bearer token,
-    // which some servers would reject differently than "no auth attempted".
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
+    let body = |disable_thinking: bool| {
+        let mut body = json!({
+            "model": model_id,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": transcript },
+            ],
+            "response_format": { "type": "json_object" },
+        });
+        if disable_thinking {
+            // Thinking models (qwen3.5 on Ollama: 286s vs 9s for a 24s
+            // meeting) reason for minutes, blow REMOTE_NOTES_TIMEOUT on a real
+            // meeting, and with JSON mode on answer detached from their own
+            // reasoning. Ollama reads `reasoning_effort`; llama.cpp, mlx_lm
+            // and vLLM read the chat-template switch. Non-thinking models
+            // ignore both.
+            body["reasoning_effort"] = json!("none");
+            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+        }
+        body
+    };
+    let send = |body: Value| {
+        // No header at all when there is no key — never an empty bearer token,
+        // which some servers would reject differently than "no auth attempted".
+        let mut request = client.post(url.as_str()).json(&body);
+        if let Some(key) = api_key {
+            request = request.bearer_auth(key);
+        }
+        request.send()
+    };
 
     let name = "the custom endpoint";
-    let response = tokio::time::timeout(REMOTE_NOTES_TIMEOUT, request.send())
-        .await
-        .map_err(|_| format!("{name} did not answer within {}s", REMOTE_NOTES_TIMEOUT.as_secs()))?
-        .map_err(|e| format!("could not reach {name} ({})", transport_reason(&e)))?;
+    let answer = |sent: Result<Result<reqwest::Response, reqwest::Error>, _>| {
+        sent.map_err(|_| format!("{name} did not answer within {}s", REMOTE_NOTES_TIMEOUT.as_secs()))?
+            .map_err(|e| format!("could not reach {name} ({})", transport_reason(&e)))
+    };
+    let mut response = answer(tokio::time::timeout(REMOTE_NOTES_TIMEOUT, send(body(true))).await)?;
+    if response.status() == reqwest::StatusCode::BAD_REQUEST {
+        // A strict server may reject the unfamiliar thinking switches; one
+        // retry without them makes it no worse off than before they existed.
+        // A 400 with another cause fails again and reports its own message.
+        response = answer(tokio::time::timeout(REMOTE_NOTES_TIMEOUT, send(body(false))).await)?;
+    }
 
     let status = response.status();
     if !status.is_success() {
@@ -862,11 +886,10 @@ mod tests {
     async fn a_custom_endpoints_error_message_is_surfaced() {
         install_crypto_provider();
         // Ollama's actual answer to a model id with a space in it.
-        let (base, server) = stub_provider(
-            400,
-            r###"{"error":{"message":"invalid model name","type":"invalid_request_error","param":null,"code":null}}"###,
-        )
-        .await;
+        let body =
+            r###"{"error":{"message":"invalid model name","type":"invalid_request_error","param":null,"code":null}}"###;
+        // Twice: a 400 is retried once without the thinking switches.
+        let (base, server) = stub_sequence(&[(400, body), (400, body)]).await;
 
         let result = run_custom_notes("Alice: ship it.", &base, "qwen 3.5", None).await;
         let _ = server.await.unwrap();
@@ -883,7 +906,7 @@ mod tests {
             "error": { "message": format!("bad key sk-custom\n{}", "x".repeat(2000)) }
         })
         .to_string();
-        let (base, server) = stub_provider(400, &body).await;
+        let (base, server) = stub_sequence(&[(400, &body), (400, &body)]).await;
 
         let result = run_custom_notes("Alice: ship it.", &base, "m", Some("sk-custom")).await;
         let _ = server.await.unwrap();
@@ -907,6 +930,72 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("HTTP 500"), "{err}");
         assert!(!err.contains("Alice"), "error quoted the body: {err}");
+    }
+
+    const NOTES_OK: &str =
+        r###"{"choices":[{"message":{"content":"{\"title\":\"T\",\"notes\":\"## Summary\"}"}}]}"###;
+
+    #[tokio::test]
+    async fn a_custom_endpoint_request_turns_thinking_off() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[(200, NOTES_OK)]).await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "qwen3.5:9b", None).await;
+        let seen = server.await.unwrap();
+
+        assert!(result.is_ok(), "{result:?}");
+        // Ollama's switch, and the chat-template one llama.cpp, mlx_lm and vLLM read.
+        assert_eq!(seen[0].body["reasoning_effort"], "none");
+        assert_eq!(seen[0].body["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[tokio::test]
+    async fn a_server_rejecting_the_thinking_switches_is_retried_without_them() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[
+            (400, r###"{"error":{"message":"unknown field reasoning_effort"}}"###),
+            (200, NOTES_OK),
+        ])
+        .await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "m", None).await;
+        let seen = server.await.unwrap();
+
+        assert_eq!(result.unwrap().notes, "## Summary");
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].body.get("reasoning_effort").is_none(), "{}", seen[1].body);
+        assert!(seen[1].body.get("chat_template_kwargs").is_none(), "{}", seen[1].body);
+        assert_eq!(seen[1].body["messages"], seen[0].body["messages"]);
+    }
+
+    #[tokio::test]
+    async fn a_400_that_persists_without_the_switches_reports_the_retrys_error() {
+        install_crypto_provider();
+        let (base, server) = stub_sequence(&[
+            (400, r###"{"error":{"message":"first"}}"###),
+            (400, r###"{"error":{"message":"invalid model name"}}"###),
+        ])
+        .await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "qwen 3.5", None).await;
+        let seen = server.await.unwrap();
+
+        assert_eq!(seen.len(), 2);
+        let err = result.unwrap_err();
+        assert!(err.contains("HTTP 400: invalid model name"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn only_a_400_is_retried() {
+        install_crypto_provider();
+        // One response only: a retry would find nothing listening.
+        let (base, server) = stub_sequence(&[(500, r###"{"error":{"message":"boom"}}"###)]).await;
+
+        let result = run_custom_notes("Alice: ship it.", &base, "m", None).await;
+        let _ = server.await.unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("HTTP 500: boom"), "{err}");
     }
 
     const MODELS: &str = r###"{"object":"list","data":[{"id":"qwen3.5:9b","object":"model"},{"id":"gemma4:26b","object":"model"}]}"###;
@@ -947,6 +1036,7 @@ mod tests {
         install_crypto_provider();
         let (base, server) = stub_sequence(&[
             (200, MODELS),
+            (400, r###"{"error":{"message":"invalid model name"}}"###),
             (400, r###"{"error":{"message":"invalid model name"}}"###),
         ])
         .await;
