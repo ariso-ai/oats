@@ -17,13 +17,13 @@
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
     "@heroicons/vue": "^2.2.0",
-    "@sentry/browser": "^10.74.0",
+    "@sentry/browser": "^10.75.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-notification": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.5",
-    "@tauri-apps/plugin-store": "^2.4.4",
-    "@tauri-apps/plugin-updater": "^2.11.0",
+    "@tauri-apps/plugin-store": "^2.4.5",
+    "@tauri-apps/plugin-updater": "^2.12.0",
     "@tiptap/extension-placeholder": "^3.31.3",
     "@tiptap/extension-task-item": "^3.31.3",
     "@tiptap/extension-task-list": "^3.31.3",
@@ -31,20 +31,20 @@
     "@tiptap/markdown": "^3.31.3",
     "@tiptap/starter-kit": "^3.31.3",
     "@tiptap/vue-3": "^3.31.3",
-    "vue": "^3.5.42",
+    "vue": "^3.5.43",
     "vue-router": "^5.3.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/cli": "^2.11.4",
-    "@vitejs/plugin-vue": "^6.0.8",
-    "@vue/test-utils": "^2.5.0",
-    "jsdom": "^30.0.1",
+    "@tauri-apps/cli": "^2.11.5",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "@vue/test-utils": "^2.5.1",
+    "jsdom": "^30.1.0",
     "tailwindcss": "^4.1.8",
     "tauri-plugin-mcp": "^0.3.1",
     "tauri-plugin-mcp-server": "^0.3.1",
     "vite": "^8.3.0",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.1"
   },
   "optionalDependencies": {
     "appdmg": "^0.6.6"
