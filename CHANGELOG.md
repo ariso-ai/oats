@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/ariso-ai/oats/compare/v0.26.0...v0.26.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **library:** hide pending-uploads box on the local backend ([ec31413](https://github.com/ariso-ai/oats/commit/ec314133708ea02c9efc9f71db32fa5798294285))
+* **library:** hide pending-uploads box on the local backend ([388325c](https://github.com/ariso-ai/oats/commit/388325cce4c0714521cf005d9b50950400fc1544))
+
 ## [0.26.0](https://github.com/ariso-ai/oats/compare/v0.25.0...v0.26.0) (2026-09-30)
 
 
