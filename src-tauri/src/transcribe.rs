@@ -1441,6 +1441,22 @@ mod tests {
         }
     }
 
+    /// Block until a detached retry task has moved the recording's meta into
+    /// the state `done` accepts. The retry spawns a real stub process (a
+    /// `.cmd` on Windows, which is slow to start), so a fixed sleep races it;
+    /// poll instead, and fail loudly rather than hang the suite.
+    async fn wait_for_meta(dir: &Path, done: impl Fn(&storage::RecordingMeta) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !storage::read_meta(dir).is_ok_and(|m| done(&m)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the detached retry never settled {}",
+                dir.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Let a gated stub finish, releasing whoever is parked in `run_transcribe`.
     fn release_stt(stub_dir: &Path) {
         std::fs::write(stub_dir.join("stt-release"), b"").unwrap();
@@ -2390,8 +2406,8 @@ mod tests {
         // Models are now ready: seed the marker, then run the scan.
         crate::model_manager::mark_stt_ready_for_test(root);
         retry_recordings_pending_stt(root).await;
-        // The scan spawns detached tasks; give them a tick to run.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The scan spawns detached tasks; wait for them to settle.
+        wait_for_meta(&pending_dir, |m| m.status == RecordingStatus::Done).await;
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         let resumed = read_meta(&pending_dir).unwrap();
@@ -2455,7 +2471,7 @@ mod tests {
         // instead (the pre-fix bug) would find no recordings at all, since
         // nothing was ever written under the models root.
         retry_recordings_pending_stt(&meta_root).await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        wait_for_meta(&pending_dir, |m| m.status == RecordingStatus::Done).await;
         unsafe { std::env::remove_var("ARISO_STT_BIN") };
 
         let resumed = read_meta(&pending_dir).unwrap();
@@ -2507,7 +2523,7 @@ mod tests {
         // The LLM model is now ready: seed the marker, then run the scan.
         crate::model_manager::mark_llm_ready_for_test(root);
         retry_recordings_pending_llm(root).await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        wait_for_meta(&pending_dir, |m| m.notes_error.is_none()).await;
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         let resumed = read_meta(&pending_dir).unwrap();
