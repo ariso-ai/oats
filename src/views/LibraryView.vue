@@ -236,7 +236,13 @@
         <kbd>{{ searchShortcutLabel }}</kbd>
       </button>
 
-      <PendingUploads ref="pendingUploads" @uploaded="onPendingUploaded" />
+      <!-- Only Ariso buffers to a cloud-upload queue; the local backend never
+           uploads, so the box would just be noise there. -->
+      <PendingUploads
+        v-if="activeBackend?.id === 'ariso'"
+        ref="pendingUploads"
+        @uploaded="onPendingUploaded"
+      />
 
       <!-- Todo: the user's open action items, grouped by day. Selecting a row
            opens the meeting it came from in the detail pane. -->
