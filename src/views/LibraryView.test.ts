@@ -1802,7 +1802,8 @@ describe('LibraryView', () => {
     expect(wrapper.get('.add-btn').attributes('disabled')).toBeUndefined();
   });
 
-  it('renders the PendingUploads section inside the sidebar', async () => {
+  it('renders the PendingUploads section inside the sidebar on the Ariso backend', async () => {
+    backendId.mockReturnValue('ariso');
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView, {
       global: {
@@ -1815,7 +1816,44 @@ describe('LibraryView', () => {
     expect(wrapper.find('.pending-stub').exists()).toBe(true);
   });
 
+  // Local never uploads anything, so the cloud-upload queue would just be
+  // noise for a local-backend user.
+  it('hides the PendingUploads section on the local backend', async () => {
+    backendId.mockReturnValue('local');
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.pending-stub').exists()).toBe(false);
+  });
+
+  it('hides the PendingUploads section after switching from Ariso to local', async () => {
+    backendId.mockReturnValue('ariso');
+    listMeetings.mockResolvedValue([]);
+    const wrapper = mount(LibraryView, {
+      global: {
+        stubs: {
+          PendingUploads: { name: 'PendingUploads', template: '<div class="pending-stub" />' },
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find('.pending-stub').exists()).toBe(true);
+
+    backendId.mockReturnValue('local');
+    emitEvent('backend://changed', { source: 'other-window' });
+    await flushPromises();
+
+    expect(wrapper.find('.pending-stub').exists()).toBe(false);
+  });
+
   it('notifies the recorder window when a sidebar pending upload succeeds', async () => {
+    backendId.mockReturnValue('ariso');
     listMeetings.mockResolvedValue([]);
     const wrapper = mount(LibraryView, {
       global: {
