@@ -2523,7 +2523,10 @@ mod tests {
         // The LLM model is now ready: seed the marker, then run the scan.
         crate::model_manager::mark_llm_ready_for_test(root);
         retry_recordings_pending_llm(root).await;
-        wait_for_meta(&pending_dir, |m| m.notes_error.is_none()).await;
+        wait_for_meta(&pending_dir, |m| {
+            m.notes_written.is_some() && !m.notes_in_progress
+        })
+        .await;
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         let resumed = read_meta(&pending_dir).unwrap();
