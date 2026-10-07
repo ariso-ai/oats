@@ -192,6 +192,30 @@ describe('uploadAudio presign request', () => {
       expect.objectContaining({ fileSize: 5 })
     );
   });
+
+  it('tags the upload metadata with source "oats", with or without a meeting id', async () => {
+    const { api } = await import('../tauri');
+    (api.putPresigned as ReturnType<typeof vi.fn>).mockResolvedValue(200);
+    for (const meetingId of [undefined, 42]) {
+      apiRequest.mockReset();
+      apiRequest
+        .mockResolvedValueOnce({
+          status: 200,
+          data: { meetingId: 9, presignedUrl: 'https://bucket.s3.amazonaws.com/rec.mp3?sig=x' },
+        })
+        .mockResolvedValueOnce({ status: 202, data: {} });
+
+      await useMeetingApi().uploadAudio(new Blob(['audio'], { type: 'audio/mpeg' }), {
+        meetingId,
+      });
+
+      expect(apiRequest).toHaveBeenCalledWith(
+        'POST',
+        expect.stringMatching(/\/audio\/presign$/),
+        expect.objectContaining({ metadata: expect.objectContaining({ source: 'oats' }) })
+      );
+    }
+  });
 });
 
 describe('uploadAudio stage tagging', () => {
