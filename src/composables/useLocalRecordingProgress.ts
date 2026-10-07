@@ -56,6 +56,8 @@ export interface LocalRecordingProgress {
   stage: ComputedRef<LocalProgressStage>;
   hasTranscript: ComputedRef<boolean>;
   hasNote: ComputedRef<boolean>;
+  /** Transcription failure detail while `stage === 'transcript-failed'`. */
+  error: ComputedRef<string | undefined>;
   retrying: Ref<boolean>;
   /** Start (or restart) polling for the current id. */
   begin: () => void;
@@ -91,6 +93,7 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
   const stage = computed(() => deriveStage(status.value));
   const hasTranscript = computed(() => !!status.value?.hasTranscript);
   const hasNote = computed(() => !!status.value?.hasNote);
+  const error = computed(() => status.value?.error);
 
   function clearTimer(): void {
     if (timer) {
@@ -200,6 +203,7 @@ export function useLocalRecordingProgress(getId: () => string | null): LocalReco
     stage,
     hasTranscript,
     hasNote,
+    error,
     retrying,
     begin,
     reset,

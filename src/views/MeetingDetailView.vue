@@ -380,6 +380,10 @@
               <span class="transcript-content"><span v-if="r.speaker" class="transcript-speaker">{{ r.speaker }}:</span> {{ r.text }}</span>
             </li>
           </ol>
+          <div v-else-if="transcriptFailureDetail" class="content-empty transcript-failure" role="alert">
+            <p>Transcript failed.</p>
+            <p class="transcript-failure-detail">{{ transcriptFailureDetail }}</p>
+          </div>
           <div v-else class="content-empty">No transcript available.</div>
         </div>
 
@@ -863,6 +867,14 @@ function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
   else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
 }
+
+// The tab chip only ever says "Transcript failed" — the detail panel's
+// Transcript tab is where the user actually lands to find out why, so the
+// specific backend error (plumbed from meta.error via local_recording_status)
+// belongs there rather than in the chip.
+const transcriptFailureDetail = computed(() =>
+  progress.stage.value === 'transcript-failed' ? progress.error.value : undefined
+);
 
 // A cloud meeting we were tracking just gained content. Nothing about the list
 // row changes when a transcript lands (same id, timestamp, prepId), so the
@@ -2145,6 +2157,8 @@ const durationLabel = computed<string | null>(() => {
 .notes-title--input::placeholder { color: #9a9a9a; font-weight: 700; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
+.transcript-failure p { margin: 0 0 4px; }
+.transcript-failure-detail { color: #dc2626; font-size: 13px; }
 
 .sec { margin-bottom: 22px; }
 .sec:last-child { margin-bottom: 0; }

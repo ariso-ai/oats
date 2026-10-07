@@ -165,6 +165,15 @@ describe('useLocalRecordingProgress polling', () => {
     expect(recordingStatus.mock.calls.length).toBe(calls);
   });
 
+  it('surfaces the backend error detail at a failed stage', async () => {
+    recordingStatus.mockResolvedValue(view({ status: 'failed', error: 'model download corrupted' }));
+    const p = useLocalRecordingProgress(() => 'rec-1');
+    p.begin();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(p.stage.value).toBe('transcript-failed');
+    expect(p.error.value).toBe('model download corrupted');
+  });
+
   it('keeps polling at pending-models until it resolves', async () => {
     recordingStatus
       .mockResolvedValueOnce(view({ status: 'pending-models' }))
