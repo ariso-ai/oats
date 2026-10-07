@@ -801,7 +801,10 @@ export function useMeetingApi() {
       meetingId?: number;
     }
   ): Promise<{ meetingId: number }> {
+    // `source` identifies these uploads as coming from oats (vs. a generic
+    // file upload) in the meeting's metadata.
     const metadata: Record<string, string> = {
+      source: 'oats',
       endAt: options?.endAt ?? new Date().toISOString(),
     };
     if (options?.startAt) metadata.startAt = options.startAt;
