@@ -246,13 +246,7 @@
 
       <!-- Content -->
       <div class="card-content">
-        <!-- Above the panes rather than in one: a failed cloud meeting has no
-             Transcript tab to hold it, and may still show My Notes. -->
-        <div v-if="cloudFailureReason" class="content-empty transcript-failure" role="alert">
-          <p>Transcription failed.</p>
-          <p class="transcript-failure-detail">{{ cloudFailureReason }}</p>
-        </div>
-        <div v-else-if="!availableTabs.length" class="content-empty">
+        <div v-if="!availableTabs.length" class="content-empty">
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
         </div>
 
@@ -386,9 +380,9 @@
               <span class="transcript-content"><span v-if="r.speaker" class="transcript-speaker">{{ r.speaker }}:</span> {{ r.text }}</span>
             </li>
           </ol>
-          <div v-else-if="transcriptFailureDetail" class="content-empty transcript-failure" role="alert">
+          <div v-else-if="transcriptFailed" class="content-empty transcript-failure" role="alert">
             <p>Transcript failed.</p>
-            <p class="transcript-failure-detail">{{ transcriptFailureDetail }}</p>
+            <p v-if="transcriptFailureDetail" class="transcript-failure-detail">{{ transcriptFailureDetail }}</p>
           </div>
           <div v-else class="content-empty">No transcript available.</div>
         </div>
@@ -890,23 +884,23 @@ function onRetry(): void {
   else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
 }
 
-// The tab chip only ever says "Transcript failed" — the detail panel's
-// Transcript tab is where the user actually lands to find out why, so the
-// specific backend error belongs there rather than in the chip. Local reads it
-// from meta.error via local_recording_status; cloud from the open clip's
-// `result`, which covers one failed clip on an otherwise transcribed meeting.
-const transcriptFailureDetail = computed(() => {
-  if (detail.value?.isLocal) {
-    return progress.stage.value === 'transcript-failed' ? progress.error.value : undefined;
-  }
-  return audioClips.value.find((c) => c.transcript_id === activeClipId.value)?.result ?? undefined;
+// The tab chip only ever says "Transcript failed" — the Transcript tab is where
+// the user lands to find out why, next to the recording's audio, which still
+// plays. Local reads the reason from meta.error via local_recording_status;
+// cloud from the open clip's `result` (one failed clip on an otherwise
+// transcribed meeting), else the latest clip that kept one.
+const openClipFailure = computed(
+  () => audioClips.value.find((c) => c.transcript_id === activeClipId.value)?.result ?? undefined
+);
+const transcriptFailed = computed(() => {
+  if (detail.value?.isLocal) return progress.stage.value === 'transcript-failed';
+  return cloudTranscriptionFailed.value || !!openClipFailure.value;
 });
-
-// Why a failed cloud meeting has no transcript: the latest clip that kept a
-// reason, or a generic line when the failure kept none (e.g. the audio never
-// loaded). Null unless the meeting itself failed.
-const cloudFailureReason = computed(() => {
-  if (!cloudTranscriptionFailed.value) return null;
+const transcriptFailureDetail = computed(() => {
+  if (!transcriptFailed.value) return undefined;
+  if (detail.value?.isLocal) return progress.error.value;
+  if (openClipFailure.value) return openClipFailure.value;
+  // A failure that kept no reason (e.g. the audio never loaded).
   const clip = [...audioClips.value].reverse().find((c) => c.result);
   return clip?.result ?? 'The recording could not be transcribed.';
 });
@@ -921,6 +915,15 @@ watch(cloudProcessing, (isProcessing, was) => {
   // only the still-open one deserves a refetch.
   const item = props.item;
   if (item && detail.value?.id === item.id) void load(item);
+});
+
+// A recording that fails while it's open has the reason surface on its own,
+// unless the user is already on a tab that has content.
+watch(progress.stage, (next) => {
+  if (next !== 'transcript-failed') return;
+  if (availableTabs.value.find((t) => t.key === activeTab.value)?.disabled) {
+    activeTab.value = 'transcript';
+  }
 });
 
 const TERMINAL_STAGES: LocalProgressStage[] = [
@@ -1622,6 +1625,11 @@ function assessmentPresent(d: MeetingDetail): boolean {
 function firstTabFor(d: MeetingDetail, item: MeetingListItem): TabKey {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
+  // A failed transcription opens on its reason. The local poll hasn't run yet
+  // here, so read the list row's status.
+  if (d.isLocal ? item.status === 'failed' : cloudTranscriptionFailed.value) {
+    return 'transcript';
+  }
   if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
   if (d.prepId != null) return 'prep';
   if (assessmentPresent(d)) return 'assessment';
@@ -1640,14 +1648,21 @@ const availableTabs = computed<{ key: TabKey; label: string; disabled?: boolean 
   const out: { key: TabKey; label: string; disabled?: boolean }[] = [];
   if (d.isLocal) {
     out.push({ key: 'note', label: 'AI Notes', disabled: !d.note });
-    out.push({ key: 'transcript', label: 'Transcript', disabled: !d.hasTranscript });
+    // A failed transcript keeps the tab open: it holds the reason and the audio.
+    out.push({
+      key: 'transcript',
+      label: 'Transcript',
+      disabled: !d.hasTranscript && progress.stage.value !== 'transcript-failed',
+    });
     if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
       out.push({ key: 'mynote', label: 'My Notes' });
     }
     return out;
   }
   if (notesPresent(d)) out.push({ key: 'note', label: 'AI Notes' });
-  if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
+  if (d.hasTranscript || cloudTranscriptionFailed.value) {
+    out.push({ key: 'transcript', label: 'Transcript' });
+  }
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
   }
