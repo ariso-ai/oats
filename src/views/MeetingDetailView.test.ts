@@ -1100,7 +1100,9 @@ describe('MeetingDetailView local generation progress', () => {
     const wrapper = await mountLocal(detail({ isLocal: true }));
     await flushPromises();
 
-    expect(wrapper.find('.tab-status-label').text()).toBe('Transcript failed');
+    // On the Transcript tab the pane states the failure; the chip keeps only Retry.
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
+    expect(wrapper.find('.tab-status-label').exists()).toBe(false);
     await wrapper.find('.tab-retry').trigger('click');
     await flushPromises();
     expect(retryTranscription).toHaveBeenCalledWith('7');
@@ -1449,16 +1451,14 @@ describe('MeetingDetailView cloud transcription failure', () => {
     result: 'language_detection cannot be performed on files with no spoken audio.',
   };
 
-  it('opens on the Transcript tab with a failed chip, no Retry, and the reason', async () => {
+  it('opens on the Transcript tab with the reason and no chip beside the audio', async () => {
     const wrapper = await mountWith(
       detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
     );
 
     expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
     expect(wrapper.find('.tab-audio').exists()).toBe(true);
-    expect(wrapper.find('.tab-status-label').text()).toBe('Transcript failed');
-    expect(wrapper.find('.tab-status .spinner').exists()).toBe(false);
-    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+    expect(wrapper.find('.tab-status').exists()).toBe(false);
     const failure = wrapper.find('.transcript-failure');
     expect(failure.attributes('role')).toBe('alert');
     expect(failure.find('.transcript-failure-detail').text()).toBe(failedClip.result);
@@ -1499,6 +1499,11 @@ describe('MeetingDetailView cloud transcription failure', () => {
 
     expect(wrapper.findAll('.seg-btn').map((b) => b.text())).toEqual(['Transcript', 'My Notes']);
     expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
+
+    // Off the Transcript tab, the chip is the only sign of the failure.
+    await wrapper.findAll('.seg-btn')[1].trigger('click');
+    expect(wrapper.find('.tab-status-label').text()).toBe('Transcript failed');
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
     expect(wrapper.find('.transcript-failure-detail').text()).toBe(failedClip.result);
   });
 

@@ -200,7 +200,7 @@
         </div>
         <div v-if="showStatusChip" class="tab-status">
           <span v-if="statusGenerating" class="spinner spinner--sm" />
-          <span class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
+          <span v-if="statusLabel" class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
             {{ statusLabel }}
           </span>
           <button
@@ -830,7 +830,9 @@ const cloudTranscriptionFailed = computed(
 const showStatusChip = computed(
   () =>
     cloudProcessing.value ||
-    cloudTranscriptionFailed.value ||
+    // On the Transcript tab the pane already says it, and cloud has no Retry
+    // to keep the chip for.
+    (cloudTranscriptionFailed.value && activeTab.value !== 'transcript') ||
     (!!detail.value?.isLocal &&
       [
         'transcribing', 'pending-models', 'notes-pending', 'notes-pending-model',
@@ -850,7 +852,9 @@ const statusGenerating = computed(
 const statusLabel = computed(() => {
   // One combined stage server-side: no transcript/notes split like local's.
   if (cloudProcessing.value) return 'Uploaded — processing transcript & notes…';
-  if (cloudTranscriptionFailed.value) return 'Transcript failed';
+  // The Transcript tab's pane states the failure beside the audio player, so
+  // the chip there would only repeat it.
+  if (cloudTranscriptionFailed.value) return activeTab.value === 'transcript' ? '' : 'Transcript failed';
   switch (progress.stage.value) {
     case 'transcribing':
       return 'Generating Transcript';
@@ -861,7 +865,7 @@ const statusLabel = computed(() => {
     case 'notes-pending-model':
       return 'Waiting for the notes model to finish downloading…';
     case 'transcript-failed':
-      return 'Transcript failed';
+      return activeTab.value === 'transcript' ? '' : 'Transcript failed';
     case 'notes-failed':
       return 'AI Notes failed';
     case 'notes-empty-transcript':
