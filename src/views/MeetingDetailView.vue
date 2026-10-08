@@ -246,7 +246,13 @@
 
       <!-- Content -->
       <div class="card-content">
-        <div v-if="!availableTabs.length" class="content-empty">
+        <!-- Above the panes rather than in one: a failed cloud meeting has no
+             Transcript tab to hold it, and may still show My Notes. -->
+        <div v-if="cloudFailureReason" class="content-empty transcript-failure" role="alert">
+          <p>Transcription failed.</p>
+          <p class="transcript-failure-detail">{{ cloudFailureReason }}</p>
+        </div>
+        <div v-else-if="!availableTabs.length" class="content-empty">
           {{ detail.isLocal ? 'No notes or transcript yet for this recording.' : 'No notes available for this meeting yet.' }}
         </div>
 
@@ -374,7 +380,7 @@
 
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
-          <ol v-else-if="displayedChunks" class="transcript">
+          <ol v-else-if="displayedChunks?.length" class="transcript">
             <li v-for="r in transcriptRows" :key="r.key" class="transcript-line">
               <span class="transcript-ts">{{ r.ts }}</span>
               <span class="transcript-content"><span v-if="r.speaker" class="transcript-speaker">{{ r.speaker }}:</span> {{ r.text }}</span>
@@ -472,7 +478,7 @@ import { composeLocalShareText } from './meetingShareText';
 import { transcriptFilename } from './transcriptDownloadName';
 import { parseLocalTranscript } from './localTranscript';
 import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
-import { ariJoinChip } from '../composables/meetingStatus';
+import { ariJoinChip, isTranscriptionFailedMeetingStatus } from '../composables/meetingStatus';
 import {
   useLocalRecordingProgress,
   type LocalProgressStage,
@@ -816,17 +822,29 @@ const cloudProcessing = computed(
   () => !!detail.value && !detail.value.isLocal && processingMeetings.isProcessing(detail.value.id)
 );
 
+// The server marks a meeting 'error' once its transcription failed for good
+// (agents#8473). While this session still tracks the upload, the processing chip
+// keeps the slot; the poll settles on 'error' and the refetch lands here.
+const cloudTranscriptionFailed = computed(
+  () =>
+    !!detail.value &&
+    !detail.value.isLocal &&
+    !cloudProcessing.value &&
+    isTranscriptionFailedMeetingStatus(detail.value.arisoStatus)
+);
+
 const showStatusChip = computed(
   () =>
     cloudProcessing.value ||
+    cloudTranscriptionFailed.value ||
     (!!detail.value?.isLocal &&
       [
         'transcribing', 'pending-models', 'notes-pending', 'notes-pending-model',
         'transcript-failed', 'notes-failed', 'notes-empty-transcript',
       ].includes(progress.stage.value))
 );
-// Cloud has no post-upload failure signal, so its chip is always the spinner
-// variant — there is nothing to offer a Retry for.
+// Cloud's chip is the spinner while processing and the failed label once the
+// server says so — never with a Retry: there is no cloud retry to offer.
 const statusGenerating = computed(
   () =>
     cloudProcessing.value ||
@@ -838,6 +856,7 @@ const statusGenerating = computed(
 const statusLabel = computed(() => {
   // One combined stage server-side: no transcript/notes split like local's.
   if (cloudProcessing.value) return 'Uploaded — processing transcript & notes…';
+  if (cloudTranscriptionFailed.value) return 'Transcript failed';
   switch (progress.stage.value) {
     case 'transcribing':
       return 'Generating Transcript';
@@ -861,7 +880,10 @@ const statusLabel = computed(() => {
 // re-running generation would only reach the same conclusion. Every other
 // non-generating stage has a real retry to offer.
 const showRetry = computed(
-  () => !statusGenerating.value && progress.stage.value !== 'notes-empty-transcript'
+  () =>
+    !!detail.value?.isLocal &&
+    !statusGenerating.value &&
+    progress.stage.value !== 'notes-empty-transcript'
 );
 function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
@@ -870,11 +892,24 @@ function onRetry(): void {
 
 // The tab chip only ever says "Transcript failed" — the detail panel's
 // Transcript tab is where the user actually lands to find out why, so the
-// specific backend error (plumbed from meta.error via local_recording_status)
-// belongs there rather than in the chip.
-const transcriptFailureDetail = computed(() =>
-  progress.stage.value === 'transcript-failed' ? progress.error.value : undefined
-);
+// specific backend error belongs there rather than in the chip. Local reads it
+// from meta.error via local_recording_status; cloud from the open clip's
+// `result`, which covers one failed clip on an otherwise transcribed meeting.
+const transcriptFailureDetail = computed(() => {
+  if (detail.value?.isLocal) {
+    return progress.stage.value === 'transcript-failed' ? progress.error.value : undefined;
+  }
+  return audioClips.value.find((c) => c.transcript_id === activeClipId.value)?.result ?? undefined;
+});
+
+// Why a failed cloud meeting has no transcript: the latest clip that kept a
+// reason, or a generic line when the failure kept none (e.g. the audio never
+// loaded). Null unless the meeting itself failed.
+const cloudFailureReason = computed(() => {
+  if (!cloudTranscriptionFailed.value) return null;
+  const clip = [...audioClips.value].reverse().find((c) => c.result);
+  return clip?.result ?? 'The recording could not be transcribed.';
+});
 
 // A cloud meeting we were tracking just gained content. Nothing about the list
 // row changes when a transcript lands (same id, timestamp, prepId), so the

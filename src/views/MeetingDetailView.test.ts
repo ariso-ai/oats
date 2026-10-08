@@ -1398,6 +1398,109 @@ describe('MeetingDetailView cloud processing chip', () => {
   });
 });
 
+// The server marks a meeting 'error' when its transcription failed for good and
+// keeps the provider's reason on the clip (`audio_clips[].result`).
+describe('MeetingDetailView cloud transcription failure', () => {
+  const failedClip = {
+    transcript_id: 'c1',
+    duration_ms: 1000,
+    created_at: 't1',
+    legacy: false,
+    result: 'language_detection cannot be performed on files with no spoken audio.',
+  };
+
+  it('shows a failed chip with no Retry and the reason in place of the empty state', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
+    );
+
+    expect(wrapper.find('.tab-status-label').text()).toBe('Transcript failed');
+    expect(wrapper.find('.tab-status .spinner').exists()).toBe(false);
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+    const failure = wrapper.find('.transcript-failure');
+    expect(failure.attributes('role')).toBe('alert');
+    expect(failure.find('.transcript-failure-detail').text()).toBe(failedClip.result);
+    expect(wrapper.text()).not.toContain('No notes available for this meeting yet.');
+  });
+
+  it('shows the reason from the latest clip that recorded one', async () => {
+    const wrapper = await mountWith(
+      detail({
+        isLocal: false,
+        arisoStatus: 'error',
+        audioClips: [
+          { ...failedClip, result: 'older reason' },
+          { ...failedClip, transcript_id: 'c2', result: 'newer reason' },
+          { ...failedClip, transcript_id: 'c3', result: null },
+        ],
+      })
+    );
+
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe('newer reason');
+  });
+
+  it('falls back to a generic reason when no clip kept one', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [{ ...failedClip, result: null }] })
+    );
+
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe(
+      'The recording could not be transcribed.'
+    );
+  });
+
+  it('keeps the failure notice visible beside the My Notes tab', async () => {
+    notesCanEdit.mockReturnValue(true);
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
+    );
+
+    expect(wrapper.findAll('.seg-btn').map((b) => b.text())).toEqual(['My Notes']);
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe(failedClip.result);
+  });
+
+  it('shows the processing chip, not the failure, while this session is still tracking it', async () => {
+    trackProcessing('7');
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
+    );
+
+    expect(wrapper.find('.tab-status-label').text()).toBe(
+      'Uploaded — processing transcript & notes…'
+    );
+    // The Transcript pane may still carry the clip's own reason (hidden
+    // behind v-show); the meeting-level notice must not show.
+    expect(wrapper.find('.card-content > .transcript-failure').exists()).toBe(false);
+  });
+
+  it("shows the open clip's reason in the Transcript tab when only that clip failed", async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        isLocal: false,
+        arisoStatus: 'done',
+        hasTranscript: true,
+        audioClips: [
+          { ...failedClip, result: null },
+          { ...failedClip, transcript_id: 'c2', result: 'no spoken audio' },
+        ],
+      })
+    );
+    await flushPromises();
+    // Not a meeting-level failure: no chip, no top notice.
+    expect(wrapper.find('.tab-status').exists()).toBe(false);
+    expect(wrapper.find('.transcript-failure').exists()).toBe(false);
+
+    await wrapper.findAll('.clip-row')[1].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe('no spoken audio');
+    expect(wrapper.text()).not.toContain('No transcript available.');
+  });
+});
+
 describe('MeetingDetailView per-clip delete', () => {
   const hostDetail = (over: Partial<MeetingDetail> = {}): MeetingDetail =>
     detail({

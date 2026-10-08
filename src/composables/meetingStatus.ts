@@ -16,6 +16,13 @@ function statusIs(status: unknown, want: string): boolean {
   return typeof status === 'string' && status.trim().toLowerCase() === want;
 }
 
+/** The meeting's transcription failed for good. The backend sets `'error'`
+ *  (and keeps the provider's reason on the clip, `audio_clips[].result`);
+ *  before agents#8473 it set `'cancelled'`, which read as a called-off event. */
+export function isTranscriptionFailedMeetingStatus(status: unknown): boolean {
+  return statusIs(status, 'error');
+}
+
 /** Ari (the notetaker bot) is in the meeting right now. */
 export function isJoinedMeetingStatus(status: unknown): boolean {
   return statusIs(status, 'joined');

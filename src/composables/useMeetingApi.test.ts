@@ -443,4 +443,11 @@ describe('isMeetingNotesReady', () => {
     expect(isMeetingNotesReady({ hasTranscript: false, summary: null })).toBe(false);
     expect(isMeetingNotesReady({ summary: '' })).toBe(false);
   });
+
+  // Nothing more is coming once transcription failed for good, so the
+  // processing indicator must stop rather than spin forever.
+  it('is settled once transcription failed', () => {
+    expect(isMeetingNotesReady({ status: 'error' })).toBe(true);
+    expect(isMeetingNotesReady({ status: 'processing' })).toBe(false);
+  });
 });
