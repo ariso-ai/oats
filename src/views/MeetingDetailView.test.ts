@@ -1100,10 +1100,52 @@ describe('MeetingDetailView local generation progress', () => {
     const wrapper = await mountLocal(detail({ isLocal: true }));
     await flushPromises();
 
-    expect(wrapper.find('.tab-status-label').text()).toBe('Transcript failed');
+    // On the Transcript tab the pane states the failure; the chip keeps only Retry.
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
+    expect(wrapper.find('.tab-status-label').exists()).toBe(false);
     await wrapper.find('.tab-retry').trigger('click');
     await flushPromises();
     expect(retryTranscription).toHaveBeenCalledWith('7');
+  });
+
+  // The reason and the recording's audio live in the Transcript tab, so a
+  // failed transcript must leave that tab reachable.
+  it('opens a failed recording on an enabled Transcript tab with the reason and audio', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'failed', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+      error: 'speech model failed to load',
+    });
+    getMeetingDetail.mockResolvedValue(detail({ isLocal: true }));
+    const wrapper = mount(MeetingDetailView, {
+      props: { item: { ...localItem, status: 'failed' } },
+    });
+    await flushPromises();
+
+    const tab = wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript')!;
+    expect(tab.attributes('disabled')).toBeUndefined();
+    expect(tab.classes()).toContain('seg-btn--active');
+    expect(wrapper.find('.transcript-failure').attributes('role')).toBe('alert');
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe('speech model failed to load');
+    expect(wrapper.find('.tab-audio').exists()).toBe(true);
+  });
+
+  it('moves off a disabled tab to the Transcript tab when the recording fails while open', async () => {
+    recordingStatus.mockResolvedValue({
+      status: 'transcribing', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+    });
+    const wrapper = await mountLocalFaked(detail({ isLocal: true }));
+    // Nothing to show yet: the default AI Notes tab is selected but disabled.
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+
+    recordingStatus.mockResolvedValue({
+      status: 'failed', hasTranscript: false, hasNote: false, notesStatus: 'pending',
+      error: 'speech model failed to load',
+    });
+    await vi.advanceTimersByTimeAsync(2500);
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe('speech model failed to load');
+    vi.useRealTimers();
   });
 
   it('hides the chip and enables both tabs once notes are ready', async () => {
@@ -1395,6 +1437,113 @@ describe('MeetingDetailView cloud processing chip', () => {
 
     expect(getMeetingDetail).not.toHaveBeenCalled();
     wrapper.unmount();
+  });
+});
+
+// The server marks a meeting 'error' when its transcription failed for good and
+// keeps the provider's reason on the clip (`audio_clips[].result`).
+describe('MeetingDetailView cloud transcription failure', () => {
+  const failedClip = {
+    transcript_id: 'c1',
+    duration_ms: 1000,
+    created_at: 't1',
+    legacy: false,
+    result: 'language_detection cannot be performed on files with no spoken audio.',
+  };
+
+  it('opens on the Transcript tab with the reason and no chip beside the audio', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
+    );
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
+    expect(wrapper.find('.tab-audio').exists()).toBe(true);
+    expect(wrapper.find('.tab-status').exists()).toBe(false);
+    const failure = wrapper.find('.transcript-failure');
+    expect(failure.attributes('role')).toBe('alert');
+    expect(failure.find('.transcript-failure-detail').text()).toBe(failedClip.result);
+    expect(wrapper.text()).not.toContain('No notes available for this meeting yet.');
+  });
+
+  it('shows the latest recorded reason when the open clip kept none', async () => {
+    const wrapper = await mountWith(
+      detail({
+        isLocal: false,
+        arisoStatus: 'error',
+        audioClips: [
+          { ...failedClip, result: null },
+          { ...failedClip, transcript_id: 'c2', result: 'older reason' },
+          { ...failedClip, transcript_id: 'c3', result: 'newer reason' },
+        ],
+      })
+    );
+
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe('newer reason');
+  });
+
+  it('falls back to a generic reason when no clip kept one', async () => {
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [{ ...failedClip, result: null }] })
+    );
+
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe(
+      'The recording could not be transcribed.'
+    );
+  });
+
+  it('opens on the Transcript tab even when My Notes is available', async () => {
+    notesCanEdit.mockReturnValue(true);
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
+    );
+
+    expect(wrapper.findAll('.seg-btn').map((b) => b.text())).toEqual(['Transcript', 'My Notes']);
+    expect(wrapper.find('.seg-btn--active').text()).toBe('Transcript');
+
+    // Off the Transcript tab, the chip is the only sign of the failure.
+    await wrapper.findAll('.seg-btn')[1].trigger('click');
+    expect(wrapper.find('.tab-status-label').text()).toBe('Transcript failed');
+    expect(wrapper.find('.tab-retry').exists()).toBe(false);
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe(failedClip.result);
+  });
+
+  it('shows the processing chip, not the failure, while this session is still tracking it', async () => {
+    trackProcessing('7');
+    const wrapper = await mountWith(
+      detail({ isLocal: false, arisoStatus: 'error', audioClips: [failedClip] })
+    );
+
+    expect(wrapper.find('.tab-status-label').text()).toBe(
+      'Uploaded — processing transcript & notes…'
+    );
+    expect(wrapper.findAll('.seg-btn').map((b) => b.text())).not.toContain('Transcript');
+  });
+
+  it("shows the open clip's reason in the Transcript tab when only that clip failed", async () => {
+    getMeetingTranscript.mockResolvedValue([
+      { chunk_index: 0, start_ms: 0, content: 'from clip one', transcript_id: 'c1' },
+    ]);
+    const wrapper = await mountWith(
+      detail({
+        isLocal: false,
+        arisoStatus: 'done',
+        hasTranscript: true,
+        audioClips: [
+          { ...failedClip, result: null },
+          { ...failedClip, transcript_id: 'c2', result: 'no spoken audio' },
+        ],
+      })
+    );
+    await flushPromises();
+    // Not a meeting-level failure: no chip, no top notice.
+    expect(wrapper.find('.tab-status').exists()).toBe(false);
+    expect(wrapper.find('.transcript-failure').exists()).toBe(false);
+
+    await wrapper.findAll('.clip-row')[1].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('.transcript-failure-detail').text()).toBe('no spoken audio');
+    expect(wrapper.text()).not.toContain('No transcript available.');
   });
 });
 

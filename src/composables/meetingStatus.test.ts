@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { ariJoinChip, isCanceledMeetingStatus } from './meetingStatus';
+import {
+  ariJoinChip,
+  isCanceledMeetingStatus,
+  isTranscriptionFailedMeetingStatus,
+} from './meetingStatus';
 
 describe('isCanceledMeetingStatus', () => {
   it('matches the backend spelling', () => {
@@ -23,6 +27,19 @@ describe('isCanceledMeetingStatus', () => {
     expect(isCanceledMeetingStatus(undefined)).toBe(false);
     expect(isCanceledMeetingStatus(1)).toBe(false);
     expect(isCanceledMeetingStatus({})).toBe(false);
+  });
+});
+
+describe('isTranscriptionFailedMeetingStatus', () => {
+  it('matches the backend error status, tolerating case and padding', () => {
+    expect(isTranscriptionFailedMeetingStatus('error')).toBe(true);
+    expect(isTranscriptionFailedMeetingStatus(' Error ')).toBe(true);
+  });
+
+  it('rejects every other status, including cancelled', () => {
+    expect(isTranscriptionFailedMeetingStatus('cancelled')).toBe(false);
+    expect(isTranscriptionFailedMeetingStatus('done')).toBe(false);
+    expect(isTranscriptionFailedMeetingStatus(undefined)).toBe(false);
   });
 });
 

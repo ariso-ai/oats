@@ -267,6 +267,10 @@ pub struct RecordingStatusView {
     /// `null` rather than as a missing key.
     #[serde(default)]
     pub notes_written: Option<String>,
+    /// Mirrors `RecordingMeta.error`: the transcription failure detail when
+    /// `status == Failed`, so the detail panel can show why, not just that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Metadata persisted next to a buffered pending upload (`<id>.json`), so a

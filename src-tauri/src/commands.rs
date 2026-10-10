@@ -1842,6 +1842,7 @@ pub fn local_recording_status(
         notes_status,
         preview_checkpoints,
         notes_written: meta.notes_written,
+        error: meta.error,
     })
 }
 

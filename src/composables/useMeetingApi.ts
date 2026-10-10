@@ -1,5 +1,6 @@
 import { api } from '../tauri';
 import { UploadStageError, type UploadStage } from './useDiagnostics';
+import { isTranscriptionFailedMeetingStatus } from './meetingStatus';
 
 interface TranscriptSegment {
   speaker: number;
@@ -27,6 +28,9 @@ export interface MeetingAudioClip {
   duration_ms: number | null;
   created_at: string;
   legacy: boolean;
+  /** The provider's error from this clip's latest transcription (vendor name
+   *  stripped server-side); null/absent when it succeeded or hasn't run. */
+  result?: string | null;
 }
 
 interface Meeting {
@@ -195,11 +199,12 @@ interface MeetingNotes {
  *  same two fields `ArisoBackend.getMeetingDetail` reads off `/meeting-notes/:id`
  *  to decide whether the Transcript/AI-Notes tabs exist, so one truthy value is
  *  enough to call the meeting "no longer processing" — the later assessment and
- *  coaching fields lag and must not hold the indicator up. */
+ *  coaching fields lag and must not hold the indicator up. A meeting whose
+ *  transcription failed for good is settled too: nothing more is coming. */
 export function isMeetingNotesReady(
-  n: Pick<MeetingNotes, 'hasTranscript' | 'summary'>
+  n: Pick<MeetingNotes, 'hasTranscript' | 'summary' | 'status'>
 ): boolean {
-  return !!n.hasTranscript || !!n.summary;
+  return !!n.hasTranscript || !!n.summary || isTranscriptionFailedMeetingStatus(n.status);
 }
 
 interface ScheduledMeetingsResponse {

@@ -380,6 +380,8 @@ export interface RecordingStatusView {
   previewCheckpoints: number;
   /** RFC3339 time oats last wrote this recording's note, or null. */
   notesWritten: string | null;
+  /** Transcription failure detail when `status === 'failed'`, or undefined. */
+  error?: string;
 }
 
 export interface VaultTaskGroup {

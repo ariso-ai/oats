@@ -200,7 +200,7 @@
         </div>
         <div v-if="showStatusChip" class="tab-status">
           <span v-if="statusGenerating" class="spinner spinner--sm" />
-          <span class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
+          <span v-if="statusLabel" class="tab-status-label" :class="{ 'tab-status-label--err': !statusGenerating }">
             {{ statusLabel }}
           </span>
           <button
@@ -374,12 +374,16 @@
 
           <div v-if="loadingTranscript" class="card-state"><span class="spinner" /><span>Loading transcript…</span></div>
           <div v-else-if="transcriptMarkdown" class="md" v-html="renderMarkdown(transcriptMarkdown)" />
-          <ol v-else-if="displayedChunks" class="transcript">
+          <ol v-else-if="displayedChunks?.length" class="transcript">
             <li v-for="r in transcriptRows" :key="r.key" class="transcript-line">
               <span class="transcript-ts">{{ r.ts }}</span>
               <span class="transcript-content"><span v-if="r.speaker" class="transcript-speaker">{{ r.speaker }}:</span> {{ r.text }}</span>
             </li>
           </ol>
+          <div v-else-if="transcriptFailed" class="content-empty transcript-failure" role="alert">
+            <p>Transcript failed.</p>
+            <p v-if="transcriptFailureDetail" class="transcript-failure-detail">{{ transcriptFailureDetail }}</p>
+          </div>
           <div v-else class="content-empty">No transcript available.</div>
         </div>
 
@@ -468,7 +472,7 @@ import { composeLocalShareText } from './meetingShareText';
 import { transcriptFilename } from './transcriptDownloadName';
 import { parseLocalTranscript } from './localTranscript';
 import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
-import { ariJoinChip } from '../composables/meetingStatus';
+import { ariJoinChip, isTranscriptionFailedMeetingStatus } from '../composables/meetingStatus';
 import {
   useLocalRecordingProgress,
   type LocalProgressStage,
@@ -812,17 +816,31 @@ const cloudProcessing = computed(
   () => !!detail.value && !detail.value.isLocal && processingMeetings.isProcessing(detail.value.id)
 );
 
+// The server marks a meeting 'error' once its transcription failed for good
+// (agents#8473). While this session still tracks the upload, the processing chip
+// keeps the slot; the poll settles on 'error' and the refetch lands here.
+const cloudTranscriptionFailed = computed(
+  () =>
+    !!detail.value &&
+    !detail.value.isLocal &&
+    !cloudProcessing.value &&
+    isTranscriptionFailedMeetingStatus(detail.value.arisoStatus)
+);
+
 const showStatusChip = computed(
   () =>
     cloudProcessing.value ||
+    // On the Transcript tab the pane already says it, and cloud has no Retry
+    // to keep the chip for.
+    (cloudTranscriptionFailed.value && activeTab.value !== 'transcript') ||
     (!!detail.value?.isLocal &&
       [
         'transcribing', 'pending-models', 'notes-pending', 'notes-pending-model',
         'transcript-failed', 'notes-failed', 'notes-empty-transcript',
       ].includes(progress.stage.value))
 );
-// Cloud has no post-upload failure signal, so its chip is always the spinner
-// variant — there is nothing to offer a Retry for.
+// Cloud's chip is the spinner while processing and the failed label once the
+// server says so — never with a Retry: there is no cloud retry to offer.
 const statusGenerating = computed(
   () =>
     cloudProcessing.value ||
@@ -834,6 +852,9 @@ const statusGenerating = computed(
 const statusLabel = computed(() => {
   // One combined stage server-side: no transcript/notes split like local's.
   if (cloudProcessing.value) return 'Uploaded — processing transcript & notes…';
+  // The Transcript tab's pane states the failure beside the audio player, so
+  // the chip there would only repeat it.
+  if (cloudTranscriptionFailed.value) return activeTab.value === 'transcript' ? '' : 'Transcript failed';
   switch (progress.stage.value) {
     case 'transcribing':
       return 'Generating Transcript';
@@ -844,7 +865,7 @@ const statusLabel = computed(() => {
     case 'notes-pending-model':
       return 'Waiting for the notes model to finish downloading…';
     case 'transcript-failed':
-      return 'Transcript failed';
+      return activeTab.value === 'transcript' ? '' : 'Transcript failed';
     case 'notes-failed':
       return 'AI Notes failed';
     case 'notes-empty-transcript':
@@ -857,12 +878,36 @@ const statusLabel = computed(() => {
 // re-running generation would only reach the same conclusion. Every other
 // non-generating stage has a real retry to offer.
 const showRetry = computed(
-  () => !statusGenerating.value && progress.stage.value !== 'notes-empty-transcript'
+  () =>
+    !!detail.value?.isLocal &&
+    !statusGenerating.value &&
+    progress.stage.value !== 'notes-empty-transcript'
 );
 function onRetry(): void {
   if (progress.stage.value === 'transcript-failed') void progress.retryTranscription();
   else if (progress.stage.value === 'notes-failed') void progress.retryNotes();
 }
+
+// The tab chip only ever says "Transcript failed" — the Transcript tab is where
+// the user lands to find out why, next to the recording's audio, which still
+// plays. Local reads the reason from meta.error via local_recording_status;
+// cloud from the open clip's `result` (one failed clip on an otherwise
+// transcribed meeting), else the latest clip that kept one.
+const openClipFailure = computed(
+  () => audioClips.value.find((c) => c.transcript_id === activeClipId.value)?.result ?? undefined
+);
+const transcriptFailed = computed(() => {
+  if (detail.value?.isLocal) return progress.stage.value === 'transcript-failed';
+  return cloudTranscriptionFailed.value || !!openClipFailure.value;
+});
+const transcriptFailureDetail = computed(() => {
+  if (!transcriptFailed.value) return undefined;
+  if (detail.value?.isLocal) return progress.error.value;
+  if (openClipFailure.value) return openClipFailure.value;
+  // A failure that kept no reason (e.g. the audio never loaded).
+  const clip = [...audioClips.value].reverse().find((c) => c.result);
+  return clip?.result ?? 'The recording could not be transcribed.';
+});
 
 // A cloud meeting we were tracking just gained content. Nothing about the list
 // row changes when a transcript lands (same id, timestamp, prepId), so the
@@ -874,6 +919,15 @@ watch(cloudProcessing, (isProcessing, was) => {
   // only the still-open one deserves a refetch.
   const item = props.item;
   if (item && detail.value?.id === item.id) void load(item);
+});
+
+// A recording that fails while it's open has the reason surface on its own,
+// unless the user is already on a tab that has content.
+watch(progress.stage, (next) => {
+  if (next !== 'transcript-failed') return;
+  if (availableTabs.value.find((t) => t.key === activeTab.value)?.disabled) {
+    activeTab.value = 'transcript';
+  }
 });
 
 const TERMINAL_STAGES: LocalProgressStage[] = [
@@ -1575,6 +1629,11 @@ function assessmentPresent(d: MeetingDetail): boolean {
 function firstTabFor(d: MeetingDetail, item: MeetingListItem): TabKey {
   if (notesPresent(d)) return 'note';
   if (d.hasTranscript) return 'transcript';
+  // A failed transcription opens on its reason. The local poll hasn't run yet
+  // here, so read the list row's status.
+  if (d.isLocal ? item.status === 'failed' : cloudTranscriptionFailed.value) {
+    return 'transcript';
+  }
   if (d.hasIndividualNote || notesPersistence.canEdit(item)) return 'mynote';
   if (d.prepId != null) return 'prep';
   if (assessmentPresent(d)) return 'assessment';
@@ -1593,14 +1652,21 @@ const availableTabs = computed<{ key: TabKey; label: string; disabled?: boolean 
   const out: { key: TabKey; label: string; disabled?: boolean }[] = [];
   if (d.isLocal) {
     out.push({ key: 'note', label: 'AI Notes', disabled: !d.note });
-    out.push({ key: 'transcript', label: 'Transcript', disabled: !d.hasTranscript });
+    // A failed transcript keeps the tab open: it holds the reason and the audio.
+    out.push({
+      key: 'transcript',
+      label: 'Transcript',
+      disabled: !d.hasTranscript && progress.stage.value !== 'transcript-failed',
+    });
     if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
       out.push({ key: 'mynote', label: 'My Notes' });
     }
     return out;
   }
   if (notesPresent(d)) out.push({ key: 'note', label: 'AI Notes' });
-  if (d.hasTranscript) out.push({ key: 'transcript', label: 'Transcript' });
+  if (d.hasTranscript || cloudTranscriptionFailed.value) {
+    out.push({ key: 'transcript', label: 'Transcript' });
+  }
   if ((props.item && notesPersistence.canEdit(props.item)) || d.hasIndividualNote) {
     out.push({ key: 'mynote', label: 'My Notes' });
   }
@@ -2145,6 +2211,8 @@ const durationLabel = computed<string | null>(() => {
 .notes-title--input::placeholder { color: #9a9a9a; font-weight: 700; }
 .notes-date { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .content-empty { color: #6f6f6f; font-size: 14px; padding: 8px 0; }
+.transcript-failure p { margin: 0 0 4px; }
+.transcript-failure-detail { color: #dc2626; font-size: 13px; }
 
 .sec { margin-bottom: 22px; }
 .sec:last-child { margin-bottom: 0; }
