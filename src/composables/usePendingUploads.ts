@@ -88,6 +88,13 @@ async function uploadGroup(group: PendingUploadMeta[]): Promise<number> {
   return meetingId;
 }
 
+/** Upload exactly one buffered item (the per-recording "Upload" action) — not its
+ *  whole meetingId group, matching per-recording Discard's granularity. Resolves to
+ *  the meeting the audio landed on so the caller can mark it "processing". */
+export async function uploadItem(item: PendingUploadMeta): Promise<number> {
+  return uploadGroup([item]);
+}
+
 /** Thrown by {@link combineAndUpload} when at least one group fails but
  *  others succeeded. Carries the succeeded groups' meeting ids so the caller
  *  can still track them as processing instead of losing them to the throw. */

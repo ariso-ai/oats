@@ -10,6 +10,7 @@ const bufferPath = vi.fn();
 const checkSession = vi.fn();
 const combineAndUpload = vi.fn();
 const discardAll = vi.fn();
+const uploadItem = vi.fn();
 const markUploaded = vi.fn();
 
 vi.mock('../tauri', () => ({
@@ -25,6 +26,7 @@ vi.mock('../tauri', () => ({
 vi.mock('../composables/usePendingUploads', () => ({
   combineAndUpload: (...a: unknown[]) => combineAndUpload(...a),
   discardAll: (...a: unknown[]) => discardAll(...a),
+  uploadItem: (...a: unknown[]) => uploadItem(...a),
   PartialUploadError: class PartialUploadError extends Error {
     constructor(public readonly uploadedMeetingIds: number[], cause: unknown) {
       super(cause instanceof Error ? cause.message : String(cause));
@@ -278,12 +280,14 @@ describe('PendingUploads', () => {
     expect(discardAll).not.toHaveBeenCalled();
   });
 
-  // With a single recording, "Discard all" already discards exactly that one.
-  it('shows no per-recording Discard when only one recording is pending', async () => {
+  // Icon controls are cheap enough on space that every row gets its own,
+  // even when there is only one pending recording (issue #451).
+  it('still shows per-recording Upload and Discard when only one recording is pending', async () => {
     list.mockResolvedValue([items[0]]);
     const wrapper = mount(PendingUploads);
     await flushPromises();
-    expect(wrapper.find('.pi-discard').exists()).toBe(false);
+    expect(wrapper.find('.pi-discard').exists()).toBe(true);
+    expect(wrapper.find('.pi-upload').exists()).toBe(true);
   });
 
   it('per-recording Discard confirms then discards only that recording', async () => {
@@ -295,8 +299,9 @@ describe('PendingUploads', () => {
     const buttons = wrapper.findAll('.pi-discard');
     expect(buttons).toHaveLength(2);
     await buttons[1].trigger('click'); // first click → confirm
-    expect(wrapper.findAll('.pi-discard')[1].text()).toBe('Confirm');
-    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+    expect(wrapper.findAll('.pi-discard')[1].classes()).toContain('armed');
+    expect(wrapper.findAll('.pi-discard')[1].attributes('aria-label')).toMatch(/confirm/i);
+    expect(wrapper.findAll('.pi-discard')[0].classes()).not.toContain('armed');
     expect(discardAudio).not.toHaveBeenCalled();
     await wrapper.findAll('.pi-discard')[1].trigger('click'); // second click → run
     await flushPromises();
@@ -316,8 +321,8 @@ describe('PendingUploads', () => {
     await wrapper.findAll('.pi-discard')[1].trigger('click'); // only arms the second
 
     expect(discardAudio).not.toHaveBeenCalled();
-    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
-    expect(wrapper.findAll('.pi-discard')[1].text()).toBe('Confirm');
+    expect(wrapper.findAll('.pi-discard')[0].classes()).not.toContain('armed');
+    expect(wrapper.findAll('.pi-discard')[1].classes()).toContain('armed');
   });
 
   it('cancels a per-recording discard confirmation when the pointer leaves its row', async () => {
@@ -327,7 +332,7 @@ describe('PendingUploads', () => {
 
     await wrapper.findAll('.pi-discard')[0].trigger('click'); // arm confirm
     await wrapper.findAll('.pi-controls')[0].trigger('mouseleave'); // move away
-    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+    expect(wrapper.findAll('.pi-discard')[0].classes()).not.toContain('armed');
 
     await wrapper.findAll('.pi-discard')[0].trigger('click'); // only re-arms
     expect(discardAudio).not.toHaveBeenCalled();
@@ -345,11 +350,11 @@ describe('PendingUploads', () => {
 
     expect(wrapper.find('.pending-error').text()).toBe('Could not discard this recording.');
     expect(wrapper.findAll('.pending-item')).toHaveLength(2);
-    expect(wrapper.findAll('.pi-discard')[0].text()).toBe('Discard');
+    expect(wrapper.findAll('.pi-discard')[0].classes()).not.toContain('armed');
   });
 
   // Discarding a buffer mid-retry could pull it out from under the upload.
-  it('disables per-recording Discard while an upload is in flight', async () => {
+  it('disables per-recording Discard and Upload while a bulk upload is in flight', async () => {
     list.mockResolvedValue(items);
     combineAndUpload.mockReturnValue(new Promise(() => {}));
     const wrapper = mount(PendingUploads);
@@ -358,9 +363,10 @@ describe('PendingUploads', () => {
     await wrapper.find('.upload').trigger('click');
     await flushPromises();
 
-    const buttons = wrapper.findAll('.pi-discard');
-    expect(buttons).toHaveLength(2);
-    for (const b of buttons) {
+    for (const b of wrapper.findAll('.pi-discard')) {
+      expect(b.attributes('disabled')).toBeDefined();
+    }
+    for (const b of wrapper.findAll('.pi-upload')) {
       expect(b.attributes('disabled')).toBeDefined();
     }
   });
@@ -374,5 +380,105 @@ describe('PendingUploads', () => {
     await (wrapper.vm as unknown as { refresh: () => Promise<void> }).refresh();
     await flushPromises();
     expect(wrapper.findAll('.pending-item')).toHaveLength(2);
+  });
+
+  describe('per-item upload', () => {
+    it('uploads only that recording, marks it processing, refreshes, and emits uploaded', async () => {
+      list.mockResolvedValueOnce(items).mockResolvedValueOnce([items[0]]);
+      uploadItem.mockResolvedValue(99);
+      const wrapper = mount(PendingUploads);
+      await flushPromises();
+
+      await wrapper.findAll('.pi-upload')[1].trigger('click');
+      await flushPromises();
+
+      expect(uploadItem).toHaveBeenCalledWith(items[1]);
+      expect(combineAndUpload).not.toHaveBeenCalled();
+      expect(markUploaded).toHaveBeenCalledWith(99);
+      expect(wrapper.emitted('uploaded')).toHaveLength(1);
+      expect(wrapper.findAll('.pending-item')).toHaveLength(1);
+    });
+
+    it('shows an error and keeps the recording when a per-recording upload fails', async () => {
+      list.mockResolvedValue(items);
+      uploadItem.mockRejectedValue(new Error('offline'));
+      const wrapper = mount(PendingUploads);
+      await flushPromises();
+
+      await wrapper.findAll('.pi-upload')[0].trigger('click');
+      await flushPromises();
+
+      expect(wrapper.find('.pending-error').text()).toBe('Upload failed — try again.');
+      expect(wrapper.findAll('.pending-item')).toHaveLength(2);
+      expect(markUploaded).not.toHaveBeenCalled();
+      // Review Focus: a failure must not leave the row's buttons stuck disabled.
+      expect(wrapper.findAll('.pi-upload')[0].attributes('disabled')).toBeUndefined();
+      expect(wrapper.findAll('.pi-discard')[0].attributes('disabled')).toBeUndefined();
+    });
+
+    it('explains missing session before retrying a per-recording upload', async () => {
+      list.mockResolvedValue(items);
+      checkSession.mockResolvedValue(null);
+      const wrapper = mount(PendingUploads);
+      await flushPromises();
+
+      await wrapper.findAll('.pi-upload')[0].trigger('click');
+      await flushPromises();
+
+      expect(uploadItem).not.toHaveBeenCalled();
+      expect(wrapper.find('.pending-error').text()).toBe('Upload failed — sign in to Ari again, then retry.');
+      expect(wrapper.findAll('.pending-item')).toHaveLength(2);
+    });
+
+    // Review Focus: starting an upload on an armed row must disarm its own
+    // discard confirmation, so a later click re-arms instead of discarding.
+    it('disarms this recording\'s Discard confirmation when its Upload is clicked', async () => {
+      list.mockResolvedValue(items);
+      uploadItem.mockReturnValue(new Promise(() => {}));
+      const wrapper = mount(PendingUploads);
+      await flushPromises();
+
+      await wrapper.findAll('.pi-discard')[0].trigger('click'); // arm
+      expect(wrapper.findAll('.pi-discard')[0].classes()).toContain('armed');
+
+      await wrapper.findAll('.pi-upload')[0].trigger('click');
+      await flushPromises();
+
+      expect(wrapper.findAll('.pi-discard')[0].classes()).not.toContain('armed');
+    });
+
+    // Review Focus: only Upload/Discard are locked — Play/Locate on every row
+    // stay usable while one row's upload is in flight.
+    it('leaves Locate clickable on every row while one recording is uploading', async () => {
+      list.mockResolvedValue(items);
+      uploadItem.mockReturnValue(new Promise(() => {}));
+      reveal.mockResolvedValue(undefined);
+      const wrapper = mount(PendingUploads);
+      await flushPromises();
+
+      await wrapper.findAll('.pi-upload')[0].trigger('click');
+      await flushPromises();
+
+      for (const b of wrapper.findAll('.pi-locate')) {
+        expect(b.attributes('disabled')).toBeUndefined();
+      }
+      await wrapper.findAll('.pi-locate')[1].trigger('click');
+      await flushPromises();
+      expect(reveal).toHaveBeenCalledWith('2026-06-12T11:00:00Z');
+    });
+
+    // Review Focus: icon-only buttons need a real accessible name, not just title.
+    it('gives per-recording Upload and Discard buttons an aria-label', async () => {
+      list.mockResolvedValue(items);
+      const wrapper = mount(PendingUploads);
+      await flushPromises();
+
+      for (const b of wrapper.findAll('.pi-upload')) {
+        expect(b.attributes('aria-label')).toBeTruthy();
+      }
+      for (const b of wrapper.findAll('.pi-discard')) {
+        expect(b.attributes('aria-label')).toBeTruthy();
+      }
+    });
   });
 });
