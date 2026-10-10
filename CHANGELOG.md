@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.26.2](https://github.com/ariso-ai/oats/compare/v0.26.1...v0.26.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* drop the "Transcript failed" chip label on the Transcript tab ([7ca74b3](https://github.com/ariso-ai/oats/commit/7ca74b3ccdc15fe5daf429c678a91a1b18c2d89b))
+* show the server's transcription failure reason for cloud meetings ([91a0efc](https://github.com/ariso-ai/oats/commit/91a0efc5a2d158f5518d83c014187eacf8a78e24))
+* show transcription failures in the Transcript tab, beside the audio ([e955059](https://github.com/ariso-ai/oats/commit/e9550591bb22427f3a990b39674626d6ca84d8bd))
+* surface local transcription failure detail in the Transcript tab ([4e273f7](https://github.com/ariso-ai/oats/commit/4e273f7313b6fbf8d10314662edd0a043e8937fe))
+* surface local transcription failure detail in the Transcript tab ([0cd42b9](https://github.com/ariso-ai/oats/commit/0cd42b96e3bce44bd22a2334ca70868aa89eec68)), closes [#479](https://github.com/ariso-ai/oats/issues/479)
+
 ## [0.26.1](https://github.com/ariso-ai/oats/compare/v0.26.0...v0.26.1) (2026-10-07)
 
 
