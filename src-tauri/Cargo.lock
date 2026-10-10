@@ -3457,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "oats"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "block2",
  "chrono",
