@@ -25,6 +25,7 @@ import {
   groupByMeetingId,
   combineAndUpload,
   discardAll,
+  uploadItem,
   PartialUploadError,
 } from './usePendingUploads';
 
@@ -204,6 +205,73 @@ describe('combineAndUpload', () => {
     discardAudio.mockResolvedValue(undefined);
 
     await expect(combineAndUpload([a, d, items[0]])).resolves.toEqual([5, 9, 77]);
+  });
+});
+
+describe('uploadItem', () => {
+  it('combines the single key, uploads with that item\'s own meta, and discards it', async () => {
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockResolvedValue({ meetingId: 42 });
+    discardAudio.mockResolvedValue(undefined);
+
+    const result = await uploadItem(items[0]);
+
+    expect(combine).toHaveBeenCalledWith(['2026-06-12T09:00:00Z']);
+    const [blobArg, metaArg] = uploadAudio.mock.calls[0];
+    expect(blobArg).toBeInstanceOf(Blob);
+    expect(metaArg).toEqual({
+      startAt: '2026-06-12T09:00:00Z',
+      endAt: '2026-06-12T09:05:00Z',
+      durationSeconds: 300,
+    });
+    expect(discardAudio).toHaveBeenCalledWith('2026-06-12T09:00:00Z');
+    expect(discardAudio).not.toHaveBeenCalledWith('2026-06-12T11:00:00Z');
+    expect(result).toBe(42);
+  });
+
+  it('preserves the item\'s meetingId when it has one', async () => {
+    const withMeeting = { ...items[0], meetingId: 7 };
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockResolvedValue({ meetingId: 7 });
+    discardAudio.mockResolvedValue(undefined);
+
+    await uploadItem(withMeeting);
+
+    const [, metaArg] = uploadAudio.mock.calls[0];
+    expect(metaArg).toMatchObject({ meetingId: 7 });
+  });
+
+  it('reports an upload failure as a retry with itemCount 1', async () => {
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockRejectedValue(new Error('offline'));
+
+    await expect(uploadItem(items[0])).rejects.toThrow('offline');
+
+    expect(reportUploadFailure).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ attempt: 'retry', itemCount: 1, durationSeconds: 300 })
+    );
+  });
+
+  it('reports a failing combine under the combine stage and never uploads', async () => {
+    combine.mockRejectedValue(new Error('buffer missing'));
+
+    await expect(uploadItem(items[0])).rejects.toThrow('buffer missing');
+
+    expect(uploadAudio).not.toHaveBeenCalled();
+    expect(reportUploadFailure).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ attempt: 'retry', stage: 'combine', itemCount: 1 })
+    );
+  });
+
+  it('does not discard the buffer when the upload fails', async () => {
+    combine.mockResolvedValue(new ArrayBuffer(4));
+    uploadAudio.mockRejectedValue(new Error('offline'));
+
+    await expect(uploadItem(items[0])).rejects.toThrow('offline');
+
+    expect(discardAudio).not.toHaveBeenCalled();
   });
 });
 

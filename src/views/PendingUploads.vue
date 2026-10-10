@@ -27,16 +27,33 @@
           >
             Locate
           </button>
-          <!-- With one recording, "Discard all" already discards exactly it. -->
           <button
-            v-if="items.length > 1"
+            class="pi-upload"
+            type="button"
+            :disabled="actionsDisabled"
+            :aria-label="uploadingItem === it.createdAt ? 'Uploading this recording…' : 'Upload this recording now'"
+            :title="uploadingItem === it.createdAt ? 'Uploading this recording…' : 'Upload this recording now'"
+            @click="onUploadItem(it)"
+          >
+            <span v-if="uploadingItem === it.createdAt" class="pi-spinner" aria-hidden="true" />
+            <svg v-else viewBox="0 0 24 24" class="ic" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <path d="M17 8l-5-5-5 5" />
+              <path d="M12 3v12" />
+            </svg>
+          </button>
+          <button
             class="pi-discard"
+            type="button"
             :class="{ armed: confirmingItem === it.createdAt }"
             :disabled="actionsDisabled"
-            title="Delete this buffered recording without uploading it"
+            :aria-label="confirmingItem === it.createdAt ? 'Click again to confirm deleting this recording' : 'Delete this buffered recording without uploading it'"
+            :title="confirmingItem === it.createdAt ? 'Click again to confirm deleting this recording' : 'Delete this buffered recording without uploading it'"
             @click="onDiscardItem(it)"
           >
-            {{ confirmingItem === it.createdAt ? 'Confirm' : 'Discard' }}
+            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true">
+              <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+            </svg>
           </button>
         </div>
       </div>
@@ -65,7 +82,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { auth, pending, type PendingUploadMeta } from '../tauri';
-import { combineAndUpload, discardAll, PartialUploadError } from '../composables/usePendingUploads';
+import { combineAndUpload, discardAll, uploadItem, PartialUploadError } from '../composables/usePendingUploads';
 import { useMeetingProcessing } from '../composables/useMeetingProcessing';
 import RecordingAudioPlayer from './RecordingAudioPlayer.vue';
 
@@ -82,9 +99,13 @@ const confirmingItem = ref<string | null>(null);
 // A single-recording discard in flight. Kept apart from `busy` so it doesn't
 // put the upload spinner on the Upload button.
 const discardingItem = ref(false);
+// The `createdAt` of the one recording whose per-row Upload is in flight, if any.
+const uploadingItem = ref<string | null>(null);
 // Any upload or discard in flight locks every action: discarding a buffer
 // mid-retry could pull it out from under the combine/upload.
-const actionsDisabled = computed(() => busy.value || discardingItem.value);
+const actionsDisabled = computed(
+  () => busy.value || discardingItem.value || uploadingItem.value !== null
+);
 // Rust resolves this ($HOME on macOS, %USERPROFILE% on Windows, ARISO_ROOT in
 // dev), so the recovery line names a folder the user can actually open. The
 // literal is only the pre-IPC placeholder and the fallback when the lookup
@@ -173,6 +194,31 @@ async function onUpload(): Promise<void> {
     error.value = uploadErrorMessage(e);
   } finally {
     busy.value = false;
+  }
+}
+
+// Mirrors onUpload but for exactly one buffered recording: same session check and
+// error message, but a full failure here can't be partial (it's one group), so
+// there's no PartialUploadError case to handle.
+async function onUploadItem(it: PendingUploadMeta): Promise<void> {
+  confirmingDiscard.value = false;
+  confirmingItem.value = null;
+  error.value = null;
+  uploadingItem.value = it.createdAt;
+  try {
+    if (!(await auth.checkSession())) {
+      error.value = 'Upload failed — sign in to Ari again, then retry.';
+      return;
+    }
+    const meetingId = await uploadItem(it);
+    processing.markUploaded(meetingId);
+    await refresh();
+    emit('uploaded');
+  } catch (e) {
+    console.error('Pending upload failed', e);
+    error.value = uploadErrorMessage(e);
+  } finally {
+    uploadingItem.value = null;
   }
 }
 
@@ -349,31 +395,54 @@ onMounted(async () => {
   background: #f7f6f4;
   border-color: #bdbbb6;
 }
-/* Same shape as Locate but muted, like "Discard all"; red once armed so the
-   confirming second click reads as destructive. */
+/* Icon-only, same footprint as Locate; muted like the old "Discard" text, red
+   once armed so the confirming second click reads as destructive. */
+.pi-upload,
 .pi-discard {
   flex-shrink: 0;
-  font-family: inherit;
-  font-size: 13px;
-  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border-radius: 6px;
   border: 1px solid #d7d6d2;
   background: #ffffff;
   color: #6f6f6f;
   cursor: pointer;
-  white-space: nowrap;
 }
+.pi-upload:not(:disabled):hover,
 .pi-discard:not(:disabled):hover {
   background: #f7f6f4;
   border-color: #bdbbb6;
   color: #1c1c1c;
+}
+.pi-upload .ic,
+.pi-discard .ic {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .pi-discard.armed,
 .pi-discard.armed:not(:disabled):hover {
   border-color: #e3b1ae;
   color: #c2413b;
 }
+.pi-upload:disabled,
 .pi-discard:disabled { opacity: 0.6; cursor: default; }
+.pi-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(28, 28, 28, 0.15);
+  border-top-color: #1c1c1c;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 .pending-error {
   margin: 0 10px;
   color: #c2413b;
