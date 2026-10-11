@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.27.0](https://github.com/ariso-ai/oats/compare/v0.26.1...v0.27.0) (2026-10-11)
+
+
+### Features
+
+* add per-recording upload and delete controls to pending uploads ([f8583eb](https://github.com/ariso-ai/oats/commit/f8583ebb0fc8644c543f2b50ab1b168458f44d3c))
+
+
+### Bug Fixes
+
+* drop the "Transcript failed" chip label on the Transcript tab ([7ca74b3](https://github.com/ariso-ai/oats/commit/7ca74b3ccdc15fe5daf429c678a91a1b18c2d89b))
+* retry focusing the Meetings window after tray-menu dismissal ([5f92962](https://github.com/ariso-ai/oats/commit/5f929625749045ed88a09c0630f8d09799e8fe52))
+* retry focusing the Meetings window after tray-menu dismissal ([dcf783d](https://github.com/ariso-ai/oats/commit/dcf783dd939cabfe6cc9b5c9f11ddf31cf645e71)), closes [#483](https://github.com/ariso-ai/oats/issues/483)
+* show the server's transcription failure reason for cloud meetings ([91a0efc](https://github.com/ariso-ai/oats/commit/91a0efc5a2d158f5518d83c014187eacf8a78e24))
+* show transcription failures in the Transcript tab, beside the audio ([e955059](https://github.com/ariso-ai/oats/commit/e9550591bb22427f3a990b39674626d6ca84d8bd))
+* surface local transcription failure detail in the Transcript tab ([4e273f7](https://github.com/ariso-ai/oats/commit/4e273f7313b6fbf8d10314662edd0a043e8937fe))
+* surface local transcription failure detail in the Transcript tab ([0cd42b9](https://github.com/ariso-ai/oats/commit/0cd42b96e3bce44bd22a2334ca70868aa89eec68)), closes [#479](https://github.com/ariso-ai/oats/issues/479)
+
 ## [0.26.1](https://github.com/ariso-ai/oats/compare/v0.26.0...v0.26.1) (2026-10-07)
 
 
