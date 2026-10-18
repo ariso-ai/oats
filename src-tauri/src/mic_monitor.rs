@@ -613,7 +613,11 @@ mod windows_audio {
             return false;
         }
 
-        let excluded = super::process_tree(our_pid, &process_list());
+        let Some(processes) = process_list() else {
+            deinitialize();
+            return false;
+        };
+        let excluded = super::process_tree(our_pid, &processes);
         let result = query_output_active(&excluded).unwrap_or(false);
         deinitialize();
         result
@@ -648,9 +652,9 @@ mod windows_audio {
         Ok(false)
     }
 
-    /// `(pid, parent_pid)` for every running process; empty if the snapshot
-    /// fails, which only loses the child exclusion, not our own pid.
-    fn process_list() -> Vec<(u32, u32)> {
+    /// `(pid, parent_pid)` for every running process; `None` if the snapshot
+    /// cannot be created (e.g. under resource pressure).
+    fn process_list() -> Option<Vec<(u32, u32)>> {
         use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -658,9 +662,8 @@ mod windows_audio {
         };
 
         let mut processes = Vec::new();
-        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-            return processes;
-        };
+        let snapshot =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
@@ -671,7 +674,7 @@ mod windows_audio {
             next = unsafe { Process32NextW(snapshot, &mut entry) };
         }
         let _ = unsafe { CloseHandle(snapshot) };
-        processes
+        Some(processes)
     }
 }
 
