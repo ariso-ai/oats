@@ -1,7 +1,9 @@
 //! Auto-trigger microphone monitor. Watches per-process input through Core
 //! Audio on macOS or capture-endpoint sessions on Windows, excludes our own
-//! PID, and feeds one shared debounced state machine. A sustained external
-//! mic-on opens the recorder; a sustained mic-off emits `auto-record://stop`.
+//! PID, and feeds one shared debounced state machine. Detection requires both
+//! an external mic-on AND system audio output active (ruling out in-person,
+//! audio-only-from-the-device meetings); a sustained mic-off emits
+//! `auto-record://stop`.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,23 +50,28 @@ impl Machine {
 
     /// Advance one tick. `now` is a monotonic millisecond counter. `external`
     /// is the set of PIDs (excluding our own) currently running audio input.
-    /// `recording_active` is whether any recording (manual or auto) is in
-    /// progress. Returns an `Action` when a transition demands one.
+    /// `system_audio_active` is whether any other process currently has sound
+    /// coming out of the device. A meeting needs both: mic-only (e.g. an
+    /// in-person meeting picked up ambient sound) or system-audio-only (e.g.
+    /// music playing) must not arm detection. `recording_active` is whether
+    /// any recording (manual or auto) is in progress. Returns an `Action`
+    /// when a transition demands one.
     pub fn tick(
         &mut self,
         now: u64,
         external: &HashSet<i32>,
+        system_audio_active: bool,
         recording_active: bool,
     ) -> Option<Action> {
         match &self.phase {
             Phase::Idle => {
-                if !external.is_empty() && !recording_active {
+                if !external.is_empty() && system_audio_active && !recording_active {
                     self.phase = Phase::Arming { since: now };
                 }
                 None
             }
             Phase::Arming { since } => {
-                if external.is_empty() {
+                if external.is_empty() || !system_audio_active {
                     self.phase = Phase::Idle;
                     None
                 } else if now.saturating_sub(*since) >= START_DEBOUNCE_MS {
@@ -192,65 +199,93 @@ mod tests {
     #[test]
     fn brief_blip_does_not_start() {
         let mut m = Machine::new();
-        assert_eq!(m.tick(0, &pids(&[42]), false), None); // -> Arming
+        assert_eq!(m.tick(0, &pids(&[42]), true, false), None); // -> Arming
         // Mic released before the 3s debounce elapses.
-        assert_eq!(m.tick(1_000, &pids(&[]), false), None); // -> Idle
-        assert_eq!(m.tick(5_000, &pids(&[]), false), None);
+        assert_eq!(m.tick(1_000, &pids(&[]), true, false), None); // -> Idle
+        assert_eq!(m.tick(5_000, &pids(&[]), true, false), None);
     }
 
     #[test]
     fn sustained_mic_starts_after_debounce() {
         let mut m = Machine::new();
-        assert_eq!(m.tick(0, &pids(&[42]), false), None); // Arming
-        assert_eq!(m.tick(2_000, &pids(&[42]), false), None); // still arming
-        assert_eq!(m.tick(3_000, &pids(&[42]), false), Some(Action::Start));
+        assert_eq!(m.tick(0, &pids(&[42]), true, false), None); // Arming
+        assert_eq!(m.tick(2_000, &pids(&[42]), true, false), None); // still arming
+        assert_eq!(m.tick(3_000, &pids(&[42]), true, false), Some(Action::Start));
+    }
+
+    #[test]
+    fn mic_alone_never_arms() {
+        let mut m = Machine::new();
+        // Microphone active but no system audio output (e.g. an in-person
+        // meeting): must never arm, however long the mic stays on.
+        assert_eq!(m.tick(0, &pids(&[42]), false, false), None);
+        assert_eq!(m.tick(3_000, &pids(&[42]), false, false), None);
+        assert_eq!(m.tick(60_000, &pids(&[42]), false, false), None);
+    }
+
+    #[test]
+    fn system_audio_alone_never_arms() {
+        let mut m = Machine::new();
+        // System audio playing but no external mic input: must never arm.
+        assert_eq!(m.tick(0, &pids(&[]), true, false), None);
+        assert_eq!(m.tick(3_000, &pids(&[]), true, false), None);
+        assert_eq!(m.tick(60_000, &pids(&[]), true, false), None);
+    }
+
+    #[test]
+    fn system_audio_dropping_during_arming_cancels() {
+        let mut m = Machine::new();
+        assert_eq!(m.tick(0, &pids(&[42]), true, false), None); // Arming
+        // System audio stops before the debounce elapses, mic stays on.
+        assert_eq!(m.tick(1_000, &pids(&[42]), false, false), None); // -> Idle
+        assert_eq!(m.tick(4_000, &pids(&[42]), false, false), None); // still no start
     }
 
     #[test]
     fn active_recording_suppresses_start() {
         let mut m = Machine::new();
         // recording_active true keeps us out of Arming entirely.
-        assert_eq!(m.tick(0, &pids(&[42]), true), None);
-        assert_eq!(m.tick(3_000, &pids(&[42]), true), None);
+        assert_eq!(m.tick(0, &pids(&[42]), true, true), None);
+        assert_eq!(m.tick(3_000, &pids(&[42]), true, true), None);
     }
 
     #[test]
     fn stops_after_trigger_pids_release() {
         let mut m = Machine::new();
-        m.tick(0, &pids(&[42]), false);
-        assert_eq!(m.tick(3_000, &pids(&[42]), false), Some(Action::Start));
+        m.tick(0, &pids(&[42]), true, false);
+        assert_eq!(m.tick(3_000, &pids(&[42]), true, false), Some(Action::Start));
         // Our own capture appears as a new PID — must be ignored.
-        assert_eq!(m.tick(4_000, &pids(&[42, 99]), false), None);
+        assert_eq!(m.tick(4_000, &pids(&[42, 99]), true, false), None);
         // Trigger app releases; only PID 99 (ours) remains.
-        assert_eq!(m.tick(5_000, &pids(&[99]), false), None); // -> Stopping
-        assert_eq!(m.tick(13_000, &pids(&[99]), false), Some(Action::Stop));
+        assert_eq!(m.tick(5_000, &pids(&[99]), true, false), None); // -> Stopping
+        assert_eq!(m.tick(13_000, &pids(&[99]), true, false), Some(Action::Stop));
     }
 
     #[test]
     fn reacquire_during_stopping_cancels_stop() {
         let mut m = Machine::new();
-        m.tick(0, &pids(&[42]), false);
-        m.tick(3_000, &pids(&[42]), false); // Start
-        m.tick(4_000, &pids(&[]), false); // Stopping
+        m.tick(0, &pids(&[42]), true, false);
+        m.tick(3_000, &pids(&[42]), true, false); // Start
+        m.tick(4_000, &pids(&[]), true, false); // Stopping
         // Trigger app comes back before the 8s stop debounce.
-        assert_eq!(m.tick(6_000, &pids(&[42]), false), None); // -> Recording
-        assert_eq!(m.tick(20_000, &pids(&[42]), false), None); // stays recording
+        assert_eq!(m.tick(6_000, &pids(&[42]), true, false), None); // -> Recording
+        assert_eq!(m.tick(20_000, &pids(&[42]), true, false), None); // stays recording
     }
 
     #[test]
     fn reset_machine_rearms_for_next_back_to_back_call() {
         let mut m = Machine::new();
-        m.tick(0, &pids(&[42]), false);
-        assert_eq!(m.tick(3_000, &pids(&[42]), false), Some(Action::Start)); // Recording
+        m.tick(0, &pids(&[42]), true, false);
+        assert_eq!(m.tick(3_000, &pids(&[42]), true, false), Some(Action::Start)); // Recording
         // Same app holds the mic across the call boundary: no stop fires, and the
         // machine is stuck in Recording.
-        assert_eq!(m.tick(4_000, &pids(&[42]), false), None);
+        assert_eq!(m.tick(4_000, &pids(&[42]), true, false), None);
         // request_mic_monitor_rearm replaces the machine with a fresh one while the
         // recorder is now stopped (recording_active == false). It re-arms on the
         // still-held mic and starts a SEPARATE recording for call B.
         m = Machine::new();
-        assert_eq!(m.tick(5_000, &pids(&[42]), false), None); // Idle -> Arming
-        assert_eq!(m.tick(8_000, &pids(&[42]), false), Some(Action::Start));
+        assert_eq!(m.tick(5_000, &pids(&[42]), true, false), None); // Idle -> Arming
+        assert_eq!(m.tick(8_000, &pids(&[42]), true, false), Some(Action::Start));
     }
 }
 
@@ -268,6 +303,26 @@ fn external_input_pids() -> HashSet<i32> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         HashSet::new()
+    }
+}
+
+/// Whether any other process currently has sound coming out of the device
+/// (system audio output). Returns `false` when the endpoint cannot be
+/// queried.
+fn system_audio_active() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        coreaudio::system_audio_active(std::process::id() as i32)
+    }
+    // No Windows output signal yet: report active so detection keeps its
+    // mic-only behavior there instead of never arming.
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        false
     }
 }
 
@@ -377,10 +432,11 @@ async fn run_loop(app: AppHandle) {
             machine = Machine::new();
         }
         let external = external_input_pids();
+        let system_audio = system_audio_active();
         let recording_active = app
             .state::<crate::recording_state::RecordingState>()
             .is_active();
-        if let Some(action) = machine.tick(elapsed, &external, recording_active) {
+        if let Some(action) = machine.tick(elapsed, &external, system_audio, recording_active) {
             match action {
                 Action::Start => {
                     // Prompt the user (Record/Dismiss, 10s) before recording.
@@ -538,6 +594,7 @@ mod coreaudio {
     const PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#"); // kAudioHardwarePropertyProcessObjectList
     const PROCESS_PID: u32 = fourcc(b"ppid"); // kAudioProcessPropertyPID
     const IS_RUNNING_INPUT: u32 = fourcc(b"piri"); // kAudioProcessPropertyIsRunningInput (14.4+)
+    const IS_RUNNING_OUTPUT: u32 = fourcc(b"piro"); // kAudioProcessPropertyIsRunningOutput (14.4+)
 
     const fn fourcc(s: &[u8; 4]) -> u32 {
         ((s[0] as u32) << 24) | ((s[1] as u32) << 16) | ((s[2] as u32) << 8) | (s[3] as u32)
@@ -645,6 +702,25 @@ mod coreaudio {
             }
         }
         set
+    }
+
+    /// Whether any other process has sound currently coming out of the
+    /// device.
+    pub fn system_audio_active(our_pid: i32) -> bool {
+        let Some(objects) = process_object_list() else {
+            return false;
+        };
+        for obj in objects {
+            if read_u32(obj, IS_RUNNING_OUTPUT).unwrap_or(0) == 0 {
+                continue;
+            }
+            if let Some(pid) = read_u32(obj, PROCESS_PID).map(|v| v as i32) {
+                if pid > 0 && pid != our_pid {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Probe availability: the process-object-list selector is 14.0+, and the
