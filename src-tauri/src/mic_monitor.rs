@@ -314,9 +314,11 @@ fn system_audio_active() -> bool {
     {
         coreaudio::system_audio_active(std::process::id() as i32)
     }
+    // No Windows output signal yet: report active so detection keeps its
+    // mic-only behavior there instead of never arming.
     #[cfg(target_os = "windows")]
     {
-        windows_audio::system_audio_active()
+        true
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -575,42 +577,6 @@ mod windows_audio {
             }
         }
         Ok(pids)
-    }
-
-    /// Whether any session on the default render (playback) endpoint is
-    /// currently active, i.e. sound is coming out of the device.
-    pub fn system_audio_active() -> bool {
-        let hr = initialize_mta();
-        if hr.is_err() {
-            return false;
-        }
-
-        let result = query_output_active().unwrap_or(false);
-        deinitialize();
-        result
-    }
-
-    fn query_output_active() -> Result<bool, String> {
-        let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
-        let device = enumerator
-            .get_default_device(&Direction::Render)
-            .map_err(|e| e.to_string())?;
-        let manager = device
-            .get_iaudiosessionmanager()
-            .map_err(|e| e.to_string())?;
-        let sessions = manager
-            .get_audiosessionenumerator()
-            .map_err(|e| e.to_string())?;
-
-        for index in 0..sessions.get_count().map_err(|e| e.to_string())? {
-            let Ok(session) = sessions.get_session(index) else {
-                continue;
-            };
-            if session.get_state().ok() == Some(SessionState::Active) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 
