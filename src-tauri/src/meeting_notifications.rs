@@ -8,6 +8,11 @@
 //! Reliability: realtime delivery is best-effort (Pusher does not redeliver to
 //! disconnected clients), so on every (re)subscribe we also run a catch-up
 //! fetch of the inbox and surface any meeting-prep we haven't notified yet.
+//!
+//! Ariso only sends that event when the user has it deliver each prep before
+//! its meeting, so oats also checks today's meetings itself and raises a prep
+//! ten minutes ahead (`notify_due_preps`). Whether a prep notification shows
+//! is up to oats's own toggle, not the user's Ariso delivery setting.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -53,6 +58,14 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// the WS timeout; reqwest's builder isn't configured with a request timeout
 /// (see `commands::http_client`).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How far ahead of a meeting oats raises its prep notification on its own.
+/// Matches Ariso's default lead for virtual meetings, so a per-meeting Ariso
+/// delivery and this check land together and `seen` keeps it to one banner.
+const PREP_LEAD_MS: i64 = 10 * 60_000;
+
+/// How often oats looks at today's meetings for a prep that's due.
+const PREP_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Errors raised by the session-bound HTTP/WS calls. `Auth` means the server
 /// rejected the stored session (401/403) — distinct because it requires
@@ -181,6 +194,8 @@ async fn run_session(
 
     // Application-level keepalive so a dead connection is detected promptly.
     let mut ping = tokio::time::interval(Duration::from_secs(30));
+    let mut prep_check = tokio::time::interval(PREP_CHECK_INTERVAL);
+    prep_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -202,6 +217,11 @@ async fn run_session(
                 let _ = write
                     .send(Message::text(r#"{"event":"pusher:ping","data":"{}"}"#))
                     .await;
+            }
+            // Wait for the first catch-up to seed `seen`, so a prep Ariso
+            // already delivered before launch isn't announced again.
+            _ = prep_check.tick(), if !*first => {
+                notify_due_preps(app, seen).await?;
             }
         }
     }
@@ -430,14 +450,17 @@ fn parse_id(v: Option<&Value>) -> Option<i64> {
 }
 
 /// Realtime handler: a live event is an explicit "this just happened" signal,
-/// so always notify. Recording it in `seen` keeps the catch-up backstop from
-/// re-notifying the same prep on the next (re)subscribe.
+/// so notify unless oats already raised this prep itself (`notify_due_preps`).
+/// Recording it in `seen` keeps the catch-up backstop from re-notifying the
+/// same prep on the next (re)subscribe.
 async fn handle_prep(
     app: &AppHandle,
     prep_id: i64,
     seen: &mut HashSet<i64>,
 ) -> Result<(), SessionError> {
-    seen.insert(prep_id);
+    if !seen.insert(prep_id) {
+        return Ok(());
+    }
     let message = match fetch_inbox(app).await {
         Ok(items) => items
             .into_iter()
@@ -483,6 +506,123 @@ async fn catch_up(
         }
     }
     Ok(())
+}
+
+/// Oats's own prep notification: a meeting with a prep starts within
+/// `PREP_LEAD_MS`. Ariso only sends a per-meeting event when the user picked
+/// per-meeting delivery there (its "start of the day" digest sends none), so
+/// this is what makes oats's toggle the one that decides. `seen` dedupes it
+/// against the realtime path, whichever arrives first.
+async fn notify_due_preps(app: &AppHandle, seen: &mut HashSet<i64>) -> Result<(), SessionError> {
+    let meetings = match fetch_today_meetings(app).await {
+        Ok(v) => v,
+        Err(SessionError::Auth) => return Err(SessionError::Auth),
+        Err(SessionError::Other(e)) => {
+            eprintln!("meeting-notifications: meetings fetch failed: {e}");
+            return Ok(());
+        }
+    };
+    for due in due_preps_from(&meetings, chrono::Utc::now().timestamp_millis()) {
+        if seen.insert(due.prep_id) {
+            let body = due_prep_body(due.title.as_deref(), due.start.with_timezone(&chrono::Local));
+            show(app, "Meeting prep ready", &body, due.prep_id);
+        }
+    }
+    Ok(())
+}
+
+/// GET /meetings with no dates → today's meetings in the user's Ariso
+/// timezone, each with its `prep_id` and participants.
+async fn fetch_today_meetings(app: &AppHandle) -> Result<Value, SessionError> {
+    let token = get_session_token(app).ok_or(SessionError::Auth)?;
+    tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(SessionError::Auth);
+        }
+        if !status.is_success() {
+            return Err(SessionError::Other(format!(
+                "/meetings returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| SessionError::Other("/meetings timed out".into()))?
+}
+
+#[derive(Debug, PartialEq)]
+struct DuePrep {
+    prep_id: i64,
+    title: Option<String>,
+    start: chrono::DateTime<chrono::Utc>,
+}
+
+/// Pure selector (testable): meetings from a `/meetings` payload that have a
+/// prep and start within `PREP_LEAD_MS` of `now_ms`, skipping cancelled ones
+/// and ones the user declined.
+fn due_preps_from(resp: &Value, now_ms: i64) -> Vec<DuePrep> {
+    let Some(meetings) = resp.get("meetings").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    meetings
+        .iter()
+        .filter(|m| !crate::tray_meeting::is_cancelled_status(m) && !declined_by_user(m))
+        .filter_map(|m| {
+            let prep_id = parse_id(m.get("prep_id"))?;
+            let start = chrono::DateTime::parse_from_rfc3339(m.get("start_at")?.as_str()?)
+                .ok()?
+                .with_timezone(&chrono::Utc);
+            let start_ms = start.timestamp_millis();
+            let due = start_ms - PREP_LEAD_MS <= now_ms && now_ms < start_ms;
+            due.then(|| DuePrep {
+                prep_id,
+                title: m
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(String::from),
+                start,
+            })
+        })
+        .collect()
+}
+
+/// Whether the signed-in user's own participant row says they declined.
+fn declined_by_user(meeting: &Value) -> bool {
+    meeting
+        .get("participants")
+        .and_then(Value::as_array)
+        .is_some_and(|ps| {
+            ps.iter().any(|p| {
+                truthy(p.get("is_current_user"))
+                    && p.get("attendance_status").and_then(Value::as_str) == Some("declined")
+            })
+        })
+}
+
+/// "Weekly sync starts at 2:30 PM." Generic over the timezone so tests can
+/// pin one; production passes local time.
+fn due_prep_body<Tz: chrono::TimeZone>(title: Option<&str>, start: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let time = start.format("%-I:%M %p");
+    match title {
+        Some(t) => truncate(&format!("{t} starts at {time}."), 120),
+        None => format!("Your meeting starts at {time}."),
+    }
 }
 
 fn build_notification(message: Option<&str>) -> (String, String) {
@@ -1479,6 +1619,78 @@ mod tests {
     fn at(offset_min: i64) -> String {
         let dt = chrono::DateTime::from_timestamp_millis(NOW_MS + offset_min * 60_000).unwrap();
         dt.to_rfc3339()
+    }
+
+    fn due_ids(resp: &Value) -> Vec<i64> {
+        due_preps_from(resp, NOW_MS).into_iter().map(|d| d.prep_id).collect()
+    }
+
+    #[test]
+    fn due_preps_are_meetings_with_a_prep_starting_within_the_lead() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(8), "title": "Weekly sync", "prep_id": 41 },
+            { "id": 2, "start_at": at(10), "title": "Edge", "prep_id": "42" },
+            { "id": 3, "start_at": at(5), "title": "No prep", "prep_id": null },
+            { "id": 4, "start_at": at(11), "title": "Too early", "prep_id": 44 },
+            { "id": 5, "start_at": at(0), "title": "Starting now", "prep_id": 45 },
+            { "id": 6, "start_at": at(-5), "title": "Started", "prep_id": 46 }
+        ]});
+        assert_eq!(
+            due_preps_from(&resp, NOW_MS),
+            vec![
+                DuePrep {
+                    prep_id: 41,
+                    title: Some("Weekly sync".into()),
+                    start: chrono::DateTime::from_timestamp_millis(NOW_MS + 8 * 60_000).unwrap(),
+                },
+                DuePrep {
+                    prep_id: 42,
+                    title: Some("Edge".into()),
+                    start: chrono::DateTime::from_timestamp_millis(NOW_MS + 10 * 60_000).unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn due_preps_skip_cancelled_meetings() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(5), "status": "cancelled", "prep_id": 41 }
+        ]});
+        assert!(due_ids(&resp).is_empty());
+    }
+
+    #[test]
+    fn due_preps_skip_meetings_the_user_declined() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(5), "prep_id": 41, "participants": [
+                { "is_current_user": true, "attendance_status": "declined" }
+            ]},
+            { "id": 2, "start_at": at(5), "prep_id": 42, "participants": [
+                { "is_current_user": false, "attendance_status": "declined" },
+                { "is_current_user": true, "attendance_status": "accepted" }
+            ]}
+        ]});
+        assert_eq!(due_ids(&resp), vec![42]);
+    }
+
+    #[test]
+    fn due_preps_tolerate_a_missing_or_malformed_payload() {
+        assert!(due_ids(&json!({})).is_empty());
+        assert!(due_ids(&json!({ "meetings": [ { "prep_id": 41 } ] })).is_empty());
+    }
+
+    #[test]
+    fn due_prep_body_names_the_meeting_and_its_local_start() {
+        let tz = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-06-16T14:30:00-07:00")
+            .unwrap()
+            .with_timezone(&tz);
+        assert_eq!(
+            due_prep_body(Some("Weekly sync"), start),
+            "Weekly sync starts at 2:30 PM."
+        );
+        assert_eq!(due_prep_body(None, start), "Your meeting starts at 2:30 PM.");
     }
 
     #[test]
