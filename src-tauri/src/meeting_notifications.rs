@@ -8,6 +8,11 @@
 //! Reliability: realtime delivery is best-effort (Pusher does not redeliver to
 //! disconnected clients), so on every (re)subscribe we also run a catch-up
 //! fetch of the inbox and surface any meeting-prep we haven't notified yet.
+//!
+//! Ariso only sends that event when the user has it deliver each prep before
+//! its meeting, so oats also checks today's meetings itself and raises a prep
+//! ten minutes ahead (`notify_due_preps`). Whether a prep notification shows
+//! is up to oats's own toggle, not the user's Ariso delivery setting.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -53,6 +58,14 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// the WS timeout; reqwest's builder isn't configured with a request timeout
 /// (see `commands::http_client`).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How far ahead of a meeting oats raises its prep notification on its own.
+/// Matches Ariso's default lead for virtual meetings, so a per-meeting Ariso
+/// delivery and this check land together and `seen` keeps it to one banner.
+const PREP_LEAD_MS: i64 = 10 * 60_000;
+
+/// How often oats looks at today's meetings for a prep that's due.
+const PREP_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Errors raised by the session-bound HTTP/WS calls. `Auth` means the server
 /// rejected the stored session (401/403) — distinct because it requires
@@ -123,7 +136,8 @@ pub fn stop(app: &AppHandle) {
 
 /// Supervisor loop: (re)connect with exponential backoff until the session is
 /// invalidated. A `seen` set (shared across reconnects) dedupes notifications
-/// between the realtime path and the catch-up fetch.
+/// between the realtime path and the catch-up fetch. It starts from the preps
+/// oats has already shown (`load_shown`), so a restart doesn't repeat them.
 ///
 /// On `SessionError::Auth` the loop exits: the stored token is cleared, the
 /// orchestrator handle is reset, and we wait for the next sign-in (a
@@ -132,7 +146,7 @@ pub fn stop(app: &AppHandle) {
 /// already invalidated the session.
 async fn run_loop(app: AppHandle) {
     let mut backoff = 1u64;
-    let mut seen: HashSet<i64> = HashSet::new();
+    let mut seen: HashSet<i64> = load_shown(&app);
     // First successful subscribe seeds `seen` with the current inbox WITHOUT
     // notifying, so launch doesn't replay every old prep as a banner.
     let mut first = true;
@@ -181,6 +195,8 @@ async fn run_session(
 
     // Application-level keepalive so a dead connection is detected promptly.
     let mut ping = tokio::time::interval(Duration::from_secs(30));
+    let mut prep_check = tokio::time::interval(PREP_CHECK_INTERVAL);
+    prep_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -202,6 +218,11 @@ async fn run_session(
                 let _ = write
                     .send(Message::text(r#"{"event":"pusher:ping","data":"{}"}"#))
                     .await;
+            }
+            // Wait for the first catch-up to seed `seen`, so a prep Ariso
+            // already delivered before launch isn't announced again.
+            _ = prep_check.tick(), if !*first => {
+                notify_due_preps(app, seen).await?;
             }
         }
     }
@@ -430,14 +451,17 @@ fn parse_id(v: Option<&Value>) -> Option<i64> {
 }
 
 /// Realtime handler: a live event is an explicit "this just happened" signal,
-/// so always notify. Recording it in `seen` keeps the catch-up backstop from
-/// re-notifying the same prep on the next (re)subscribe.
+/// so notify unless oats already raised this prep itself (`notify_due_preps`).
+/// Recording it in `seen` keeps the catch-up backstop from re-notifying the
+/// same prep on the next (re)subscribe.
 async fn handle_prep(
     app: &AppHandle,
     prep_id: i64,
     seen: &mut HashSet<i64>,
 ) -> Result<(), SessionError> {
-    seen.insert(prep_id);
+    if !seen.insert(prep_id) {
+        return Ok(());
+    }
     let message = match fetch_inbox(app).await {
         Ok(items) => items
             .into_iter()
@@ -483,6 +507,123 @@ async fn catch_up(
         }
     }
     Ok(())
+}
+
+/// Oats's own prep notification: a meeting with a prep starts within
+/// `PREP_LEAD_MS`. Ariso only sends a per-meeting event when the user picked
+/// per-meeting delivery there (its "start of the day" digest sends none), so
+/// this is what makes oats's toggle the one that decides. `seen` dedupes it
+/// against the realtime path, whichever arrives first.
+async fn notify_due_preps(app: &AppHandle, seen: &mut HashSet<i64>) -> Result<(), SessionError> {
+    let meetings = match fetch_today_meetings(app).await {
+        Ok(v) => v,
+        Err(SessionError::Auth) => return Err(SessionError::Auth),
+        Err(SessionError::Other(e)) => {
+            eprintln!("meeting-notifications: meetings fetch failed: {e}");
+            return Ok(());
+        }
+    };
+    for due in due_preps_from(&meetings, chrono::Utc::now().timestamp_millis()) {
+        if seen.insert(due.prep_id) {
+            let body = due_prep_body(due.title.as_deref(), due.start.with_timezone(&chrono::Local));
+            show(app, "Meeting prep ready", &body, due.prep_id);
+        }
+    }
+    Ok(())
+}
+
+/// GET /meetings with no dates → today's meetings in the user's Ariso
+/// timezone, each with its `prep_id` and participants.
+async fn fetch_today_meetings(app: &AppHandle) -> Result<Value, SessionError> {
+    let token = get_session_token(app).ok_or(SessionError::Auth)?;
+    tokio::time::timeout(HTTP_TIMEOUT, async {
+        let resp = http_client()
+            .get(format!("{}/meetings", api_base_url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(SessionError::Auth);
+        }
+        if !status.is_success() {
+            return Err(SessionError::Other(format!(
+                "/meetings returned {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| SessionError::Other(e.to_string()))
+    })
+    .await
+    .map_err(|_| SessionError::Other("/meetings timed out".into()))?
+}
+
+#[derive(Debug, PartialEq)]
+struct DuePrep {
+    prep_id: i64,
+    title: Option<String>,
+    start: chrono::DateTime<chrono::Utc>,
+}
+
+/// Pure selector (testable): meetings from a `/meetings` payload that have a
+/// prep and start within `PREP_LEAD_MS` of `now_ms`, skipping cancelled ones
+/// and ones the user declined.
+fn due_preps_from(resp: &Value, now_ms: i64) -> Vec<DuePrep> {
+    let Some(meetings) = resp.get("meetings").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    meetings
+        .iter()
+        .filter(|m| !crate::tray_meeting::is_cancelled_status(m) && !declined_by_user(m))
+        .filter_map(|m| {
+            let prep_id = parse_id(m.get("prep_id"))?;
+            let start = chrono::DateTime::parse_from_rfc3339(m.get("start_at")?.as_str()?)
+                .ok()?
+                .with_timezone(&chrono::Utc);
+            let start_ms = start.timestamp_millis();
+            let due = start_ms - PREP_LEAD_MS <= now_ms && now_ms < start_ms;
+            due.then(|| DuePrep {
+                prep_id,
+                title: m
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(String::from),
+                start,
+            })
+        })
+        .collect()
+}
+
+/// Whether the signed-in user's own participant row says they declined.
+fn declined_by_user(meeting: &Value) -> bool {
+    meeting
+        .get("participants")
+        .and_then(Value::as_array)
+        .is_some_and(|ps| {
+            ps.iter().any(|p| {
+                truthy(p.get("is_current_user"))
+                    && p.get("attendance_status").and_then(Value::as_str) == Some("declined")
+            })
+        })
+}
+
+/// "Weekly sync starts at 2:30 PM." Generic over the timezone so tests can
+/// pin one; production passes local time.
+fn due_prep_body<Tz: chrono::TimeZone>(title: Option<&str>, start: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let time = start.format("%-I:%M %p");
+    match title {
+        Some(t) => truncate(&format!("{t} starts at {time}."), 120),
+        None => format!("Your meeting starts at {time}."),
+    }
 }
 
 fn build_notification(message: Option<&str>) -> (String, String) {
@@ -881,6 +1022,7 @@ pub fn init_native(app: &AppHandle) {
 /// can open the prep in-app on click; the prep link rides along as the request
 /// id. In dev and on other platforms we fall back to the plugin (no click).
 fn show(app: &AppHandle, title: &str, body: &str, prep_id: i64) {
+    remember_shown(app, prep_id);
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
         macos_un::show(app, title, body, &prep_link(prep_id));
@@ -890,6 +1032,64 @@ fn show(app: &AppHandle, title: &str, body: &str, prep_id: i64) {
     if let Err(e) = app.notification().builder().title(title).body(body).show() {
         eprintln!("meeting-notifications: failed to show notification: {e}");
     }
+}
+
+/// Preps oats has already shown, kept on disk as `{ "<prep id>": shown_at_ms }`.
+/// A start-of-day Ariso user has no inbox rows for the catch-up to seed `seen`
+/// from, so without this, turning the toggle off and on, signing in again, or
+/// relaunching would repeat every prep still inside its lead window.
+const SHOWN_PATH: &str = "shown-meeting-preps.json";
+const SHOWN_KEY: &str = "shown";
+
+/// Well past any lead window; keeps the file to about a day of preps.
+const SHOWN_TTL_MS: i64 = 24 * 60 * 60_000;
+
+fn load_shown(app: &AppHandle) -> HashSet<i64> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match app.store(SHOWN_PATH) {
+        Ok(store) => shown_ids_from(store.get(SHOWN_KEY).as_ref(), now_ms),
+        Err(_) => HashSet::new(),
+    }
+}
+
+fn remember_shown(app: &AppHandle, prep_id: i64) {
+    let Ok(store) = app.store(SHOWN_PATH) else {
+        return;
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    store.set(SHOWN_KEY, with_shown(store.get(SHOWN_KEY).as_ref(), prep_id, now_ms));
+    if let Err(e) = store.save() {
+        eprintln!("meeting-notifications: failed to save shown preps: {e}");
+    }
+}
+
+/// Pure (testable): the prep ids in the stored map shown within the last day.
+fn shown_ids_from(stored: Option<&Value>, now_ms: i64) -> HashSet<i64> {
+    recent_shown(stored, now_ms)
+        .keys()
+        .filter_map(|id| id.parse().ok())
+        .collect()
+}
+
+/// Pure (testable): the stored map with entries older than a day dropped and
+/// `prep_id` recorded as shown at `now_ms`.
+fn with_shown(stored: Option<&Value>, prep_id: i64, now_ms: i64) -> Value {
+    let mut shown = recent_shown(stored, now_ms);
+    shown.insert(prep_id.to_string(), json!(now_ms));
+    Value::Object(shown)
+}
+
+fn recent_shown(stored: Option<&Value>, now_ms: i64) -> serde_json::Map<String, Value> {
+    stored
+        .and_then(Value::as_object)
+        .map(|shown| {
+            shown
+                .iter()
+                .filter(|(_, at)| at.as_i64().is_some_and(|at| now_ms - at < SHOWN_TTL_MS))
+                .map(|(id, at)| (id.clone(), at.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// UNUserNotificationCenter integration: a delegate receives the click on the
@@ -1479,6 +1679,101 @@ mod tests {
     fn at(offset_min: i64) -> String {
         let dt = chrono::DateTime::from_timestamp_millis(NOW_MS + offset_min * 60_000).unwrap();
         dt.to_rfc3339()
+    }
+
+    fn due_ids(resp: &Value) -> Vec<i64> {
+        due_preps_from(resp, NOW_MS).into_iter().map(|d| d.prep_id).collect()
+    }
+
+    #[test]
+    fn due_preps_are_meetings_with_a_prep_starting_within_the_lead() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(8), "title": "Weekly sync", "prep_id": 41 },
+            { "id": 2, "start_at": at(10), "title": "Edge", "prep_id": "42" },
+            { "id": 3, "start_at": at(5), "title": "No prep", "prep_id": null },
+            { "id": 4, "start_at": at(11), "title": "Too early", "prep_id": 44 },
+            { "id": 5, "start_at": at(0), "title": "Starting now", "prep_id": 45 },
+            { "id": 6, "start_at": at(-5), "title": "Started", "prep_id": 46 }
+        ]});
+        assert_eq!(
+            due_preps_from(&resp, NOW_MS),
+            vec![
+                DuePrep {
+                    prep_id: 41,
+                    title: Some("Weekly sync".into()),
+                    start: chrono::DateTime::from_timestamp_millis(NOW_MS + 8 * 60_000).unwrap(),
+                },
+                DuePrep {
+                    prep_id: 42,
+                    title: Some("Edge".into()),
+                    start: chrono::DateTime::from_timestamp_millis(NOW_MS + 10 * 60_000).unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn due_preps_skip_cancelled_meetings() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(5), "status": "cancelled", "prep_id": 41 }
+        ]});
+        assert!(due_ids(&resp).is_empty());
+    }
+
+    #[test]
+    fn due_preps_skip_meetings_the_user_declined() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(5), "prep_id": 41, "participants": [
+                { "is_current_user": true, "attendance_status": "declined" }
+            ]},
+            { "id": 2, "start_at": at(5), "prep_id": 42, "participants": [
+                { "is_current_user": false, "attendance_status": "declined" },
+                { "is_current_user": true, "attendance_status": "accepted" }
+            ]}
+        ]});
+        assert_eq!(due_ids(&resp), vec![42]);
+    }
+
+    #[test]
+    fn due_preps_tolerate_a_missing_or_malformed_payload() {
+        assert!(due_ids(&json!({})).is_empty());
+        assert!(due_ids(&json!({ "meetings": [ { "prep_id": 41 } ] })).is_empty());
+    }
+
+    #[test]
+    fn due_prep_body_names_the_meeting_and_its_local_start() {
+        let tz = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-06-16T14:30:00-07:00")
+            .unwrap()
+            .with_timezone(&tz);
+        assert_eq!(
+            due_prep_body(Some("Weekly sync"), start),
+            "Weekly sync starts at 2:30 PM."
+        );
+        assert_eq!(due_prep_body(None, start), "Your meeting starts at 2:30 PM.");
+    }
+
+    #[test]
+    fn shown_ids_keep_only_the_last_day() {
+        let stored = json!({
+            "41": NOW_MS - 60_000,
+            "42": NOW_MS - SHOWN_TTL_MS,
+            "not-an-id": NOW_MS,
+            "43": "yesterday"
+        });
+        assert_eq!(shown_ids_from(Some(&stored), NOW_MS), HashSet::from([41]));
+        assert!(shown_ids_from(None, NOW_MS).is_empty());
+        assert!(shown_ids_from(Some(&json!([41])), NOW_MS).is_empty());
+    }
+
+    #[test]
+    fn with_shown_records_the_prep_and_drops_stale_entries() {
+        let stored = json!({ "41": NOW_MS - 60_000, "42": NOW_MS - SHOWN_TTL_MS });
+        assert_eq!(
+            with_shown(Some(&stored), 43, NOW_MS),
+            json!({ "41": NOW_MS - 60_000, "43": NOW_MS })
+        );
+        assert_eq!(with_shown(None, 43, NOW_MS), json!({ "43": NOW_MS }));
     }
 
     #[test]
