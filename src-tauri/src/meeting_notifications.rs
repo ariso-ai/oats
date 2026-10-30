@@ -136,7 +136,8 @@ pub fn stop(app: &AppHandle) {
 
 /// Supervisor loop: (re)connect with exponential backoff until the session is
 /// invalidated. A `seen` set (shared across reconnects) dedupes notifications
-/// between the realtime path and the catch-up fetch.
+/// between the realtime path and the catch-up fetch. It starts from the preps
+/// oats has already shown (`load_shown`), so a restart doesn't repeat them.
 ///
 /// On `SessionError::Auth` the loop exits: the stored token is cleared, the
 /// orchestrator handle is reset, and we wait for the next sign-in (a
@@ -145,7 +146,7 @@ pub fn stop(app: &AppHandle) {
 /// already invalidated the session.
 async fn run_loop(app: AppHandle) {
     let mut backoff = 1u64;
-    let mut seen: HashSet<i64> = HashSet::new();
+    let mut seen: HashSet<i64> = load_shown(&app);
     // First successful subscribe seeds `seen` with the current inbox WITHOUT
     // notifying, so launch doesn't replay every old prep as a banner.
     let mut first = true;
@@ -1021,6 +1022,7 @@ pub fn init_native(app: &AppHandle) {
 /// can open the prep in-app on click; the prep link rides along as the request
 /// id. In dev and on other platforms we fall back to the plugin (no click).
 fn show(app: &AppHandle, title: &str, body: &str, prep_id: i64) {
+    remember_shown(app, prep_id);
     #[cfg(target_os = "macos")]
     if !tauri::is_dev() {
         macos_un::show(app, title, body, &prep_link(prep_id));
@@ -1030,6 +1032,64 @@ fn show(app: &AppHandle, title: &str, body: &str, prep_id: i64) {
     if let Err(e) = app.notification().builder().title(title).body(body).show() {
         eprintln!("meeting-notifications: failed to show notification: {e}");
     }
+}
+
+/// Preps oats has already shown, kept on disk as `{ "<prep id>": shown_at_ms }`.
+/// A start-of-day Ariso user has no inbox rows for the catch-up to seed `seen`
+/// from, so without this, turning the toggle off and on, signing in again, or
+/// relaunching would repeat every prep still inside its lead window.
+const SHOWN_PATH: &str = "shown-meeting-preps.json";
+const SHOWN_KEY: &str = "shown";
+
+/// Well past any lead window; keeps the file to about a day of preps.
+const SHOWN_TTL_MS: i64 = 24 * 60 * 60_000;
+
+fn load_shown(app: &AppHandle) -> HashSet<i64> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match app.store(SHOWN_PATH) {
+        Ok(store) => shown_ids_from(store.get(SHOWN_KEY).as_ref(), now_ms),
+        Err(_) => HashSet::new(),
+    }
+}
+
+fn remember_shown(app: &AppHandle, prep_id: i64) {
+    let Ok(store) = app.store(SHOWN_PATH) else {
+        return;
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    store.set(SHOWN_KEY, with_shown(store.get(SHOWN_KEY).as_ref(), prep_id, now_ms));
+    if let Err(e) = store.save() {
+        eprintln!("meeting-notifications: failed to save shown preps: {e}");
+    }
+}
+
+/// Pure (testable): the prep ids in the stored map shown within the last day.
+fn shown_ids_from(stored: Option<&Value>, now_ms: i64) -> HashSet<i64> {
+    recent_shown(stored, now_ms)
+        .keys()
+        .filter_map(|id| id.parse().ok())
+        .collect()
+}
+
+/// Pure (testable): the stored map with entries older than a day dropped and
+/// `prep_id` recorded as shown at `now_ms`.
+fn with_shown(stored: Option<&Value>, prep_id: i64, now_ms: i64) -> Value {
+    let mut shown = recent_shown(stored, now_ms);
+    shown.insert(prep_id.to_string(), json!(now_ms));
+    Value::Object(shown)
+}
+
+fn recent_shown(stored: Option<&Value>, now_ms: i64) -> serde_json::Map<String, Value> {
+    stored
+        .and_then(Value::as_object)
+        .map(|shown| {
+            shown
+                .iter()
+                .filter(|(_, at)| at.as_i64().is_some_and(|at| now_ms - at < SHOWN_TTL_MS))
+                .map(|(id, at)| (id.clone(), at.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// UNUserNotificationCenter integration: a delegate receives the click on the
@@ -1691,6 +1751,29 @@ mod tests {
             "Weekly sync starts at 2:30 PM."
         );
         assert_eq!(due_prep_body(None, start), "Your meeting starts at 2:30 PM.");
+    }
+
+    #[test]
+    fn shown_ids_keep_only_the_last_day() {
+        let stored = json!({
+            "41": NOW_MS - 60_000,
+            "42": NOW_MS - SHOWN_TTL_MS,
+            "not-an-id": NOW_MS,
+            "43": "yesterday"
+        });
+        assert_eq!(shown_ids_from(Some(&stored), NOW_MS), HashSet::from([41]));
+        assert!(shown_ids_from(None, NOW_MS).is_empty());
+        assert!(shown_ids_from(Some(&json!([41])), NOW_MS).is_empty());
+    }
+
+    #[test]
+    fn with_shown_records_the_prep_and_drops_stale_entries() {
+        let stored = json!({ "41": NOW_MS - 60_000, "42": NOW_MS - SHOWN_TTL_MS });
+        assert_eq!(
+            with_shown(Some(&stored), 43, NOW_MS),
+            json!({ "41": NOW_MS - 60_000, "43": NOW_MS })
+        );
+        assert_eq!(with_shown(None, 43, NOW_MS), json!({ "43": NOW_MS }));
     }
 
     #[test]
