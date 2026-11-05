@@ -250,6 +250,15 @@ mod tests {
     }
 
     #[test]
+    fn process_tree_collects_all_descendants_only() {
+        // 10 = oats; 20 = WebView2 browser; 30 = its audio utility process;
+        // 40 = an unrelated app; 0 = the idle process, its own parent.
+        let processes = [(0, 0), (10, 1), (20, 10), (30, 20), (40, 1)];
+        assert_eq!(process_tree(10, &processes), HashSet::from([10, 20, 30]));
+        assert_eq!(process_tree(0, &processes), HashSet::from([0]));
+    }
+
+    #[test]
     fn stops_after_trigger_pids_release() {
         let mut m = Machine::new();
         m.tick(0, &pids(&[42]), true, false);
@@ -314,16 +323,31 @@ fn system_audio_active() -> bool {
     {
         coreaudio::system_audio_active(std::process::id() as i32)
     }
-    // No Windows output signal yet: report active so detection keeps its
-    // mic-only behavior there instead of never arming.
     #[cfg(target_os = "windows")]
     {
-        true
+        windows_audio::system_audio_active(std::process::id())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
+}
+
+/// `root` plus every process descending from it, given `(pid, parent_pid)`
+/// pairs. Used on Windows to exclude our own WebView2 children, which play
+/// library audio from processes other than ours.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn process_tree(root: u32, processes: &[(u32, u32)]) -> HashSet<u32> {
+    let mut tree = HashSet::from([root]);
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for &(pid, ppid) in processes {
+            if ppid == parent && pid != parent && tree.insert(pid) {
+                frontier.push(pid);
+            }
+        }
+    }
+    tree
 }
 
 /// Whether the per-process input API (macOS 14.4+) is available at runtime.
@@ -577,6 +601,80 @@ mod windows_audio {
             }
         }
         Ok(pids)
+    }
+
+    /// Whether any session on the default render (playback) endpoint is
+    /// active and owned by another app, i.e. sound is coming out of the
+    /// device. Skips the shared System Sounds session (pid 0) and our own
+    /// process tree, so library playback in oats' WebView2 doesn't count.
+    pub fn system_audio_active(our_pid: u32) -> bool {
+        let hr = initialize_mta();
+        if hr.is_err() {
+            return false;
+        }
+
+        let Some(processes) = process_list() else {
+            deinitialize();
+            return false;
+        };
+        let excluded = super::process_tree(our_pid, &processes);
+        let result = query_output_active(&excluded).unwrap_or(false);
+        deinitialize();
+        result
+    }
+
+    fn query_output_active(excluded: &HashSet<u32>) -> Result<bool, String> {
+        let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
+        let device = enumerator
+            .get_default_device(&Direction::Render)
+            .map_err(|e| e.to_string())?;
+        let manager = device
+            .get_iaudiosessionmanager()
+            .map_err(|e| e.to_string())?;
+        let sessions = manager
+            .get_audiosessionenumerator()
+            .map_err(|e| e.to_string())?;
+
+        for index in 0..sessions.get_count().map_err(|e| e.to_string())? {
+            let Ok(session) = sessions.get_session(index) else {
+                continue;
+            };
+            if session.get_state().ok() != Some(SessionState::Active) {
+                continue;
+            }
+            let Ok(pid) = session.get_process_id() else {
+                continue;
+            };
+            if pid != 0 && !excluded.contains(&pid) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `(pid, parent_pid)` for every running process; `None` if the snapshot
+    /// cannot be created (e.g. under resource pressure).
+    fn process_list() -> Option<Vec<(u32, u32)>> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+
+        let mut processes = Vec::new();
+        let snapshot =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut next = unsafe { Process32FirstW(snapshot, &mut entry) };
+        while next.is_ok() {
+            processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            next = unsafe { Process32NextW(snapshot, &mut entry) };
+        }
+        let _ = unsafe { CloseHandle(snapshot) };
+        Some(processes)
     }
 }
 
