@@ -547,6 +547,11 @@ export const local = {
   copyRecordingFile(id: string, kind: 'note' | 'transcript', dest: string): Promise<void> {
     return invoke('copy_recording_file', { id, kind, dest });
   },
+  /** Copy a recording's audio file to a user-picked absolute path.
+   *  Byte-for-byte copy; works for both vault (new) and legacy recordings. */
+  copyRecordingAudio(id: string, dest: string): Promise<void> {
+    return invoke('copy_recording_audio', { id, dest });
+  },
   /** Read a recording's note/transcript markdown for in-app rendering.
    *  Resolves to null when the file hasn't been generated yet. */
   readRecordingFile(id: string, kind: 'note' | 'transcript'): Promise<string | null> {
@@ -826,6 +831,17 @@ export async function pickMarkdownSavePath(defaultName: string): Promise<string 
   const picked = await saveDialog({
     defaultPath: defaultName,
     filters: [{ name: 'Markdown', extensions: ['md'] }],
+  });
+  return typeof picked === 'string' ? picked : null;
+}
+
+/** Open a native save dialog for an audio export; returns the chosen
+ *  absolute path, or null when the user cancels.
+ *  Requires `dialog:allow-save` for the calling window. */
+export async function pickAudioSavePath(defaultName: string): Promise<string | null> {
+  const picked = await saveDialog({
+    defaultPath: defaultName,
+    filters: [{ name: 'Audio', extensions: ['mp3'] }],
   });
   return typeof picked === 'string' ? picked : null;
 }

@@ -226,6 +226,7 @@ fn main() {
             commands::write_recording_note_title,
             commands::open_recording_file,
             commands::copy_recording_file,
+            commands::copy_recording_audio,
             commands::rename_local_recording,
             commands::list_local_speakers,
             commands::rename_local_speaker,

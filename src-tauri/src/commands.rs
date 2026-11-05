@@ -2272,6 +2272,53 @@ pub fn copy_recording_file(id: String, kind: String, dest: String) -> Result<(),
     })
 }
 
+/// Copy a recording's audio file to a user-picked path. The save-a-copy
+/// sibling of `read_recording_audio`: same path resolution (vault attachment
+/// for new recordings, legacy `recording.mp3` for old ones), but the bytes
+/// land wherever the caller's save dialog pointed.
+///
+/// `dest` must be absolute. The caller chooses *where* the bytes go but
+/// never *what* they are — the source is always the recording's audio file.
+#[tauri::command]
+pub fn copy_recording_audio(id: String, dest: String) -> Result<(), String> {
+    crate::storage::validate_recording_id(&id)?;
+    if !std::path::Path::new(&dest).is_absolute() {
+        return Err("Destination path must be absolute.".to_string());
+    }
+    let dir = recording_dir(&id)?;
+    let meta = crate::storage::read_meta(&dir)?;
+    let src = match meta.audio_file {
+        Some(audio_file) => {
+            crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file)
+        }
+        None => dir.join("recording.mp3"),
+    };
+    if !src.exists() {
+        return Err(format!("recording audio not found: {}", src.display()));
+    }
+
+    // Same same-file guard as `copy_recording_file`: `fs::copy(p, p)` with
+    // O_TRUNC would zero the source and report success.
+    if same_file::is_same_file(&src, &dest).unwrap_or(false) {
+        return Err(
+            "Pick a destination outside the vault — that path is the audio itself."
+                .to_string(),
+        );
+    }
+
+    // Atomic write: copy to a `.tmp` sibling then rename into place, so a
+    // partial write never clobbers whatever `dest` held before.
+    let tmp = std::path::Path::new(&dest).with_extension("tmp");
+    if let Err(e) = std::fs::copy(&src, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("copy audio file: {e}"));
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("finalize audio file: {e}")
+    })
+}
+
 /// Convert a web rect's top-left Y to an AppKit view's bottom-left Y.
 /// `view_height` is the content view's height in points; `y`/`height` are the
 /// button rect in CSS points (CSS px == AppKit points, so no DPR scaling).
@@ -4410,6 +4457,105 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("recording file not found"), "unexpected error: {err}");
+        assert!(!dest.exists(), "no file should be created when the source is missing");
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_audio_copies_vault_audio_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-01T10-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        let mut meta = test_meta(id);
+        meta.audio_file = Some("2026-09-01 Standup.mp3".into());
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let audio_bytes = b"RIFFWAVEFMT audio data";
+        crate::vault::write_audio("2026-09-01 Standup.mp3", audio_bytes).unwrap();
+
+        let dest = tmp.path().join("exported.mp3");
+        copy_recording_audio(id.into(), dest.to_string_lossy().into_owned()).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), audio_bytes);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_audio_copies_legacy_audio_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-01T11-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        // Legacy recording: no audio_file in meta.
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let audio_bytes = b"legacy mp3 bytes";
+        std::fs::write(dir.join("recording.mp3"), audio_bytes).unwrap();
+
+        let dest = tmp.path().join("legacy-exported.mp3");
+        copy_recording_audio(id.into(), dest.to_string_lossy().into_owned()).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), audio_bytes);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_audio_refuses_to_copy_onto_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-01T12-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        // Legacy path so the src is inside the recording dir.
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+        let audio_bytes = b"audio content";
+        let src = dir.join("recording.mp3");
+        std::fs::write(&src, audio_bytes).unwrap();
+
+        let err = copy_recording_audio(
+            id.into(),
+            src.to_string_lossy().into_owned(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("outside the vault"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(&src).unwrap(), audio_bytes);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    #[test]
+    fn copy_recording_audio_rejects_relative_destination() {
+        let err = copy_recording_audio(
+            "2026-09-01T10-00-00Z".into(),
+            "relative/exported.mp3".into(),
+        )
+        .unwrap_err();
+        assert!(err.contains("absolute"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn copy_recording_audio_errors_when_audio_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = crate::vault::meta_root().unwrap();
+        let id = "2026-09-01T13-00-00Z";
+        let dir = crate::storage::create_recording_dir(&root, id).unwrap();
+        // Meta with no audio_file: legacy path expected at recording.mp3, but we
+        // don't write that file.
+        let meta = test_meta(id);
+        crate::storage::write_meta(&dir, &meta).unwrap();
+
+        let dest = tmp.path().join("exported.mp3");
+        let err = copy_recording_audio(
+            id.into(),
+            dest.to_string_lossy().into_owned(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("recording audio not found"), "unexpected error: {err}");
         assert!(!dest.exists(), "no file should be created when the source is missing");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }

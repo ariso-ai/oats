@@ -34,3 +34,13 @@ export function transcriptFilename(
   const stamp = isoDateStamp(startAt);
   return stamp ? `${stem} - ${stamp}.md` : `${stem}.md`;
 }
+
+/** Default name offered in the audio save dialog: `{title} audio - {date}.mp3`. */
+export function audioFilename(
+  title: string | undefined,
+  startAt: string | undefined
+): string {
+  const stem = `${sanitizeFilename(title)} audio`;
+  const stamp = isoDateStamp(startAt);
+  return stamp ? `${stem} - ${stamp}.mp3` : `${stem}.mp3`;
+}
