@@ -227,6 +227,20 @@
         <div v-if="showTabAudio" class="tab-audio">
           <RecordingAudioPlayer :key="detail.id" :load="loadAudio" />
         </div>
+        <!-- Download audio = byte-for-byte copy of the recording's audio file.
+             Shown only on the Transcript tab for local recordings with audio,
+             next to the transcript download button. -->
+        <button
+          v-if="showDownloadAudio"
+          class="tab-download"
+          type="button"
+          :disabled="downloadingAudio"
+          title="Download audio"
+          @click="onDownloadAudioClick"
+        >
+          <svg viewBox="0 0 24 24" class="ic"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+          Download audio
+        </button>
         <!-- Download = copy the recording's existing transcript.md to a path the user
              picks. Sits in the tab row beside Regenerate notes, and like it is shown only
              when usable rather than rendered-and-disabled. Local only: an Ariso transcript
@@ -335,6 +349,9 @@
         <div v-show="activeTab === 'transcript'" class="tab-pane">
           <p v-if="transcriptDownloadError" class="transcript-download-error" role="alert">
             ⚠ {{ transcriptDownloadError }}
+          </p>
+          <p v-if="audioDownloadError" class="transcript-download-error" role="alert">
+            ⚠ {{ audioDownloadError }}
           </p>
           <!-- Audio playback sits right under the tabs, surfaced only while the
                Transcript tab is active; keyed by meeting id so switching selection
@@ -469,9 +486,9 @@ import { useLocalSpeakerRename } from '../composables/useLocalSpeakerRename';
 import { avatarColor, initials } from './avatarStyle';
 import ArisoActionItems from './ArisoActionItems.vue';
 import { composeLocalShareText } from './meetingShareText';
-import { transcriptFilename } from './transcriptDownloadName';
+import { transcriptFilename, audioFilename } from './transcriptDownloadName';
 import { parseLocalTranscript } from './localTranscript';
-import { shareTextNative, local, pickMarkdownSavePath } from '../tauri';
+import { shareTextNative, local, pickMarkdownSavePath, pickAudioSavePath } from '../tauri';
 import { ariJoinChip, isTranscriptionFailedMeetingStatus } from '../composables/meetingStatus';
 import {
   useLocalRecordingProgress,
@@ -984,6 +1001,15 @@ const showDownloadTranscript = computed(
     !!detail.value?.hasTranscript
 );
 
+// The audio download action: shown on the Transcript tab whenever the local
+// recording has an audio file. Symmetric with `showDownloadTranscript`.
+const showDownloadAudio = computed(
+  () =>
+    !!detail.value?.isLocal &&
+    activeTab.value === 'transcript' &&
+    !!detail.value?.hasAudioRecording
+);
+
 // The lone play control moves up into the tab row; a multi-clip recording keeps its
 // per-clip players in the pane instead. Gated on the Transcript tab like the audio block
 // it replaces, so it is created only when that tab is open (and torn down with it, which
@@ -1250,6 +1276,28 @@ async function onDownloadTranscriptClick(): Promise<void> {
   }
 }
 
+const audioDownloadError = ref<string | null>(null);
+const downloadingAudio = ref(false);
+
+async function onDownloadAudioClick(): Promise<void> {
+  const d = detail.value;
+  if (!d?.isLocal || !d.hasAudioRecording || downloadingAudio.value) return;
+  const my = reqId;
+  audioDownloadError.value = null;
+  downloadingAudio.value = true;
+  try {
+    const dest = await pickAudioSavePath(audioFilename(d.title, d.startAt));
+    if (!dest) return; // canceled — silent no-op
+    await local.copyRecordingAudio(d.id, dest);
+  } catch (e) {
+    if (my !== reqId) return;
+    audioDownloadError.value =
+      `Couldn't save the audio: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    if (my === reqId) downloadingAudio.value = false;
+  }
+}
+
 // Whole-note delete (local recordings only). Blocked while the pipeline is
 // still in flight: both the finalize/STT task and the notes task write into the
 // recording's folder AND the vault, and `write_note` targets the vault root,
@@ -1404,6 +1452,8 @@ async function load(item: MeetingListItem | null): Promise<void> {
   clipDeleteError.value = null;
   transcriptDownloadError.value = null;
   downloadingTranscript.value = false;
+  audioDownloadError.value = null;
+  downloadingAudio.value = false;
   showNoteDeleteConfirm.value = false;
   noteDeleteError.value = null;
   deletingNote.value = false;
@@ -2158,6 +2208,9 @@ const durationLabel = computed<string | null>(() => {
    button then sits directly beside it instead of splitting the gap. */
 .tab-status ~ .tab-download { margin-left: 0; }
 .tab-status ~ .tab-audio, .tab-audio ~ .tab-download { margin-left: 0; }
+/* When two download buttons are shown together (audio + transcript), only the
+   first gets the auto margin that pushes them to the right end of the row. */
+.tab-download ~ .tab-download { margin-left: 0; }
 
 /* Content */
 .card-content { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 24px 24px; }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeFilename, isoDateStamp, transcriptFilename } from './transcriptDownloadName';
+import { sanitizeFilename, isoDateStamp, transcriptFilename, audioFilename } from './transcriptDownloadName';
 
 describe('sanitizeFilename', () => {
   it('keeps an ordinary title unchanged', () => {
@@ -61,6 +61,24 @@ describe('transcriptFilename', () => {
   it('applies the default title fallback', () => {
     expect(transcriptFilename('', '2026-08-30T12:00:00Z')).toBe(
       'Meeting transcript - 2026-08-30.md'
+    );
+  });
+});
+
+describe('audioFilename', () => {
+  it('assembles title, suffix, and date', () => {
+    expect(audioFilename('Weekly sync', '2026-08-30T12:00:00Z')).toBe(
+      'Weekly sync audio - 2026-08-30.mp3'
+    );
+  });
+
+  it('omits the date separator when the date is unknown', () => {
+    expect(audioFilename('Weekly sync', undefined)).toBe('Weekly sync audio.mp3');
+  });
+
+  it('applies the default title fallback', () => {
+    expect(audioFilename('', '2026-08-30T12:00:00Z')).toBe(
+      'Meeting audio - 2026-08-30.mp3'
     );
   });
 });
