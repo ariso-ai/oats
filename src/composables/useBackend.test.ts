@@ -25,6 +25,9 @@ const deleteMeetingRecordingClip = vi.fn();
 const getMeetingPrepApi = vi.fn();
 const listActionItemsByDay = vi.fn();
 const listFollowUpsBySource = vi.fn();
+const createActionItemFollowUp = vi.fn();
+const setFollowUpCompleted = vi.fn();
+const setVaultTaskDone = vi.fn();
 const reportUploadFailure = vi.fn(() => Promise.resolve());
 
 vi.mock('./useDiagnostics', () => ({
@@ -37,6 +40,7 @@ vi.mock('../tauri', () => ({
     modelStatus: () => modelStatus(),
     listRecordings: () => listRecordings(),
     listVaultTasks: () => listVaultTasks(),
+    setVaultTaskDone: (...a: unknown[]) => setVaultTaskDone(...a),
     renameRecording: (...a: unknown[]) => renameRecording(...a),
     deleteRecording: (...a: unknown[]) => deleteRecording(...a),
     readRecordingAudio: (...a: unknown[]) => readRecordingAudio(...a),
@@ -69,6 +73,8 @@ vi.mock('./useMeetingApi', async (importOriginal) => ({
     getMeetingPrep: (...a: unknown[]) => getMeetingPrepApi(...a),
     listActionItemsByDay: (...a: unknown[]) => listActionItemsByDay(...a),
     listFollowUpsBySource: (...a: unknown[]) => listFollowUpsBySource(...a),
+    createActionItemFollowUp: (...a: unknown[]) => createActionItemFollowUp(...a),
+    setFollowUpCompleted: (...a: unknown[]) => setFollowUpCompleted(...a),
   }),
 }));
 
@@ -848,7 +854,13 @@ describe('action items', () => {
     expect(entries).toEqual([
       {
         meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
-        items: [{ name: 'Dana', item: 'Send pricing deck' }],
+        items: [
+          {
+            name: 'Dana',
+            item: 'Send pricing deck',
+            ref: { kind: 'ariso', meetingId: '9', meetingTitle: 'Q3 Pricing Review', text: 'Send pricing deck' },
+          },
+        ],
       },
     ]);
   });
@@ -937,9 +949,105 @@ describe('action items', () => {
     expect(entries).toEqual([
       {
         meeting: { id: '9', title: 'Q3 Pricing Review', timestamp: '2026-08-31T09:00:00Z' },
-        items: [{ name: 'Me', item: 'Book the venue' }],
+        items: [
+          {
+            name: 'Me',
+            item: 'Book the venue',
+            ref: {
+              kind: 'ariso',
+              meetingId: '9',
+              meetingTitle: 'Q3 Pricing Review',
+              text: 'Book the venue',
+              followUpId: '2',
+            },
+          },
+        ],
       },
     ]);
+  });
+
+  it('Ariso includes checked-off items, marked done by the user, when asked', async () => {
+    listActionItemsByDay.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === '2026-08-31'
+          ? [
+              {
+                meetingId: 9,
+                meetingTitle: 'Q3 Pricing Review',
+                startAt: '2026-08-31T09:00:00Z',
+                actionItems: [{ item: 'Send pricing deck' }, { item: 'Book the venue' }],
+              },
+            ]
+          : []
+      )
+    );
+    listFollowUpsBySource.mockResolvedValue([
+      { id: '1', description: 'Send pricing deck', completed: true, completedAt: '2026-08-31T10:00:00Z' },
+    ]);
+
+    const entries = await new ArisoBackend().listActionItems({ includeCompletedSinceDays: 14 });
+
+    expect(entries).toHaveLength(1);
+    const [done, open] = entries[0].items;
+    expect(done.item).toBe('Send pricing deck');
+    expect(done.completion).toEqual({ by: 'user', at: '2026-08-31T10:00:00Z' });
+    expect(done.ref).toMatchObject({ kind: 'ariso', followUpId: '1' });
+    expect(open.item).toBe('Book the venue');
+    expect(open.completion).toBeUndefined();
+  });
+
+  it('Ariso drops items completed before the window', async () => {
+    listActionItemsByDay.mockImplementation((day: string) =>
+      Promise.resolve(
+        day === '2026-08-31'
+          ? [
+              {
+                meetingId: 9,
+                meetingTitle: 'Q3 Pricing Review',
+                startAt: '2026-08-31T09:00:00Z',
+                actionItems: [{ item: 'Old' }, { item: 'Undated' }],
+              },
+            ]
+          : []
+      )
+    );
+    listFollowUpsBySource.mockResolvedValue([
+      { id: '1', description: 'Old', completed: true, completedAt: '2026-08-01T10:00:00Z' },
+      { id: '2', description: 'Undated', completed: true },
+    ]);
+
+    const entries = await new ArisoBackend().listActionItems({ includeCompletedSinceDays: 14 });
+
+    // Without a completion date the item's own meeting (inside the window)
+    // is the best evidence it is recent, so it stays.
+    expect(entries[0].items.map((i) => i.item)).toEqual(['Undated']);
+    expect(entries[0].items[0].completion).toEqual({ by: 'user' });
+  });
+
+  it('Ariso completes an item by creating its follow-up first', async () => {
+    createActionItemFollowUp.mockResolvedValue({ id: '77', description: 'Ship it', completed: false });
+    setFollowUpCompleted.mockResolvedValue(undefined);
+
+    const next = await new ArisoBackend().setActionItemDone(
+      { kind: 'ariso', meetingId: '9', meetingTitle: 'Sync', text: 'Ship it' },
+      true
+    );
+
+    expect(createActionItemFollowUp).toHaveBeenCalledWith('9', 'Sync', 'Ship it');
+    expect(setFollowUpCompleted).toHaveBeenCalledWith('77', true);
+    expect(next).toEqual({ kind: 'ariso', meetingId: '9', meetingTitle: 'Sync', text: 'Ship it', followUpId: '77' });
+  });
+
+  it('Ariso reopens through the existing follow-up', async () => {
+    setFollowUpCompleted.mockResolvedValue(undefined);
+
+    await new ArisoBackend().setActionItemDone(
+      { kind: 'ariso', meetingId: '9', meetingTitle: 'Sync', text: 'Ship it', followUpId: '5' },
+      false
+    );
+
+    expect(createActionItemFollowUp).not.toHaveBeenCalled();
+    expect(setFollowUpCompleted).toHaveBeenCalledWith('5', false);
   });
 
   it('Ariso keeps a meeting’s items when its follow-up lookup fails', async () => {
@@ -986,7 +1094,13 @@ describe('action items', () => {
 
   it('local joins vault tasks onto their recordings', async () => {
     listVaultTasks.mockResolvedValue([
-      { oatsId: '2026-06-02T14-30-05Z', tasks: ['Ship the RFC', 'Email legal'] },
+      {
+        oatsId: '2026-06-02T14-30-05Z',
+        tasks: [
+          { text: 'Ship the RFC', line: 1, raw: '- [ ] Ship the RFC', done: false, doneAt: null },
+          { text: 'Email legal', line: 2, raw: '- [ ] Email legal', done: false, doneAt: null },
+        ],
+      },
     ]);
     listRecordings.mockResolvedValue([
       {
@@ -1013,12 +1127,27 @@ describe('action items', () => {
       hasNote: true,
       hasTranscript: true,
     });
-    expect(entries[0].items).toEqual([{ item: 'Ship the RFC' }, { item: 'Email legal' }]);
+    expect(entries[0].items).toEqual([
+      {
+        item: 'Ship the RFC',
+        ref: { kind: 'local', oatsId: '2026-06-02T14-30-05Z', line: 1, expected: '- [ ] Ship the RFC' },
+      },
+      {
+        item: 'Email legal',
+        ref: { kind: 'local', oatsId: '2026-06-02T14-30-05Z', line: 2, expected: '- [ ] Email legal' },
+      },
+    ]);
   });
 
   it('local trims whitespace-only tasks out of a group', async () => {
     listVaultTasks.mockResolvedValue([
-      { oatsId: '2026-06-02T14-30-05Z', tasks: ['  ', 'Real task'] },
+      {
+        oatsId: '2026-06-02T14-30-05Z',
+        tasks: [
+          { text: '  ', line: 0, raw: '- [ ]   ', done: false, doneAt: null },
+          { text: 'Real task', line: null, raw: '', done: false, doneAt: null },
+        ],
+      },
     ]);
     listRecordings.mockResolvedValue([
       {
@@ -1036,11 +1165,20 @@ describe('action items', () => {
     const entries = await new LocalBackend().listActionItems();
 
     expect(entries).toHaveLength(1);
+    // A legacy bullet (no line) has nothing to tick, so it carries no ref.
     expect(entries[0].items).toEqual([{ item: 'Real task' }]);
   });
 
   it('local drops a group whose tasks are all whitespace', async () => {
-    listVaultTasks.mockResolvedValue([{ oatsId: '2026-06-02T14-30-05Z', tasks: ['  ', '\t'] }]);
+    listVaultTasks.mockResolvedValue([
+      {
+        oatsId: '2026-06-02T14-30-05Z',
+        tasks: [
+          { text: '  ', line: 0, raw: '', done: false, doneAt: null },
+          { text: '\t', line: 1, raw: '', done: false, doneAt: null },
+        ],
+      },
+    ]);
     listRecordings.mockResolvedValue([
       {
         id: '2026-06-02T14-30-05Z',
@@ -1059,7 +1197,9 @@ describe('action items', () => {
 
   it('local skips vault notes whose recording is gone', async () => {
     // Nothing to open in the detail pane, so the row would be a dead end.
-    listVaultTasks.mockResolvedValue([{ oatsId: 'orphan', tasks: ['Ship the RFC'] }]);
+    listVaultTasks.mockResolvedValue([
+      { oatsId: 'orphan', tasks: [{ text: 'Ship the RFC', line: 0, raw: '', done: false, doneAt: null }] },
+    ]);
     listRecordings.mockResolvedValue([]);
 
     await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
@@ -1070,6 +1210,80 @@ describe('action items', () => {
     listRecordings.mockResolvedValue([]);
 
     await expect(new LocalBackend().listActionItems()).resolves.toEqual([]);
+  });
+
+  const standup = {
+    id: '2026-06-02T14-30-05Z',
+    title: 'Standup',
+    createdAt: '2026-06-02T14:30:05Z',
+    durationSeconds: 42,
+    status: 'done',
+    hasAudio: true,
+    hasNote: true,
+    hasTranscript: true,
+  };
+
+  it('local leaves done tasks out by default', async () => {
+    listVaultTasks.mockResolvedValue([
+      {
+        oatsId: standup.id,
+        tasks: [
+          { text: 'Open', line: 1, raw: '- [ ] Open', done: false, doneAt: null },
+          { text: 'Done', line: 2, raw: '- [x] Done ✅ 2026-08-30', done: true, doneAt: '2026-08-30' },
+        ],
+      },
+    ]);
+    listRecordings.mockResolvedValue([standup]);
+
+    const entries = await new LocalBackend().listActionItems();
+
+    expect(entries[0].items.map((i) => i.item)).toEqual(['Open']);
+  });
+
+  it('local includes tasks done inside the window, dated by their ✅ stamp', async () => {
+    listVaultTasks.mockResolvedValue([
+      {
+        oatsId: standup.id,
+        tasks: [
+          { text: 'Recent', line: 1, raw: '- [x] Recent ✅ 2026-08-30', done: true, doneAt: '2026-08-30' },
+          { text: 'Edge', line: 2, raw: '- [x] Edge ✅ 2026-08-17', done: true, doneAt: '2026-08-17' },
+          { text: 'Stale', line: 3, raw: '- [x] Stale ✅ 2026-08-16', done: true, doneAt: '2026-08-16' },
+          { text: 'Undated', line: 4, raw: '- [x] Undated', done: true, doneAt: null },
+        ],
+      },
+    ]);
+    listRecordings.mockResolvedValue([standup]);
+
+    const entries = await new LocalBackend().listActionItems({ includeCompletedSinceDays: 14 });
+
+    // "Now" is Aug 31: the last 14 days run back to Aug 17. An undated tick
+    // (made in Obsidian without the Tasks plugin) can't be placed in the window.
+    expect(entries[0].items.map((i) => i.item)).toEqual(['Recent', 'Edge']);
+    expect(entries[0].items[0].completion).toEqual({ by: 'user', at: '2026-08-30' });
+  });
+
+  it('local ticks the line it listed and hands back the guard for the next write', async () => {
+    setVaultTaskDone.mockResolvedValue('## Action Items\n- [x] Ship it ✅ 2026-08-31\r\n- [ ] Next\n');
+
+    const next = await new LocalBackend().setActionItemDone(
+      { kind: 'local', oatsId: 'rec', line: 1, expected: '- [ ] Ship it' },
+      true
+    );
+
+    expect(setVaultTaskDone).toHaveBeenCalledWith('rec', 1, '- [ ] Ship it', true);
+    expect(next).toEqual({ kind: 'local', oatsId: 'rec', line: 1, expected: '- [x] Ship it ✅ 2026-08-31' });
+  });
+
+  it('a backend refuses a ref from the other backend', async () => {
+    await expect(
+      new LocalBackend().setActionItemDone(
+        { kind: 'ariso', meetingId: '9', meetingTitle: 'Sync', text: 'Ship it' },
+        true
+      )
+    ).rejects.toThrow();
+    await expect(
+      new ArisoBackend().setActionItemDone({ kind: 'local', oatsId: 'r', line: 0, expected: '' }, true)
+    ).rejects.toThrow();
   });
 
   it('Ariso advertises action items', () => {

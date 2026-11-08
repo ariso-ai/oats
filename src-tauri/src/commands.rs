@@ -1774,24 +1774,27 @@ pub fn list_local_recordings() -> Result<Vec<crate::storage::RecordingSummary>, 
     Ok(summaries)
 }
 
-/// One vault note's open tasks, keyed by the recording that produced the note.
+/// One vault note's tasks, keyed by the recording that produced the note.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultTaskGroup {
     pub oats_id: String,
-    pub tasks: Vec<String>,
+    pub tasks: Vec<crate::vault::NoteTask>,
 }
 
-/// Every open Obsidian task in the vault's oats-generated notes, grouped by
-/// recording. Notes with no open tasks are omitted; unreadable notes are
-/// skipped with the same "skip junk" tolerance as `list_local_recordings`.
-/// Sorted by id so the result is stable (`scan_vault` returns a HashMap).
+/// Every Obsidian task — open and done — in the vault's oats-generated notes,
+/// grouped by recording. Done tasks come back so the Todos view can show its
+/// Completed section; each task carries the body line and raw text that
+/// `set_vault_task_done` guards on. Notes with no tasks are omitted;
+/// unreadable notes are skipped with the same "skip junk" tolerance as
+/// `list_local_recordings`. Sorted by id so the result is stable (`scan_vault`
+/// returns a HashMap).
 #[tauri::command]
 pub fn list_vault_tasks() -> Result<Vec<VaultTaskGroup>, String> {
     let mut groups = Vec::new();
     for (oats_id, path) in crate::vault::scan_vault()? {
         let Ok(contents) = std::fs::read_to_string(&path) else { continue };
-        let tasks = crate::vault::open_tasks(&contents);
+        let tasks = crate::vault::note_tasks(&contents);
         if !tasks.is_empty() {
             groups.push(VaultTaskGroup { oats_id, tasks });
         }
@@ -3477,7 +3480,7 @@ mod tests {
     }
 
     #[test]
-    fn list_vault_tasks_groups_open_tasks_by_recording() {
+    fn list_vault_tasks_groups_tasks_by_recording() {
         // SAFETY: command tests run with --test-threads=1, so the process-wide
         // ARISO_ROOT mutation below has no concurrent writer.
         let tmp = tempfile::tempdir().unwrap();
@@ -3509,10 +3512,16 @@ mod tests {
 
         let groups = list_vault_tasks().unwrap();
 
-        // Only the recording with open tasks comes back.
-        assert_eq!(groups.len(), 1);
+        // Both recordings come back, sorted by id; done tasks are included so
+        // the Todos view can show them under Completed.
+        assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].oats_id, "2026-06-02T14-30-05Z");
-        assert_eq!(groups[0].tasks, vec!["Ship the RFC", "Email legal"]);
+        let texts: Vec<&str> = groups[0].tasks.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["Ship the RFC", "Email legal"]);
+        assert!(groups[0].tasks.iter().all(|t| !t.done && t.line.is_some()));
+        assert_eq!(groups[1].oats_id, "2026-06-03T09-00-00Z");
+        assert_eq!(groups[1].tasks.len(), 1);
+        assert!(groups[1].tasks[0].done);
 
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }

@@ -384,9 +384,23 @@ export interface RecordingStatusView {
   error?: string;
 }
 
+/** One Obsidian task in a vault note (`vault::NoteTask`). */
+export interface VaultTask {
+  /** The task's own text, Tasks emoji metadata stripped. */
+  text: string;
+  /** Index into the note's body lines — `setVaultTaskDone`'s `line`. Null for
+   *  a legacy plain bullet, which has no checkbox to tick. */
+  line: number | null;
+  /** The line as it stands on disk — `setVaultTaskDone`'s `expected` guard. */
+  raw: string;
+  done: boolean;
+  /** The `✅ YYYY-MM-DD` completion date of a done task, when it carries one. */
+  doneAt: string | null;
+}
+
 export interface VaultTaskGroup {
   oatsId: string;
-  tasks: string[];
+  tasks: VaultTask[];
 }
 
 export interface LocalFinalizeResult {
@@ -482,8 +496,8 @@ export const local = {
   listRecordings(): Promise<RecordingSummary[]> {
     return invoke<RecordingSummary[]>('list_local_recordings');
   },
-  /** Open Obsidian tasks found in the vault's generated notes, grouped by the
-   *  recording each note belongs to. */
+  /** Obsidian tasks (open and done) found in the vault's generated notes,
+   *  grouped by the recording each note belongs to. */
   listVaultTasks(): Promise<VaultTaskGroup[]> {
     return invoke<VaultTaskGroup[]>('list_vault_tasks');
   },

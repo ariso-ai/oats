@@ -11,6 +11,8 @@ const usesMeetingPicker = vi.fn(() => false);
 const supportsSearch = vi.fn(() => false);
 const supportsActionItems = vi.fn(() => false);
 const listActionItems = vi.fn();
+const setActionItemDone = vi.fn();
+const revealActionItems = vi.fn();
 const openRecordingFile = vi.fn();
 const readRecordingAudio = vi.fn();
 const readRecordingNote = vi.fn();
@@ -88,7 +90,8 @@ vi.mock('../composables/useBackend', async (importOriginal) => {
         supportsSearch: supportsSearch(),
         supportsActionItems: supportsActionItems(),
         listMeetings: () => listMeetings(),
-        listActionItems: () => listActionItems(),
+        listActionItems: (...a: unknown[]) => listActionItems(...a),
+        setActionItemDone: (...a: unknown[]) => setActionItemDone(...a),
         searchMeetings: (query: string) => searchMeetings(query),
         getMeetingDetail: (meeting: unknown) => getMeetingDetail(meeting),
         getMeetingPrep: (prepId: number) => getMeetingPrep(prepId),
@@ -191,6 +194,7 @@ const detailStub = {
   methods: {
     openPrepTab: (meetingId?: string) => openPrepTab(meetingId),
     saveNotesNow: () => saveNotesNow(),
+    revealActionItems: (meetingId: string) => revealActionItems(meetingId),
   },
   template:
     '<div class="detail-stub" :data-meeting="item?.id" :data-prep="item?.prepId"><button class="btn-close" @click="$emit(\'close\')">x</button></div>',
@@ -2162,9 +2166,24 @@ describe('LibraryView Todo tab', () => {
   };
   const todoButton = (wrapper: ReturnType<typeof mount>) =>
     wrapper.findAll('.nav-tab').find((b) => b.text().includes('Todo'))!;
+  const todoRows = (wrapper: ReturnType<typeof mount>) => wrapper.findAll('li.todo-row');
+  const filterRows = (wrapper: ReturnType<typeof mount>) => wrapper.findAll('.todo-filter');
 
   function actionItems(meeting: { id: string; title: string; timestamp: string }, ...items: string[]) {
-    return [{ meeting, items: items.map((item) => ({ item })) }];
+    return [
+      {
+        meeting,
+        items: items.map((item) => ({
+          item,
+          ref: { kind: 'ariso', meetingId: meeting.id, meetingTitle: meeting.title, text: item },
+        })),
+      },
+    ];
+  }
+
+  async function openTodos(wrapper: ReturnType<typeof mount>) {
+    await todoButton(wrapper).trigger('click');
+    await flushPromises();
   }
 
   it('keeps the Todo tab disabled for a backend that has no action items', async () => {
@@ -2179,112 +2198,125 @@ describe('LibraryView Todo tab', () => {
     expect(listActionItems).not.toHaveBeenCalled();
   });
 
-  it('enables the Todo tab for a local backend that has vault tasks', async () => {
+  it('enables the Todo tab for a backend with action items, and loads them only when opened', async () => {
     backendId.mockReturnValue('local');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue([]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+
+    expect(todoButton(wrapper).attributes('disabled')).toBeUndefined();
+    // No count on the tab, so nothing to fetch until the tab is opened.
+    expect(todoButton(wrapper).text().trim()).toBe('Todos');
+    expect(listActionItems).not.toHaveBeenCalled();
+
+    await openTodos(wrapper);
+    expect(listActionItems).toHaveBeenCalledWith({ includeCompletedSinceDays: 14 });
+  });
+
+  it('swaps the detail card for the Todos pane, and back on the Meetings tab', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Some meeting' })]);
     listActionItems.mockResolvedValue(
-      actionItems(
-        { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
-        'Ship the RFC'
-      )
+      actionItems({ id: 'a', title: 'Some meeting', timestamp: daysAgo(0).toISOString() }, 'Ship the RFC')
     );
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    expect(todoButton(wrapper).attributes('disabled')).toBeUndefined();
+    await openTodos(wrapper);
 
-    await todoButton(wrapper).trigger('click');
+    expect(wrapper.findComponent({ name: 'TodosView' }).exists()).toBe(true);
+    expect(wrapper.find('.detail-slot').attributes('style')).toContain('display: none');
+    expect(todoRows(wrapper)).toHaveLength(1);
+    expect(wrapper.text()).toContain('Ship the RFC');
+
+    await wrapper.findAll('.nav-tab').find((b) => b.text().includes('Meetings'))!.trigger('click');
     await flushPromises();
 
-    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
-    expect(wrapper.text()).toContain('Ship the RFC');
+    expect(wrapper.findComponent({ name: 'TodosView' }).exists()).toBe(false);
+    expect(wrapper.find('.detail-slot').attributes('style') ?? '').not.toContain('display: none');
   });
 
-  it('lists action items grouped by day when the tab is opened', async () => {
+  it('turns the sidebar into a filter list: All todos, then meetings by day with open counts', async () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
-    const today = daysAgo(0);
-    const yesterday = daysAgo(1);
     listActionItems.mockResolvedValue([
       ...actionItems(
-        { id: '9', title: 'Q3 Pricing Review', timestamp: today.toISOString() },
+        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
         'Send pricing deck',
         'Follow up with finance'
       ),
-      ...actionItems(
-        { id: '7', title: 'Platform Sync', timestamp: yesterday.toISOString() },
-        'Draft migration plan'
-      ),
+      ...actionItems({ id: '7', title: 'Platform Sync', timestamp: daysAgo(1).toISOString() }, 'Draft migration plan'),
     ]);
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
+    await openTodos(wrapper);
 
-    expect(listActionItems).toHaveBeenCalledTimes(1);
-
-    const headers = wrapper.findAll('.group-label').map((h) => h.text());
+    const headers = wrapper.findAll('.sidebar .group-label').map((h) => h.text());
     expect(headers[0]).toContain('TODAY');
     expect(headers[1]).toContain('YESTERDAY');
+    const filters = filterRows(wrapper).map((r) => [r.find('.mi-title').text(), r.find('.todo-count').text()]);
+    expect(filters).toEqual([
+      ['All todos', '3'],
+      ['Q3 Pricing Review', '2'],
+      ['Platform Sync', '1'],
+    ]);
+    expect(filterRows(wrapper)[0].classes()).toContain('selected');
+    expect(todoRows(wrapper)).toHaveLength(3);
 
-    const rows = wrapper.findAll('.todo-item');
-    expect(rows).toHaveLength(3);
-    expect(rows[0].text()).toContain('Send pricing deck');
-    expect(rows[0].text()).toContain('Q3 Pricing Review');
-    expect(rows[2].text()).toContain('Draft migration plan');
+    await filterRows(wrapper)[2].trigger('click');
+
+    expect(filterRows(wrapper)[2].classes()).toContain('selected');
+    expect(wrapper.find('.todos .head-title').text()).toBe('Todos · Platform Sync');
+    expect(todoRows(wrapper).map((r) => r.find('.todo-text').text())).toEqual(['Draft migration plan']);
+
+    await wrapper.find('.todos .head-clear').trigger('click');
+    expect(todoRows(wrapper)).toHaveLength(3);
   });
 
-  it('opens the source meeting in the detail pane when an action item is clicked', async () => {
+  it('opening a todo’s meeting moves to the Meetings tab and reveals its action items', async () => {
     backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
     listActionItems.mockResolvedValue(
-      actionItems(
-        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
-        'Send pricing deck'
-      )
+      actionItems({ id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() }, 'Send pricing deck')
     );
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
-    await wrapper.findAll('.todo-item')[0].trigger('click');
+    await openTodos(wrapper);
+    await todoRows(wrapper)[0].find('.todo-act').trigger('click');
     await flushPromises();
 
+    expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('9');
-    expect(wrapper.findAll('.todo-item')[0].classes()).toContain('selected');
+    expect(revealActionItems).toHaveBeenCalledWith('9');
   });
 
-  it('drops a todo ticked in the detail pane without flashing the loading state', async () => {
-    backendId.mockReturnValue('local');
+  it('checks a todo off through the active backend', async () => {
+    backendId.mockReturnValue('ariso');
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
-    const meeting = { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() };
-    listActionItems.mockResolvedValue(actionItems(meeting, 'Ship the RFC', 'Email legal'));
+    const entries = actionItems(
+      { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
+      'Send pricing deck'
+    );
+    listActionItems.mockResolvedValue(entries);
+    setActionItemDone.mockImplementation(async (r: unknown) => ({ ...(r as object), followUpId: '1' }));
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
-    await wrapper.findAll('.todo-item')[0].trigger('click');
-    await flushPromises();
-    expect(wrapper.findAll('.todo-item')).toHaveLength(2);
-
-    listActionItems.mockResolvedValue(actionItems(meeting, 'Email legal'));
-    wrapper.findComponent({ name: 'MeetingDetailView' }).vm.$emit('tasks-changed', { id: meeting.id });
-    await nextTick();
-    expect(wrapper.text()).not.toContain('Loading…');
+    await openTodos(wrapper);
+    await todoRows(wrapper)[0].find('input').setValue(true);
     await flushPromises();
 
-    const rows = wrapper.findAll('.todo-item');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].text()).toContain('Email legal');
-    // The meeting stays open in the detail pane.
-    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe(meeting.id);
+    expect(setActionItemDone).toHaveBeenCalledWith(entries[0].items[0].ref, true);
+    expect(wrapper.find('.todos-toast').exists()).toBe(true);
   });
 
   it('does not reload action items for a task ticked outside the Todo tab', async () => {
@@ -2310,8 +2342,7 @@ describe('LibraryView Todo tab', () => {
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
+    await openTodos(wrapper);
 
     expect(wrapper.text()).toContain('Could not load action items.');
   });
@@ -2324,11 +2355,10 @@ describe('LibraryView Todo tab', () => {
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
+    await openTodos(wrapper);
 
-    expect(wrapper.text()).toContain('No action items.');
-    expect(wrapper.findAll('.meeting-item')).toHaveLength(0);
+    expect(wrapper.text()).toContain('Action items from your meetings will show up here.');
+    expect(filterRows(wrapper).map((r) => r.find('.mi-title').text())).toEqual(['All todos']);
   });
 
   it('falls back to the meetings list when the backend switches to one without action items', async () => {
@@ -2336,17 +2366,13 @@ describe('LibraryView Todo tab', () => {
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
     listActionItems.mockResolvedValue(
-      actionItems(
-        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
-        'Send pricing deck'
-      )
+      actionItems({ id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() }, 'Send pricing deck')
     );
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
-    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    await openTodos(wrapper);
+    expect(todoRows(wrapper)).toHaveLength(1);
 
     backendId.mockReturnValue('local');
     supportsActionItems.mockReturnValue(false);
@@ -2354,7 +2380,7 @@ describe('LibraryView Todo tab', () => {
     emitEvent('backend://changed', null);
     await flushPromises();
 
-    expect(wrapper.findAll('.todo-item')).toHaveLength(0);
+    expect(todoRows(wrapper)).toHaveLength(0);
     expect(wrapper.text()).toContain('Local recording');
     expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
   });
@@ -2364,21 +2390,15 @@ describe('LibraryView Todo tab', () => {
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
     listActionItems.mockResolvedValue(
-      actionItems(
-        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
-        'Send pricing deck'
-      )
+      actionItems({ id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() }, 'Send pricing deck')
     );
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
-    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    await openTodos(wrapper);
     expect(wrapper.text()).toContain('Send pricing deck');
 
     backendId.mockReturnValue('local');
-    supportsActionItems.mockReturnValue(true);
     listActionItems.mockResolvedValue(
       actionItems(
         { id: '2026-06-02T14-30-05Z', title: 'Standup', timestamp: daysAgo(0).toISOString() },
@@ -2389,7 +2409,7 @@ describe('LibraryView Todo tab', () => {
     await flushPromises();
 
     expect(todoButton(wrapper).classes()).toContain('nav-tab--active');
-    expect(wrapper.findAll('.todo-item')).toHaveLength(1);
+    expect(todoRows(wrapper)).toHaveLength(1);
     expect(wrapper.text()).toContain('Ship the RFC');
     expect(wrapper.text()).not.toContain('Send pricing deck');
   });
@@ -2399,12 +2419,12 @@ describe('LibraryView Todo tab', () => {
     supportsActionItems.mockReturnValue(true);
     listMeetings.mockResolvedValue([]);
     let resolveAriso!: (entries: ReturnType<typeof actionItems>) => void;
-    listActionItems.mockReturnValueOnce(new Promise((resolve) => (resolveAriso = resolve)));
+    const pending = new Promise<ReturnType<typeof actionItems>>((resolve) => (resolveAriso = resolve));
+    listActionItems.mockReturnValue(pending);
 
     const wrapper = mountWithDetailStub();
     await flushPromises();
-    await todoButton(wrapper).trigger('click');
-    await flushPromises();
+    await openTodos(wrapper);
     expect(wrapper.text()).toContain('Loading…');
 
     backendId.mockReturnValue('local');
@@ -2418,14 +2438,10 @@ describe('LibraryView Todo tab', () => {
     await flushPromises();
 
     resolveAriso(
-      actionItems(
-        { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() },
-        'Send pricing deck'
-      )
+      actionItems({ id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() }, 'Send pricing deck')
     );
     await flushPromises();
 
-    expect(listActionItems).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain('Ship the RFC');
     expect(wrapper.text()).not.toContain('Send pricing deck');
   });

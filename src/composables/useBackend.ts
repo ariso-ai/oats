@@ -19,11 +19,11 @@ import {
   type ActionItemFollowUp,
   parseRowId,
 } from './useMeetingApi';
-import { openActionItems } from './arisoActionItems';
+import { indexFollowUps } from './arisoActionItems';
 import { arisoTruthy } from './autoJoin';
 import { reportUploadFailure } from './useDiagnostics';
 import { isCanceledMeetingStatus } from './meetingStatus';
-import { localDateKey } from './groupMeetingsByDate';
+import { localDateKey, shortDayLabel } from './groupMeetingsByDate';
 
 export type BackendId = 'ariso' | 'local';
 
@@ -96,6 +96,33 @@ export interface MeetingActionItem {
   /** Ariso: the owner's meeting_participants row id; null when the owner is a
    *  bare name or nobody (Unassigned). */
   meetingParticipantId?: number | null;
+  /** Present ⇒ the item is done. Only the Todos list carries it. */
+  completion?: ActionItemCompletion;
+  /** How to check this item off (or reopen it) from the Todos view. Absent
+   *  when it can't be: a legacy local bullet with no checkbox. */
+  ref?: ActionItemRef;
+}
+
+/** Who completed a todo and when. `at` is an ISO timestamp (Ariso) or a local
+ *  `YYYY-MM-DD` date (an Obsidian `✅` stamp); absent when unknown. `'ari'` is
+ *  reserved for Ari-marked completion, which no backend produces yet. */
+export interface ActionItemCompletion {
+  by: 'user' | 'ari';
+  at?: string;
+}
+
+/** Everything a backend needs to tick one todo. Ariso completes the
+ *  requester's follow-up for the item (created on first check, linked to the
+ *  item by its text); local flips the checkbox on one line of the vault note,
+ *  guarded by that line's current text. */
+export type ActionItemRef =
+  | { kind: 'ariso'; meetingId: string; meetingTitle: string; text: string; followUpId?: string }
+  | { kind: 'local'; oatsId: string; line: number; expected: string };
+
+export interface ListActionItemsOptions {
+  /** Also return items completed within this many days (their `completion`
+   *  set). Omitted ⇒ open items only. */
+  includeCompletedSinceDays?: number;
 }
 
 /** One meeting's action items for the signed-in user, with the meeting itself as
@@ -219,7 +246,11 @@ export interface Backend {
    *  per-day endpoint serves; local scans the whole vault history. The meeting
    *  comes back as a selectable list row so a Todo row can open it in the
    *  detail pane. Rejects only when nothing at all could be loaded. */
-  listActionItems(): Promise<ActionItemEntry[]>;
+  listActionItems(opts?: ListActionItemsOptions): Promise<ActionItemEntry[]>;
+  /** Check a todo off (`done`) or reopen it. Resolves to the ref to use for
+   *  the next write on the same item (Undo): a write can change what the
+   *  backend keys on — Ariso creates the follow-up, local rewrites the line. */
+  setActionItemDone(ref: ActionItemRef, done: boolean): Promise<ActionItemRef>;
   /** Load the detail for a single row (from the list item the user clicked). */
   getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail>;
   /** Lazily load the meeting's transcript (null when none). Ariso meetings
@@ -351,18 +382,12 @@ function recordingToListItem(r: RecordingSummary): MeetingListItem {
 // history; mirrors the old search dialog's limit.
 const MAX_LOCAL_SEARCH_RESULTS = 50;
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const MONTHS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-];
-
 export function timestampTitle(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return `Recording ${iso}`;
   // A friendly LOCAL label like "Sat Jun 17 @ 1PM" — every part reads from the
   // same Date so they can't disagree across a timezone boundary near midnight.
-  const day = `${WEEKDAYS[d.getDay()]} ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  const day = shortDayLabel(d);
   const hours = d.getHours();
   const minutes = d.getMinutes();
   const meridiem = hours < 12 ? 'AM' : 'PM';
@@ -377,6 +402,8 @@ export function timestampTitle(iso: string): string {
 // Ariso's action-items endpoint serves a single day, so the backend asks for
 // the last two weeks one day at a time and concatenates. This is an endpoint
 // constraint, not a UI one — the Library just asks for "the action items".
+// The Completed window (`includeCompletedSinceDays`) can't reach past this: an
+// item whose meeting is older isn't fetched at all, done or not.
 const ARISO_TODO_DAY_COUNT = 14;
 
 /** The `YYYY-MM-DD` local calendar days to request: today first, then back. */
@@ -392,20 +419,59 @@ export function recentDayKeys(now: Date, count: number): string[] {
 
 // The day endpoint lists every item the user owns, done or not: checking one
 // off completes its follow-up, which the endpoint doesn't consult. So each
-// meeting's follow-ups are looked up and the completed items dropped. A failed
-// lookup keeps that meeting's items — a stale todo beats a silently lost one.
-async function withoutCheckedOff(entries: ActionItemEntry[]): Promise<ActionItemEntry[]> {
+// meeting's follow-ups are looked up to mark the completed items (dropped
+// unless the caller asked for recent completions) and to carry the follow-up
+// id a later check/uncheck writes to. A failed lookup keeps that meeting's
+// items as open — a stale todo beats a silently lost one.
+async function withFollowUps(
+  entries: ActionItemEntry[],
+  completedSince: Date | null
+): Promise<ActionItemEntry[]> {
   const { listFollowUpsBySource } = useMeetingApi();
   const ids = [...new Set(entries.map((e) => e.meeting.id))];
   const lookups = await Promise.allSettled(ids.map((id) => listFollowUpsBySource(id)));
-  const byMeeting = new Map<string, ActionItemFollowUp[]>();
+  const byMeeting = new Map<string, Map<string, ActionItemFollowUp>>();
   lookups.forEach((result, i) => {
-    if (result.status === 'fulfilled') byMeeting.set(ids[i], result.value);
+    if (result.status === 'fulfilled') byMeeting.set(ids[i], indexFollowUps(result.value));
     else console.error('Failed to load follow-ups for a meeting', result.reason);
   });
   return entries
-    .map((e) => ({ ...e, items: openActionItems(e.items, byMeeting.get(e.meeting.id) ?? []) }))
+    .map((e) => {
+      const followUps = byMeeting.get(e.meeting.id);
+      const items: MeetingActionItem[] = [];
+      for (const it of e.items) {
+        const f = followUps?.get(it.item);
+        const ref: ActionItemRef = {
+          kind: 'ariso',
+          meetingId: e.meeting.id,
+          meetingTitle: e.meeting.title,
+          text: it.item,
+        };
+        if (f) ref.followUpId = f.id;
+        if (!f?.completed) {
+          items.push({ ...it, ref });
+          continue;
+        }
+        if (!completedSince) continue;
+        // Undated completions stay: the item's meeting is inside the fetched
+        // window, so it was at least done recently.
+        if (f.completedAt && new Date(f.completedAt) < completedSince) continue;
+        const completion: ActionItemCompletion = { by: 'user' };
+        if (f.completedAt) completion.at = f.completedAt;
+        items.push({ ...it, ref, completion });
+      }
+      return { ...e, items };
+    })
     .filter((e) => e.items.length > 0);
+}
+
+/** Start of the local day `days` days before `now`: the cutoff of a
+ *  "completed in the last N days" window. */
+function completedWindowStart(now: Date, days: number): Date {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - days);
+  return d;
 }
 
 export class ArisoBackend implements Backend {
@@ -476,7 +542,7 @@ export class ArisoBackend implements Backend {
     return meetings.map(meetingSummaryToListItem);
   }
 
-  async listActionItems(): Promise<ActionItemEntry[]> {
+  async listActionItems(opts: ListActionItemsOptions = {}): Promise<ActionItemEntry[]> {
     const { listActionItemsByDay } = useMeetingApi();
     const results = await Promise.allSettled(
       recentDayKeys(new Date(), ARISO_TODO_DAY_COUNT).map((day) => listActionItemsByDay(day))
@@ -507,7 +573,22 @@ export class ArisoBackend implements Backend {
     if (results.length > 0 && failures === results.length) {
       throw new Error('Could not load action items.');
     }
-    return withoutCheckedOff(entries);
+    const since =
+      opts.includeCompletedSinceDays != null
+        ? completedWindowStart(new Date(), opts.includeCompletedSinceDays)
+        : null;
+    return withFollowUps(entries, since);
+  }
+
+  async setActionItemDone(ref: ActionItemRef, done: boolean): Promise<ActionItemRef> {
+    if (ref.kind !== 'ariso') throw new Error('Not an Ariso action item');
+    const api = useMeetingApi();
+    let followUpId = ref.followUpId;
+    if (!followUpId) {
+      followUpId = (await api.createActionItemFollowUp(ref.meetingId, ref.meetingTitle, ref.text)).id;
+    }
+    await api.setFollowUpCompleted(followUpId, done);
+    return { ...ref, followUpId };
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {
@@ -662,23 +743,48 @@ export class LocalBackend implements Backend {
   // window either, and an open action item from three weeks ago is still open.
   // Notes whose recording folder is gone are skipped: a row with no meeting to
   // open would be a dead end.
-  async listActionItems(): Promise<ActionItemEntry[]> {
+  async listActionItems(opts: ListActionItemsOptions = {}): Promise<ActionItemEntry[]> {
     const [groups, recordings] = await Promise.all([
       local.listVaultTasks(),
       local.listRecordings(),
     ]);
     const byId = new Map(recordings.map((r) => [r.id, r]));
+    // `doneAt` is a local YYYY-MM-DD, so the window compares calendar days.
+    const sinceKey =
+      opts.includeCompletedSinceDays != null
+        ? localDateKey(completedWindowStart(new Date(), opts.includeCompletedSinceDays))
+        : null;
     const entries: ActionItemEntry[] = [];
     for (const group of groups) {
       const recording = byId.get(group.oatsId);
       if (!recording) continue;
-      const items = group.tasks
-        .map((task) => ({ item: task.trim() }))
-        .filter((it) => it.item.length > 0);
+      const items: MeetingActionItem[] = [];
+      for (const task of group.tasks) {
+        const text = task.text.trim();
+        if (!text) continue;
+        // A done task without a ✅ date (ticked outside the Tasks plugin)
+        // can't be placed in the window, so it is left out.
+        if (task.done && (!sinceKey || !task.doneAt || task.doneAt < sinceKey)) continue;
+        const it: MeetingActionItem = { item: text };
+        if (task.line != null) {
+          it.ref = { kind: 'local', oatsId: group.oatsId, line: task.line, expected: task.raw };
+        }
+        if (task.done) it.completion = { by: 'user', at: task.doneAt! };
+        items.push(it);
+      }
       if (items.length === 0) continue;
       entries.push({ meeting: recordingToListItem(recording), items });
     }
     return entries;
+  }
+
+  async setActionItemDone(ref: ActionItemRef, done: boolean): Promise<ActionItemRef> {
+    if (ref.kind !== 'local') throw new Error('Not a local action item');
+    const body = await local.setVaultTaskDone(ref.oatsId, ref.line, ref.expected, done);
+    // The write rewrote the line (checkbox + ✅ stamp); the next write on this
+    // task (Undo) must guard on the new text.
+    const line = body.split('\n')[ref.line] ?? '';
+    return { ...ref, expected: line.replace(/\r$/, '') };
   }
 
   async getMeetingDetail(item: MeetingListItem): Promise<MeetingDetail> {

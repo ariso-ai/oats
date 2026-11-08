@@ -167,6 +167,7 @@ import {
   nextDaySection,
   todayLabel,
   upcomingRelLabel,
+  fmtClock,
 } from '../composables/groupMeetingsByDate';
 import oatsLogo from '../assets/oats-light.svg';
 
@@ -310,13 +311,6 @@ function step(delta: number): void {
   const next = safeIndex.value + delta;
   if (next < 0 || next > upcoming.value.length - 1) return;
   featuredIndex.value = next;
-}
-
-function fmtClock(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
 // "4:00 PM • 45min" — duration from the explicit field (local recordings) or
