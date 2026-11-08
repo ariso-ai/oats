@@ -661,8 +661,7 @@ function onTodosListChanged(): void {
 // "Open meeting" on a todo: the one way out of the Todos pane. Show the
 // meeting on the Meetings tab, scrolled to its action items.
 async function openMeetingFromTodo(m: MeetingListItem): Promise<void> {
-  activeView.value = 'meetings';
-  await selectMeeting(m, { userSelected: true });
+  await showMeeting(m, { userSelected: true });
   await nextTick();
   detailView.value?.revealActionItems?.(m.id);
 }
@@ -1054,6 +1053,16 @@ async function selectMeeting(m: MeetingListItem, options: { userSelected?: boole
   selectedItem.value = m;
 }
 
+// Put a meeting on screen. The Todos pane covers the meeting detail, so an
+// explicit "show this meeting" (a recording reveal or start, a search result,
+// a prep notification, a todo's Open meeting) leaves the Todos tab first.
+// Background selection — a list reload auto-picking a row — goes through
+// `selectMeeting` directly and leaves the tab alone.
+async function showMeeting(m: MeetingListItem, options: { userSelected?: boolean } = {}): Promise<void> {
+  if (activeView.value === 'todo') activeView.value = 'meetings';
+  await selectMeeting(m, options);
+}
+
 async function clearSelection(): Promise<void> {
   const my = ++selectionReqId;
   await detailView.value?.saveNotesNow?.();
@@ -1068,7 +1077,7 @@ async function showRecordingMeeting(): Promise<void> {
   const id = recordingMeetingId.value;
   if (!id) return;
   const m = displayMeetings.value.find((x) => x.id === id);
-  if (m) await selectMeeting(m, { userSelected: false });
+  if (m) await showMeeting(m, { userSelected: false });
 }
 
 function openSearchPalette(): void {
@@ -1087,13 +1096,15 @@ async function searchMeetings(query: string): Promise<MeetingListItem[]> {
 
 async function onSearchResultSelected(meeting: MeetingListItem): Promise<void> {
   searchPaletteOpen.value = false;
-  await selectMeeting(meeting, { userSelected: true });
+  await showMeeting(meeting, { userSelected: true });
 }
 
 // The palette's Home command returns the Library to its neutral detail state:
 // close search, then clear the selected meeting after saving any edits.
 async function goHomeFromSearch(): Promise<void> {
   searchPaletteOpen.value = false;
+  // That state lives behind the Todos pane; see `showMeeting`.
+  if (activeView.value === 'todo') activeView.value = 'meetings';
   await clearSelection();
 }
 
@@ -1494,7 +1505,7 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
     await pinRecordedMeeting(idStr);
     m = displayMeetings.value.find((x) => x.id === idStr);
   }
-  if (m) await selectMeeting(m, { userSelected: false });
+  if (m) await showMeeting(m, { userSelected: false });
 }
 
 // A meeting-prep notification was clicked. The prep id is queued natively (the
@@ -1532,7 +1543,7 @@ async function openMeetingPrep(prepId: number): Promise<void> {
     console.warn('Meeting prep', prepId, 'has no meeting row to open');
     return;
   }
-  await selectMeeting(m, { userSelected: true });
+  await showMeeting(m, { userSelected: true });
   // selectMeeting is a no-op when that row is already selected — swap in the
   // resolved row anyway, so a prepId the selected row lacked reaches the pane.
   if (selectedItem.value !== m && selectedItem.value?.id === m.id) selectedItem.value = m;

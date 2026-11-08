@@ -1578,6 +1578,43 @@ describe('LibraryView', () => {
     expect(wrapper.find('.add-btn--recording').exists()).toBe(false);
   });
 
+  // The Todos pane covers the meeting detail, so re-docking from there must
+  // leave the Todos tab, or the click does nothing visible.
+  it('the "Recording" indicator leaves the Todos tab to re-dock the strip', async () => {
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    await wrapper.findAll('.nav-tab').find((b) => b.text().includes('Todos'))!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.add-btn--recording').exists()).toBe(true);
+
+    await wrapper.find('.add-btn--recording').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: 'TodosView' }).exists()).toBe(false);
+    expect(wrapper.find('.strip').exists()).toBe(true);
+  });
+
+  it('a reveal event (recording pill clicked) leaves the Todos tab', async () => {
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    emitEvent('recorder://state', localRecorderState());
+    await flushPromises();
+    await wrapper.findAll('.nav-tab').find((b) => b.text().includes('Todos'))!.trigger('click');
+    await flushPromises();
+
+    emitEvent('recording://reveal', {});
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: 'TodosView' }).exists()).toBe(false);
+    expect(wrapper.find('.strip').exists()).toBe(true);
+  });
+
   // Req 2: closing the detail pane mid-recording also surfaces the indicator.
   it('shows the "Recording" indicator after the detail pane is closed mid-recording', async () => {
     listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
@@ -2027,6 +2064,27 @@ describe('LibraryView meeting-prep notification', () => {
     expect(openPrepTab).toHaveBeenCalledTimes(1);
   });
 
+  it('opens the prep’s meeting out of the Todos tab, which would otherwise cover it', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    invokeWith(null);
+    listMeetings.mockResolvedValue([
+      item({ id: '45565', title: 'Standup', prepId: 5145, files: undefined }),
+    ]);
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await wrapper.findAll('.nav-tab').find((b) => b.text().includes('Todos'))!.trigger('click');
+    await flushPromises();
+
+    invokeWith(5145);
+    emitEvent('meeting-prep://open', {});
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: 'TodosView' }).exists()).toBe(false);
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('45565');
+    expect(openPrepTab).toHaveBeenCalledTimes(1);
+  });
+
   it('does nothing when nothing is queued', async () => {
     invokeWith(null);
     listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
@@ -2296,6 +2354,56 @@ describe('LibraryView Todo tab', () => {
     expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
     expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('9');
     expect(revealActionItems).toHaveBeenCalledWith('9');
+  });
+
+  it('a search result picked on the Todos tab opens in Meetings', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue([]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await openTodos(wrapper);
+    wrapper
+      .findComponent({ name: 'LibrarySearchPalette' })
+      .vm.$emit('select', { id: '9', title: 'Q3 Pricing Review', timestamp: daysAgo(0).toISOString() });
+    await flushPromises();
+
+    expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
+    expect(wrapper.find('.detail-stub').attributes('data-meeting')).toBe('9');
+  });
+
+  it('the search palette’s Home leaves the Todos tab for the empty detail card', async () => {
+    backendId.mockReturnValue('ariso');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([]);
+    listActionItems.mockResolvedValue([]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await openTodos(wrapper);
+    wrapper.findComponent({ name: 'LibrarySearchPalette' }).vm.$emit('go-to-notes');
+    await flushPromises();
+
+    expect(todoButton(wrapper).classes()).not.toContain('nav-tab--active');
+    expect(wrapper.findComponent({ name: 'TodosView' }).exists()).toBe(false);
+  });
+
+  it('a background reload keeps the Todos tab open', async () => {
+    backendId.mockReturnValue('local');
+    supportsActionItems.mockReturnValue(true);
+    listMeetings.mockResolvedValue([item({ id: 'a', title: 'Standup' })]);
+    listActionItems.mockResolvedValue([]);
+
+    const wrapper = mountWithDetailStub();
+    await flushPromises();
+    await openTodos(wrapper);
+    // A vault switch reloads the list and auto-selects its first row.
+    emitEvent('vault://changed', null);
+    await flushPromises();
+
+    expect(todoButton(wrapper).classes()).toContain('nav-tab--active');
   });
 
   it('checks a todo off through the active backend', async () => {
