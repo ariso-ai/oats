@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { mount, flushPromises, type VueWrapper, type DOMWrapper } from '@vue/test-utils';
 import { nextTick } from 'vue';
 import type { MeetingDetail, MeetingListItem } from '../composables/useBackend';
@@ -1847,6 +1847,33 @@ describe('MeetingDetailView meeting prep', () => {
 
     expect(wrapper.find('.seg-btn--active').text()).toBe('Prep');
     expect(wrapper.find('.prep-pane').text()).toContain('From the notification');
+  });
+
+  it('revealActionItems shows AI Notes scrolled to the Action Items (Todos "Open meeting")', async () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    onTestFinished(() => {
+      Element.prototype.scrollIntoView = original;
+    });
+    getMeetingDetail.mockResolvedValueOnce(detail({ id: '7', digest: 'D' }));
+    const wrapper = mount(MeetingDetailView, { props: { item } });
+    await flushPromises();
+    await wrapper.findAll('.seg-btn').find((b) => b.text() === 'Transcript')?.trigger('click');
+
+    // Selected and asked in the same tick, as the Library does: the request
+    // must wait out the incoming meeting's load.
+    getMeetingDetail.mockResolvedValueOnce(
+      detail({ id: '8', digest: 'D', actionItems: [{ item: 'Ship it' }] })
+    );
+    void wrapper.setProps({ item: { ...item, id: '8' } });
+    await nextTick();
+    (wrapper.vm as unknown as { revealActionItems: (id: string) => void }).revealActionItems('8');
+    await flushPromises();
+
+    expect(wrapper.find('.seg-btn--active').text()).toBe('AI Notes');
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect((scrollIntoView.mock.contexts[0] as HTMLElement).hasAttribute('data-action-items')).toBe(true);
   });
 
   // The Library selects the prep's row and asks for the Prep tab one tick

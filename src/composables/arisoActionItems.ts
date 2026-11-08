@@ -71,12 +71,3 @@ export function isOwnedBySelf(
 export function indexFollowUps(followUps: ActionItemFollowUp[]): Map<string, ActionItemFollowUp> {
   return new Map(followUps.map((f) => [f.description, f]));
 }
-
-/** The items the user has not checked off yet. */
-export function openActionItems<T extends MeetingActionItem>(
-  items: T[],
-  followUps: ActionItemFollowUp[]
-): T[] {
-  const index = indexFollowUps(followUps);
-  return items.filter((it) => !index.get(it.item)?.completed);
-}

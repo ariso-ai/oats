@@ -338,6 +338,27 @@ describe('action-item follow-ups', () => {
     expect(followUps).toEqual([{ id: '138', description: 'Purchase a smaller toolset', completed: false }]);
   });
 
+  it('carries the completion time of a completed follow-up', async () => {
+    apiRequest.mockResolvedValue({
+      status: 200,
+      data: {
+        followUps: [
+          { id: '1', raw: { description: 'Done', completed: true, completed_at: '2026-08-30T10:00:00Z' } },
+          { id: '2', raw: { description: 'Open', completed: false, completed_at: '2026-08-30T10:00:00Z' } },
+          { id: '3', raw: { description: 'Garbled', completed: true, completed_at: 'yesterday' } },
+        ],
+      },
+    });
+
+    const followUps = await useMeetingApi().listFollowUpsBySource(9);
+
+    expect(followUps).toEqual([
+      { id: '1', description: 'Done', completed: true, completedAt: '2026-08-30T10:00:00Z' },
+      { id: '2', description: 'Open', completed: false },
+      { id: '3', description: 'Garbled', completed: true },
+    ]);
+  });
+
   it('surfaces a failed follow-up lookup', async () => {
     apiRequest.mockResolvedValue({ status: 500, data: { error: 'boom' } });
     await expect(useMeetingApi().listFollowUpsBySource(9)).rejects.toThrow('boom');

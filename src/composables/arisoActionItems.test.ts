@@ -5,7 +5,6 @@ import {
   indexFollowUps,
   isAlreadyAssignedTo,
   isOwnedBySelf,
-  openActionItems,
 } from './arisoActionItems';
 import type { MeetingParticipantInfo } from './useBackend';
 
@@ -92,13 +91,5 @@ describe('follow-up matching', () => {
     expect(index.get('Send pricing deck')?.id).toBe('1');
     expect(index.get('Book the venue')?.completed).toBe(false);
     expect(index.get('Something else')).toBeUndefined();
-  });
-
-  it('keeps only the items not yet checked off', () => {
-    const open = openActionItems(
-      [{ item: 'Send pricing deck' }, { item: 'Book the venue' }, { item: 'Draft the RFC' }],
-      followUps
-    );
-    expect(open.map((i) => i.item)).toEqual(['Book the venue', 'Draft the RFC']);
   });
 });

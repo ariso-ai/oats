@@ -1,5 +1,5 @@
 <template>
-  <div class="card">
+  <div ref="cardEl" class="card">
     <div v-if="loading" class="card-state">
       <span class="spinner" />
       <span>Loading meeting…</span>
@@ -276,7 +276,7 @@
               <div class="md" v-html="renderMarkdown(detail.digest)" />
             </section>
 
-            <section v-if="detail.actionItems.length" class="sec">
+            <section v-if="detail.actionItems.length" class="sec" data-action-items>
               <h3 class="sec-h">Action Items <span class="count">{{ detail.actionItems.length }}</span></h3>
               <ArisoActionItems
                 :meeting-id="detail.id"
@@ -1011,6 +1011,31 @@ const prepError = ref<string | null>(null);
 // It ends when another meeting is selected or the user picks a tab.
 let pendingPrepMeetingId: string | null = null;
 
+// "Open meeting" from the Todos view: once this meeting's detail is up, show
+// AI Notes scrolled to its action items. Pending like the prep request above,
+// because the Library asks right after selecting — while the detail loads.
+let pendingRevealMeetingId: string | null = null;
+const cardEl = ref<HTMLElement | null>(null);
+
+function revealActionItems(meetingId: string): void {
+  pendingRevealMeetingId = meetingId;
+  if (!loading.value) void applyRevealActionItems();
+}
+
+async function applyRevealActionItems(): Promise<void> {
+  const wanted = pendingRevealMeetingId;
+  if (wanted === null || detail.value?.id !== wanted) return;
+  pendingRevealMeetingId = null;
+  activeTab.value = 'note';
+  await nextTick();
+  // Ariso: the Action Items section. Local: the note's first task checkbox —
+  // the generated note's Action Items, or wherever the user moved them.
+  const target =
+    cardEl.value?.querySelector('[data-action-items]') ??
+    cardEl.value?.querySelector('.md input[type="checkbox"]');
+  target?.scrollIntoView?.({ block: 'center' });
+}
+
 /** Activate the Prep tab (the notification click target). Called by the Library
  *  right after it selects the prep's meeting, so the detail is usually still
  *  loading — hence the pending id. `meetingId` identifies the meeting the prep
@@ -1437,6 +1462,9 @@ async function load(item: MeetingListItem | null): Promise<void> {
   if (pendingPrepMeetingId !== null && pendingPrepMeetingId !== item?.id) {
     pendingPrepMeetingId = null;
   }
+  if (pendingRevealMeetingId !== null && pendingRevealMeetingId !== item?.id) {
+    pendingRevealMeetingId = null;
+  }
   prepContent.value = null;
   prepLoaded.value = false;
   loadingPrep.value = false;
@@ -1486,6 +1514,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
     if (my === reqId) {
       loading.value = false;
       if (activeTab.value !== 'mynote') suppressAutoSave = false;
+      void applyRevealActionItems();
     }
   }
 }
@@ -1784,7 +1813,7 @@ async function saveNotesNow(): Promise<void> {
   }
 }
 
-defineExpose({ saveNotesNow, openPrepTab });
+defineExpose({ saveNotesNow, openPrepTab, revealActionItems });
 
 // Flushes the loaded note before the detail pane clears local draft state.
 // This protects quick tab/meeting/window changes where the 700ms debounce has

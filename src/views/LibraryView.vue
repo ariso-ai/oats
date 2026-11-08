@@ -244,27 +244,38 @@
         @uploaded="onPendingUploaded"
       />
 
-      <!-- Todo: the user's open action items, grouped by day. Selecting a row
-           opens the meeting it came from in the detail pane. -->
+      <!-- Todos: the sidebar filters the Todos pane. "All todos", then every
+           meeting with open todos, grouped by day, each with its open count. -->
       <template v-if="activeView === 'todo'">
-        <p v-if="todoLoading" class="hint">Loading…</p>
+        <p v-if="todoLoading && !todoLoaded" class="hint">Loading…</p>
         <p v-else-if="todoError" class="hint">{{ todoError }}</p>
-        <p v-else-if="todoSections.length === 0" class="hint">No action items.</p>
         <div v-else class="meeting-list">
-          <template v-for="section in todoSections" :key="section.key">
+          <button
+            class="meeting-item todo-filter"
+            :class="{ selected: todoFilterMeeting === null }"
+            :aria-pressed="todoFilterMeeting === null"
+            @click="todoFilterId = null"
+          >
+            <span class="mi-head">
+              <span class="mi-title">All todos</span>
+              <span class="todo-count">{{ todoOpenCount }}</span>
+            </span>
+          </button>
+          <template v-for="section in todoMeetingSections" :key="section.key">
             <div class="group-label">{{ section.label }}</div>
             <button
-              v-for="row in section.rows"
-              :key="row.key"
-              class="meeting-item todo-item"
-              :class="{ selected: selectedItem?.id === row.meeting.id }"
-              :aria-pressed="selectedItem?.id === row.meeting.id"
-              @click="selectMeeting(row.meeting, { userSelected: true })"
+              v-for="f in section.meetings"
+              :key="f.meeting.id"
+              class="meeting-item todo-filter"
+              :class="{ selected: todoFilterMeeting?.id === f.meeting.id }"
+              :aria-pressed="todoFilterMeeting?.id === f.meeting.id"
+              @click="todoFilterId = f.meeting.id"
             >
               <span class="mi-head">
-                <span class="mi-title">{{ row.text }}</span>
+                <span class="mi-title">{{ f.meeting.title }}</span>
+                <span class="todo-count">{{ f.openCount }}</span>
               </span>
-              <span class="mi-sub">{{ todoSub(row) }}</span>
+              <span class="mi-sub">{{ fmtClock(f.meeting.timestamp) }}</span>
             </button>
           </template>
         </div>
@@ -337,6 +348,22 @@
          (mirroring an on-going recording) docked underneath. -->
     <section class="detail-wrap">
       <div class="detail-card">
+        <TodosView
+          v-if="activeView === 'todo'"
+          :entries="todoEntries"
+          :loading="todoLoading && !todoLoaded"
+          :error="todoError"
+          :now="today"
+          :filter-meeting="todoFilterMeeting"
+          :completed-window-days="TODO_COMPLETED_WINDOW_DAYS"
+          :set-done="setTodoDone"
+          :list-changed="onTodosListChanged"
+          @open-meeting="openMeetingFromTodo"
+          @clear-filter="todoFilterId = null"
+        />
+        <!-- Hidden, not unmounted, behind the Todos pane: an open meeting keeps
+             its tab, scroll position, and any unsaved note edits. -->
+        <div v-show="activeView !== 'todo'" class="detail-slot">
         <MeetingDetailView
           v-if="selectedItem"
           ref="detailView"
@@ -358,9 +385,10 @@
           @start="startRecordingFor"
           @record="startRecording"
         />
+        </div>
       </div>
       <RecorderStrip
-        :meeting-id="selectedItem?.id ?? null"
+        :meeting-id="activeView === 'todo' ? null : (selectedItem?.id ?? null)"
         @recording-change="recordingMeetingId = $event"
         @recording-active="recordingActive = $event"
         @recording-phase="onRecorderPhase"
@@ -406,13 +434,18 @@ import {
   upcomingRelLabel,
   isMeetingInProgress,
   type MeetingSection,
+  fmtClock,
+  localDateKey,
 } from '../composables/groupMeetingsByDate';
 import {
-  groupActionItemsByDay,
+  groupTodoMeetingsByDay,
+  splitTodoSections,
+  todoRows,
   type ActionItemEntry,
-  type ActionItemRow,
 } from '../composables/actionItemSections';
+import type { ActionItemRef } from '../composables/useBackend';
 import MeetingDetailView from './MeetingDetailView.vue';
+import TodosView from './TodosView.vue';
 import UpNextCard from './UpNextCard.vue';
 import LibrarySearchPalette from './LibrarySearchPalette.vue';
 import RecorderStrip from './RecorderStrip.vue';
@@ -467,6 +500,7 @@ const PENDING_MODELS_LABEL = 'Waiting for on-device models…';
 type MeetingDetailViewExposed = InstanceType<typeof MeetingDetailView> & {
   saveNotesNow?: () => Promise<void>;
   openPrepTab?: () => void;
+  revealActionItems?: (meetingId: string) => void;
 };
 const detailView = ref<MeetingDetailViewExposed | null>(null);
 const pendingUploads = ref<{ refresh: () => Promise<void> } | null>(null);
@@ -492,6 +526,7 @@ const recordingStarting = computed(
 // indicator both show (or neither does).
 const recorderStripVisible = computed(
   () =>
+    activeView.value !== 'todo' &&
     recordingActive.value &&
     recordingMeetingId.value != null &&
     recordingMeetingId.value === selectedItem.value?.id
@@ -520,7 +555,14 @@ const monthName = computed(() => now.value.toLocaleString(undefined, { month: 'l
 const activeView = ref<'today' | 'meetings' | 'todo'>('meetings');
 const todoEntries = ref<ActionItemEntry[]>([]);
 const todoLoading = ref(false);
+// Whether the current backend's todos have loaded at least once: later loads
+// refresh in place instead of swapping the list for "Loading…".
+const todoLoaded = ref(false);
 const todoError = ref<string | null>(null);
+// Sidebar filter in the Todos tab: one meeting's todos, or all (null).
+const todoFilterId = ref<string | null>(null);
+// The Todos pane's Completed section reaches back this far.
+const TODO_COMPLETED_WINDOW_DAYS = 14;
 const isMac = computed(() =>
   typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 );
@@ -581,16 +623,47 @@ const displayedSections = computed<MeetingSection[]>(() => {
   return groupMeetingsByDate(displayMeetings.value, now.value);
 });
 
-const todoSections = computed(() => groupActionItemsByDay(todoEntries.value, now.value));
-
-// Which meeting an action item came from, so a row reads on its own.
-function todoSub(row: ActionItemRow): string {
-  return `${row.meeting.title} · ${fmtClock(row.meeting.timestamp)}`;
-}
+// `now`, but only changing at midnight: the todo lists' day headers are all that
+// depend on it, and the 30-second clock tick must not regroup and re-render
+// them. The string key is what stops the tick (an unchanged string triggers
+// nothing downstream); `today` is rebuilt from it only when the day turns.
+const todayKey = computed(() => localDateKey(now.value));
+const today = computed(() => {
+  const [y, m, d] = todayKey.value.split('-').map(Number);
+  return new Date(y, m - 1, d, 12);
+});
+const todoMeetingSections = computed(() =>
+  groupTodoMeetingsByDay(splitTodoSections(todoRows(todoEntries.value), today.value).open)
+);
+// The "All todos" row: the sum of the per-meeting counts below it.
+const todoOpenCount = computed(() =>
+  todoMeetingSections.value.reduce((n, s) => n + s.meetings.reduce((m, f) => m + f.openCount, 0), 0)
+);
+// The filtered meeting, while it still has todos in the list.
+const todoFilterMeeting = computed<MeetingListItem | null>(
+  () => todoEntries.value.find((e) => e.meeting.id === todoFilterId.value)?.meeting ?? null
+);
 
 async function openTodoView(): Promise<void> {
   activeView.value = 'todo';
-  await loadActionItems();
+  await loadActionItems({ silent: todoLoaded.value });
+}
+
+async function setTodoDone(ref: ActionItemRef, done: boolean): Promise<ActionItemRef> {
+  const backend = activeBackend.value ?? (await getActiveBackend());
+  return backend.setActionItemDone(ref, done);
+}
+
+function onTodosListChanged(): void {
+  void loadActionItems({ silent: true });
+}
+
+// "Open meeting" on a todo: the one way out of the Todos pane. Show the
+// meeting on the Meetings tab, scrolled to its action items.
+async function openMeetingFromTodo(m: MeetingListItem): Promise<void> {
+  await showMeeting(m, { userSelected: true });
+  await nextTick();
+  detailView.value?.revealActionItems?.(m.id);
 }
 
 // Bump per call so a slow load can't overwrite a newer one.
@@ -612,9 +685,12 @@ async function loadActionItems({ silent = false } = {}): Promise<void> {
     todoError.value = null;
   }
   try {
-    const loaded = await backend.listActionItems();
+    const loaded = await backend.listActionItems({
+      includeCompletedSinceDays: TODO_COMPLETED_WINDOW_DAYS,
+    });
     if (requestId !== loadActionItemsRequest) return;
     todoEntries.value = loaded;
+    todoLoaded.value = true;
     todoError.value = null;
   } catch (e) {
     if (requestId !== loadActionItemsRequest) return;
@@ -645,8 +721,10 @@ watch(
   () => {
     loadActionItemsRequest++;
     todoLoading.value = false;
+    todoLoaded.value = false;
     todoEntries.value = [];
     todoError.value = null;
+    todoFilterId.value = null;
     if (activeView.value === 'todo' && !activeBackend.value?.supportsActionItems) {
       activeView.value = 'meetings';
     } else if (activeView.value === 'todo') {
@@ -888,13 +966,6 @@ function isNextNow(m: MeetingListItem): boolean {
   return m.id === nextUpcomingId.value && isMeetingInProgress(m, now.value);
 }
 
-function fmtClock(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-}
-
 // The in-progress next meeting shows its start–end range (rendered green);
 // every other row keeps the normal start-time subtitle.
 function subFor(m: MeetingListItem): string {
@@ -982,6 +1053,16 @@ async function selectMeeting(m: MeetingListItem, options: { userSelected?: boole
   selectedItem.value = m;
 }
 
+// Put a meeting on screen. The Todos pane covers the meeting detail, so an
+// explicit "show this meeting" (a recording reveal or start, a search result,
+// a prep notification, a todo's Open meeting) leaves the Todos tab first.
+// Background selection — a list reload auto-picking a row — goes through
+// `selectMeeting` directly and leaves the tab alone.
+async function showMeeting(m: MeetingListItem, options: { userSelected?: boolean } = {}): Promise<void> {
+  if (activeView.value === 'todo') activeView.value = 'meetings';
+  await selectMeeting(m, options);
+}
+
 async function clearSelection(): Promise<void> {
   const my = ++selectionReqId;
   await detailView.value?.saveNotesNow?.();
@@ -996,7 +1077,7 @@ async function showRecordingMeeting(): Promise<void> {
   const id = recordingMeetingId.value;
   if (!id) return;
   const m = displayMeetings.value.find((x) => x.id === id);
-  if (m) await selectMeeting(m, { userSelected: false });
+  if (m) await showMeeting(m, { userSelected: false });
 }
 
 function openSearchPalette(): void {
@@ -1015,13 +1096,15 @@ async function searchMeetings(query: string): Promise<MeetingListItem[]> {
 
 async function onSearchResultSelected(meeting: MeetingListItem): Promise<void> {
   searchPaletteOpen.value = false;
-  await selectMeeting(meeting, { userSelected: true });
+  await showMeeting(meeting, { userSelected: true });
 }
 
 // The palette's Home command returns the Library to its neutral detail state:
 // close search, then clear the selected meeting after saving any edits.
 async function goHomeFromSearch(): Promise<void> {
   searchPaletteOpen.value = false;
+  // That state lives behind the Todos pane; see `showMeeting`.
+  if (activeView.value === 'todo') activeView.value = 'meetings';
   await clearSelection();
 }
 
@@ -1422,7 +1505,7 @@ async function selectRecordingMeeting(id: number | null | undefined): Promise<vo
     await pinRecordedMeeting(idStr);
     m = displayMeetings.value.find((x) => x.id === idStr);
   }
-  if (m) await selectMeeting(m, { userSelected: false });
+  if (m) await showMeeting(m, { userSelected: false });
 }
 
 // A meeting-prep notification was clicked. The prep id is queued natively (the
@@ -1460,7 +1543,7 @@ async function openMeetingPrep(prepId: number): Promise<void> {
     console.warn('Meeting prep', prepId, 'has no meeting row to open');
     return;
   }
-  await selectMeeting(m, { userSelected: true });
+  await showMeeting(m, { userSelected: true });
   // selectMeeting is a no-op when that row is already selected — swap in the
   // resolved row anyway, so a prepId the selected row lacked reaches the pane.
   if (selectedItem.value !== m && selectedItem.value?.id === m.id) selectedItem.value = m;
@@ -2165,19 +2248,13 @@ onUnmounted(() => {
 .mi-rel { flex-shrink: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; color: #6f6f6f; }
 .mi-rel--now { color: #2e8b4f; }
 .mi-sub { font-size: 12px; color: #6f6f6f; }
-/* An action item is a sentence, not a title: let it wrap to two lines rather
-   than truncate mid-thought, and keep its source meeting on a single line. */
-.todo-item .mi-title {
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+/* Todos sidebar filter rows: meeting title, open count pushed right. */
+.todo-filter .mi-title { flex: 1; min-width: 0; }
+.todo-count {
+  flex-shrink: 0; margin-left: auto; font-size: 12px; font-weight: 500; color: #6f6f6f;
+  font-variant-numeric: tabular-nums;
 }
-.todo-item .mi-sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.detail-slot { flex: 1; min-width: 0; min-height: 0; display: flex; }
 .mi-sub--now { color: #2e8b4f; font-weight: 500; }
 /* Sits where the time/duration sub-line normally does, so a processing row is
    the same height as every other one. */

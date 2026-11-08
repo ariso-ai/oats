@@ -419,23 +419,42 @@ fn legacy_action_item_bullets(body: &str) -> Vec<String> {
     items
 }
 
-/// The note's open (unchecked) tasks, in document order, with Tasks emoji
-/// metadata stripped so each row reads as the task itself.
+/// One Obsidian task in a vault note, as the Todos view lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteTask {
+    /// The task's own text, Tasks emoji metadata stripped.
+    pub text: String,
+    /// Index into the lines of `note_body` — the `line` `set_task_done`
+    /// takes. None for a legacy plain bullet, which has no checkbox to tick.
+    pub line: Option<usize>,
+    /// The line exactly as it stands — `set_task_done`'s `expected` guard.
+    /// Empty for a legacy bullet.
+    pub raw: String,
+    pub done: bool,
+    /// The `✅ YYYY-MM-DD` completion date, when the done task carries one.
+    pub done_at: Option<String>,
+}
+
+/// The note's tasks, open (`[ ]`) and done (`[x]`), in document order, with
+/// Tasks emoji metadata stripped so each row reads as the task itself.
 ///
 /// Scans the whole body rather than just the Action Items section: once oats
 /// has written the note it belongs to the user, who may reorganize or add items
-/// in Obsidian. `[x]` (done) and `[-]` (cancelled) are excluded — that is how a
-/// todo gets closed, whether in Obsidian or via `set_task_done` in-app.
+/// in Obsidian. `[-]` (cancelled) and any other custom status are excluded —
+/// they are neither a todo nor a completion.
 ///
 /// A note containing no checkbox at all falls back to the plain bullets under
-/// `## Action Items`, so notes generated before this feature still populate the
-/// Todos tab.
-pub fn open_tasks(note_contents: &str) -> Vec<String> {
+/// `## Action Items` (as open, untickable tasks), so notes generated before
+/// oats emitted checkboxes still populate the Todos tab.
+pub fn note_tasks(note_contents: &str) -> Vec<NoteTask> {
     let body = note_body(note_contents);
     let mut tasks = Vec::new();
     let mut saw_checkbox = false;
     let mut fence: Option<char> = None;
-    for line in body.lines() {
+    // `lines()` yields the same lines, with `\r` stripped, as the
+    // `split_inclusive('\n')` walk in `set_task_done`, so indices agree.
+    for (i, line) in body.lines().enumerate() {
         let trimmed = line.trim_start();
         if advance_fence(trimmed, &mut fence) {
             continue;
@@ -446,22 +465,44 @@ pub fn open_tasks(note_contents: &str) -> Vec<String> {
         let Some((_, content)) = split_list_item(line) else { continue };
         let Some(state) = checkbox_state(content) else { continue };
         saw_checkbox = true;
-        if state != ' ' {
+        let done = match state {
+            ' ' => false,
+            'x' | 'X' => true,
+            _ => continue,
+        };
+        let rest = &content[3..];
+        if is_placeholder_item(rest) {
             continue;
         }
-        let raw = &content[3..];
-        if is_placeholder_item(raw) {
+        let text = strip_task_metadata(rest);
+        if text.is_empty() {
             continue;
         }
-        let text = strip_task_metadata(raw);
-        if !text.is_empty() {
-            tasks.push(text);
-        }
+        let done_at = if done {
+            find_done_stamp(rest).map(|r| rest[r].trim_start_matches('✅').trim().to_string())
+        } else {
+            None
+        };
+        tasks.push(NoteTask { text, line: Some(i), raw: line.to_string(), done, done_at });
     }
     if saw_checkbox {
         return tasks;
     }
     legacy_action_item_bullets(&body)
+        .into_iter()
+        .map(|text| NoteTask { text, line: None, raw: String::new(), done: false, done_at: None })
+        .collect()
+}
+
+/// The note's open (unchecked) tasks' text — see `note_tasks`. Test-only: the
+/// app reads `note_tasks` directly, but the open-task tests read clearer this way.
+#[cfg(test)]
+pub fn open_tasks(note_contents: &str) -> Vec<String> {
+    note_tasks(note_contents)
+        .into_iter()
+        .filter(|t| !t.done)
+        .map(|t| t.text)
+        .collect()
 }
 
 /// True when `s` opens with a `YYYY-MM-DD`-shaped date: 4 digits, `-`, 2
@@ -1528,6 +1569,61 @@ mod tests {
         // contains a fenced block must not leak the fenced lines as tasks.
         let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n```\n*   not a task\n```\n*   Real task\n";
         assert_eq!(open_tasks(legacy), vec!["Real task"]);
+    }
+
+    #[test]
+    fn note_tasks_returns_open_and_done_tasks_with_their_body_line() {
+        let note = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n- [ ] Ship the RFC ➕ 2026-06-02\n- [x] Email legal ➕ 2026-06-02 ✅ 2026-06-04\n- [-] Dropped\n- [X] Undated done\n";
+        let tasks = note_tasks(note);
+        assert_eq!(
+            tasks,
+            vec![
+                NoteTask {
+                    text: "Ship the RFC".into(),
+                    line: Some(1),
+                    raw: "- [ ] Ship the RFC ➕ 2026-06-02".into(),
+                    done: false,
+                    done_at: None,
+                },
+                NoteTask {
+                    text: "Email legal".into(),
+                    line: Some(2),
+                    raw: "- [x] Email legal ➕ 2026-06-02 ✅ 2026-06-04".into(),
+                    done: true,
+                    done_at: Some("2026-06-04".into()),
+                },
+                NoteTask {
+                    text: "Undated done".into(),
+                    line: Some(4),
+                    raw: "- [X] Undated done".into(),
+                    done: true,
+                    done_at: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn note_task_line_and_raw_round_trip_through_set_task_done() {
+        // The line/raw pair is exactly what set_task_done guards on, so the
+        // Todos view can tick a task it listed without re-reading the note.
+        let note = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Summary\r\nWe met.\r\n- [ ] Ship it ➕ 2026-06-02\r\n";
+        let task = note_tasks(note).remove(0);
+        let updated = set_task_done(note, task.line.unwrap(), &task.raw, true, "2026-06-05").unwrap();
+        let after = note_tasks(&updated).remove(0);
+        assert!(after.done);
+        assert_eq!(after.done_at.as_deref(), Some("2026-06-05"));
+        assert_eq!(after.line, task.line);
+    }
+
+    #[test]
+    fn note_tasks_marks_legacy_bullets_as_not_tickable() {
+        let legacy = "---\noats_id: x\n---\n![[Attachments/a.mp3]]\n\n## Action Items\n*   Real task\n";
+        let tasks = note_tasks(legacy);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].text, "Real task");
+        assert_eq!(tasks[0].line, None);
+        assert!(!tasks[0].done);
     }
 
     #[test]

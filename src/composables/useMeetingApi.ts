@@ -86,6 +86,8 @@ export interface ActionItemFollowUp {
   id: string;
   description: string;
   completed: boolean;
+  /** When the requester checked it off, if the server says. ISO timestamp. */
+  completedAt?: string;
 }
 
 /** Who an action item belongs to after a reassignment, as the server resolved
@@ -247,8 +249,9 @@ function parseActionItemFollowUp(raw: unknown): ActionItemFollowUp | null {
   const f = raw as {
     id?: unknown;
     description?: unknown;
-    raw?: { description?: unknown; completed?: unknown } | null;
+    raw?: { description?: unknown; completed?: unknown; completed_at?: unknown } | null;
     searchable_json?: { description?: unknown } | null;
+    completed_at?: unknown;
   };
   const description = [f.raw?.description, f.searchable_json?.description, f.description].find(
     (d): d is string => typeof d === 'string' && d.length > 0
@@ -262,7 +265,15 @@ function parseActionItemFollowUp(raw: unknown): ActionItemFollowUp | null {
         ? f.id
         : null;
   if (!id || !description) return null;
-  return { id, description, completed: f.raw?.completed === true };
+  const completed = f.raw?.completed === true;
+  const out: ActionItemFollowUp = { id, description, completed };
+  // Only a completed follow-up has a meaningful completion time; take it from
+  // whichever layer carries it, and only when it parses as a date.
+  const at = [f.raw?.completed_at, f.completed_at].find(
+    (v): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v))
+  );
+  if (completed && at) out.completedAt = at;
+  return out;
 }
 
 function assertOk(res: { status: number; data: unknown }, expected: number, action: string): void {
