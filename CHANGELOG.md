@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.28.0](https://github.com/ariso-ai/oats/compare/v0.27.0...v0.28.0) (2026-11-10)
+
+
+### Features
+
+* **library:** add Download Audio button for local recordings ([455f5f1](https://github.com/ariso-ai/oats/commit/455f5f16e647c634915c211a812e784113ebddec))
+* **library:** add Download Audio button for local recordings ([3eba63e](https://github.com/ariso-ai/oats/commit/3eba63e579ab558522cfa34d602eac0eabd4bee9))
+* **todos:** new todos view ([7e5798c](https://github.com/ariso-ai/oats/commit/7e5798c4da2348a7c876eaf11cc54e4229cabb69))
+* **todos:** Todos view in the Library detail pane ([aa710bd](https://github.com/ariso-ai/oats/commit/aa710bd6afb88e9f3ae46417dee98ead76c639b7))
+
+
+### Bug Fixes
+
+* **library:** leave the Todos tab when showing a meeting ([028ddfb](https://github.com/ariso-ai/oats/commit/028ddfbf7eee3d46b08ffd2b418e766b8a62f47a))
+
 ## [0.27.0](https://github.com/ariso-ai/oats/compare/v0.26.1...v0.27.0) (2026-10-30)
 
 
