@@ -738,18 +738,20 @@ fn open_meeting_prompt_window(
     subtitle: Option<&str>,
     default_record: bool,
 ) -> Result<(), String> {
+    let seconds = AUTO_RECORD_PROMPT_TIMEOUT.as_secs();
+    open_meeting_prompt_window_at(app, meeting_prompt_url(seconds, subtitle, default_record))
+}
+
+/// Build the `meeting-prompt` window at `url` (the start prompt or the Ari
+/// notice). Must run on the main thread.
+fn open_meeting_prompt_window_at(app: &AppHandle, url: String) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     // Only one prompt is live per meeting; replace any stale window.
     if let Some(existing) = app.get_webview_window("meeting-prompt") {
         let _ = existing.close();
     }
-    let seconds = AUTO_RECORD_PROMPT_TIMEOUT.as_secs();
-    let win = WebviewWindowBuilder::new(
-        app,
-        "meeting-prompt",
-        WebviewUrl::App(meeting_prompt_url(seconds, subtitle, default_record).into()),
-    )
+    let win = WebviewWindowBuilder::new(app, "meeting-prompt", WebviewUrl::App(url.into()))
     .title("")
     .inner_size(MEETING_PROMPT_W, MEETING_PROMPT_H)
     .decorations(false)
@@ -830,76 +832,45 @@ fn deliver_auto_record_decision(record: bool) {
     }
 }
 
-/// Whether the meeting happening right now is already flagged for server-side
-/// auto-join (an Ariso notetaker will record it), in which case the desktop must
-/// not also record. Only the Ariso backend has a calendar; everything else — and
-/// any network/parse error — returns false so detection proceeds normally.
-pub async fn current_meeting_auto_join_scheduled(app: &AppHandle) -> bool {
-    use crate::commands::{active_backend, api_base_url, get_session_token, http_client};
-    if active_backend(app) != "ariso" {
-        return false;
-    }
-    let Some(token) = get_session_token(app) else {
-        return false;
-    };
-    let now = chrono::Utc::now();
-    let start = (now - chrono::Duration::hours(2)).to_rfc3339();
-    let end = (now + chrono::Duration::hours(2)).to_rfc3339();
-    let result = tokio::time::timeout(HTTP_TIMEOUT, async {
-        http_client()
-            .get(format!("{}/meetings", api_base_url()))
-            .query(&[("startDate", start.as_str()), ("endDate", end.as_str())])
-            .header(AUTHORIZATION, format!("Bearer {token}"))
-            .header(CONTENT_TYPE, "application/json")
-            .send()
-            .await
-            .ok()?
-            .json::<Value>()
-            .await
-            .ok()
-    })
-    .await;
-    match result {
-        Ok(Some(v)) => current_meeting_auto_join_from(&v, now.timestamp_millis()),
-        _ => false,
+/// What to do when the mic monitor detects a call starting.
+#[derive(Debug, PartialEq)]
+pub enum StartDecision {
+    /// Show the Record/Dismiss countdown; `subtitle` is the live meeting's title.
+    Prompt { subtitle: Option<String> },
+    /// Ari (the notetaker bot) is joining or already in the call: skip the
+    /// countdown, don't record, and show an informational notice instead.
+    AriPresent { joining: bool, title: Option<String> },
+    /// The meeting is flagged for server-side auto-join but Ari isn't in yet; an
+    /// Ariso notetaker will record it, so skip silently (no prompt, no record).
+    SkipAutoJoin,
+}
+
+/// Decide whether a newly detected call gets the record countdown. Only the
+/// Ariso backend has a calendar; everything else — and any network/parse error
+/// — falls back to a plain prompt so detection proceeds normally.
+pub async fn start_decision(app: &AppHandle) -> StartDecision {
+    match fetch_meetings_around_now(app).await {
+        Some(v) => start_decision_from(&v, chrono::Utc::now().timestamp_millis()),
+        None => StartDecision::Prompt { subtitle: None },
     }
 }
 
-/// Pure selector (testable): given the `/meetings` response and the current time
-/// in epoch-ms, return whether the *current* meeting is auto-join-scheduled.
-/// "Current" mirrors the frontend's `pickDefaultMeeting`: a meeting is current
-/// when `start - 5min <= now <= start + 60min`; if several overlap, the latest
-/// start wins (the one you most recently joined).
-fn current_meeting_auto_join_from(resp: &Value, now_ms: i64) -> bool {
-    const FIVE_MIN_MS: i64 = 5 * 60_000;
-    const SIXTY_MIN_MS: i64 = 60 * 60_000;
-    let Some(meetings) = resp.get("meetings").and_then(Value::as_array) else {
-        return false;
-    };
-    let mut current_start = i64::MIN;
-    let mut current_auto_join = false;
-    for m in meetings {
-        let Some(start_str) = m.get("start_at").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(start_ms) = chrono::DateTime::parse_from_rfc3339(start_str)
-            .map(|dt| dt.timestamp_millis())
-        else {
-            continue;
-        };
-        let is_current = start_ms - FIVE_MIN_MS <= now_ms && now_ms <= start_ms + SIXTY_MIN_MS;
-        if is_current && start_ms >= current_start {
-            current_start = start_ms;
-            current_auto_join = truthy(m.get("auto_join_scheduled"));
-        }
+/// Pure (testable): the start decision for the `/meetings` response at `now_ms`.
+/// Ari presence (status `joining`/`joined`) wins over the auto-join flag, since
+/// it reflects what's actually happening rather than what was scheduled.
+fn start_decision_from(resp: &Value, now_ms: i64) -> StartDecision {
+    let title = current_meeting_title_from(resp, now_ms);
+    if let Some(joining) = current_meeting_ari_presence_from(resp, now_ms) {
+        return StartDecision::AriPresent { joining, title };
     }
-    current_auto_join
+    if current_meeting_auto_join_from(resp, now_ms) {
+        return StartDecision::SkipAutoJoin;
+    }
+    StartDecision::Prompt { subtitle: title }
 }
 
-/// Best-effort title of the meeting happening right now, shown as the prompt
-/// subtitle. Only the Ariso backend has a calendar; everything else — and any
-/// network/parse error — returns None so the view keeps its default subtitle.
-pub async fn current_meeting_title(app: &AppHandle) -> Option<String> {
+/// GET `/meetings` for now ±2h (Ariso backend only). None on any error.
+async fn fetch_meetings_around_now(app: &AppHandle) -> Option<Value> {
     use crate::commands::{active_backend, api_base_url, get_session_token, http_client};
     if active_backend(app) != "ariso" {
         return None;
@@ -908,7 +879,7 @@ pub async fn current_meeting_title(app: &AppHandle) -> Option<String> {
     let now = chrono::Utc::now();
     let start = (now - chrono::Duration::hours(2)).to_rfc3339();
     let end = (now + chrono::Duration::hours(2)).to_rfc3339();
-    let result = tokio::time::timeout(HTTP_TIMEOUT, async {
+    tokio::time::timeout(HTTP_TIMEOUT, async {
         http_client()
             .get(format!("{}/meetings", api_base_url()))
             .query(&[("startDate", start.as_str()), ("endDate", end.as_str())])
@@ -921,22 +892,20 @@ pub async fn current_meeting_title(app: &AppHandle) -> Option<String> {
             .await
             .ok()
     })
-    .await;
-    match result {
-        Ok(Some(v)) => current_meeting_title_from(&v, now.timestamp_millis()),
-        _ => None,
-    }
+    .await
+    .ok()
+    .flatten()
 }
 
-/// Pure selector (testable): title of the *current* meeting, picked the same way
-/// as `current_meeting_auto_join_from` (latest start among the current ones).
-/// Returns None when there is no current meeting or its title is null/empty.
-fn current_meeting_title_from(resp: &Value, now_ms: i64) -> Option<String> {
+/// Pure selector (testable): the *current* meeting in a `/meetings` response.
+/// "Current" mirrors the frontend's `pickDefaultMeeting`: a meeting is current
+/// when `start - 5min <= now <= start + 60min`; if several overlap, the latest
+/// start wins (the one you most recently joined).
+fn current_meeting_from(resp: &Value, now_ms: i64) -> Option<&Value> {
     const FIVE_MIN_MS: i64 = 5 * 60_000;
     const SIXTY_MIN_MS: i64 = 60 * 60_000;
     let meetings = resp.get("meetings").and_then(Value::as_array)?;
-    let mut current_start = i64::MIN;
-    let mut current_title: Option<String> = None;
+    let mut current: Option<(i64, &Value)> = None;
     for m in meetings {
         let Some(start_str) = m.get("start_at").and_then(Value::as_str) else {
             continue;
@@ -947,16 +916,38 @@ fn current_meeting_title_from(resp: &Value, now_ms: i64) -> Option<String> {
             continue;
         };
         let is_current = start_ms - FIVE_MIN_MS <= now_ms && now_ms <= start_ms + SIXTY_MIN_MS;
-        if is_current && start_ms >= current_start {
-            current_start = start_ms;
-            current_title = m
-                .get("title")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .filter(|s| !s.is_empty());
+        if is_current && current.is_none_or(|(s, _)| start_ms >= s) {
+            current = Some((start_ms, m));
         }
     }
-    current_title
+    current.map(|(_, m)| m)
+}
+
+/// Pure selector (testable): whether the current meeting is auto-join-scheduled.
+fn current_meeting_auto_join_from(resp: &Value, now_ms: i64) -> bool {
+    current_meeting_from(resp, now_ms).is_some_and(|m| truthy(m.get("auto_join_scheduled")))
+}
+
+/// Pure selector (testable): title of the current meeting. None when there is
+/// no current meeting or its title is null/empty.
+fn current_meeting_title_from(resp: &Value, now_ms: i64) -> Option<String> {
+    current_meeting_from(resp, now_ms)?
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Pure selector (testable): `Some(joining)` when Ari is in the current meeting
+/// — `Some(true)` for status `joining`, `Some(false)` for `joined` — else None.
+/// Case/whitespace-tolerant like the frontend's `statusIs`.
+fn current_meeting_ari_presence_from(resp: &Value, now_ms: i64) -> Option<bool> {
+    let status = current_meeting_from(resp, now_ms)?.get("status")?.as_str()?;
+    match status.trim().to_ascii_lowercase().as_str() {
+        "joining" => Some(true),
+        "joined" => Some(false),
+        _ => None,
+    }
 }
 
 /// Lenient truthiness for an API flag that may arrive as a bool, 0/1, or string.
@@ -972,9 +963,12 @@ fn truthy(v: Option<&Value>) -> bool {
 /// Show the auto-record confirm/deny notification and await the user's choice.
 /// Resolves `true` to start recording. Returns `default_record` if the user
 /// doesn't respond within the 10s window.
-pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
-    // Best-effort: surface the live meeting's title as the prompt subtitle.
-    let subtitle = current_meeting_title(app).await;
+/// `subtitle` is the live meeting's title, if known (see `start_decision`).
+pub async fn prompt_auto_record(
+    app: &AppHandle,
+    subtitle: Option<String>,
+    default_record: bool,
+) -> bool {
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
     show_auto_record_prompt(app, subtitle, default_record);
@@ -991,6 +985,38 @@ pub async fn prompt_auto_record(app: &AppHandle, default_record: bool) -> bool {
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main));
     record
+}
+
+/// How long the "Ari is in this meeting" notice stays up before closing itself.
+const ARI_NOTICE_DURATION: Duration = Duration::from_secs(6);
+
+/// Route for the informational "Ari is joining / has joined" notice. Same
+/// window and view as the start prompt, in `mode=ari`: no actions, just a
+/// dismiss button and a cosmetic countdown matching `ARI_NOTICE_DURATION`.
+fn ari_notice_url(seconds: u64, joining: bool, subtitle: Option<&str>) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    ser.append_pair("seconds", &seconds.to_string());
+    ser.append_pair("mode", "ari");
+    ser.append_pair("ari", if joining { "joining" } else { "joined" });
+    if let Some(s) = subtitle.filter(|s| !s.is_empty()) {
+        ser.append_pair("subtitle", s);
+    }
+    format!("/#/meeting-prompt?{}", ser.finish())
+}
+
+/// Ari is in the call, so oats won't prompt or record: tell the user why with a
+/// short self-dismissing notice instead of the countdown.
+pub async fn show_ari_notice(app: &AppHandle, joining: bool, title: Option<String>) {
+    let url = ari_notice_url(ARI_NOTICE_DURATION.as_secs(), joining, title.as_deref());
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(e) = open_meeting_prompt_window_at(&app_main, url) {
+            eprintln!("meeting-prompt: failed to open Ari notice window: {e}");
+        }
+    });
+    tokio::time::sleep(ARI_NOTICE_DURATION).await;
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main));
 }
 
 /// Open the meeting-start notification window. Window creation must happen on
@@ -1855,6 +1881,92 @@ mod tests {
         assert_eq!(
             super::meeting_switch_prompt_url(30, Some("")),
             "/#/meeting-prompt?seconds=30&mode=switch"
+        );
+    }
+
+    // --- Ari presence: skip the countdown when the notetaker is in the call ---
+
+    #[test]
+    fn ari_joined_shows_the_notice_instead_of_the_prompt() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "status": "joined", "title": "Standup" }
+        ]});
+        assert_eq!(
+            start_decision_from(&resp, NOW_MS),
+            StartDecision::AriPresent { joining: false, title: Some("Standup".into()) }
+        );
+    }
+
+    #[test]
+    fn ari_joining_shows_the_notice_and_tolerates_case_and_whitespace() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-1), "status": " Joining " }
+        ]});
+        assert_eq!(
+            start_decision_from(&resp, NOW_MS),
+            StartDecision::AriPresent { joining: true, title: None }
+        );
+    }
+
+    #[test]
+    fn ari_presence_wins_over_the_auto_join_flag() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "status": "joined", "auto_join_scheduled": true }
+        ]});
+        assert_eq!(
+            start_decision_from(&resp, NOW_MS),
+            StartDecision::AriPresent { joining: false, title: None }
+        );
+    }
+
+    #[test]
+    fn auto_join_flag_without_ari_present_still_skips_silently() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "status": "created", "auto_join_scheduled": true }
+        ]});
+        assert_eq!(start_decision_from(&resp, NOW_MS), StartDecision::SkipAutoJoin);
+    }
+
+    #[test]
+    fn no_ari_and_no_flag_prompts_with_the_meeting_title() {
+        let resp = json!({ "meetings": [
+            { "id": 1, "start_at": at(-10), "status": "created", "title": "Standup" }
+        ]});
+        assert_eq!(
+            start_decision_from(&resp, NOW_MS),
+            StartDecision::Prompt { subtitle: Some("Standup".into()) }
+        );
+    }
+
+    #[test]
+    fn ari_joined_on_a_non_current_or_overlapped_meeting_is_ignored() {
+        // Two hours ago: not current.
+        let stale = json!({ "meetings": [
+            { "id": 1, "start_at": at(-120), "status": "joined" }
+        ]});
+        assert_eq!(start_decision_from(&stale, NOW_MS), StartDecision::Prompt { subtitle: None });
+        // Overlap: the later-starting meeting is the active one.
+        let overlap = json!({ "meetings": [
+            { "id": 1, "start_at": at(-50), "status": "joined" },
+            { "id": 2, "start_at": at(-2),  "status": "created" }
+        ]});
+        assert_eq!(start_decision_from(&overlap, NOW_MS), StartDecision::Prompt { subtitle: None });
+    }
+
+    #[test]
+    fn missing_meetings_prompts() {
+        assert_eq!(start_decision_from(&json!({}), NOW_MS), StartDecision::Prompt { subtitle: None });
+    }
+
+    #[test]
+    fn ari_notice_url_carries_mode_status_and_subtitle() {
+        assert_eq!(
+            super::ari_notice_url(6, true, Some("Q3 Plan & Review")),
+            "/#/meeting-prompt?seconds=6&mode=ari&ari=joining&subtitle=Q3+Plan+%26+Review"
+        );
+        assert_eq!(
+            super::ari_notice_url(6, false, None),
+            "/#/meeting-prompt?seconds=6&mode=ari&ari=joined"
         );
     }
 }
