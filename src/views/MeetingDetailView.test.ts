@@ -27,6 +27,10 @@ const pickMarkdownSavePath = vi.fn();
 const copyRecordingFile = vi.fn();
 const setVaultTaskDone = vi.fn();
 const renameSpeaker = vi.fn();
+const openUrl = vi.fn();
+const getDesktopConfigMock = vi.fn(() =>
+  Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' })
+);
 
 vi.mock('../composables/useBackend', () => ({
   getActiveBackend: () => activeBackend(),
@@ -85,8 +89,7 @@ vi.mock('../tauri', () => ({
   },
   shareTextNative: (text: string, anchor: unknown) => shareTextNative(text, anchor),
   pickMarkdownSavePath: (name: string) => pickMarkdownSavePath(name),
-  getDesktopConfig: () =>
-    Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' }),
+  getDesktopConfig: () => getDesktopConfigMock(),
   local: {
     recordingStatus: (id: string) => recordingStatus(id),
     readRecordingFile: (id: string, kind: string) => readRecordingFile(id, kind),
@@ -98,6 +101,8 @@ vi.mock('../tauri', () => ({
     renameSpeaker: (...a: unknown[]) => renameSpeaker(...a),
   },
 }));
+
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: (...a: unknown[]) => openUrl(...a) }));
 
 import MeetingDetailView from './MeetingDetailView.vue';
 import MeetingNotesEditor from './MeetingNotesEditor.vue';
@@ -132,6 +137,10 @@ beforeEach(() => {
   // clearAllMocks keeps queued `mockResolvedValueOnce` implementations, so an
   // unconsumed one would answer the next test's first detail load.
   getMeetingDetail.mockReset();
+  getDesktopConfigMock.mockImplementation(() =>
+    Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' })
+  );
+  openUrl.mockReset();
   processingMock.tracked!.value = new Set();
   processingMock.version!.value = 0;
   renameMeeting.mockResolvedValue(undefined);
@@ -2853,5 +2862,33 @@ describe('MeetingDetailView local speaker rename', () => {
     await flushPromises();
 
     expect(q('.lsp-pop')).toBeNull();
+  });
+});
+
+describe('Open in Ariso button', () => {
+  it('renders for a cloud meeting and opens the web meeting-notes URL on click', async () => {
+    const wrapper = await mountWith(detail({ id: '7', isLocal: false }));
+    const btn = wrapper.find('.btn-open-ariso');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain('Open in Ariso');
+    await btn.trigger('click');
+    expect(openUrl).toHaveBeenCalledWith('https://app.test/meeting-notes/7');
+  });
+
+  it('does not render for a local recording', async () => {
+    const wrapper = await mountWith(detail({ id: '7', isLocal: true }));
+    expect(wrapper.find('.btn-open-ariso').exists()).toBe(false);
+  });
+
+  it('URL-encodes a meeting id with special characters', async () => {
+    const wrapper = await mountWith(detail({ id: 'a/b c', isLocal: false }));
+    await wrapper.find('.btn-open-ariso').trigger('click');
+    expect(openUrl).toHaveBeenCalledWith('https://app.test/meeting-notes/a%2Fb%20c');
+  });
+
+  it('stays absent when getDesktopConfig rejects', async () => {
+    getDesktopConfigMock.mockRejectedValueOnce(new Error('offline'));
+    const wrapper = await mountWith(detail({ id: '7', isLocal: false }));
+    expect(wrapper.find('.btn-open-ariso').exists()).toBe(false);
   });
 });
