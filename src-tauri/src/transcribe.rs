@@ -1081,6 +1081,13 @@ async fn append_recording_core(
     // with it — held by a different task than the one that acquired it, but
     // the serialization guarantee against a concurrent checkpoint/rename is
     // unchanged.
+    //
+    // Note the target's meta.json is left at `Done` on disk here, even though
+    // the `FinalizeResult` returned below reports `Transcribing`: the flip to
+    // `Transcribing` happens only inside `finish_append_recording`, once it's
+    // committed to merging after the clip's STT succeeds. Flipping it earlier
+    // (synchronously here) would risk stranding the target in `Transcribing`
+    // forever if the clip's STT then fails.
     let result_title = meta.title.clone();
     let handle = tokio::spawn(finish_append_recording(
         root.to_path_buf(), dir.clone(), target_id.to_string(), audio, title, created_at, duration_seconds,
@@ -1246,8 +1253,11 @@ async fn finish_append_recording(
 /// Re-run the full pipeline (transcription + notes) for an existing recording,
 /// reusing its saved `recording.mp3`. `finalize_core` derives the recording's
 /// dir from `created_at`, which equals the existing folder id, so it rewrites
-/// in place and resets `status`/`error`/`notes_error`. Returns the result plus
-/// the detached notes `JoinHandle` (tests await it; the command drops it).
+/// in place and resets `status`/`error`/`notes_error`. The returned
+/// `FinalizeResult.status` is `Transcribing` immediately, not `Done`:
+/// transcription and notes now run in a detached background continuation
+/// (issue #521), and the returned `JoinHandle` spans that whole continuation,
+/// not just notes (tests await it; the command drops it).
 pub async fn retry_transcription_core(
     root: &Path,
     id: &str,
@@ -1347,8 +1357,10 @@ pub async fn retry_recordings_pending_llm(root: &Path) {
 #[tauri::command]
 pub async fn retry_local_transcription(id: String) -> Result<FinalizeResult, String> {
     let root = crate::vault::meta_root()?;
-    // Drop the notes JoinHandle: notes are best-effort and write their outcome
-    // to meta.json directly, matching `local_finalize_recording`.
+    // Drop the JoinHandle: it now spans transcription *and* notes (issue
+    // #521), both best-effort from this command's point of view — they
+    // continue running in the background and write their outcome to
+    // meta.json directly, matching `local_finalize_recording`.
     retry_transcription_core(&root, &id)
         .await
         .map(|(res, _notes)| res)
