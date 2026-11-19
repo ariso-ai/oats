@@ -144,3 +144,25 @@ describe('MeetingPromptView switch mode', () => {
     expect(close).toHaveBeenCalled();
   });
 });
+
+describe('MeetingPromptView ari mode', () => {
+  beforeEach(() => {
+    window.location.hash = '#/meeting-prompt?seconds=6&mode=ari&ari=joined&subtitle=Standup';
+  });
+
+  it('shows the Ari notice with no record actions', () => {
+    const wrapper = mount(MeetingPromptView);
+    expect(wrapper.text()).toContain('Ari has joined this meeting');
+    expect(wrapper.text()).toContain('Standup');
+    expect(wrapper.find('.split').exists()).toBe(false);
+    expect(byText(wrapper, 'Take notes')).toBeUndefined();
+  });
+
+  it('closes the window from the dismiss button without resolving a prompt', async () => {
+    const wrapper = mount(MeetingPromptView);
+    await wrapper.find('[data-test="dismiss"]').trigger('click');
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+  });
+});

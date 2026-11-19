@@ -16,6 +16,9 @@ const { seconds, title, subtitle, mode, defaultAction } = parsePromptParams(sear
 // recording: same card, but the choice is "switch to it" vs "keep recording",
 // and it is resolved by the recorder window's own prompt window/commands.
 const isSwitch = mode === 'switch';
+// Ari mode = Ari is joining / in the call, so oats won't record: an info-only
+// notice (no actions) that Rust closes after its countdown.
+const isAri = mode === 'ari';
 // With auto-record off the countdown ends in a no-op, so the primary button is
 // Dismiss and Take notes moves behind the chevron. Switch mode never swaps.
 const dismissFirst = !isSwitch && defaultAction === 'dismiss';
@@ -47,15 +50,20 @@ async function toggleMenu() {
 // right away for snappy feedback. Rust also tears the window down on decision or
 // timeout, so this close is a harmless no-op if it gets there first.
 async function resolve(yes: boolean) {
-  await invoke(
-    isSwitch ? 'resolve_meeting_switch_prompt' : 'resolve_meeting_prompt',
-    isSwitch ? { switch: yes } : { record: yes },
-  );
+  // Nothing awaits a decision for the Ari notice; just close it.
+  if (!isAri) await resolveWithRust(yes);
   try {
     await getCurrentWebviewWindow().close();
   } catch {
     // No window in unit tests, or Rust already closed it.
   }
+}
+
+async function resolveWithRust(yes: boolean) {
+  await invoke(
+    isSwitch ? 'resolve_meeting_switch_prompt' : 'resolve_meeting_prompt',
+    isSwitch ? { switch: yes } : { record: yes },
+  );
 }
 </script>
 
@@ -83,7 +91,7 @@ async function resolve(yes: boolean) {
         </div>
 
         <!-- Split button: the default action + a chevron that reveals the other. -->
-        <div ref="splitEl" class="split">
+        <div v-if="!isAri" ref="splitEl" class="split">
           <button class="primary-btn split-main" @click="resolve(!dismissFirst)">
             {{ primaryLabel }}
           </button>

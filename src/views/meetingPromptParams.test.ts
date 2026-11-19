@@ -96,3 +96,22 @@ describe('parseSilencePromptParams', () => {
     expect(parseSilencePromptParams('?seconds=60').subtitle).toBe('');
   });
 });
+
+describe('parsePromptParams ari mode', () => {
+  it('reads the joined notice with the meeting title as subtitle', () => {
+    expect(parsePromptParams('?seconds=6&mode=ari&ari=joined&subtitle=Standup')).toEqual({
+      seconds: 6,
+      title: 'Ari has joined this meeting',
+      subtitle: 'Standup',
+      mode: 'ari',
+      defaultAction: 'dismiss',
+    });
+  });
+
+  it('reads the joining notice and falls back to an explanatory subtitle', () => {
+    const p = parsePromptParams('?mode=ari&ari=joining');
+    expect(p.title).toBe('Ari is joining this meeting');
+    expect(p.subtitle).toBe("Ari is taking notes, so oats won't record.");
+    expect(p.seconds).toBe(6);
+  });
+});
