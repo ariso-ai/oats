@@ -678,10 +678,15 @@ async fn checkpoint_locked(
 
 /// Pure-ish orchestration over an explicit root, so tests use a tempdir.
 ///
-/// Returns as soon as the transcript is persisted and marked `Done`. Notes
-/// generation runs in a detached background task whose `JoinHandle` is
-/// returned alongside the result — production callers drop it; tests
-/// `.await` it to observe `ari-note.md` / `meta.notes_error`.
+/// Returns as soon as the audio is durably persisted and an initial
+/// `Transcribing` `meta.json` is written — before transcription itself has
+/// even started (issue #521: a caller, i.e. the recorder pill, must never
+/// block on STT, which can run for as long as the meeting did). The actual
+/// transcription, the transcript/`Done` write, and notes generation all run
+/// in a detached background task whose `JoinHandle` is returned alongside
+/// the result — production callers drop it; tests `.await` it to observe
+/// the final `meta.json` status, `segments.json`/`transcript.md`, and
+/// `ari-note.md` / `meta.notes_error`.
 pub async fn finalize_core(
     root: &Path,
     audio: Vec<u8>,
@@ -734,9 +739,13 @@ pub async fn finalize_core_with_target(
     }
 }
 
-/// Create a brand-new recording: persist audio, transcribe, write
-/// `segments.json` + `transcript.md`, mark `Done`, spawn notes. On STT failure
-/// the recording is marked `Failed` (audio retained).
+/// Create a brand-new recording, in two phases. Synchronously: persist the
+/// audio into the vault and write a `meta.json` stamped `Transcribing`, then
+/// hand off to a spawned background task ([`finish_fresh_recording`]) before
+/// returning — this function never runs STT itself. In the background:
+/// transcribe, write `segments.json` + `transcript.md`, mark `Done`, then run
+/// notes inline. On STT failure the recording is marked `Failed` (audio
+/// retained); both failure paths happen in the background task.
 async fn fresh_recording_core(
     root: &Path,
     audio: Vec<u8>,
@@ -784,7 +793,7 @@ async fn fresh_recording_core(
     };
     crate::vault::write_audio(&audio_file, &audio)?;
 
-    let mut meta = RecordingMeta {
+    let meta = RecordingMeta {
         id: id.clone(),
         title: title.clone(),
         created_at,
@@ -805,62 +814,124 @@ async fn fresh_recording_core(
     };
     storage::write_meta(&dir, &meta)?;
 
-    let root = storage::ariso_root()?;
+    // Hand off to a background task for the actual transcription: a caller
+    // (the recorder pill) must never block on STT, which can run for as long
+    // as the meeting did. The per-recording lock guard moves with it — held
+    // by a different task than the one that acquired it, but the
+    // serialization guarantee against a concurrent checkpoint/rename is
+    // unchanged.
+    let handle = tokio::spawn(finish_fresh_recording(dir.clone(), id.clone(), meta.clone(), _recording_guard));
+    Ok((
+        FinalizeResult {
+            backend: "local".to_string(),
+            id,
+            title,
+            status: RecordingStatus::Transcribing,
+        },
+        handle,
+    ))
+}
+
+/// Background continuation of [`fresh_recording_core`]: runs the actual STT
+/// pass and, on success, the notes generation chained inline after it (this
+/// whole function already runs detached in a spawned task, so there is no
+/// need for a second, inner `tokio::spawn`). Persists every outcome — STT
+/// failure, a storage error, or success — to `meta.json` before returning.
+///
+/// Owns the per-recording lock guard `fresh_recording_core` acquired before
+/// spawning this task, so the transcript/`Done` write below still can't
+/// interleave with a concurrent checkpoint or rename. The guard is dropped
+/// explicitly right after that write: `process_notes` takes the same
+/// per-recording lock itself to commit its result, and `tokio::sync::Mutex`
+/// is not reentrant, so holding the guard any longer would deadlock this
+/// task against itself.
+async fn finish_fresh_recording(
+    dir: PathBuf,
+    // `meta.id` is authoritative (and already carries this value for a fresh
+    // recording); kept as its own parameter for signature symmetry with the
+    // future append-path continuation, where the two can differ.
+    _id: String,
+    mut meta: RecordingMeta,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+) {
+    let root = match storage::ariso_root() {
+        Ok(root) => root,
+        Err(e) => {
+            meta.status = RecordingStatus::Failed;
+            meta.error = Some(e);
+            let _ = storage::write_meta(&dir, &meta);
+            return;
+        }
+    };
     let models = storage::models_dir(&root);
-    let audio_path = crate::vault::audio_path(&crate::vault::vault_root()?, &audio_file);
+    let vault_root = match crate::vault::vault_root() {
+        Ok(root) => root,
+        Err(e) => {
+            meta.status = RecordingStatus::Failed;
+            meta.error = Some(e);
+            let _ = storage::write_meta(&dir, &meta);
+            return;
+        }
+    };
+    let audio_file = meta.audio_file.clone().unwrap_or_default();
+    let audio_path = crate::vault::audio_path(&vault_root, &audio_file);
     let speech_model = crate::speech_model::selected();
     match run_transcribe(&audio_path, &models, speech_model).await {
         Ok(result) => {
             meta.language = Some(result.language.clone());
             meta.participants = result.participants.clone();
             meta.model_version = Some(crate::model_manager::speech_model_version(speech_model));
-            storage::write_segments(&dir, &storage::SegmentsFile {
+            if let Err(e) = storage::write_segments(&dir, &storage::SegmentsFile {
                 language: Some(result.language.clone()),
                 participants: result.participants.clone(),
                 segments: result.segments.clone(),
-            })?;
+            }) {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(e);
+                let _ = storage::write_meta(&dir, &meta);
+                return;
+            }
             let md = storage::render_markdown(&meta, &result.segments);
-            storage::write_transcript(&dir, &md)?;
+            if let Err(e) = storage::write_transcript(&dir, &md) {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(e);
+                let _ = storage::write_meta(&dir, &meta);
+                return;
+            }
             // Truthful status from the instant the recording reads `Done`: a
             // preview note may already be in the vault, and `derive_notes_status`
             // would otherwise call this ready before the real notes exist.
             meta.notes_in_progress = true;
             meta.status = RecordingStatus::Done;
-            storage::write_meta(&dir, &meta)?;
+            if let Err(e) = storage::write_meta(&dir, &meta) {
+                meta.status = RecordingStatus::Failed;
+                meta.error = Some(e);
+                let _ = storage::write_meta(&dir, &meta);
+                return;
+            }
 
-            // Spawn notes generation detached: it's best-effort and writes
-            // its outcome (ari-note.md or meta.notes_error) directly to disk,
-            // so the UI/library state never has to wait on it.
-            let notes_handle = tokio::spawn(process_notes(dir.clone(), models, meta.clone()));
+            // The transcript/`Done` write above is the last mutation that
+            // needed this guard's protection. Drop it before running notes:
+            // `process_notes` takes the same per-recording lock itself, and
+            // this task still holding it would deadlock against itself.
+            drop(_guard);
 
-            Ok((
-                FinalizeResult {
-                    backend: "local".to_string(),
-                    id,
-                    title,
-                    status: RecordingStatus::Done,
-                },
-                notes_handle,
-            ))
+            // Run notes generation inline: it's best-effort and writes its
+            // outcome (a vault note or meta.notes_error) directly to disk, and
+            // chaining it here (rather than a second detached spawn) is what
+            // makes this function's own `JoinHandle` resolve only once notes
+            // are also done.
+            process_notes(dir.clone(), models, meta.clone()).await;
         }
         Err(e) => {
             if !crate::model_manager::speech_is_ready(&root, speech_model) {
                 meta.status = RecordingStatus::PendingModels;
                 let _ = storage::write_meta(&dir, &meta);
-                return Ok((
-                    FinalizeResult {
-                        backend: "local".to_string(),
-                        id,
-                        title,
-                        status: RecordingStatus::PendingModels,
-                    },
-                    tokio::spawn(async {}),
-                ));
+                return;
             }
             meta.status = RecordingStatus::Failed;
-            meta.error = Some(e.clone());
+            meta.error = Some(e);
             let _ = storage::write_meta(&dir, &meta);
-            Err(e)
         }
     }
 }
@@ -933,23 +1004,32 @@ fn save_failed_clip(
     }
 }
 
-/// Append a clip to existing recording `target_id`: transcribe just the clip,
-/// offset it past the existing content, stitch into `segments.json`, concatenate
-/// the audio, update meta, re-render `transcript.md`, and regenerate notes. On
-/// STT failure the clip is saved as its own `Failed` recording via
-/// [`save_failed_clip`] (no re-transcribe; target untouched). If the target
-/// lacks `segments.json` (pre-feature recording), fall back to a fresh
-/// recording rather than corrupt it.
+/// Append a clip to existing recording `target_id`, in two phases.
+/// Synchronously: re-validate (under the per-recording lock) that the target
+/// is still `Done` with audio, write the clip to a temp file, and hand off to
+/// a spawned background task ([`finish_append_recording`]) before
+/// returning — this function never runs STT itself. If the target lacks
+/// `segments.json` (pre-feature recording) or is otherwise no longer
+/// suitable, fall back to a fresh recording rather than corrupt it.
 ///
-/// Crash/IO-error safety: once STT succeeds we are committed to merging, so the
-/// target is flipped to `Transcribing` and persisted *before* any of its real
-/// content files (`recording.mp3`, `segments.json`, `transcript.md`) are
-/// touched. A crash or IO error partway through then leaves the target
-/// observably incomplete rather than silently `Done` with a stale
-/// `duration_seconds` — and `storage::most_recent_appendable` (which requires
-/// `Done`) will never pick a mid-append target as the base for a further
-/// append, which would otherwise compound the offset bug. The final
-/// `write_meta` (status `Done`) is the commit record.
+/// In the background: transcribe just the clip, offset it past the existing
+/// content, stitch into `segments.json`, concatenate the audio, update meta,
+/// re-render `transcript.md`, mark `Done`, and regenerate notes. On STT
+/// failure the clip is saved as its own `Failed` recording via
+/// [`save_failed_clip`] (no re-transcribe; target untouched).
+///
+/// Crash/IO-error safety: once STT succeeds the background task is committed
+/// to merging, so the target is flipped to `Transcribing` and persisted
+/// *before* any of its real content files (`recording.mp3`, `segments.json`,
+/// `transcript.md`) are touched. A crash or IO error partway through then
+/// leaves the target observably incomplete rather than silently `Done` with a
+/// stale `duration_seconds` — and `storage::most_recent_appendable` (which
+/// requires `Done`) will never pick a mid-append target as the base for a
+/// further append, which would otherwise compound the offset bug. The final
+/// `write_meta` (status `Done`) is the commit record. `finish_append_recording`
+/// holds the per-recording lock guard this function acquired for the entire
+/// span this comment describes, so none of it can interleave with a
+/// concurrent checkpoint or rename.
 async fn append_recording_core(
     root: &Path,
     target_id: &str,
@@ -969,7 +1049,7 @@ async fn append_recording_core(
     // completed (and changed status) since finalize_core's
     // most_recent_appendable check. Fall back to a fresh recording if the
     // target's state is no longer suitable for an append.
-    let (mut meta, mut existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
+    let (meta, existing) = match (storage::read_meta(&dir), storage::read_segments(&dir)) {
         (Ok(m), Ok(Some(s)))
             if m.status == storage::RecordingStatus::Done && m.audio_file.is_some() =>
         {
@@ -985,16 +1065,87 @@ async fn append_recording_core(
     };
 
     // Capture the pre-append duration as the new clip's time offset before
-    // `meta` is mutated any further below.
+    // `meta` is mutated any further (in the background continuation below).
     let time_offset = meta.duration_seconds as f64;
 
-    let models = storage::models_dir(&storage::ariso_root()?);
     // Transcribe from a temp file so the target's audio is never touched on failure.
     let clip_path = dir.join("append-clip.mp3");
     if let Err(e) = std::fs::write(&clip_path, &audio) {
         save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &format!("write clip: {e}"));
         return Err(format!("write clip: {e}"));
     }
+
+    // Hand off to a background task for the actual clip transcription and
+    // merge: a caller (the recorder pill) must never block on STT, which can
+    // run for as long as the clip did. The per-recording lock guard moves
+    // with it — held by a different task than the one that acquired it, but
+    // the serialization guarantee against a concurrent checkpoint/rename is
+    // unchanged.
+    //
+    // Note the target's meta.json is left at `Done` on disk here, even though
+    // the `FinalizeResult` returned below reports `Transcribing`: the flip to
+    // `Transcribing` happens only inside `finish_append_recording`, once it's
+    // committed to merging after the clip's STT succeeds. Flipping it earlier
+    // (synchronously here) would risk stranding the target in `Transcribing`
+    // forever if the clip's STT then fails.
+    let result_title = meta.title.clone();
+    let handle = tokio::spawn(finish_append_recording(
+        root.to_path_buf(), dir.clone(), target_id.to_string(), audio, title, created_at, duration_seconds,
+        meta, existing, time_offset, clip_path, append_guard,
+    ));
+    Ok((
+        FinalizeResult {
+            backend: "local".to_string(),
+            id: target_id.to_string(),
+            title: result_title,
+            status: RecordingStatus::Transcribing,
+        },
+        handle,
+    ))
+}
+
+/// Background continuation of [`append_recording_core`]: runs the clip's STT
+/// pass and, on success, stitches it into the target recording and chains
+/// notes generation inline after it (this whole function already runs
+/// detached in a spawned task, so there is no need for a second, inner
+/// `tokio::spawn`).
+///
+/// Owns the per-recording lock guard `append_recording_core` acquired before
+/// spawning this task, so the merge below still can't interleave with a
+/// concurrent checkpoint or rename. The guard is dropped explicitly right
+/// after the final `Done` write: `process_notes` takes the same
+/// per-recording lock itself to commit its result, and `tokio::sync::Mutex`
+/// is not reentrant, so holding the guard any longer would deadlock this
+/// task against itself.
+///
+/// Any failure before the "committed to merging" status flip below leaves
+/// the target completely untouched (see the doc comment on
+/// `append_recording_core`); there is no caller left here to receive an
+/// `Err`, so failures are logged instead. A failure after that point leaves
+/// the target observably incomplete rather than silently `Done` — the
+/// crash/IO-error safety already documented on `append_recording_core`.
+async fn finish_append_recording(
+    root: PathBuf,
+    dir: PathBuf,
+    target_id: String,
+    audio: Vec<u8>,
+    clip_title: String,
+    created_at: String,
+    duration_seconds: u64,
+    mut meta: RecordingMeta,
+    mut existing: storage::SegmentsFile,
+    time_offset: f64,
+    clip_path: PathBuf,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+) {
+    let models_root = match storage::ariso_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("append recording {target_id}: ariso_root: {e}");
+            return;
+        }
+    };
+    let models = storage::models_dir(&models_root);
     // Transcribe the clip with the model that produced the target recording,
     // not whatever is currently selected: an append must not mix models (and
     // languages/segmentation styles) into one recording's model_version.
@@ -1010,15 +1161,20 @@ async fn append_recording_core(
             let _ = std::fs::remove_file(&clip_path);
             // Save this clip as its own Failed recording (no re-transcribe: it
             // would deterministically fail again); leave the target intact.
-            save_failed_clip(root, &audio, &title, &created_at, duration_seconds, &e);
-            return Err(e);
+            save_failed_clip(&root, &audio, &clip_title, &created_at, duration_seconds, &e);
+            eprintln!("append recording {target_id}: transcribe clip: {e}");
+            return;
         }
     };
 
     // Committed to merging: flip the target to in-progress and persist before
-    // touching any of its real content files (see doc comment above).
+    // touching any of its real content files (see doc comment on
+    // `append_recording_core`).
     meta.status = RecordingStatus::Transcribing;
-    storage::write_meta(&dir, &meta)?;
+    if let Err(e) = storage::write_meta(&dir, &meta) {
+        eprintln!("append recording {target_id}: write meta: {e}");
+        return;
+    }
 
     // Stitch the clip past the existing content.
     let speaker_offset = storage::next_speaker_offset(&existing);
@@ -1041,42 +1197,67 @@ async fn append_recording_core(
     // Content writes, in crash-safe order: audio, then structured segments,
     // then the rendered transcript. The audio lives only in the vault
     // attachment; read it, concatenate the clip, and write it back.
-    let audio_file = meta
-        .audio_file
-        .clone()
-        .ok_or_else(|| "append target has no vault audio (legacy recording)".to_string())?;
-    let mut combined = crate::vault::read_audio(&audio_file)?;
+    let audio_file = match meta.audio_file.clone() {
+        Some(f) => f,
+        None => {
+            eprintln!("append recording {target_id}: append target has no vault audio (legacy recording)");
+            return;
+        }
+    };
+    let mut combined = match crate::vault::read_audio(&audio_file) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("append recording {target_id}: read audio: {e}");
+            return;
+        }
+    };
     combined.extend_from_slice(&audio);
-    crate::vault::write_audio(&audio_file, &combined)?;
-    storage::write_segments(&dir, &existing)?;
+    if let Err(e) = crate::vault::write_audio(&audio_file, &combined) {
+        eprintln!("append recording {target_id}: write audio: {e}");
+        return;
+    }
+    if let Err(e) = storage::write_segments(&dir, &existing) {
+        eprintln!("append recording {target_id}: write segments: {e}");
+        return;
+    }
     let md = storage::render_markdown(&meta, &existing.segments);
-    storage::write_transcript(&dir, &md)?;
+    if let Err(e) = storage::write_transcript(&dir, &md) {
+        eprintln!("append recording {target_id}: write transcript: {e}");
+        return;
+    }
 
     // Clear any stale notes_error from a prior failed attempt (mirrors
     // `retry_notes_core`) and commit: status Done, written last.
     meta.notes_error = None;
     meta.notes_in_progress = true;
     meta.status = RecordingStatus::Done;
-    storage::write_meta(&dir, &meta)?;
+    if let Err(e) = storage::write_meta(&dir, &meta) {
+        eprintln!("append recording {target_id}: write meta: {e}");
+        return;
+    }
     let _ = std::fs::remove_file(&clip_path);
 
-    let notes_handle = tokio::spawn(process_notes(dir.clone(), models, meta.clone()));
-    Ok((
-        FinalizeResult {
-            backend: "local".to_string(),
-            id: target_id.to_string(),
-            title: meta.title.clone(),
-            status: RecordingStatus::Done,
-        },
-        notes_handle,
-    ))
+    // The `Done` write above is the last mutation that needed this guard's
+    // protection. Drop it before running notes: `process_notes` takes the
+    // same per-recording lock itself, and this task still holding it would
+    // deadlock against itself.
+    drop(_guard);
+
+    // Run notes generation inline: it's best-effort and writes its outcome
+    // (a vault note or meta.notes_error) directly to disk, and chaining it
+    // here (rather than a second detached spawn) is what makes this
+    // function's own `JoinHandle` resolve only once notes are also done.
+    process_notes(dir.clone(), models, meta.clone()).await;
 }
 
 /// Re-run the full pipeline (transcription + notes) for an existing recording,
 /// reusing its saved `recording.mp3`. `finalize_core` derives the recording's
 /// dir from `created_at`, which equals the existing folder id, so it rewrites
-/// in place and resets `status`/`error`/`notes_error`. Returns the result plus
-/// the detached notes `JoinHandle` (tests await it; the command drops it).
+/// in place and resets `status`/`error`/`notes_error`. The returned
+/// `FinalizeResult.status` is `Transcribing` immediately, not `Done`:
+/// transcription and notes now run in a detached background continuation
+/// (issue #521), and the returned `JoinHandle` spans that whole continuation,
+/// not just notes (tests await it; the command drops it).
 pub async fn retry_transcription_core(
     root: &Path,
     id: &str,
@@ -1176,8 +1357,10 @@ pub async fn retry_recordings_pending_llm(root: &Path) {
 #[tauri::command]
 pub async fn retry_local_transcription(id: String) -> Result<FinalizeResult, String> {
     let root = crate::vault::meta_root()?;
-    // Drop the notes JoinHandle: notes are best-effort and write their outcome
-    // to meta.json directly, matching `local_finalize_recording`.
+    // Drop the JoinHandle: it now spans transcription *and* notes (issue
+    // #521), both best-effort from this command's point of view — they
+    // continue running in the background and write their outcome to
+    // meta.json directly, matching `local_finalize_recording`.
     retry_transcription_core(&root, &id)
         .await
         .map(|(res, _notes)| res)
@@ -1244,8 +1427,12 @@ pub async fn local_finalize_recording(
         force_new,
     } = crate::raw_ipc::meta(&request)?;
     let root = crate::vault::meta_root()?;
-    // Drop the notes JoinHandle: notes are best-effort and continue running
-    // in the background, writing their outcome to meta.json directly.
+    // Drop the JoinHandle: it now spans transcription *and* notes (issue
+    // #521), both best-effort from this command's point of view — they
+    // continue running in the background and write their outcome to
+    // meta.json directly. The returned `FinalizeResult.status` is therefore
+    // `Transcribing` on success, not `Done`; the frontend learns of the
+    // eventual `Done`/`Failed` outcome via `local_recording_status` polling.
     finalize_core_with_target(
         &root,
         audio,
@@ -1677,6 +1864,134 @@ mod tests {
         );
     }
 
+    /// Issue #521: the recorder pill must be able to close — and the user
+    /// must be able to start the next recording — without waiting for a long
+    /// meeting's STT pass. `finalize_core` must return as soon as the audio
+    /// and an initial `Transcribing` `meta.json` are durably persisted; the
+    /// gated stub proves the transcription itself hasn't even started yet
+    /// when that happens.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_finalize_returns_before_transcription_completes() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json).gating_transcribe());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let gate_guard = SttGateGuard::new(tmp.path());
+
+        let (res, handle) = tokio::time::timeout(
+            Duration::from_secs(5),
+            finalize_core(&root, b"audio".to_vec(), "T".into(), "2026-06-02T14:30:05.000Z".into(), 1),
+        )
+        .await
+        .expect("finalize_core must return before the gated transcription is released")
+        .unwrap();
+
+        assert_eq!(res.status, RecordingStatus::Transcribing);
+        let dir = storage::recordings_dir(&root).join(&res.id);
+        assert_eq!(read_meta(&dir).unwrap().status, RecordingStatus::Transcribing);
+
+        gate_guard.release();
+        handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(read_meta(&dir).unwrap().status, RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// Issue #521, append path: the same fast-return requirement as
+    /// `fresh_finalize_returns_before_transcription_completes`, but for a
+    /// clip landing within the auto-append window. The target's STT pass
+    /// (gated here) must not block `finalize_core`'s return for the second
+    /// clip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_finalize_returns_before_clip_transcription_completes() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+        let stub = clip_stub(tmp.path());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+
+        let (r1, h1) = finalize_core(
+            &root, b"aaa".to_vec(), "T".into(), "2026-06-02T10:00:00.000Z".into(), 30,
+        ).await.unwrap();
+        h1.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let json = r#"{"language":"en","durationSeconds":3.0,"segments":[{"speaker":"model-speaker-0","text":"clip","start":0.0,"end":3.0}]}"#;
+        let gated_stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json).gating_transcribe());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &gated_stub); }
+        let gate_guard = SttGateGuard::new(tmp.path());
+
+        let (r2, handle) = tokio::time::timeout(
+            Duration::from_secs(5),
+            finalize_core(&root, b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15),
+        )
+        .await
+        .expect("appending finalize_core must return before the gated clip transcription is released")
+        .unwrap();
+
+        assert_eq!(r2.id, r1.id, "still the same target");
+        assert_eq!(r2.status, RecordingStatus::Transcribing);
+
+        gate_guard.release();
+        handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        let meta = read_meta(&storage::recordings_dir(&root).join(&r1.id)).unwrap();
+        assert_eq!(meta.status, RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
+    /// Issue #521, the end-to-end regression: a *second, unrelated* recording
+    /// must not be blocked by a *first* recording's background transcription
+    /// still being gated. `fresh_finalize_returns_before_transcription_completes`
+    /// proves one `finalize_core` call returns early; this proves that early
+    /// return actually unblocks the next call across recordings — the
+    /// behavior the issue is about.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn starting_a_new_recording_is_not_blocked_by_a_prior_ones_background_transcription() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
+        let root = tmp.path().to_path_buf();
+        let json = r#"{"language":"en","durationSeconds":1.0,"segments":[{"speaker":"model-speaker-0","text":"hi","start":0.0,"end":1.0}]}"#;
+        let stub = write_stub(tmp.path(), StubBehavior::transcribe_success(json).gating_transcribe());
+        unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
+        let gate_guard = SttGateGuard::new(tmp.path());
+
+        // "Previous meeting": returns fast, but its background transcription is
+        // now parked on the gate — simulating a long on-device STT pass still in
+        // flight.
+        let (first, first_handle) = finalize_core(
+            &root, b"first".to_vec(), "First".into(), "2026-06-02T10:00:00.000Z".into(), 600,
+        ).await.unwrap();
+        assert_eq!(first.status, RecordingStatus::Transcribing);
+        wait_for_stt_start(tmp.path()).await;
+
+        // "Next meeting": started well outside the 5-minute append window, so it
+        // is a brand-new recording — and must not wait on the first one's
+        // still-gated transcription at all.
+        let (second, second_handle) = tokio::time::timeout(
+            Duration::from_secs(5),
+            finalize_core(&root, b"second".to_vec(), "Second".into(), "2026-06-02T11:00:00.000Z".into(), 10),
+        )
+        .await
+        .expect("starting the next recording must not wait on the first one's transcription")
+        .unwrap();
+        assert_ne!(second.id, first.id);
+        assert_eq!(second.status, RecordingStatus::Transcribing);
+
+        gate_guard.release();
+        first_handle.await.unwrap();
+        second_handle.await.unwrap();
+        unsafe { std::env::remove_var("ARISO_STT_BIN"); }
+
+        assert_eq!(read_meta(&storage::recordings_dir(&root).join(&first.id)).unwrap().status, RecordingStatus::Done);
+        assert_eq!(read_meta(&storage::recordings_dir(&root).join(&second.id)).unwrap().status, RecordingStatus::Done);
+        unsafe { std::env::remove_var("ARISO_ROOT"); }
+    }
+
     #[tokio::test]
     async fn finalize_writes_transcript_and_marks_done() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1696,7 +2011,7 @@ mod tests {
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert_eq!(res.status, RecordingStatus::Done);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         assert_eq!(res.id, "2026-06-02T14-30-05Z");
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         let meta = read_meta(&dir).unwrap();
@@ -1931,7 +2246,7 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         unsafe { std::env::remove_var("ARISO_ROOT"); }
 
-        assert_eq!(res.status, RecordingStatus::Done);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         // The stub notes payload is raw markdown with no title, so the default
         // survives; what matters is that it stayed flagged as a default.
         let meta = read_meta(&dir).unwrap();
@@ -1953,7 +2268,7 @@ mod tests {
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert_eq!(res.status, RecordingStatus::PendingModels);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         let meta = read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::PendingModels);
@@ -1974,13 +2289,14 @@ mod tests {
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
         crate::model_manager::mark_stt_ready_for_test(tmp.path());
 
-        let err = finalize_core(
+        let (res, handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
             "T".into(), "2026-06-02T14:30:05Z".into(), 5,
-        ).await.unwrap_err();
+        ).await.unwrap();
+        assert_eq!(res.status, RecordingStatus::Transcribing);
+        handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert!(err.contains("boom"), "got: {err}");
         let dir = crate::storage::recordings_dir(tmp.path()).join("2026-06-02T14-30-05Z");
         // STT fails *after* the vault write, so the attachment is retained even
         // though no ~/.ariso copy exists.
@@ -1993,6 +2309,7 @@ mod tests {
         assert!(!dir.join("recording.mp3").exists());
         assert_eq!(meta.status, RecordingStatus::Failed);
         assert!(meta.error.is_some());
+        assert!(meta.error.as_deref().unwrap_or("").contains("boom"));
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
 
@@ -2015,7 +2332,7 @@ mod tests {
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert_eq!(res.status, RecordingStatus::Done);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         // Note lands in the vault (resolvable by oats_id), not ~/.ariso.
         let notes = crate::vault::read_note(&res.id).unwrap();
@@ -2076,7 +2393,7 @@ mod tests {
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert_eq!(res.status, RecordingStatus::Done);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
         assert!(dir.join("transcript.md").exists());
         assert!(!dir.join("ari-note.md").exists());
@@ -2107,7 +2424,7 @@ mod tests {
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert_eq!(res.status, RecordingStatus::Done, "transcript still generates");
+        assert_eq!(res.status, RecordingStatus::Transcribing, "transcript still generates");
         let meta = read_meta(&crate::storage::recordings_dir(tmp.path()).join(&res.id)).unwrap();
         assert_eq!(meta.notes_error.as_deref(), Some(crate::storage::MODELS_NOT_READY_NOTES_ERROR));
         assert!(!meta.notes_in_progress);
@@ -2247,7 +2564,7 @@ mod tests {
         notes_handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
-        assert_eq!(res.status, RecordingStatus::Done);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         assert!(
             crate::vault::read_note(&res.id).unwrap().is_none(),
             "a speechless transcript must not produce AI notes"
@@ -2301,7 +2618,7 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         unsafe { std::env::remove_var("ARISO_ROOT"); }
 
-        assert_eq!(res.status, RecordingStatus::Done);
+        assert_eq!(res.status, RecordingStatus::Transcribing);
         assert!(dir.join("transcript.md").exists());
         let meta = read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
@@ -2806,7 +3123,7 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         assert_eq!(r.id, "2026-06-02T10-01-00Z");
-        assert_eq!(r.status, RecordingStatus::Done);
+        assert_eq!(r.status, RecordingStatus::Transcribing);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&r.id);
         assert_eq!(crate::vault::read_audio(
             crate::storage::read_meta(&dir).unwrap().audio_file.as_ref().unwrap()).unwrap(), b"bbb");
@@ -2831,7 +3148,7 @@ mod tests {
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
 
         assert_eq!(r.id, "2026-06-02T10-01-00Z");
-        assert_eq!(r.status, RecordingStatus::Done);
+        assert_eq!(r.status, RecordingStatus::Transcribing);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&r.id);
         assert_eq!(crate::vault::read_audio(
             crate::storage::read_meta(&dir).unwrap().audio_file.as_ref().unwrap()).unwrap(), b"bbb");
@@ -2879,7 +3196,7 @@ mod tests {
         // The fallback must produce a normal finished recording at that id,
         // not silently error out.
         assert_eq!(r.id, self_id);
-        assert_eq!(r.status, RecordingStatus::Done);
+        assert_eq!(r.status, RecordingStatus::Transcribing);
         let dir = crate::storage::recordings_dir(tmp.path()).join(&self_id);
         let meta = crate::storage::read_meta(&dir).unwrap();
         assert_eq!(meta.status, RecordingStatus::Done);
@@ -3033,11 +3350,13 @@ mod tests {
         // Second: failing stub → append must fall back to a separate Failed recording.
         let fail_stub = write_stub(tmp.path(), StubBehavior::transcribe_failure("boom"));
         unsafe { std::env::set_var("ARISO_STT_BIN", &fail_stub); }
-        let err = finalize_core(
+        let (res, handle) = finalize_core(
             tmp.path(), b"bbb".to_vec(), "T2".into(), "2026-06-02T10:01:00.000Z".into(), 15,
-        ).await.unwrap_err();
+        ).await.unwrap();
+        assert_eq!(res.status, RecordingStatus::Transcribing);
+        assert_eq!(res.id, r1.id, "optimistically targets the append until the clip's STT actually fails");
+        handle.await.unwrap();
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
-        assert!(err.contains("boom"), "got: {err}");
 
         // Target untouched: still one segment, 30s, audio "aaa" in the vault.
         let dir1 = crate::storage::recordings_dir(tmp.path()).join(&r1.id);
@@ -3051,6 +3370,7 @@ mod tests {
         let meta2 = crate::storage::read_meta(&dir2).unwrap();
         assert_eq!(crate::vault::read_audio(meta2.audio_file.as_ref().unwrap()).unwrap(), b"bbb");
         assert_eq!(meta2.status, RecordingStatus::Failed);
+        assert!(meta2.error.as_deref().unwrap().contains("boom"), "got: {:?}", meta2.error);
         assert!(!dir1.join("append-clip.mp3").exists(), "temp clip cleaned up");
         unsafe { std::env::remove_var("ARISO_ROOT"); }
     }
@@ -3546,6 +3866,16 @@ mod tests {
     /// commit. `process_notes` writes the meta snapshot it captured at spawn, so
     /// without a re-read the rename is reverted and `audio_file` points at a
     /// file the rename already moved.
+    ///
+    /// Issue #521 moved `finalize_core`'s return point to before transcription
+    /// even starts, so this can no longer be raced in against that return the
+    /// way it originally was: the per-recording lock now covers the whole
+    /// background transcription pass, and a real `rename_local_recording`
+    /// call landing in that window would simply block on it (see its own doc
+    /// comment) rather than race a half-finished write. The bug this guards
+    /// against is specifically in `process_notes`'s own commit, so it's
+    /// exercised directly here — with a deliberately stale snapshot — rather
+    /// than through `finalize_core`'s timing.
     #[tokio::test]
     async fn notes_commit_keeps_a_rename_that_landed_mid_run() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3554,20 +3884,26 @@ mod tests {
         unsafe { std::env::set_var("ARISO_STT_BIN", &stub); }
         unsafe { std::env::set_var("ARISO_ROOT", tmp.path()); }
 
-        let (res, notes_handle) = finalize_core(
+        let (res, handle) = finalize_core(
             tmp.path(), b"audio".to_vec(),
             "Original".into(), "2026-06-02T14:30:05.000Z".into(), 12,
         ).await.unwrap();
+        handle.await.unwrap();
         let dir = crate::storage::recordings_dir(tmp.path()).join(&res.id);
 
-        // Rename between the spawn and the commit: mutate meta.json directly,
-        // exactly as `rename_local_recording` does.
-        let mut renamed = read_meta(&dir).unwrap();
+        // The snapshot a second notes run would have captured at spawn —
+        // stale as soon as the rename below lands.
+        let stale_meta = read_meta(&dir).unwrap();
+
+        // Rename between that (simulated) spawn and the commit: mutate
+        // meta.json directly, exactly as `rename_local_recording` does.
+        let mut renamed = stale_meta.clone();
         renamed.title = "User Chosen".into();
         renamed.title_is_default = false;
         crate::storage::write_meta(&dir, &renamed).unwrap();
 
-        notes_handle.await.unwrap();
+        let models = crate::storage::models_dir(tmp.path());
+        process_notes(dir.clone(), models, stale_meta).await;
         unsafe { std::env::remove_var("ARISO_STT_BIN"); }
         unsafe { std::env::remove_var("ARISO_ROOT"); }
 
