@@ -860,6 +860,14 @@ fn deliver_auto_record_decision(record: bool) {
     }
 }
 
+/// Resolve any in-flight auto-record prompt as "don't record". Used when the
+/// Ari notice takes over the window: dropping the sender would make the
+/// prompt fall back to `default_record`, which could start recording while
+/// the notice says oats won't.
+fn cancel_pending_auto_record() {
+    deliver_auto_record_decision(false);
+}
+
 /// What to do when the mic monitor detects a call starting.
 #[derive(Debug, PartialEq)]
 pub enum StartDecision {
@@ -1037,9 +1045,14 @@ fn ari_notice_url(seconds: u64, joining: bool, subtitle: Option<&str>) -> String
 /// short self-dismissing notice instead of the countdown.
 pub async fn show_ari_notice(app: &AppHandle, joining: bool, title: Option<String>) {
     let url = ari_notice_url(ARI_NOTICE_DURATION.as_secs(), joining, title.as_deref());
+    cancel_pending_auto_record();
     let token = prompt_owner().claim();
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
+        // A newer opener claimed the window before this ran: don't replace it.
+        if !prompt_owner().owns(token) {
+            return;
+        }
         if let Err(e) = open_meeting_prompt_window_at(&app_main, url) {
             eprintln!("meeting-prompt: failed to open Ari notice window: {e}");
         }
@@ -1062,11 +1075,16 @@ fn show_auto_record_prompt(
     let token = prompt_owner().claim();
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
+        // A newer opener claimed the window before this ran: don't replace it.
+        if !prompt_owner().owns(token) {
+            return;
+        }
         if let Err(e) = open_meeting_prompt_window(&app_main, subtitle.as_deref(), default_record)
         {
             eprintln!("meeting-prompt: failed to open notification window: {e}");
         }
-    });    token
+    });
+    token
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
@@ -1602,6 +1620,18 @@ mod tests {
         let prompt = owner.claim();
         assert!(!owner.owns(notice));
         assert!(owner.owns(prompt));
+    }
+
+    #[test]
+    fn an_ari_notice_resolves_a_pending_prompt_as_do_not_record() {
+        // A Record/Dismiss countdown can outlive a mic-monitor restart. When the
+        // Ari notice takes the window, that countdown must resolve "don't
+        // record" instead of timing out to `default_record`.
+        let (tx, mut rx) = oneshot::channel();
+        *prompt_slot().lock().unwrap() = Some(tx);
+        cancel_pending_auto_record();
+        assert_eq!(rx.try_recv(), Ok(false));
+        assert!(prompt_slot().lock().unwrap().is_none());
     }
 
     #[test]
