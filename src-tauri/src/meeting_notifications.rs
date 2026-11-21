@@ -15,6 +15,7 @@
 //! is up to oats's own toggle, not the user's Ariso delivery setting.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -779,8 +780,35 @@ fn open_meeting_prompt_window_at(app: &AppHandle, url: String) -> Result<(), Str
     Ok(())
 }
 
-/// Close the notification window if it is still up (after a decision or timeout).
-fn close_meeting_prompt_window(app: &AppHandle) {
+/// Tracks which opener currently owns the shared `meeting-prompt` window. The
+/// start prompt and the Ari notice both use that one label, so a stale timer
+/// closing "the window" could otherwise tear down a newer prompt that replaced
+/// it. Each opener `claim`s a token and may close only while it still `owns` it.
+#[derive(Default)]
+struct PromptOwner(AtomicU64);
+
+impl PromptOwner {
+    fn claim(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn owns(&self, token: u64) -> bool {
+        self.0.load(Ordering::SeqCst) == token
+    }
+}
+
+fn prompt_owner() -> &'static PromptOwner {
+    static OWNER: OnceLock<PromptOwner> = OnceLock::new();
+    OWNER.get_or_init(PromptOwner::default)
+}
+
+/// Close the notification window if it is still up and still belongs to the
+/// opener holding `token` (after a decision or timeout). Must run on the main
+/// thread.
+fn close_meeting_prompt_window(app: &AppHandle, token: u64) {
+    if !prompt_owner().owns(token) {
+        return;
+    }
     if let Some(win) = app.get_webview_window("meeting-prompt") {
         let _ = win.close();
     }
@@ -971,7 +999,7 @@ pub async fn prompt_auto_record(
 ) -> bool {
     let (tx, rx) = oneshot::channel();
     *prompt_slot().lock().unwrap() = Some(tx);
-    show_auto_record_prompt(app, subtitle, default_record);
+    let token = show_auto_record_prompt(app, subtitle, default_record);
     let record = match tokio::time::timeout(AUTO_RECORD_PROMPT_TIMEOUT, rx).await {
         Ok(Ok(record)) => record,
         // Timed out, or the sender was dropped/replaced — apply the mode
@@ -981,9 +1009,10 @@ pub async fn prompt_auto_record(
             default_record
         }
     };
-    // Tear the window down on the main thread (decision made or timed out).
+    // Tear the window down on the main thread (decision made or timed out),
+    // unless a newer prompt/notice has since taken it over.
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main));
+    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main, token));
     record
 }
 
@@ -1008,6 +1037,7 @@ fn ari_notice_url(seconds: u64, joining: bool, subtitle: Option<&str>) -> String
 /// short self-dismissing notice instead of the countdown.
 pub async fn show_ari_notice(app: &AppHandle, joining: bool, title: Option<String>) {
     let url = ari_notice_url(ARI_NOTICE_DURATION.as_secs(), joining, title.as_deref());
+    let token = prompt_owner().claim();
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Err(e) = open_meeting_prompt_window_at(&app_main, url) {
@@ -1015,20 +1045,28 @@ pub async fn show_ari_notice(app: &AppHandle, joining: bool, title: Option<Strin
         }
     });
     tokio::time::sleep(ARI_NOTICE_DURATION).await;
+    // Close only our own notice: a Record/Dismiss prompt that replaced it
+    // mid-countdown must stay up so its decision remains visible.
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main));
+    let _ = app.run_on_main_thread(move || close_meeting_prompt_window(&app_main, token));
 }
 
 /// Open the meeting-start notification window. Window creation must happen on
-/// the main thread (like `open_waveform_window`), so dispatch there.
-fn show_auto_record_prompt(app: &AppHandle, subtitle: Option<String>, default_record: bool) {
+/// the main thread (like `open_waveform_window`), so dispatch there. Returns
+/// the ownership token for `close_meeting_prompt_window`.
+fn show_auto_record_prompt(
+    app: &AppHandle,
+    subtitle: Option<String>,
+    default_record: bool,
+) -> u64 {
+    let token = prompt_owner().claim();
     let app_main = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Err(e) = open_meeting_prompt_window(&app_main, subtitle.as_deref(), default_record)
         {
             eprintln!("meeting-prompt: failed to open notification window: {e}");
         }
-    });
+    });    token
 }
 
 /// Initialize native notification support. On a macOS bundle this installs the
@@ -1553,6 +1591,18 @@ pub async fn resize_meeting_switch_prompt(app: AppHandle, expanded: bool) -> Res
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_later_prompt_takes_ownership_of_the_shared_window() {
+        let owner = PromptOwner::default();
+        let notice = owner.claim();
+        assert!(owner.owns(notice));
+        // A Record/Dismiss prompt replaces the Ari notice mid-countdown: the
+        // notice's timer must no longer be allowed to close the window.
+        let prompt = owner.claim();
+        assert!(!owner.owns(notice));
+        assert!(owner.owns(prompt));
+    }
 
     #[test]
     fn inbox_event_yields_the_meeting_prep_id() {
