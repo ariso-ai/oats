@@ -79,6 +79,7 @@
       </header>
 
       <p v-if="noteDeleteError" class="note-delete-error" role="alert">⚠ {{ noteDeleteError }}</p>
+      <p v-if="openInArisoError" class="note-delete-error open-ariso-error" role="alert">⚠ {{ openInArisoError }}</p>
 
       <ShareMeetingPopover
         v-if="showShare && detail && !detail.isLocal"
@@ -633,12 +634,27 @@ async function onShareClick(): Promise<void> {
   showShare.value = !showShare.value;
 }
 
-const canOpenInAriso = computed(() => !!detail.value && !detail.value.isLocal && !!webAppBaseUrl.value);
+// The web app routes /meeting-notes/:shortCode (the same link
+// ShareMeetingPopover builds for signed-in viewers), not the meeting id, so a
+// cloud meeting without a short code has no page to open.
+const openInArisoUrl = computed<string | null>(() => {
+  const d = detail.value;
+  if (!d || d.isLocal || !d.shortCode || !webAppBaseUrl.value) return null;
+  return `${webAppBaseUrl.value}/meeting-notes/${encodeURIComponent(d.shortCode)}`;
+});
+const canOpenInAriso = computed(() => openInArisoUrl.value !== null);
+const openInArisoError = ref<string | null>(null);
 
 async function onOpenInArisoClick(): Promise<void> {
-  const d = detail.value;
-  if (!d || !webAppBaseUrl.value) return;
-  await openUrl(`${webAppBaseUrl.value}/meeting-notes/${encodeURIComponent(d.id)}`);
+  const url = openInArisoUrl.value;
+  if (!url) return;
+  openInArisoError.value = null;
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error('Failed to open meeting in Ariso', error);
+    openInArisoError.value = 'Could not open this meeting in Ariso. Please try again.';
+  }
 }
 
 onMounted(async () => {
@@ -1508,6 +1524,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showNoteDeleteConfirm.value = false;
   noteDeleteError.value = null;
   deletingNote.value = false;
+  openInArisoError.value = null;
   // Deliberately before the reset below: the flush must still see `noteDeleted`
   // so a pending draft isn't written back into the folder we just removed.
   await flushPendingNoteBeforeReset();

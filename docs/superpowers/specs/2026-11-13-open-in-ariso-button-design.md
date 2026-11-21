@@ -47,7 +47,7 @@ default browser.
 | 2 | Hardcode `https://web.ari.ariso.ai`, or derive the host? | Derive it from `getDesktopConfig().webAppBaseUrl`, mirroring `ShareMeetingPopover.vue`'s `existingShareUrl` computed, so the link stays correct in dev builds and if the web host ever changes | Default |
 | 3 | Where should the button appear? | In the header's `.head-actions` row, to the left of the existing Share button (order: Open in Ariso → Share → Delete → Close) | Default |
 | 4 | Should it render only for cloud meetings? | Yes — gate on `!detail.isLocal`, matching the existing `canShare`/`canAssignSpeakers` pattern and the issue's own implied scope (a meeting-notes URL only exists for Ariso meetings) | Default |
-| 5 | What ID goes in the URL — the meeting ID or the share short code? | The meeting ID (`detail.id`), matching the issue's "Replace `{meeting-id}` with the current meeting's ID" and the `/meeting-notes/:id` API convention used throughout `useMeetingApi.ts`. (The share short code is a different, shareable identifier used only by `ShareMeetingPopover`.) | Default |
+| 5 | What ID goes in the URL — the meeting ID or the share short code? | The share short code (`detail.shortCode`). Revised in review: the `/meeting-notes/:id` uses in `useMeetingApi.ts`, `tray_meeting.rs` and `commands.rs` are API routes on `api_base_url()`, not web routes. The only existing *web* link, `existingShareUrl` in `ShareMeetingPopover.vue`, builds `${webAppBaseUrl}/meeting-notes/${shortCode}` for signed-in viewers. A cloud meeting with no short code gets no button | Revised |
 
 ---
 
@@ -66,12 +66,24 @@ No new backend commands or composables. One new button + handler in
 ```typescript
 const webAppBaseUrl = ref('');
 
-const canOpenInAriso = computed(() => !!detail.value && !detail.value.isLocal);
+const openInArisoUrl = computed<string | null>(() => {
+  const d = detail.value;
+  if (!d || d.isLocal || !d.shortCode || !webAppBaseUrl.value) return null;
+  return `${webAppBaseUrl.value}/meeting-notes/${encodeURIComponent(d.shortCode)}`;
+});
+const canOpenInAriso = computed(() => openInArisoUrl.value !== null);
+const openInArisoError = ref<string | null>(null);
 
 async function onOpenInArisoClick(): Promise<void> {
-  const d = detail.value;
-  if (!d || !webAppBaseUrl.value) return;
-  await openUrl(`${webAppBaseUrl.value}/meeting-notes/${encodeURIComponent(d.id)}`);
+  const url = openInArisoUrl.value;
+  if (!url) return;
+  openInArisoError.value = null;
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error('Failed to open meeting in Ariso', error);
+    openInArisoError.value = 'Could not open this meeting in Ariso. Please try again.';
+  }
 }
 ```
 
@@ -121,10 +133,13 @@ just as `.note-del-btn` already does — add it as a shared selector:
 
 - [ ] The meeting notes page displays a clearly labeled "Open in Ariso" button (issue
       AC1).
-- [ ] Clicking the button opens `https://web.ari.ariso.ai/meeting-notes/{meeting-id}`
+- [ ] Clicking the button opens `https://web.ari.ariso.ai/meeting-notes/{short-code}`
       (or the dev-build equivalent host) for the current meeting in the system browser
       (issue AC2).
-- [ ] The correct meeting ID (`detail.id`) is used in the URL (issue AC3).
+- [ ] The meeting's share short code (`detail.shortCode`) is used in the URL, the same
+      identifier `ShareMeetingPopover` links with (issue AC3, revised per Decision 5).
+- [ ] The button is not shown for a cloud meeting without a short code.
+- [ ] A failed `openUrl` shows an inline error instead of failing silently.
 - [ ] The button is not shown for local (offline) recordings.
 - [ ] The button is not shown if `getDesktopConfig()` fails before the user clicks (no
       base URL to build a link from).
@@ -141,8 +156,10 @@ just as `.note-del-btn` already does — add it as a shared selector:
 - Button renders with text "Open in Ariso" for a cloud (`isLocal: false`) meeting detail.
 - Button is absent for a local (`isLocal: true`) meeting detail.
 - Clicking the button calls `openUrl` (mock `@tauri-apps/plugin-opener`) with
-  `${webAppBaseUrl}/meeting-notes/${id}`, using a mocked `getDesktopConfig()` resolving to
-  a known `webAppBaseUrl`.
+  `${webAppBaseUrl}/meeting-notes/${shortCode}`, using a mocked `getDesktopConfig()`
+  resolving to a known `webAppBaseUrl`.
+- Button is absent for a cloud meeting with no `shortCode`.
+- A rejected `openUrl` renders a `role="alert"` error.
 - Button does not throw / stays absent-of-crash when `getDesktopConfig()` rejects.
 
 ### Cannot verify at this layer

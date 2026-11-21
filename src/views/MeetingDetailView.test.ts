@@ -137,6 +137,7 @@ beforeEach(() => {
   // clearAllMocks keeps queued `mockResolvedValueOnce` implementations, so an
   // unconsumed one would answer the next test's first detail load.
   getMeetingDetail.mockReset();
+  getDesktopConfigMock.mockReset();
   getDesktopConfigMock.mockImplementation(() =>
     Promise.resolve({ webAppBaseUrl: 'https://app.test', pusherKey: '', pusherCluster: '' })
   );
@@ -2866,29 +2867,50 @@ describe('MeetingDetailView local speaker rename', () => {
 });
 
 describe('Open in Ariso button', () => {
-  it('renders for a cloud meeting and opens the web meeting-notes URL on click', async () => {
-    const wrapper = await mountWith(detail({ id: '7', isLocal: false }));
+  // Same route ShareMeetingPopover's `existingShareUrl` uses for a signed-in
+  // viewer: the web app resolves /meeting-notes/:shortCode, not the meeting id.
+  it('renders for a cloud meeting and opens the web meeting-notes URL by short code', async () => {
+    const wrapper = await mountWith(detail({ id: '7', shortCode: 'abc123', isLocal: false }));
     const btn = wrapper.find('.btn-open-ariso');
     expect(btn.exists()).toBe(true);
     expect(btn.text()).toContain('Open in Ariso');
     await btn.trigger('click');
-    expect(openUrl).toHaveBeenCalledWith('https://app.test/meeting-notes/7');
+    expect(openUrl).toHaveBeenCalledWith('https://app.test/meeting-notes/abc123');
   });
 
-  it('does not render for a local recording', async () => {
-    const wrapper = await mountWith(detail({ id: '7', isLocal: true }));
+  it('does not render for a cloud meeting without a short code', async () => {
+    const wrapper = await mountWith(detail({ id: '7', shortCode: undefined, isLocal: false }));
     expect(wrapper.find('.btn-open-ariso').exists()).toBe(false);
   });
 
-  it('URL-encodes a meeting id with special characters', async () => {
-    const wrapper = await mountWith(detail({ id: 'a/b c', isLocal: false }));
+  it('does not render for a local recording', async () => {
+    const wrapper = await mountWith(detail({ id: '7', shortCode: 'abc123', isLocal: true }));
+    expect(wrapper.find('.btn-open-ariso').exists()).toBe(false);
+  });
+
+  it('URL-encodes a short code with special characters', async () => {
+    const wrapper = await mountWith(detail({ id: '7', shortCode: 'a/b c', isLocal: false }));
     await wrapper.find('.btn-open-ariso').trigger('click');
     expect(openUrl).toHaveBeenCalledWith('https://app.test/meeting-notes/a%2Fb%20c');
   });
 
   it('stays absent when getDesktopConfig rejects', async () => {
     getDesktopConfigMock.mockRejectedValueOnce(new Error('offline'));
-    const wrapper = await mountWith(detail({ id: '7', isLocal: false }));
+    const wrapper = await mountWith(detail({ id: '7', shortCode: 'abc123', isLocal: false }));
     expect(wrapper.find('.btn-open-ariso').exists()).toBe(false);
+  });
+
+  it('shows an error when the browser cannot be opened', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    openUrl.mockRejectedValueOnce(new Error('denied'));
+    const wrapper = await mountWith(detail({ id: '7', shortCode: 'abc123', isLocal: false }));
+    await wrapper.find('.btn-open-ariso').trigger('click');
+    await flushPromises();
+    const alert = wrapper.find('.open-ariso-error');
+    expect(alert.exists()).toBe(true);
+    expect(alert.attributes('role')).toBe('alert');
+    expect(alert.text()).toContain('Could not open this meeting in Ariso');
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });
