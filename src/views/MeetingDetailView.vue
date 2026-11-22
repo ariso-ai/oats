@@ -39,6 +39,16 @@
         </div>
         <div class="head-actions">
           <button
+            v-if="canOpenInAriso"
+            class="btn-open-ariso"
+            type="button"
+            title="Open in Ariso"
+            @click="onOpenInArisoClick"
+          >
+            <svg viewBox="0 0 24 24" class="ic"><path d="M14 4h6v6" /><path d="M20 4L10 14" /><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></svg>
+            Open in Ariso
+          </button>
+          <button
             v-if="canShare"
             ref="shareBtn"
             class="btn-share"
@@ -69,6 +79,7 @@
       </header>
 
       <p v-if="noteDeleteError" class="note-delete-error" role="alert">⚠ {{ noteDeleteError }}</p>
+      <p v-if="openInArisoError" class="note-delete-error open-ariso-error" role="alert">⚠ {{ openInArisoError }}</p>
 
       <ShareMeetingPopover
         v-if="showShare && detail && !detail.isLocal"
@@ -488,7 +499,8 @@ import ArisoActionItems from './ArisoActionItems.vue';
 import { composeLocalShareText } from './meetingShareText';
 import { transcriptFilename, audioFilename } from './transcriptDownloadName';
 import { parseLocalTranscript } from './localTranscript';
-import { shareTextNative, local, pickMarkdownSavePath, pickAudioSavePath } from '../tauri';
+import { shareTextNative, local, pickMarkdownSavePath, pickAudioSavePath, getDesktopConfig } from '../tauri';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { ariJoinChip, isTranscriptionFailedMeetingStatus } from '../composables/meetingStatus';
 import {
   useLocalRecordingProgress,
@@ -558,6 +570,7 @@ const showShare = ref(false);
 const shareBtn = ref<HTMLButtonElement | null>(null);
 const shareAnchor = ref<{ bottom: number; right: number } | null>(null);
 const nativeShareSupported = ref(false);
+const webAppBaseUrl = ref('');
 
 // Attendees dropdown. The card clips overflow, so the menu is fixed-
 // positioned and anchored to the trigger's rect (captured on open),
@@ -621,11 +634,40 @@ async function onShareClick(): Promise<void> {
   showShare.value = !showShare.value;
 }
 
+// The web app routes /meeting-notes/:shortCode (the same link
+// ShareMeetingPopover builds for signed-in viewers), not the meeting id, so a
+// cloud meeting without a short code has no page to open.
+const openInArisoUrl = computed<string | null>(() => {
+  const d = detail.value;
+  if (!d || d.isLocal || !d.shortCode || !webAppBaseUrl.value) return null;
+  return `${webAppBaseUrl.value}/meeting-notes/${encodeURIComponent(d.shortCode)}`;
+});
+const canOpenInAriso = computed(() => openInArisoUrl.value !== null);
+const openInArisoError = ref<string | null>(null);
+
+async function onOpenInArisoClick(): Promise<void> {
+  const url = openInArisoUrl.value;
+  if (!url) return;
+  openInArisoError.value = null;
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error('Failed to open meeting in Ariso', error);
+    openInArisoError.value = 'Could not open this meeting in Ariso. Please try again.';
+  }
+}
+
 onMounted(async () => {
   try {
     nativeShareSupported.value = (await loadPlatformCapabilities()).nativeShare.supported;
   } catch (error) {
     console.error('Failed to load platform capabilities', error);
+  }
+  try {
+    const cfg = await getDesktopConfig();
+    webAppBaseUrl.value = cfg.webAppBaseUrl;
+  } catch {
+    // Non-fatal: Open in Ariso button just stays hidden without a base URL.
   }
 });
 
@@ -1482,6 +1524,7 @@ async function load(item: MeetingListItem | null): Promise<void> {
   showNoteDeleteConfirm.value = false;
   noteDeleteError.value = null;
   deletingNote.value = false;
+  openInArisoError.value = null;
   // Deliberately before the reset below: the flush must still see `noteDeleted`
   // so a pending draft isn't written back into the folder we just removed.
   await flushPendingNoteBeforeReset();
@@ -2069,14 +2112,16 @@ const durationLabel = computed<string | null>(() => {
 .head-title-error { margin: 4px 0 0; font-size: 12px; color: #dc2626; }
 .head-sub { margin: 4px 0 0; font-size: 13px; color: #6f6f6f; }
 .head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.btn-share {
+.btn-share,
+.btn-open-ariso {
   display: flex; align-items: center; gap: 6px;
   height: 32px; padding: 0 12px;
   background: #fff; border: 1px solid #d6d6d6; border-radius: 8px;
   box-shadow: 2px 2px 0 #e7e5e2;
   font-family: inherit; font-size: 14px; font-weight: 600; color: #1a1a1a; cursor: pointer;
 }
-.btn-share:hover { background: #fbfbfb; }
+.btn-share:hover,
+.btn-open-ariso:hover { background: #fbfbfb; }
 /* Same shape as .btn-share, but it reads destructive only on hover — this sits
    next to Close and must not shout at the user on every local note. */
 .note-del-btn {
