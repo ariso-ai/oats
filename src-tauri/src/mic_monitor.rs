@@ -447,14 +447,22 @@ async fn run_loop(app: AppHandle) {
                     let app2 = app.clone();
                     let default_record = enabled(&app2);
                     tauri::async_runtime::spawn(async move {
-                        // An Ariso notetaker already records meetings flagged for
-                        // server-side auto-join — don't double-record. Skip
-                        // silently: no prompt, no recording.
-                        if crate::meeting_notifications::current_meeting_auto_join_scheduled(&app2)
-                            .await
-                        {
-                            return;
-                        }
+                        use crate::meeting_notifications::{StartDecision, start_decision};
+                        // An Ariso notetaker records this meeting — don't
+                        // double-record. If Ari is joining or already in the
+                        // call, say so instead of counting down; if it's only
+                        // scheduled to auto-join, skip silently.
+                        let subtitle = match start_decision(&app2).await {
+                            StartDecision::AriPresent { joining, title } => {
+                                crate::meeting_notifications::show_ari_notice(
+                                    &app2, joining, title,
+                                )
+                                .await;
+                                return;
+                            }
+                            StartDecision::SkipAutoJoin => return,
+                            StartDecision::Prompt { subtitle } => subtitle,
+                        };
                         // Local backend: recording is never blocked on model
                         // state. Nudge any missing download in the background
                         // and fall through to the normal record prompt exactly
@@ -465,9 +473,12 @@ async fn run_loop(app: AppHandle) {
                         {
                             crate::commands::request_local_model_downloads(&app2);
                         }
-                        let record =
-                            crate::meeting_notifications::prompt_auto_record(&app2, default_record)
-                                .await;
+                        let record = crate::meeting_notifications::prompt_auto_record(
+                            &app2,
+                            subtitle,
+                            default_record,
+                        )
+                        .await;
                         // A manual recording may have started during the prompt;
                         // don't stack a second recorder on top of it. Also bail if
                         // Settings → Microphone was disabled while the prompt was
