@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.29.0](https://github.com/ariso-ai/oats/compare/v0.28.0...v0.29.0) (2026-11-26)
+
+
+### Features
+
+* add Open in Ariso button to meeting notes page ([54e9e2f](https://github.com/ariso-ai/oats/commit/54e9e2fab76769f6724ef300ed833e4f015750c7))
+* add Open in Ariso button to the meeting notes page ([53e29b3](https://github.com/ariso-ai/oats/commit/53e29b3ed467da4f9f1a48889f84442ce5de64c0))
+* skip the record countdown when Ari is joining or in the meeting ([691eccd](https://github.com/ariso-ai/oats/commit/691eccd659854ba01cff8477f6511c728d68c938))
+* skip the record countdown when Ari is joining or in the meeting ([6eb9401](https://github.com/ariso-ai/oats/commit/6eb9401f590b08f47746d342c33eace291f873a3))
+
+
+### Bug Fixes
+
+* keep the Ari notice from letting a stale prompt record ([469f7ec](https://github.com/ariso-ai/oats/commit/469f7ec8700d02e63557be8b31eb4cb130a2100c))
+* only close the meeting-prompt window the closer still owns ([332b64c](https://github.com/ariso-ai/oats/commit/332b64c6c28b043854bc0cc135b365dcdbba79e8))
+* open Ariso meeting notes by short code and surface open failures ([533d3f5](https://github.com/ariso-ai/oats/commit/533d3f50c6723d29488b91c008fe1ab4fce3c932))
+
 ## [0.28.0](https://github.com/ariso-ai/oats/compare/v0.27.0...v0.28.0) (2026-11-10)
 
 
